@@ -140,7 +140,7 @@
   "live_gate_min_arming_ticks": 2,
   "live_gate_assessment_ticks": 4,
   "live_gate_stack_min_ticks": 1,
-  "rsi_buy_max": 68,
+  "rsi_buy_max": 78,
   "rsi_sell_min": 32,
   "sim_latency_ms": 50,
   "sim_slippage_points": 0.5,
