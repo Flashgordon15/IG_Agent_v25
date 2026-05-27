@@ -33,6 +33,7 @@ class RestCallRecord:
     ts: float
     label: str
     category: str
+    exempt_preemptive: bool = False
 
 
 def categorize_rest_label(label: str) -> str:
@@ -72,12 +73,33 @@ _ORDER_IN_FLIGHT_PAUSED_ACTIVITIES = frozenset(
 
 _e2e_diagnostics_depth = 0
 _e2e_diagnostics_lock = threading.RLock()
+_ohlc_bootstrap_depth = 0
+_ohlc_bootstrap_lock = threading.RLock()
 
 
 def e2e_diagnostics_rest_active() -> bool:
     """True during dashboard/CLI E2E routing checks (short diagnostic REST window)."""
     with _e2e_diagnostics_lock:
         return _e2e_diagnostics_depth > 0
+
+
+def ohlc_bootstrap_rest_active() -> bool:
+    """True while OHLC session bootstrap REST is in flight (excluded from preemptive budget)."""
+    with _ohlc_bootstrap_lock:
+        return _ohlc_bootstrap_depth > 0
+
+
+@contextmanager
+def ohlc_bootstrap_rest_window() -> Iterator[None]:
+    """OHLC history fetches at session open must not consume the trading REST preemptive budget."""
+    global _ohlc_bootstrap_depth
+    with _ohlc_bootstrap_lock:
+        _ohlc_bootstrap_depth += 1
+    try:
+        yield
+    finally:
+        with _ohlc_bootstrap_lock:
+            _ohlc_bootstrap_depth = max(0, _ohlc_bootstrap_depth - 1)
 
 
 @contextmanager
@@ -140,12 +162,38 @@ def _primary_market_epic() -> str:
         return "IX.D.NIKKEI.IFM.IP"
 
 
+def hub_quote_stream_tick_age(*, epic: str | None = None) -> float | None:
+    """Seconds since last valid hub bid/offer; None when missing or invalid."""
+    try:
+        from system.market_data_hub import get_market_data_hub
+
+        key = str(epic or _primary_market_epic())
+        snap = get_market_data_hub().get_snapshot(key)
+        if snap is None or snap.bid <= 0 or snap.offer <= 0:
+            return None
+        return snap.age_seconds()
+    except Exception:
+        return None
+
+
+def hub_quote_stream_genuinely_stale(
+    *, max_age: float = FRESH_STREAM_TICK_MAX_AGE_SEC, epic: str | None = None
+) -> bool:
+    """True when the last valid quote tick is older than max_age (or absent)."""
+    age = hub_quote_stream_tick_age(epic=epic)
+    if age is None:
+        return True
+    return age > max_age
+
+
 def hub_quote_stream_fresh(*, max_age: float = FRESH_STREAM_TICK_MAX_AGE_SEC) -> bool:
     """
     True when the hub holds recent bid/offer (Lightstreamer or stream poll).
 
     Fresh ticks mean market data does not need REST polling — preemptive throttle
     must not block market/category REST in that window (v24 failure register #6).
+
+    Maintenance blank-tick windows are not treated as fresh (v25: stale must be real).
     """
     try:
         from system.market_data_hub import get_market_data_hub
@@ -153,8 +201,28 @@ def hub_quote_stream_fresh(*, max_age: float = FRESH_STREAM_TICK_MAX_AGE_SEC) ->
 
         epic = _primary_market_epic()
         if get_market_data_hub().is_in_maintenance(epic):
+            return False
+        if is_quote_stream_fresh(epic, max_age=max_age):
             return True
-        return is_quote_stream_fresh(epic, max_age=max_age)
+        hub = get_market_data_hub()
+        with hub._lock:
+            rest = hub._rest
+        if rest is not None:
+            activity_age = rest.stream_activity_age_seconds()
+            if activity_age is not None and activity_age <= max_age:
+                snap = hub.get_snapshot(epic)
+                if snap is not None and snap.bid > 0 and snap.offer > 0:
+                    return True
+        return False
+    except Exception:
+        return False
+
+
+def _hub_in_maintenance() -> bool:
+    try:
+        from system.market_data_hub import get_market_data_hub
+
+        return get_market_data_hub().is_in_maintenance(_primary_market_epic())
     except Exception:
         return False
 
@@ -223,8 +291,12 @@ class RestApiBudget:
             self._last_ts = now
             self._total_calls += 1
             cat = categorize_rest_label(label)
-            self._recent.append(RestCallRecord(now, label, cat))
-            self._track_preemptive_locked(now)
+            exempt_preemptive = ohlc_bootstrap_rest_active()
+            self._recent.append(
+                RestCallRecord(now, label, cat, exempt_preemptive=exempt_preemptive)
+            )
+            if not exempt_preemptive:
+                self._track_preemptive_locked(now)
             self._maybe_warn_locked(now)
             self._maybe_periodic_log_locked(now)
 
@@ -242,8 +314,11 @@ class RestApiBudget:
             return False
         return self._preemptive_pause_active()
 
+    def _preemptive_calls_locked(self, now: float) -> list[RestCallRecord]:
+        return [r for r in self._prune_locked(now) if not r.exempt_preemptive]
+
     def _preemptive_utilization_high_locked(self, now: float) -> bool:
-        count = len(self._prune_locked(now))
+        count = len(self._preemptive_calls_locked(now))
         threshold = max(1, math.ceil(self._warn_per_minute * PREEMPTIVE_UTILIZATION_RATIO))
         return count >= threshold
 
@@ -290,7 +365,13 @@ class RestApiBudget:
             return True
 
     def _track_preemptive_locked(self, now: float) -> None:
-        if hub_quote_stream_fresh():
+        if _hub_in_maintenance():
+            return
+
+        stream_stale = hub_quote_stream_genuinely_stale()
+        budget_high = self._preemptive_utilization_high_locked(now)
+
+        if not stream_stale:
             self._consecutive_high_readings = 0
             if self._preemptive_pause_active():
                 self._preemptive_pause_until = 0.0
@@ -306,18 +387,21 @@ class RestApiBudget:
             self._rate_limit_skip_logged = False
             self._preemptive_skip_logged = False
 
-        if not self._preemptive_utilization_high_locked(now):
+        if not budget_high:
             self._consecutive_high_readings = 0
             return
 
         self._consecutive_high_readings += 1
         if self._consecutive_high_readings >= PREEMPTIVE_CONSECUTIVE_READINGS:
+            tick_age = hub_quote_stream_tick_age()
+            age_s = f"{tick_age:.1f}s" if tick_age is not None else "n/a"
             self._preemptive_pause_until = now + PREEMPTIVE_PAUSE_SEC
             self._consecutive_high_readings = 0
             self._preemptive_skip_logged = False
             log_engine(
                 "REST approaching limit — throttling 30s "
-                f"(stream stale, >={int(PREEMPTIVE_UTILIZATION_RATIO * 100)}% budget)"
+                f"(stream stale tick_age={age_s}, "
+                f">={int(PREEMPTIVE_UTILIZATION_RATIO * 100)}% budget)"
             )
 
     def _prune_locked(self, now: float) -> list[RestCallRecord]:

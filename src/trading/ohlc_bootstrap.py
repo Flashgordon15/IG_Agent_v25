@@ -42,7 +42,10 @@ def bootstrap_ohlc_for_session(
         if not callable(fetch):
             log_engine("OHLC bootstrap: fetch_price_history unavailable")
             return 0
-        bars = fetch(epic, resolution=resolution, num_points=num_points)
+        from system.rest_api_budget import ohlc_bootstrap_rest_window
+
+        with ohlc_bootstrap_rest_window():
+            bars = fetch(epic, resolution=resolution, num_points=num_points)
         if not bars:
             log_engine(f"OHLC bootstrap: no bars returned for {epic}")
             return 0
