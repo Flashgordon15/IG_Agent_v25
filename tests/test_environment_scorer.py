@@ -116,8 +116,12 @@ class EnvironmentScorerIntegrationTests(unittest.TestCase):
         scorer._bars_at_session_open["Japan 225"] = 0
         total = scorer.score("Japan 225")
         factors = scorer.get_factors()
-        self.assertEqual(set(factors.keys()), {"atr", "trend", "session", "spread"})
-        self.assertAlmostEqual(sum(factors.values()), total, places=4)
+        self.assertEqual(
+            set(factors.keys()),
+            {"atr", "trend", "session", "spread", "sentiment"},
+        )
+        numeric = {k: float(v) for k, v in factors.items() if k != "sentiment"}
+        self.assertAlmostEqual(sum(numeric.values()), total, places=4)
         self.assertIn(scorer.get_regime(), ("Excellent", "Good", "Marginal", "WAIT"))
 
     def test_cold_start_cap(self) -> None:
