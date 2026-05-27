@@ -7,6 +7,7 @@ All authenticated REST traffic should pass through :meth:`RestApiBudget.acquire`
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from collections import deque
@@ -16,9 +17,10 @@ from typing import Any
 from system.engine_log import log_engine
 
 ESSENTIAL_REST_CATEGORIES = frozenset({"positions", "orders"})
-PREEMPTIVE_HIGH_THRESHOLD = 5
 PREEMPTIVE_CONSECUTIVE_READINGS = 3
 PREEMPTIVE_PAUSE_SEC = 30.0
+PREEMPTIVE_UTILIZATION_RATIO = 0.8
+FRESH_STREAM_TICK_MAX_AGE_SEC = 5.0
 
 
 class RestBudgetPausedError(RuntimeError):
@@ -94,6 +96,36 @@ def end_order_in_flight() -> None:
 def is_order_in_flight() -> bool:
     with _ORDER_IN_FLIGHT_LOCK:
         return _ORDER_IN_FLIGHT_COUNT > 0
+
+
+def _primary_market_epic() -> str:
+    try:
+        from system.config_loader import get_config
+        from trading.instrument_registry import InstrumentRegistry
+
+        cfg = get_config(reload=False)
+        reg = InstrumentRegistry(cfg.as_dict())
+        enabled = reg.get_enabled()
+        if enabled:
+            return str(enabled[0].get("epic") or cfg.epic)
+        return str(cfg.epic)
+    except Exception:
+        return "IX.D.NIKKEI.IFM.IP"
+
+
+def hub_quote_stream_fresh(*, max_age: float = FRESH_STREAM_TICK_MAX_AGE_SEC) -> bool:
+    """
+    True when the hub holds recent bid/offer (Lightstreamer or stream poll).
+
+    Fresh ticks mean market data does not need REST polling — preemptive throttle
+    must not block market/category REST in that window (v24 failure register #6).
+    """
+    try:
+        from system.market_watch.japan225_session import is_quote_stream_fresh
+
+        return is_quote_stream_fresh(_primary_market_epic(), max_age=max_age)
+    except Exception:
+        return False
 
 
 def order_in_flight_paused(activity: str) -> bool:
@@ -173,6 +205,17 @@ class RestApiBudget:
     def _preemptive_pause_active(self) -> bool:
         return time.time() < self._preemptive_pause_until
 
+    def _preemptive_throttle_blocks_rest(self) -> bool:
+        """Preemptive pause applies only when the live stream is down/stale."""
+        if hub_quote_stream_fresh():
+            return False
+        return self._preemptive_pause_active()
+
+    def _preemptive_utilization_high_locked(self, now: float) -> bool:
+        count = len(self._prune_locked(now))
+        threshold = max(1, math.ceil(self._warn_per_minute * PREEMPTIVE_UTILIZATION_RATIO))
+        return count >= threshold
+
     def _raise_if_non_essential_paused(self, category: str, *, label: str = "") -> None:
         if category in ESSENTIAL_REST_CATEGORIES:
             return
@@ -183,7 +226,11 @@ class RestApiBudget:
             raise RestBudgetPausedError("rate_limit_active")
         history_reconcile = bool(label) and "history/transactions" in label.lower()
         connecting_rescue = self._consume_connecting_market_rescue(label)
-        if self._preemptive_pause_active() and not history_reconcile and not connecting_rescue:
+        if (
+            self._preemptive_throttle_blocks_rest()
+            and not history_reconcile
+            and not connecting_rescue
+        ):
             if not self._preemptive_skip_logged:
                 self._preemptive_skip_logged = True
             raise RestBudgetPausedError("preemptive_throttle")
@@ -210,20 +257,35 @@ class RestApiBudget:
             return True
 
     def _track_preemptive_locked(self, now: float) -> None:
+        if hub_quote_stream_fresh():
+            self._consecutive_high_readings = 0
+            if self._preemptive_pause_active():
+                self._preemptive_pause_until = 0.0
+                log_engine(
+                    "REST preemptive throttle cleared — fresh Lightstreamer/stream ticks"
+                )
+            if not self._rate_limit_rest_active():
+                self._rate_limit_skip_logged = False
+                self._preemptive_skip_logged = False
+            return
+
         if not self._preemptive_pause_active() and not self._rate_limit_rest_active():
             self._rate_limit_skip_logged = False
             self._preemptive_skip_logged = False
-        count = len(self._prune_locked(now))
-        threshold = max(1, self._warn_per_minute - 1)
-        if count >= threshold:
-            self._consecutive_high_readings += 1
-        else:
+
+        if not self._preemptive_utilization_high_locked(now):
             self._consecutive_high_readings = 0
+            return
+
+        self._consecutive_high_readings += 1
         if self._consecutive_high_readings >= PREEMPTIVE_CONSECUTIVE_READINGS:
             self._preemptive_pause_until = now + PREEMPTIVE_PAUSE_SEC
             self._consecutive_high_readings = 0
             self._preemptive_skip_logged = False
-            log_engine("REST approaching limit — throttling 30s")
+            log_engine(
+                "REST approaching limit — throttling 30s "
+                f"(stream stale, >={int(PREEMPTIVE_UTILIZATION_RATIO * 100)}% budget)"
+            )
 
     def _prune_locked(self, now: float) -> list[RestCallRecord]:
         cutoff = now - 60.0
@@ -342,4 +404,4 @@ def reset_connecting_market_rescue() -> None:
 def non_essential_rest_paused() -> bool:
     """True when non-essential REST should defer (403 pause or proactive throttle)."""
     budget = get_rest_api_budget()
-    return budget._rate_limit_rest_active() or budget._preemptive_pause_active()
+    return budget._rate_limit_rest_active() or budget._preemptive_throttle_blocks_rest()
