@@ -16,10 +16,13 @@ from system.rate_limit_manager import get_rate_limit_manager, parse_rate_limit_e
 from system.credentials_loader import Credentials
 from system.demo_execution_trace import trace_execution, update_demo_diagnostics
 from system.demo_rest_log import log_demo_rest, mask_token
+from system.engine_log import log_engine
 
 
 class IGRestClient:
     """Synchronous IG REST client."""
+
+    TOKEN_MAX_AGE_SECONDS = 18000  # 5h — refresh before ~6h IG token expiry
 
     def __init__(
         self,
@@ -60,6 +63,8 @@ class IGRestClient:
         self._last_rest_ok_path: str = ""
         self._last_account_refresh_ts: float = 0.0
         self._last_stream_activity_at: float = 0.0
+        self._token_created_at: float = 0.0
+        self._session_refresh_in_progress: bool = False
 
     @property
     def session(self) -> SessionTokens | None:
@@ -91,6 +96,86 @@ class IGRestClient:
         if age <= stale_after:
             return f"REST OK {age:.1f}s"
         return f"REST OK {age:.0f}s ago"
+
+    def _touch_token_created(self) -> None:
+        self._token_created_at = time.time()
+
+    def token_age_seconds(self) -> float:
+        if self._token_created_at <= 0:
+            return 0.0
+        return max(0.0, time.time() - self._token_created_at)
+
+    @staticmethod
+    def _session_path_protected(path: str) -> bool:
+        p = (path or "").rstrip("/")
+        return p.endswith("/session") or p.endswith("/session/refresh")
+
+    def _log_auth_failure_critical(self) -> None:
+        log_engine("CRITICAL: IG authentication failed — check credentials")
+
+    @staticmethod
+    def _auth_failure_response(path: str) -> requests.Response:
+        resp = requests.Response()
+        resp.status_code = 401
+        resp.url = path
+        resp._content = b'{"errorCode":"error.security.auth-failure"}'
+        return resp
+
+    def _refresh_session_tokens(self) -> bool:
+        """POST /session/refresh or full login — bypasses request() to avoid recursion."""
+        if self._session_refresh_in_progress:
+            return False
+        self._session_refresh_in_progress = True
+        try:
+            if not self._auth.tokens or not self._auth.tokens.is_valid:
+                self.login()
+                return bool(self._auth.tokens and self._auth.tokens.is_valid)
+            url = f"{self._base}/session/refresh"
+            r = self._session.request(
+                "POST",
+                url,
+                headers=self._auth_headers("1"),
+                timeout=self.timeout_seconds,
+            )
+            if r.status_code in (200, 201):
+                self._auth.apply_login_response(
+                    dict(r.headers),
+                    r.json(),
+                    preferred_account_id=self.account_id,
+                )
+                self._touch_token_created()
+                self.record_rest_success("/session/refresh")
+                return True
+            self.login()
+            return bool(self._auth.tokens and self._auth.tokens.is_valid)
+        except IGAuthError:
+            self._log_auth_failure_critical()
+            return False
+        except Exception:
+            self._log_auth_failure_critical()
+            return False
+        finally:
+            self._session_refresh_in_progress = False
+
+    def proactive_refresh_if_needed(self) -> bool:
+        """Refresh when token age exceeds TOKEN_MAX_AGE_SECONDS (before REST calls)."""
+        if not self._auth.tokens or not self._auth.tokens.is_valid:
+            return False
+        age = self.token_age_seconds()
+        if age <= self.TOKEN_MAX_AGE_SECONDS:
+            return False
+        hours = age / 3600.0
+        if self._refresh_session_tokens():
+            log_engine(f"IG session refreshed — tokens renewed after {hours:.1f}h")
+            return True
+        return False
+
+    def _safe_relogin(self) -> bool:
+        try:
+            self.login()
+            return bool(self._auth.tokens and self._auth.tokens.is_valid)
+        except (IGAuthError, Exception):
+            return False
 
     def _log_auth_state(self, label: str) -> None:
         tok = self._auth.tokens
@@ -206,6 +291,7 @@ class IGRestClient:
                 "base_url": self._base,
             },
         )
+        self._touch_token_created()
         return tokens
 
     def probe_login_once(self) -> dict[str, Any]:
@@ -343,15 +429,11 @@ class IGRestClient:
     def refresh_session(self) -> SessionTokens:
         if not self._auth.tokens:
             return self.login()
-        try:
-            r = self.request("POST", "/session/refresh", headers=self._auth_headers("1"))
-            if r.status_code in (200, 201):
-                return self._auth.apply_login_response(
-                    dict(r.headers), r.json(), preferred_account_id=self.account_id
-                )
-        except IGAPIError:
-            pass
-        return self.login()
+        if self._refresh_session_tokens():
+            tok = self._auth.tokens
+            if tok:
+                return tok
+        raise IGAuthError("IG session refresh failed")
 
     def ensure_session(self) -> None:
         get_rate_limit_manager().check_rest_allowed()
@@ -1428,18 +1510,27 @@ class IGRestClient:
         timeout = kwargs.pop("timeout", self.timeout_seconds)
         last_exc: Exception | None = None
 
+        if auth_required and not self._session_path_protected(path):
+            self.proactive_refresh_if_needed()
+
+        relogin_done = False
         for attempt in range(1, self.max_retries + 1):
             try:
                 r = self._session.request(method, url, timeout=timeout, **kwargs)
                 if parse_rate_limit_error(r.status_code, r.text):
                     mgr.handle_http_response(r, source="REST", path=path)
-                if auth_required and r.status_code == 401 and attempt < self.max_retries:
-                    log_demo_rest("HTTP 401 — refreshing session", path=path)
-                    self.login()
-                    if "headers" in kwargs:
-                        ver = kwargs["headers"].get("VERSION", "3")
-                        kwargs["headers"] = self._auth_headers(str(ver))
-                    continue
+                if auth_required and r.status_code == 401:
+                    if not relogin_done:
+                        relogin_done = True
+                        log_demo_rest("HTTP 401 — re-login and retry", path=path)
+                        if self._safe_relogin():
+                            if "headers" in kwargs:
+                                ver = kwargs["headers"].get("VERSION", "3")
+                                kwargs["headers"] = self._auth_headers(str(ver))
+                            continue
+                        self._log_auth_failure_critical()
+                        return self._auth_failure_response(path)
+                    return self._auth_failure_response(path)
                 if r.status_code in (429, 500, 502, 503, 504) and attempt < self.max_retries:
                     time.sleep(self.retry_delay_seconds * attempt)
                     continue

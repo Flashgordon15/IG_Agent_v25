@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 from typing import Any
 
+from ig_api.exceptions import IGAuthError
 from system.credentials_loader import Credentials
 from system.engine_log import log_engine
 
@@ -42,22 +43,35 @@ def _session_valid(client: Any) -> bool:
     return bool(session and getattr(session, "is_valid", False))
 
 
+def _proactive_refresh(client: Any) -> None:
+    refresh = getattr(client, "proactive_refresh_if_needed", None)
+    if callable(refresh):
+        refresh()
+
+
 def ensure_shared_authenticated(credentials: Credentials) -> Any:
     """Ensure shared client is logged in; returns the client."""
     client = get_shared_rest_client(credentials)
     if _session_valid(client):
+        _proactive_refresh(client)
         return client
 
     # Never hold the global client lock during IG network I/O — that wedges the Tk main
     # thread when Start DEMO / post-OK wiring runs concurrently with stream startup.
     with _login_lock:
         if _session_valid(client):
+            _proactive_refresh(client)
             return client
-        client.login()
+        try:
+            client.login()
+        except IGAuthError:
+            log_engine("CRITICAL: IG authentication failed — check credentials")
+            return client
+        except Exception:
+            log_engine("CRITICAL: IG authentication failed — check credentials")
+            return client
         if not _session_valid(client):
-            raise RuntimeError(
-                "IG shared REST session invalid after login — check credentials and API key"
-            )
+            log_engine("CRITICAL: IG authentication failed — check credentials")
     return client
 
 
