@@ -24,6 +24,7 @@ from trading.session_manager import SessionManager
 from trading.trading_loop import TradingLoop as AgentTradingLoop
 
 _stream_client: Any | None = None
+_position_sync: Any | None = None
 
 
 def _resolve_instrument(cfg: Config) -> tuple[str, str]:
@@ -35,6 +36,51 @@ def _resolve_instrument(cfg: Config) -> tuple[str, str]:
             inst.get("epic") or cfg.epic
         )
     return str(cfg.market_search or "Market"), str(cfg.epic)
+
+
+def start_ig_position_sync(
+    rest_client: Any,
+    store: Any,
+    tracker: Any,
+    *,
+    epic: str,
+    interval_seconds: float,
+) -> Any | None:
+    """Start background IG open-position sync and attach to trade tracker."""
+    global _position_sync
+    if rest_client is None or store is None:
+        return None
+    try:
+        from runtime.ig_position_sync import IgPositionSync
+
+        sync = IgPositionSync(
+            rest_client,
+            store,
+            epic=epic,
+            interval_seconds=float(interval_seconds),
+        )
+        tracker.attach_sync(sync)
+        sync.start()
+        _position_sync = sync
+        log_engine(f"IG position sync attached epic={epic}")
+        return sync
+    except Exception as e:
+        log_engine(f"IG position sync start failed: {type(e).__name__}: {e}")
+        return None
+
+
+def stop_ig_position_sync(sync: Any | None = None) -> None:
+    """Stop background position sync (process shutdown)."""
+    global _position_sync
+    target = sync if sync is not None else _position_sync
+    if target is None:
+        return
+    try:
+        target.stop()
+    except Exception as e:
+        log_engine(f"IG position sync stop failed: {type(e).__name__}: {e}")
+    if target is _position_sync:
+        _position_sync = None
 
 
 def build_trading_loop(
@@ -55,6 +101,7 @@ def build_trading_loop(
         points_engine=points_engine,
         environment_scorer=env_scorer,
         signal_engine=signal_engine,
+        rest_client=rest_client,
     )
 
     exec_mode = mode
@@ -65,12 +112,22 @@ def build_trading_loop(
     from execution.trade_tracker import TradeTracker
 
     tracker = TradeTracker(trade_tracker_store, prefer_ig=rest_client is not None)
+    position_sync = None
+    if rest_client is not None:
+        position_sync = start_ig_position_sync(
+            rest_client,
+            store,
+            tracker,
+            epic=epic,
+            interval_seconds=float(cfg.position_sync_seconds),
+        )
     exec_engine = ExecutionEngine(
         mode=exec_mode,
         config=cfg,
         store=store,
         rest_client=rest_client,
         trade_tracker=tracker,
+        points_engine=points_engine,
     )
     journal_path = str(cfg.get("decision_log_file", "") or "")
     journal = DecisionJournal(journal_path) if journal_path else None
@@ -96,7 +153,7 @@ def build_trading_loop(
             return None
         return snap.to_quote()
 
-    return AgentTradingLoop(
+    loop = AgentTradingLoop(
         cfg,
         market=market,
         epic=epic,
@@ -108,6 +165,12 @@ def build_trading_loop(
         quote_source=quote_source,
         learning_store=store,
     )
+    loop._position_sync = position_sync  # noqa: SLF001 — shutdown hook
+    if rest_client is not None and session_manager.is_session_open():
+        from trading.ohlc_bootstrap import bootstrap_ohlc_for_session
+
+        bootstrap_ohlc_for_session(rest_client, signal_engine, epic, market)
+    return loop
 
 
 def start_market_stream(cfg: Config, *, rest_client: Any | None) -> Any | None:
@@ -163,6 +226,8 @@ def start_market_stream(cfg: Config, *, rest_client: Any | None) -> Any | None:
 
     _stream_client = client
     label = getattr(client, "transport_label", "stream")
+    if callable(label):
+        label = label()
     log_engine(f"market stream started epic={epic} transport={label}")
     return client
 

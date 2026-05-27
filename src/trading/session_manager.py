@@ -32,6 +32,7 @@ TickPhase = Literal["OPEN", "CLOSED", "FLATTEN", "MAINTENANCE"]
 STATE_VERSION = 1
 DEFAULT_STATE_FILE = "session_state.json"
 COLD_START_BARS = 6
+COLD_START_BAR_MINUTES = 5
 GAP_ATR_MULTIPLE = 1.0
 MAINTENANCE_MAX_GAP_SEC = 2 * 3600
 AUTOSAVE_INTERVAL_SEC = 30.0
@@ -63,6 +64,7 @@ class SessionManager:
         points_engine: PointsEngine | None = None,
         environment_scorer: EnvironmentScorer | None = None,
         signal_engine: SignalEngine | None = None,
+        rest_client: Any | None = None,
         state_path: Path | str | None = None,
         maintenance_gap_hours: float = 2.0,
         flatten_lead_minutes: float = 5.0,
@@ -73,6 +75,7 @@ class SessionManager:
         self._points = points_engine
         self._env_scorer = environment_scorer
         self._signal_engine = signal_engine
+        self._rest_client = rest_client
         self._path = (
             Path(state_path)
             if state_path
@@ -118,11 +121,30 @@ class SessionManager:
         except Exception:
             return False
 
-    def bars_since_open(self) -> int:
-        return max(0, self._complete_bar_count() - int(self._bars_at_open))
+    def _elapsed_bars_from_open_time(self, *, at: datetime | None = None) -> int:
+        """Completed 5m periods since session open (wall-clock fallback for cold start)."""
+        if self._open_time is None:
+            return 0
+        now = at or datetime.now()
+        start = self._open_time
+        if start.tzinfo is not None:
+            if now.tzinfo is None:
+                now = now.replace(tzinfo=start.tzinfo)
+            else:
+                now = now.astimezone(start.tzinfo)
+        elif now.tzinfo is not None:
+            start = start.replace(tzinfo=now.tzinfo)
+        elapsed = max(0.0, (now - start).total_seconds())
+        return int(elapsed // (COLD_START_BAR_MINUTES * 60))
 
-    def is_cold_start(self) -> bool:
-        return self.bars_since_open() < COLD_START_BARS
+    def bars_since_open(self, *, at: datetime | None = None) -> int:
+        """Bars since session open — max(candle count, elapsed 5m periods), capped at 6."""
+        from_candles = max(0, self._complete_bar_count() - int(self._bars_at_open))
+        from_clock = self._elapsed_bars_from_open_time(at=at)
+        return min(COLD_START_BARS, max(from_candles, from_clock))
+
+    def is_cold_start(self, *, at: datetime | None = None) -> bool:
+        return self.bars_since_open(at=at) < COLD_START_BARS
 
     def check_gap_open(self, atr: float, *, open_price: float | None = None) -> bool:
         """
@@ -181,10 +203,26 @@ class SessionManager:
     def on_session_open(self, quote: Quote | None = None, *, at: datetime | None = None) -> None:
         now = at or (quote.time if quote is not None else datetime.now())
         maintenance = self._check_maintenance_reopen(now)
+        already_open = self._session_open and self._open_time is not None
+
+        if already_open and maintenance:
+            self._maintenance_reopen_active = True
+            log_engine(
+                f"session_manager maintenance reopen epic={self._epic} "
+                f"(count today={self._maintenance_count_today}) — preserving cold-start bars"
+            )
+            return
+
+        if already_open and not maintenance:
+            return
+
         self._maintenance_reopen_active = maintenance
         self._session_open = True
         self._open_time = now
-        self._bars_at_open = self._complete_bar_count()
+        if not maintenance:
+            self._bars_at_open = self._complete_bar_count()
+        elif self._bars_at_open <= 0:
+            self._bars_at_open = self._complete_bar_count()
         self._gap_checked = False
         self._gap_detected = False
 
@@ -192,16 +230,27 @@ class SessionManager:
             self._maintenance_count_today += 1
             log_engine(
                 f"session_manager maintenance reopen epic={self._epic} "
-                f"(count today={self._maintenance_count_today}) — cold start reset only"
+                f"(count today={self._maintenance_count_today}) — preserving cold-start bars"
             )
             if self._env_scorer is not None:
-                self._env_scorer.reset_session(self._market, opened_at=now)
+                self._env_scorer.reset_session(
+                    self._market, opened_at=now, reset_cold_start_baseline=False
+                )
         else:
             log_engine(f"session_manager session OPEN epic={self._epic}")
             if self._points is not None:
                 self._points.reset_session()
             if self._env_scorer is not None:
                 self._env_scorer.reset_session(self._market, opened_at=now)
+            if self._rest_client is not None and self._signal_engine is not None:
+                from trading.ohlc_bootstrap import bootstrap_ohlc_for_session
+
+                bootstrap_ohlc_for_session(
+                    self._rest_client,
+                    self._signal_engine,
+                    self._epic,
+                    self._market,
+                )
 
         if quote is not None:
             px = float(quote.mid)
@@ -233,6 +282,14 @@ class SessionManager:
                 self.on_session_close(quote, at=now)
 
             self._session_open = open_now
+
+            if open_now and self._open_time is None:
+                self._open_time = now
+                self._bars_at_open = self._complete_bar_count()
+                log_engine(
+                    f"session_manager: anchored session open at {now.isoformat()} "
+                    f"(restored mid-session)"
+                )
 
             if not open_now:
                 if self._is_daily_maintenance_closed(at=now):
@@ -320,6 +377,8 @@ class SessionManager:
         bars_elapsed = int(data.get("bars_elapsed", 0))
         current = self._complete_bar_count()
         self._bars_at_open = max(0, current - bars_elapsed)
+        if self._session_open and self._open_time is None:
+            self._open_time = datetime.now()
 
     def _load_state(self) -> None:
         data = read_json_file(self._path)
