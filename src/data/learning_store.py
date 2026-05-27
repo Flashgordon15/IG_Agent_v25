@@ -51,9 +51,15 @@ class LearningStore:
         self._conn: sqlite3.Connection | None = None
         self._lock = threading.RLock()
 
+    def _apply_connection_pragmas(self) -> None:
+        assert self._conn is not None
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
+
     @_locked
     def connect(self) -> None:
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self._apply_connection_pragmas()
         self._conn.row_factory = sqlite3.Row
         self._init_schema()
 
