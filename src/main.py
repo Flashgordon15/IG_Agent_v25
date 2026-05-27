@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import socket
 import sys
 import threading
 import time
@@ -40,6 +41,34 @@ EXIT_INSTANCE = 4
 _BROWSER_DELAY_SEC = 3.0
 _API_HOST = "127.0.0.1"
 _API_PORT = 8080
+
+
+def check_port_available(port: int) -> bool:
+    """Return True if nothing is accepting TCP connections on 127.0.0.1:port."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    result = s.connect_ex((_API_HOST, port))
+    s.close()
+    return result != 0
+
+
+def _port_in_use_banner(port: int) -> str:
+    return (
+        "\n"
+        "================================================================================\n"
+        f"IG Agent v25: port {port} is already in use\n"
+        "\n"
+        f"Another process is listening on http://{_API_HOST}:{port}/\n"
+        "\n"
+        "To find the process:\n"
+        f"  lsof -i :{port} -sTCP:LISTEN\n"
+        "\n"
+        "To stop it (replace PID with the number from lsof):\n"
+        "  kill <PID>\n"
+        "\n"
+        "Or quit the other IG Agent / API server from the dock or Activity Monitor.\n"
+        "================================================================================\n"
+    )
 
 
 def _config_path() -> Path:
@@ -174,6 +203,11 @@ class AgentRuntime:
             if code == EXIT_INSTANCE:
                 release_instance_lock()
             return code
+
+        if not check_port_available(_API_PORT):
+            print(_port_in_use_banner(_API_PORT), file=sys.stderr)
+            release_instance_lock()
+            sys.exit(1)
 
         os.environ.setdefault("IG_AGENT_ROOT", str(project_root()))
         os.environ.setdefault("PYTHONPATH", str(project_root() / "src"))

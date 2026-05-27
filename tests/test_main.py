@@ -83,5 +83,93 @@ class MainStartupTests(unittest.TestCase):
         self.assertEqual(merged["account_id"], "Z6BAH4")
 
 
+class PortConflictTests(unittest.TestCase):
+    def test_check_port_available_when_free(self) -> None:
+        import socket
+
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        self.assertTrue(main_mod.check_port_available(port))
+
+    def test_check_port_available_when_listening(self) -> None:
+        import socket
+
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("127.0.0.1", 0))
+        s.listen(1)
+        port = s.getsockname()[1]
+        try:
+            self.assertFalse(main_mod.check_port_available(port))
+        finally:
+            s.close()
+
+    @patch("main.release_instance_lock")
+    @patch("main.check_port_available", return_value=False)
+    @patch("main.run_preflight", return_value=main_mod.EXIT_OK)
+    def test_port_in_use_prints_banner_exits_and_releases_lock(
+        self,
+        _preflight: MagicMock,
+        port_mock: MagicMock,
+        release_mock: MagicMock,
+    ) -> None:
+        runtime = main_mod.AgentRuntime()
+        stderr_capture: list[str] = []
+
+        class _Err:
+            def write(self, msg: str) -> int:
+                stderr_capture.append(msg)
+                return len(msg)
+
+            def flush(self) -> None:
+                pass
+
+        with patch("sys.stderr", _Err()):
+            with self.assertRaises(SystemExit) as ctx:
+                runtime.run()
+        self.assertEqual(ctx.exception.code, 1)
+        port_mock.assert_called_once_with(main_mod._API_PORT)
+        release_mock.assert_called_once()
+        combined = "".join(stderr_capture)
+        self.assertIn("port 8080 is already in use", combined)
+        self.assertIn("lsof -i :8080", combined)
+
+    @patch("uvicorn.run")
+    @patch("main.create_app")
+    @patch("main.register_api_startup")
+    @patch("main.register_trading_loop")
+    @patch("runtime.agent_bootstrap.build_trading_loop")
+    @patch("main._rest_client_if_ready", return_value=None)
+    @patch("main.apply_config_defaults", side_effect=lambda d: d)
+    @patch("main._load_config")
+    @patch("main.check_port_available", return_value=True)
+    @patch("main.run_preflight", return_value=main_mod.EXIT_OK)
+    def test_port_free_continues_to_uvicorn(
+        self,
+        _preflight: MagicMock,
+        port_mock: MagicMock,
+        load_mock: MagicMock,
+        _defaults: MagicMock,
+        _rest: MagicMock,
+        loop_mock: MagicMock,
+        _reg_loop: MagicMock,
+        _reg_startup: MagicMock,
+        _app_mock: MagicMock,
+        uvicorn_mock: MagicMock,
+    ) -> None:
+        cfg = MagicMock()
+        cfg.as_dict.return_value = {"epic": "IX.D.NIKKEI.IFM.IP"}
+        load_mock.return_value = cfg
+        loop_mock.return_value = MagicMock()
+        runtime = main_mod.AgentRuntime()
+        code = runtime.run()
+        self.assertEqual(code, main_mod.EXIT_OK)
+        port_mock.assert_called_once_with(main_mod._API_PORT)
+        uvicorn_mock.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
