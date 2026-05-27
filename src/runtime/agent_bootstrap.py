@@ -167,8 +167,8 @@ def build_trading_loop(
         execution_loop=execution_loop,
         quote_source=quote_source,
         learning_store=store,
+        position_sync=position_sync,
     )
-    loop._position_sync = position_sync  # noqa: SLF001 — shutdown hook
     if rest_client is not None and session_manager.is_session_open():
         from trading.ohlc_bootstrap import bootstrap_ohlc_for_session
 

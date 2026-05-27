@@ -75,6 +75,13 @@ class SessionManagerTests(unittest.TestCase):
         ):
             self.assertFalse(self.mgr.should_flatten())
 
+    def test_flatten_schedule_at_five_minutes(self) -> None:
+        with patch.object(self.mgr, "minutes_to_session_end", return_value=4.8):
+            self.assertTrue(self.mgr.should_run_flatten_attempt())
+            self.assertEqual(self.mgr.mark_flatten_attempt(), 5.0)
+        with patch.object(self.mgr, "minutes_to_session_end", return_value=4.8):
+            self.assertFalse(self.mgr.should_run_flatten_attempt())
+
     def test_maintenance_reopen_resets_cold_start_not_points(self) -> None:
         self.mgr._last_close_time = datetime(2026, 5, 27, 21, 0)
         self.mgr.on_session_open(_quote(100.0), at=datetime(2026, 5, 27, 21, 45))

@@ -18,6 +18,7 @@ from system.market_watch.calendar import (
     get_market_status,
     is_market_open,
     is_session_end_flatten_window,
+    minutes_until_market_close,
 )
 from system.paths import data_dir
 from system.state_manager import atomic_write_json, read_json_file
@@ -37,6 +38,8 @@ GAP_ATR_MULTIPLE = 1.0
 MAINTENANCE_MAX_GAP_SEC = 2 * 3600
 AUTOSAVE_INTERVAL_SEC = 30.0
 FLATTEN_LEAD_MINUTES = 5.0
+FLATTEN_RETRY_MINUTES = (5.0, 3.0, 1.0)
+ENTRY_BLOCK_MINUTES = 10.0
 
 
 @dataclass
@@ -98,6 +101,9 @@ class SessionManager:
         self._maintenance_reopen_active = False
         self._maintenance_pause_active = False
         self._maintenance_pause_logged = False
+        self._flatten_attempts_done: set[float] = set()
+        self._flatten_failures = 0
+        self._flatten_confirmed = False
 
         self._load_state()
 
@@ -189,6 +195,67 @@ class SessionManager:
         except Exception:
             return False
 
+    def minutes_to_session_end(self, *, at: datetime | None = None) -> float | None:
+        """Minutes until the IG session closes while the market is open."""
+        try:
+            return minutes_until_market_close(self._epic, at=at)
+        except Exception:
+            return None
+
+    def is_entry_blocked_near_session_end(self, *, at: datetime | None = None) -> tuple[bool, int | None]:
+        """Block new entries when fewer than ENTRY_BLOCK_MINUTES remain."""
+        mins = self.minutes_to_session_end(at=at)
+        if mins is None:
+            return False, None
+        if mins < ENTRY_BLOCK_MINUTES:
+            return True, max(0, int(mins))
+        return False, None
+
+    def should_run_flatten_attempt(self, *, at: datetime | None = None) -> bool:
+        """True on first tick at each T-5 / T-3 / T-1 minute mark before session end."""
+        if self._flatten_confirmed:
+            return False
+        mins = self.minutes_to_session_end(at=at)
+        if mins is None:
+            return False
+        for threshold in FLATTEN_RETRY_MINUTES:
+            if threshold in self._flatten_attempts_done:
+                continue
+            if mins <= threshold:
+                return True
+        return False
+
+    def mark_flatten_attempt(self, *, at: datetime | None = None) -> float | None:
+        """Record that the scheduled flatten at this threshold was started."""
+        mins = self.minutes_to_session_end(at=at)
+        if mins is None:
+            return None
+        for threshold in FLATTEN_RETRY_MINUTES:
+            if threshold in self._flatten_attempts_done:
+                continue
+            if mins <= threshold:
+                self._flatten_attempts_done.add(threshold)
+                return threshold
+        return None
+
+    def record_flatten_failure(self) -> int:
+        """Increment failed flatten verification count (max 3 scheduled attempts)."""
+        self._flatten_failures += 1
+        return self._flatten_failures
+
+    def flatten_failures(self) -> int:
+        return self._flatten_failures
+
+    def flatten_confirmed(self) -> None:
+        self._flatten_confirmed = True
+        self._flatten_attempts_done.clear()
+        self._flatten_failures = 0
+
+    def _reset_flatten_state(self) -> None:
+        self._flatten_attempts_done.clear()
+        self._flatten_failures = 0
+        self._flatten_confirmed = False
+
     def _check_maintenance_reopen(self, now: datetime) -> bool:
         if self._last_close_time is None:
             return False
@@ -240,6 +307,7 @@ class SessionManager:
                 )
         else:
             log_engine(f"session_manager session OPEN epic={self._epic}")
+            self._reset_flatten_state()
             if self._points is not None:
                 self._points.reset_session()
             if self._env_scorer is not None:

@@ -7,6 +7,7 @@ for gate 7 only. No GUI imports. Trading continues if the FastAPI dashboard fail
 
 from __future__ import annotations
 
+import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
@@ -20,6 +21,7 @@ from execution.trading_loop import TickOutcome, TradingLoop as ExecutionTickLoop
 from signals.signal_engine import SignalResult
 from system.config import Config
 from system.engine_log import log_engine
+from system.paths import project_root
 from trading.environment_scorer import (
     GATE_PASS_MIN,
     SAFE_DEFAULT_SCORE,
@@ -41,6 +43,7 @@ SPREAD_NORMAL_MULTIPLIER = 1.5
 DAILY_LOSS_LIMIT_GBP = 200.0
 STAGE1_MAX_OPEN_POSITIONS = 1
 DEFAULT_TICK_INTERVAL_SEC = 5.0
+FLATTEN_VERIFY_WAIT_SEC = 10.0
 
 
 def signal_gate_explanation(sig: SignalResult, threshold: float) -> tuple[str, str]:
@@ -152,6 +155,7 @@ class TradingLoop:
         learning_store: Any | None = None,
         tick_interval_sec: float | None = None,
         on_flatten: Callable[[], int] | None = None,
+        position_sync: Any | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._config = config
@@ -170,6 +174,7 @@ class TradingLoop:
             else getattr(config, "refresh_seconds", DEFAULT_TICK_INTERVAL_SEC)
         )
         self._on_flatten = on_flatten
+        self._position_sync = position_sync
         self._clock = clock or datetime.now
 
         self._stop = threading.Event()
@@ -386,9 +391,19 @@ class TradingLoop:
     def _gate_session_open(self) -> GateResult:
         from system.market_data_hub import get_market_data_hub
 
+        at = quote_time(self._clock())
         phase = self._session.snapshot().phase
         hub_maint = get_market_data_hub().is_in_maintenance(self._epic)
-        open_now = bool(self._session.is_session_open(at=quote_time(self._clock())))
+        open_now = bool(self._session.is_session_open(at=at))
+        blocked, mins_left = self._session.is_entry_blocked_near_session_end(at=at)
+        if blocked and open_now:
+            detail = f"entry blocked — session ends in {mins_left}min"
+            return GateResult(
+                name="session_open",
+                passed=False,
+                value={"open": True, "entry_blocked": True, "mins_left": mins_left},
+                detail=detail,
+            )
         if hub_maint:
             detail = "Japan 225 maintenance — stream paused until prices resume"
         elif phase == "MAINTENANCE":
@@ -590,21 +605,95 @@ class TradingLoop:
         return 0.0
 
     def _flatten_if_needed(self) -> None:
+        at = quote_time(self._clock())
         try:
-            if not self._session.should_flatten(at=quote_time(self._clock())):
+            if not self._session.should_run_flatten_attempt(at=at):
                 return
         except Exception as e:
-            log_engine(f"should_flatten check failed: {type(e).__name__}: {e}")
+            log_engine(f"flatten attempt check failed: {type(e).__name__}: {e}")
             return
-        log_engine("session flatten window — closing all open positions")
+        threshold = self._session.mark_flatten_attempt(at=at)
+        log_engine(
+            f"session flatten — closing all open positions "
+            f"(T-{int(threshold or 0)}min)"
+        )
         try:
-            if self._on_flatten is not None:
-                n = int(self._on_flatten())
-            else:
-                n = self._default_flatten()
-            log_engine(f"flatten complete — closed {n} position(s)")
+            n = self._execute_flatten_close()
+            log_engine(f"flatten close sent — {n} position(s)")
         except Exception as e:
-            log_engine(f"flatten failed: {type(e).__name__}: {e}")
+            log_engine(f"flatten close failed: {type(e).__name__}: {e}")
+            self._session.record_flatten_failure()
+            if self._session.flatten_failures() >= 3:
+                self._flatten_failed_critical()
+            return
+        self._verify_flatten_after_close(at)
+
+    def _verify_flatten_after_close(self, at: datetime) -> None:
+        time.sleep(FLATTEN_VERIFY_WAIT_SEC)
+        sync = getattr(self, "_position_sync", None)
+        if sync is not None and hasattr(sync, "sync_once"):
+            try:
+                sync.sync_once()
+            except Exception as e:
+                log_engine(
+                    f"ig_position_sync verify sync failed: {type(e).__name__}: {e}"
+                )
+        open_count = self._ig_open_position_count()
+        if open_count <= 0:
+            log_engine("FLATTEN CONFIRMED — all positions closed")
+            self._session.flatten_confirmed()
+            return
+        failures = self._session.record_flatten_failure()
+        log_engine(
+            f"flatten verify failed — {open_count} position(s) still open "
+            f"(failure {failures}/3)"
+        )
+        if failures >= 3:
+            self._flatten_failed_critical()
+
+    def _flatten_failed_critical(self) -> None:
+        log_engine("CRITICAL: FLATTEN FAILED — manual intervention required")
+        self._trigger_emergency_stop()
+
+    def _trigger_emergency_stop(self) -> None:
+        script = project_root() / "scripts" / "emergency_stop.sh"
+        if not script.is_file():
+            log_engine(f"emergency_stop.sh not found at {script}")
+            return
+        try:
+            subprocess.Popen(
+                ["bash", str(script)],
+                cwd=str(project_root()),
+                start_new_session=True,
+            )
+            log_engine("emergency_stop.sh triggered")
+        except Exception as e:
+            log_engine(
+                f"emergency_stop.sh launch failed: {type(e).__name__}: {e}"
+            )
+
+    def _ig_open_position_count(self) -> int:
+        sync = getattr(self, "_position_sync", None)
+        if sync is not None:
+            try:
+                if hasattr(sync, "count_for_epic"):
+                    return int(sync.count_for_epic(self._epic))
+                return int(sync.total_open())
+            except Exception:
+                pass
+        engine = self._execution_loop.execution_engine
+        tracker = getattr(engine, "trade_tracker", None)
+        if tracker is not None and hasattr(tracker, "count_open_for_epic"):
+            try:
+                return int(tracker.count_open_for_epic(self._epic))
+            except Exception:
+                pass
+        return 0
+
+    def _execute_flatten_close(self) -> int:
+        if self._on_flatten is not None:
+            return int(self._on_flatten())
+        return self._default_flatten()
 
     def _default_flatten(self) -> int:
         engine = self._execution_loop.execution_engine
