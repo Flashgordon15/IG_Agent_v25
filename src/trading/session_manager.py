@@ -96,6 +96,8 @@ class SessionManager:
         self._last_persist_ts = 0.0
         self._phase: TickPhase = "CLOSED"
         self._maintenance_reopen_active = False
+        self._maintenance_pause_active = False
+        self._maintenance_pause_logged = False
 
         self._load_state()
 
@@ -275,13 +277,38 @@ class SessionManager:
             now = quote.time if isinstance(quote.time, datetime) else datetime.now()
             was_open = self._session_open
             open_now = self.is_session_open(at=now)
+            daily_maint = self._is_daily_maintenance_closed(at=now)
 
             if not was_open and open_now:
-                self.on_session_open(quote, at=now)
+                if self._maintenance_pause_active:
+                    self._maintenance_pause_active = False
+                    self._maintenance_pause_logged = False
+                    self._maintenance_reopen_active = True
+                    self._session_open = True
+                    log_engine(
+                        f"session_manager maintenance reopen epic={self._epic} "
+                        f"— preserving cold-start bars"
+                    )
+                else:
+                    self.on_session_open(quote, at=now)
             elif was_open and not open_now:
-                self.on_session_close(quote, at=now)
+                if daily_maint:
+                    self._maintenance_pause_active = True
+                    if not self._maintenance_pause_logged:
+                        self._maintenance_pause_logged = True
+                        log_engine("Maintenance pause — will resume")
+                else:
+                    self._maintenance_pause_active = False
+                    self._maintenance_pause_logged = False
+                    self.on_session_close(quote, at=now)
 
-            self._session_open = open_now
+            if daily_maint:
+                self._phase = "MAINTENANCE"
+                self._maybe_persist()
+                return self._phase
+
+            if not self._maintenance_pause_active:
+                self._session_open = open_now
 
             if open_now and self._open_time is None:
                 self._open_time = now
@@ -292,10 +319,7 @@ class SessionManager:
                 )
 
             if not open_now:
-                if self._is_daily_maintenance_closed(at=now):
-                    self._phase = "MAINTENANCE"
-                else:
-                    self._phase = "CLOSED"
+                self._phase = "CLOSED"
                 self._maybe_persist()
                 return self._phase
 

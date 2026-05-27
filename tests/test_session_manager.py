@@ -79,8 +79,22 @@ class SessionManagerTests(unittest.TestCase):
         self.mgr._last_close_time = datetime(2026, 5, 27, 21, 0)
         self.mgr.on_session_open(_quote(100.0), at=datetime(2026, 5, 27, 21, 45))
         self.points.reset_session.assert_not_called()
-        self.env.reset_session.assert_called_once()
+        self.env.reset_session.assert_called_once_with(
+            "Japan 225",
+            opened_at=datetime(2026, 5, 27, 21, 45),
+            reset_cold_start_baseline=False,
+        )
         self.assertEqual(self.mgr._maintenance_count_today, 1)
+
+    def test_cold_start_advances_with_elapsed_time(self) -> None:
+        self.mgr._open_time = datetime.now() - timedelta(minutes=16)
+        self.mgr._bars_at_open = 0
+        self.engine.candles.return_value = [1, 2]
+        self.assertGreaterEqual(self.mgr.bars_since_open(), 3)
+        self.assertTrue(self.mgr.is_cold_start())
+        self.mgr._open_time = datetime.now() - timedelta(minutes=31)
+        self.assertGreaterEqual(self.mgr.bars_since_open(), 6)
+        self.assertFalse(self.mgr.is_cold_start())
 
     def test_new_day_open_resets_points_and_env(self) -> None:
         self.mgr._last_close_time = datetime(2026, 5, 26, 6, 0)
@@ -132,6 +146,25 @@ class SessionManagerTests(unittest.TestCase):
                 return_value=status,
             ):
                 self.assertEqual(self.mgr.on_tick(_quote()), "MAINTENANCE")
+
+    def test_daily_break_pause_preserves_session(self) -> None:
+        self.mgr._session_open = True
+        self.mgr._open_time = datetime(2026, 5, 27, 18, 0)
+        self.mgr._bars_at_open = 2
+        status = MagicMock()
+        status.open = False
+        status.reason = "daily break (maintenance)"
+        with patch("trading.session_manager.is_market_open", return_value=False):
+            with patch(
+                "trading.session_manager.get_market_status",
+                return_value=status,
+            ):
+                with patch.object(self.mgr, "on_session_close") as close_mock:
+                    phase = self.mgr.on_tick(_quote())
+                    self.assertEqual(phase, "MAINTENANCE")
+                    close_mock.assert_not_called()
+                    self.points.reset_session.assert_not_called()
+                    self.assertTrue(self.mgr._session_open)
 
     def test_state_persistence_round_trip(self) -> None:
         self.mgr._session_open = True

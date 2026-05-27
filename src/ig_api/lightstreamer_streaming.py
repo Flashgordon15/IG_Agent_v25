@@ -25,8 +25,6 @@ _BLANK_TICK_LOG_INTERVAL_SEC = 30.0
 class IGLightstreamerStreamingClient:
     """Lightstreamer MARKET subscription; falls back to REST poll on failure."""
 
-    transport_label = "Lightstreamer"
-
     def __init__(
         self,
         credentials: Credentials,
@@ -77,9 +75,12 @@ class IGLightstreamerStreamingClient:
         log_engine(
             f"Lightstreamer CONNECTED — first tick received bid={bid} offer={offer} epic={epic}"
         )
+
+    @property
     def transport_label(self) -> str:
         if self._using_fallback and self._fallback:
-            return getattr(self._fallback, "transport_label", "REST poll")
+            fb = getattr(self._fallback, "transport_label", "REST poll")
+            return fb() if callable(fb) else str(fb)
         return "Lightstreamer"
 
     @property
@@ -262,23 +263,9 @@ class IGLightstreamerStreamingClient:
                         bid_text = str(raw_bid or "").strip()
                         offer_text = str(raw_offer or "").strip()
                         if not bid_text or not offer_text:
-                            now = time.time()
-                            if now - ls_client._last_blank_tick_log_ts >= _BLANK_TICK_LOG_INTERVAL_SEC:
-                                ls_client._last_blank_tick_log_ts = now
-                                log_engine(
-                                    f"WARN: Lightstreamer tick ignored — blank prices "
-                                    f"values={field_values or {'BID': raw_bid, 'OFFER': raw_offer}} "
-                                    f"epic={epic_name}"
-                                )
-                            if (
-                                not ls_client._first_tick_received
-                                and ls_client._first_valid_tick_deadline_ts > 0
-                                and now >= ls_client._first_valid_tick_deadline_ts
-                                and not ls_client._blank_tick_resubscribe_scheduled
-                            ):
-                                ls_client._blank_tick_resubscribe_scheduled = True
-                                log_engine("LS blank ticks >30s — resubscribing")
-                                ls_client._schedule_blank_tick_recovery(epic_name)
+                            from system.market_data_hub import get_market_data_hub
+
+                            get_market_data_hub().enter_maintenance(epic_name)
                             return
                         log_engine(
                             f"LS raw tick received: item={item} values={field_values}"
@@ -288,13 +275,9 @@ class IGLightstreamerStreamingClient:
                     except (TypeError, ValueError):
                         return
                     if bid <= 0 or offer <= 0:
-                        now = time.time()
-                        if now - ls_client._last_blank_tick_log_ts >= _BLANK_TICK_LOG_INTERVAL_SEC:
-                            ls_client._last_blank_tick_log_ts = now
-                            log_engine(
-                                f"WARN: Lightstreamer tick ignored — invalid prices "
-                                f"bid={bid} offer={offer} epic={epic_name}"
-                            )
+                        from system.market_data_hub import get_market_data_hub
+
+                        get_market_data_hub().enter_maintenance(epic_name)
                         return
                     from system.market_data_hub import get_market_data_hub
 

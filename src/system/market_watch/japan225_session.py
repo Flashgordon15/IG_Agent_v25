@@ -35,6 +35,12 @@ _CLOSED_LOG_INTERVAL_SEC = 60.0
 _FRESH_LS_TICK_MAX_AGE_SEC = 5.0
 _QUOTE_STREAM_STALE_MSG = "Quote stream stale — trading paused"
 _QUOTE_STREAM_RESTORED_MSG = "Fresh quote stream restored — trading resumed"
+_MAINTENANCE_MSG = (
+    "Japan 225 maintenance — daily break ~22:00 BST until prices resume"
+)
+_BLANK_TICK_MAINTENANCE_MSG = (
+    "Japan 225 maintenance window — awaiting prices from stream"
+)
 _last_closed_log_ts = 0.0
 _last_japan225_open: bool | None = None
 _awaiting_fresh_ls_tick = False
@@ -94,6 +100,24 @@ def japan225_awaiting_fresh_tick() -> bool:
         return _awaiting_fresh_ls_tick
 
 
+def is_scheduled_daily_maintenance(
+    epic: str = JAPAN225_EPIC, *, now_utc: datetime | None = None
+) -> bool:
+    """True during IG fund calendar daily break (not weekend/session close)."""
+    status = get_market_status(epic, at=now_utc)
+    if status is None or status.open:
+        return False
+    reason = str(status.reason or "").lower()
+    return "break" in reason or "maintenance" in reason
+
+
+def is_hub_price_maintenance(epic: str) -> bool:
+    """True when Lightstreamer is sending blank BID/OFFER (hub maintenance mode)."""
+    from system.market_data_hub import get_market_data_hub
+
+    return get_market_data_hub().is_in_maintenance(epic)
+
+
 def is_quote_stream_fresh(
     epic: str, *, max_age: float = _FRESH_LS_TICK_MAX_AGE_SEC
 ) -> bool:
@@ -131,7 +155,11 @@ def japan225_strategy_paused(epic: str) -> tuple[bool, str]:
     if not japan225_session_gate_enabled(epic):
         return False, ""
     if not is_japan225_open():
+        if is_scheduled_daily_maintenance(epic):
+            return True, _MAINTENANCE_MSG
         return True, japan225_closed_message()
+    if is_hub_price_maintenance(epic):
+        return True, _BLANK_TICK_MAINTENANCE_MSG
     if japan225_awaiting_fresh_tick():
         jst = _jst_now()
         return (

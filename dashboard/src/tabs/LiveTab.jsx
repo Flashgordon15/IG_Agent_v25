@@ -163,7 +163,12 @@ function formatGateValueCompact(gate) {
     if (value && typeof value === "object" && value.display) return String(value.display);
     if (typeof value === "number") return `${pct2(value)}%`;
   }
-  if (name === "session_open") return value === true ? "open" : "closed";
+  if (name === "session_open") {
+    if (gate.detail && /maintenance/i.test(String(gate.detail))) {
+      return String(gate.detail);
+    }
+    return value === true ? "open" : "closed";
+  }
   if (name === "points_state") return String(value ?? "—");
   if (name === "cold_start_gap" && value && typeof value === "object") {
     return `${value.bars ?? 0} bars`;
@@ -209,6 +214,8 @@ export default function LiveTab({ tick }) {
   const badgeRaw = String(health.badge || "WATCHING").toUpperCase();
   const badge = ["WATCHING", "BLOCKED", "READY"].includes(badgeRaw) ? badgeRaw : "WATCHING";
   const blockingReason = getBlockingReason(health, tick?.signal || {});
+  const marketMaint = tick?.market_state === "MAINTENANCE";
+  const sessionGate = (health.gates || []).find((g) => g.name === "session_open");
   const badgeColor =
     badge === "READY" ? "text-green" : badge === "BLOCKED" ? "text-red" : "text-amber";
   const gates = orderGates(health.gates);
@@ -248,7 +255,10 @@ export default function LiveTab({ tick }) {
         <p className="text-muted text-[11px] mt-1 leading-snug">
           {badge === "READY"
             ? "All gates passing"
-            : blockingReason || (badge === "WATCHING" ? "Session closed or awaiting data" : "—")}
+            : marketMaint
+              ? sessionGate?.detail ||
+                "Japan 225 daily maintenance (~22:00 BST) — prices resume automatically"
+              : blockingReason || (badge === "WATCHING" ? "Session closed or awaiting data" : "—")}
         </p>
       </div>
 

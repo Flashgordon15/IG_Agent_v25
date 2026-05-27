@@ -32,17 +32,23 @@ export default function StatusBar({ tick, reconnecting, onErrorsClick }) {
   const syncAge = tick?.tick_age_s ?? null;
   const syncColor =
     syncAge === null ? "muted" : syncAge < 5 ? "green" : syncAge <= 30 ? "amber" : "red";
+  const marketMaint = market === "MAINTENANCE";
   const marketOpen = market === "OPEN";
+  const streamMaint = stream === "MAINTENANCE";
   const streamLive = stream === "LIVE" && !reconnecting;
 
   return (
     <header className="sticky top-0 z-40 border-b border-border bg-bg px-3 py-2 flex flex-wrap gap-2">
-      <span className={`pill ${pillClass(marketOpen ? "green" : market === "STALE" ? "amber" : "muted")}`}>
+      <span
+        className={`pill ${pillClass(marketMaint ? "amber" : marketOpen ? "green" : market === "STALE" ? "amber" : "muted")}`}
+      >
         {marketOpen && <Dot color="green" pulse />}
-        Japan 225 {market}
+        Japan 225 {marketMaint ? "MAINTENANCE" : market}
       </span>
-      <span className={`pill ${pillClass(streamLive ? "green" : reconnecting ? "amber" : "red")}`}>
-        Stream {stream}
+      <span
+        className={`pill ${pillClass(streamMaint ? "amber" : streamLive ? "green" : reconnecting ? "amber" : "red")}`}
+      >
+        Stream {streamMaint ? "MAINTENANCE" : stream}
       </span>
       <span className={`pill ${pillClass(restColor)}`}>REST {rest}/6</span>
       <button

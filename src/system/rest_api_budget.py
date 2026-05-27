@@ -11,8 +11,9 @@ import math
 import threading
 import time
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterator
 
 from system.engine_log import log_engine
 
@@ -69,6 +70,32 @@ _ORDER_IN_FLIGHT_PAUSED_ACTIVITIES = frozenset(
     }
 )
 
+_e2e_diagnostics_depth = 0
+_e2e_diagnostics_lock = threading.RLock()
+
+
+def e2e_diagnostics_rest_active() -> bool:
+    """True during dashboard/CLI E2E routing checks (short diagnostic REST window)."""
+    with _e2e_diagnostics_lock:
+        return _e2e_diagnostics_depth > 0
+
+
+@contextmanager
+def e2e_diagnostics_rest_window() -> Iterator[None]:
+    """
+    Allow a few REST calls for E2E/startup diagnostics even if preemptive throttle is active.
+
+    Does not bypass IG rate-limit backoff or order-in-flight reservation.
+    """
+    global _e2e_diagnostics_depth
+    with _e2e_diagnostics_lock:
+        _e2e_diagnostics_depth += 1
+    try:
+        yield
+    finally:
+        with _e2e_diagnostics_lock:
+            _e2e_diagnostics_depth = max(0, _e2e_diagnostics_depth - 1)
+
 
 def begin_order_in_flight() -> None:
     """Reserve REST budget for POST /positions/otc + GET /confirms + position sync."""
@@ -121,9 +148,13 @@ def hub_quote_stream_fresh(*, max_age: float = FRESH_STREAM_TICK_MAX_AGE_SEC) ->
     must not block market/category REST in that window (v24 failure register #6).
     """
     try:
+        from system.market_data_hub import get_market_data_hub
         from system.market_watch.japan225_session import is_quote_stream_fresh
 
-        return is_quote_stream_fresh(_primary_market_epic(), max_age=max_age)
+        epic = _primary_market_epic()
+        if get_market_data_hub().is_in_maintenance(epic):
+            return True
+        return is_quote_stream_fresh(epic, max_age=max_age)
     except Exception:
         return False
 
@@ -218,6 +249,8 @@ class RestApiBudget:
 
     def _raise_if_non_essential_paused(self, category: str, *, label: str = "") -> None:
         if category in ESSENTIAL_REST_CATEGORIES:
+            return
+        if e2e_diagnostics_rest_active():
             return
         if self._rate_limit_rest_active():
             if not self._rate_limit_skip_logged:

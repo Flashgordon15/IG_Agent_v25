@@ -384,8 +384,19 @@ class TradingLoop:
         return results
 
     def _gate_session_open(self) -> GateResult:
+        from system.market_data_hub import get_market_data_hub
+
+        phase = self._session.snapshot().phase
+        hub_maint = get_market_data_hub().is_in_maintenance(self._epic)
         open_now = bool(self._session.is_session_open(at=quote_time(self._clock())))
-        detail = "market open" if open_now else "market closed"
+        if hub_maint:
+            detail = "Japan 225 maintenance — stream paused until prices resume"
+        elif phase == "MAINTENANCE":
+            detail = "Daily maintenance ~22:00 BST — session resumes when IG reopens"
+        elif open_now:
+            detail = "market open"
+        else:
+            detail = "market closed"
         return GateResult(
             name="session_open",
             passed=open_now,
@@ -683,7 +694,19 @@ class TradingLoop:
                 session_open = bool(g.passed)
                 break
 
-        if not session_open:
+        hub_maint = False
+        session_maint = False
+        try:
+            from system.market_data_hub import get_market_data_hub
+
+            hub_maint = get_market_data_hub().is_in_maintenance(self._epic)
+            session_maint = self._session.snapshot().phase == "MAINTENANCE"
+        except Exception:
+            pass
+
+        if hub_maint or session_maint:
+            market_state = "MAINTENANCE"
+        elif not session_open:
             market_state = "CLOSED"
         elif spread <= 0:
             market_state = "OFFLINE"
@@ -703,7 +726,9 @@ class TradingLoop:
         tick_age_s = max(0.0, (self._clock() - quote_ts).total_seconds())
 
         stream_status = "DISCONNECTED"
-        if spread > 0:
+        if hub_maint or session_maint:
+            stream_status = "MAINTENANCE"
+        elif spread > 0:
             try:
                 from system.market_data_hub import get_market_data_hub
 

@@ -43,6 +43,8 @@ class MarketDataHub:
         self._last_fetch_ts: dict[str, float] = {}
         self._total_fetches = 0
         self._listeners: list[Callable[[QuoteSnapshot], None]] = []
+        self._maintenance_epics: set[str] = set()
+        self._maintenance_logged: set[str] = set()
 
     def attach_rest(self, rest_client: Any) -> None:
         with self._lock:
@@ -73,7 +75,32 @@ class MarketDataHub:
             except Exception:
                 pass
 
+    def enter_maintenance(self, epic: str) -> None:
+        """IG sends blank BID/OFFER during Japan 225 daily maintenance — pause REST/stale paths."""
+        epic_key = str(epic)
+        with self._lock:
+            self._maintenance_epics.add(epic_key)
+            first = epic_key not in self._maintenance_logged
+            if first:
+                self._maintenance_logged.add(epic_key)
+        if first:
+            log_engine(
+                "Japan 225 maintenance window — pausing until prices resume"
+            )
+
+    def exit_maintenance(self, epic: str) -> None:
+        epic_key = str(epic)
+        with self._lock:
+            self._maintenance_epics.discard(epic_key)
+            self._maintenance_logged.discard(epic_key)
+
+    def is_in_maintenance(self, epic: str) -> bool:
+        with self._lock:
+            return str(epic) in self._maintenance_epics
+
     def publish(self, epic: str, bid: float, offer: float, *, source: str = "stream") -> QuoteSnapshot:
+        if bid > 0 and offer > 0:
+            self.exit_maintenance(epic)
         snap = QuoteSnapshot(epic=epic, bid=bid, offer=offer, updated_at=time.time(), source=source)
         with self._lock:
             self._quotes[epic] = snap
@@ -113,6 +140,9 @@ class MarketDataHub:
         min_interval: minimum seconds between API calls for this epic.
         max_age: if set, return cache without fetch when younger than this.
         """
+        if self.is_in_maintenance(epic):
+            return self.get_snapshot(epic)
+
         interval = self._fetch_interval_sec if min_interval is None else min_interval
         with self._lock:
             rest = self._rest

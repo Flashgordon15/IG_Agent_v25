@@ -41,12 +41,17 @@ def _default_gates() -> list[dict[str, Any]]:
 
 def build_default_tick() -> dict[str, Any]:
     """Safe offline snapshot when no trading loop has published yet."""
+    from trading.gate_readiness import compute_trade_readiness, format_health_badge_text
+
     gates = _default_gates()
     passing = sum(1 for g in gates if g.get("pass"))
+    badge = "BLOCKED"
+    readiness = compute_trade_readiness(gates)
+    badge_text = format_health_badge_text(badge, readiness)
     return {
         "type": "tick",
         "ts": _iso_now(),
-        "market_state": "OFFLINE",
+        "market_state": "OFFLINE",  # OPEN | CLOSED | OFFLINE | MAINTENANCE
         "bid": None,
         "offer": None,
         "spread": None,
@@ -55,7 +60,9 @@ def build_default_tick() -> dict[str, Any]:
         "rest_calls_min": 0,
         "errors": {"count": 0, "type": None},
         "health": {
-            "badge": "BLOCKED",
+            "badge": badge,
+            "badge_text": badge_text,
+            "readiness": readiness,
             "gates": gates,
             "summary": f"{passing} of {len(gates)} gates passing — awaiting engine",
         },

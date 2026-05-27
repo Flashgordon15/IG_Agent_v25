@@ -128,7 +128,11 @@ export default function SystemTab({ tick, reconnecting }) {
         <p className="text-[12px] text-muted">
           Status: {reconnecting ? "Reconnecting…" : tick?.stream_status || "—"} · Tick age{" "}
           {tick?.tick_age_s ?? "—"}s · Transport auto · Stale gate:{" "}
-          {tick?.market_state === "STALE" ? "active" : "clear"}
+          {tick?.market_state === "MAINTENANCE"
+            ? "maintenance (no REST)"
+            : tick?.market_state === "STALE"
+              ? "active"
+              : "clear"}
         </p>
       </div>
 
