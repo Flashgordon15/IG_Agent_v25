@@ -439,7 +439,35 @@ class LearningStore:
             tuple(params),
         )
         self.conn.commit()
-        return self.conn.total_changes > 0
+        ok = self.conn.total_changes > 0
+        if ok:
+            try:
+                from execution.ml_training_hooks import record_ml_exit_for_deal
+
+                closed = self.conn.execute(
+                    """
+                    SELECT ig_deal_id, exit_price, pnl_points, result
+                    FROM trades WHERE id=?
+                    """,
+                    (row["id"],),
+                ).fetchone()
+                exit_px = float(closed["exit_price"] or 0) if closed else 0.0
+                pts = float(closed["pnl_points"] or 0) if closed else 0.0
+                record_ml_exit_for_deal(
+                    str(deal_id or deal_reference),
+                    ig_pnl=float(ig_pnl),
+                    result=str(result),
+                    exit_price=exit_px,
+                    pts_pnl=pts,
+                    exit_reason="ig_transaction_sync",
+                )
+            except Exception as e:
+                from system.engine_log import log_engine
+
+                log_engine(
+                    f"ml_training_store exit hook failed: {type(e).__name__}: {e}"
+                )
+        return ok
 
     def _rebuild_stats_for(self, setup_key: str) -> None:
         # Only count strategy-originated trades so IG-imported rows don't dilute

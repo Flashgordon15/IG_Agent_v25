@@ -589,6 +589,21 @@ class LiveExecutor:
             ig_deal_id=str(confirm.get("deal_id") or ""),
         )
         deal_id = str(confirm.get("deal_id") or "")
+        if deal_id:
+            try:
+                from execution.ml_training_hooks import record_ml_entry_from_signal
+
+                record_ml_entry_from_signal(
+                    deal_id,
+                    signal,
+                    execution_params,
+                    fill_price=float(signal.quote.mid),
+                )
+            except Exception as e:
+                log_engine(
+                    f"ml_training_store entry skipped deal={deal_id}: "
+                    f"{type(e).__name__}: {e}"
+                )
         if deal_id and hasattr(self._client, "ensure_protective_stops"):
             self._client.ensure_protective_stops(
                 deal_id,

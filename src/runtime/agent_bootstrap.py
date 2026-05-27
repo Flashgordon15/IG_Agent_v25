@@ -128,6 +128,7 @@ def build_trading_loop(
         rest_client=rest_client,
         trade_tracker=tracker,
         points_engine=points_engine,
+        environment_scorer=env_scorer,
     )
     journal_path = str(cfg.get("decision_log_file", "") or "")
     journal = DecisionJournal(journal_path) if journal_path else None

@@ -42,6 +42,9 @@ class ExecutionEngine:
         rest_client: Any | None = None,
         has_broker_position: Callable[[str], bool] | None = None,
         trade_tracker: TradeTracker | None = None,
+        points_engine: Any | None = None,
+        environment_scorer: Any | None = None,
+        ml_training_store: Any | None = None,
     ) -> None:
         self.mode = mode
         self.config = config
@@ -54,7 +57,23 @@ class ExecutionEngine:
         # Restore persisted cooldowns from the learning store so restarts
         # don't let the bot re-enter the same setup immediately.
         self._cooldown.attach_store(store)
-        self._validator = OrderValidator(config, self._adaptive, self._cooldown, store=store)
+        self._points = points_engine
+        self._env_scorer = environment_scorer
+        from execution.ml_training_hooks import configure_ml_training
+        from data.ml_training_store import MLTrainingStore
+
+        configure_ml_training(
+            ml_store=ml_training_store or MLTrainingStore(),
+            points_engine=points_engine,
+            environment_scorer=environment_scorer,
+        )
+        self._validator = OrderValidator(
+            config,
+            self._adaptive,
+            self._cooldown,
+            store=store,
+            points_engine=points_engine,
+        )
         self._risk = RiskManager(config, store)
         skip_ig_exits = mode.uses_broker()
         self._trade_manager = TradeManager(
@@ -156,6 +175,23 @@ class ExecutionEngine:
         settings = self._adaptive.settings(
             signal.setup_key, signal.adjusted_confidence, signal.snapshot
         )
+        if self._points is not None:
+            mult = float(
+                self._points.get_size_multiplier(signal.adjusted_confidence)
+            )
+            base_size = float(settings.get("size", self.config.trade_size))
+            cfg = self.config
+            sized = base_size * mult
+            settings["size"] = max(
+                cfg.adaptive_min_trade_size,
+                min(cfg.adaptive_max_trade_size, sized),
+            )
+            notes = str(settings.get("notes") or "")
+            settings["notes"] = (
+                f"{notes}, points {self._points.get_state()} ×{mult:.2f}"
+                if notes
+                else f"points {self._points.get_state()} ×{mult:.2f}"
+            )
         trace_execution(
             "ADAPTIVE",
             "AdaptiveEngine.settings",
