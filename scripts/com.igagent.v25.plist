@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.igagent.v25</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Library/Frameworks/Python.framework/Versions/3.14/bin/python3</string>
+		<string>/Users/chrisgordon/Desktop/IG_Agent_v25/src/main.py</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>/Users/chrisgordon/Desktop/IG_Agent_v25</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<false/>
+	<key>StandardOutPath</key>
+	<string>/Users/chrisgordon/Desktop/IG_Agent_v25/src/data/logs/launchd_stdout.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/chrisgordon/Desktop/IG_Agent_v25/src/data/logs/launchd_stderr.log</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PYTHONPATH</key>
+		<string>/Users/chrisgordon/Desktop/IG_Agent_v25/src</string>
+		<key>IG_AGENT_ROOT</key>
+		<string>/Users/chrisgordon/Desktop/IG_Agent_v25</string>
+	</dict>
+</dict>
+</plist>
