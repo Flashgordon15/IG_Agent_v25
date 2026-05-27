@@ -6,5 +6,4 @@ src/data/*.sqlite3
 src/data/logs/
 src/data/ml_training_store.jsonl
 dashboard/node_modules/
-dashboard/dist/
 .DS_Store

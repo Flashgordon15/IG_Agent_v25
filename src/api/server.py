@@ -1,15 +1,5 @@
 """
-FastAPI dashboard server — Section 4.5 Step 8 / 5.8 (System tab data source).
-
-Runs on port 8080 as a separate process from the trading loop. If this process
-fails, trading continues.
-
-Read-only HTTP/WebSocket except POST /api/close/{deal_id}, which is the ONLY
-endpoint that writes to trading state (manual close).
-
-Launch:
-  PYTHONPATH=src python -m api.server
-  # or scripts/run_api_server.sh
+FastAPI dashboard server — API + WebSocket + static React build (Section 4.5 Steps 8/13).
 """
 
 from __future__ import annotations
@@ -17,11 +7,18 @@ from __future__ import annotations
 import argparse
 import asyncio
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from api import routes, ws
 from api.snapshot_store import watch_snapshot_file
+from system.paths import project_root
+
+
+def _dashboard_dist() -> Path:
+    return project_root() / "dashboard" / "dist"
 
 
 def create_app(*, watch_snapshot: bool = True) -> FastAPI:
@@ -43,15 +40,17 @@ def create_app(*, watch_snapshot: bool = True) -> FastAPI:
 
     app = FastAPI(
         title="IG Agent v25 API",
-        version="0.1.0",
-        description=(
-            "Dashboard API. Read-only except POST /api/close/{deal_id} "
-            "(manual position close)."
-        ),
+        version="25.1.0",
+        description="Dashboard API, WebSocket ticks, and static UI at /",
         lifespan=lifespan,
     )
     app.include_router(routes.router)
     app.include_router(ws.router)
+
+    dist = _dashboard_dist()
+    if dist.is_dir() and (dist / "index.html").is_file():
+        app.mount("/", StaticFiles(directory=str(dist), html=True), name="dashboard")
+
     return app
 
 

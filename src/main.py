@@ -17,6 +17,7 @@ import webbrowser
 from pathlib import Path
 from typing import Any
 
+from api.agent_control import register_trading_loop
 from api.server import create_app
 from system.config import Config
 from system.config_loader import ConfigLoader
@@ -181,6 +182,7 @@ class AgentRuntime:
             from runtime.agent_bootstrap import build_trading_loop
 
             self.trading_loop = build_trading_loop(cfg, rest_client=rest)
+            register_trading_loop(self.trading_loop)
             self.trading_loop.start()
             log_engine("orchestrator trading loop started (background)")
 
