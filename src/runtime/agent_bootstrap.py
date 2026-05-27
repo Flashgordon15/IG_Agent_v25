@@ -94,7 +94,9 @@ def build_trading_loop(
     store = LearningStore(str(cfg.learning_db))
     signal_engine = SignalEngine(cfg, store)
     points_engine = PointsEngine(store)
-    env_scorer = EnvironmentScorer(signal_engine, config=cfg)
+    env_scorer = EnvironmentScorer(
+        signal_engine, config=cfg, rest_client=rest_client, epic=epic
+    )
     session_manager = SessionManager(
         epic,
         market=market,

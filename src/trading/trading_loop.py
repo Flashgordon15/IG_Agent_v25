@@ -20,15 +20,95 @@ from execution.trading_loop import TickOutcome, TradingLoop as ExecutionTickLoop
 from signals.signal_engine import SignalResult
 from system.config import Config
 from system.engine_log import log_engine
-from trading.environment_scorer import GATE_PASS_MIN, EnvironmentScorer
+from trading.environment_scorer import (
+    GATE_PASS_MIN,
+    SAFE_DEFAULT_SCORE,
+    EnvironmentScorer,
+)
+from trading.open_position_view import (
+    enrich_positions_with_quote,
+    normalize_sync_position,
+    positions_from_store_rows,
+)
 from trading.points_engine import PointsEngine
 from trading.session_manager import SessionManager
+from trading.price_trend import compute_price_trend_30m
+from trading.gate_readiness import compute_trade_readiness, format_health_badge_text
+from trading.trade_eligibility import build_trade_eligibility
 
 STAGE1_GBP_RISK_CAP = 50.0
 SPREAD_NORMAL_MULTIPLIER = 1.5
 DAILY_LOSS_LIMIT_GBP = 200.0
 STAGE1_MAX_OPEN_POSITIONS = 1
 DEFAULT_TICK_INTERVAL_SEC = 5.0
+
+
+def signal_gate_explanation(sig: SignalResult, threshold: float) -> tuple[str, str]:
+    """Human-readable (gate_detail, block_reason) for dashboard / gates."""
+    conf = float(sig.adjusted_confidence)
+    snap = sig.snapshot or {}
+    raw = str(snap.get("raw_signal") or "").strip()
+
+    if sig.signal in ("BUY", "SELL"):
+        if conf < threshold:
+            msg = f"{sig.signal} {conf:.1f}% below {threshold:.1f}% threshold"
+            return msg, msg
+        return f"{sig.signal} {conf:.1f}% (>= {threshold:.1f}%)", ""
+
+    if snap.get("rsi_block"):
+        reason = str(snap["rsi_block"])
+        lead = raw or "BUY/SELL"
+        return f"WAIT — {reason} ({lead} score {conf:.1f}%)", reason
+
+    if "blocked:" in sig.notes:
+        reason = sig.notes.split("blocked:", 1)[1].split(",", 1)[0].strip()
+        return f"WAIT — {reason} ({conf:.1f}% score held)", reason
+
+    notes_lower = (sig.notes or "").lower()
+    if "duplicate suppressed" in notes_lower:
+        reason = "awaiting next closed 5m bar"
+        return f"WAIT — {reason}", reason
+    if "collecting live data" in notes_lower:
+        reason = "collecting candle history"
+        return f"WAIT — {reason}", reason
+
+    for part in (sig.notes or "").split("|"):
+        part = part.strip()
+        if "BLOCKED:" in part or part.startswith("vol regime="):
+            return f"WAIT — {part}", part
+
+    buy = snap.get("buy_score")
+    sell = snap.get("sell_score")
+    try:
+        b = float(buy) if buy is not None else None
+        s = float(sell) if sell is not None else None
+    except (TypeError, ValueError):
+        b = s = None
+
+    if b is not None and s is not None and max(b, s) < threshold:
+        reason = f"scores buy={b:.0f} sell={s:.0f} need >={threshold:.0f}%"
+        return f"WAIT — {reason}", reason
+
+    if raw in ("BUY", "SELL"):
+        reason = f"{raw} scored {conf:.1f}% but output is WAIT"
+        return f"WAIT — {reason}", reason
+
+    return f"WAIT — no tradable direction ({conf:.1f}%)", "no BUY/SELL on closed bar"
+
+
+def _atr_from_signal_snapshot(snapshot: dict[str, Any] | None) -> float:
+    if not snapshot:
+        return 0.0
+    last = snapshot.get("last")
+    try:
+        if last is not None and hasattr(last, "get"):
+            return float(last.get("atr", 0) or 0)
+    except (TypeError, ValueError):
+        pass
+    try:
+        return float(snapshot.get("atr", 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 @dataclass
@@ -184,6 +264,7 @@ class TradingLoop:
         self._flatten_if_needed()
 
         gates = self._evaluate_gates(quote)
+        self._maybe_consume_points_skip_on_suppressed_signal(gates)
         all_passed = all(g.passed for g in gates)
         wait_reason = ""
         if not all_passed:
@@ -194,7 +275,11 @@ class TradingLoop:
         fitness = 0.0
         for g in gates:
             if g.name == "environment_fitness":
-                fitness = float(g.value or 0.0)
+                v = g.value
+                if isinstance(v, dict):
+                    fitness = float(v.get("score", 0) or 0)
+                else:
+                    fitness = float(v or 0.0)
             if g.name == "signal_confidence" and isinstance(g.value, dict):
                 signal = g.value.get("signal")
 
@@ -259,12 +344,31 @@ class TradingLoop:
                 elif name == "signal_confidence":
                     results.append(self._gate_signal_confidence())
                 elif name == "execution":
+                    prior_ok = bool(results) and all(r.passed for r in results)
+                    if prior_ok:
+                        detail = "Ready — order path armed (process_tick on this tick)"
+                        value = "armed"
+                    else:
+                        blockers = [
+                            r.name.replace("_", " ")
+                            for r in results
+                            if not r.passed
+                        ]
+                        blocker_txt = ", ".join(blockers[:3])
+                        if len(blockers) > 3:
+                            blocker_txt += f" +{len(blockers) - 3} more"
+                        detail = (
+                            f"Not armed — waiting on: {blocker_txt}"
+                            if blocker_txt
+                            else "Not armed — prior gates incomplete"
+                        )
+                        value = "waiting"
                     results.append(
                         GateResult(
                             name="execution",
-                            passed=results and all(r.passed for r in results),
-                            value="armed",
-                            detail="Async order path via process_tick",
+                            passed=prior_ok,
+                            value=value,
+                            detail=detail,
                         )
                     )
                 else:
@@ -310,14 +414,51 @@ class TradingLoop:
         )
 
     def _gate_environment_fitness(self, quote: Quote) -> GateResult:
-        score = float(self._env.score(self._market, quote=quote))
+        try:
+            score = float(self._env.score(self._market, quote=quote))
+        except Exception as e:
+            log_engine(
+                f"environment_fitness gate: score failed for {self._market}: "
+                f"{type(e).__name__}: {e}"
+            )
+            score = float(SAFE_DEFAULT_SCORE)
+        score_int = int(round(score))
         passed = score >= GATE_PASS_MIN
+        sent = {}
+        if hasattr(self._env, "get_sentiment_factor"):
+            try:
+                sent = self._env.get_sentiment_factor(self._market)
+            except Exception:
+                sent = {}
+        sent_label = str(sent.get("label") or "")
+        detail = f"fitness {score_int}% (need >={int(GATE_PASS_MIN)}%)"
+        if sent_label and sent_label != "neutral":
+            detail += f" — {sent_label}"
         return GateResult(
             name="environment_fitness",
             passed=passed,
-            value=score,
-            detail=f"fitness {score:.0f} (need >={GATE_PASS_MIN:.0f})",
+            value={"score": score_int, "display": f"{score_int}%", "sentiment": sent},
+            detail=detail,
         )
+
+    def _maybe_consume_points_skip_on_suppressed_signal(
+        self, gates: list[GateResult]
+    ) -> None:
+        """After 3 losses, burn one skip slot per actionable signal while paused."""
+        if not self._points.is_session_paused():
+            return
+        points_gate = next((g for g in gates if g.name == "points_state"), None)
+        sig_gate = next((g for g in gates if g.name == "signal_confidence"), None)
+        if points_gate is None or points_gate.passed:
+            return
+        if sig_gate is None or not sig_gate.passed:
+            return
+        if self._points.consume_signal_skip():
+            remaining = self._points.session_skips_remaining()
+            log_engine(
+                "points session pause: consumed skip slot "
+                f"({remaining} remaining)"
+            )
 
     def _gate_points_state(self) -> GateResult:
         state = self._points.get_state()
@@ -335,7 +476,11 @@ class TradingLoop:
         elif day_stopped:
             detail = "day stop active"
         elif paused:
-            detail = "session pause active"
+            n = self._points.session_skips_remaining()
+            detail = (
+                f"session pause — skip {n} actionable signal(s) "
+                f"(BUY/SELL that would have fired)"
+            )
         elif loss_gbp >= DAILY_LOSS_LIMIT_GBP:
             detail = f"daily loss £{loss_gbp:.2f} >= £{DAILY_LOSS_LIMIT_GBP:.0f}"
         else:
@@ -371,31 +516,42 @@ class TradingLoop:
         elif not risk_ok:
             detail = f"risk £{risk_gbp:.2f} > £{STAGE1_GBP_RISK_CAP:.0f} cap"
         else:
-            detail = "spread, size, and position OK"
+            detail = (
+                f"OK — spread {spread:.1f} pts (max {spread_cap:.1f}), "
+                f"flat, risk £{risk_gbp:.0f} (cap £{STAGE1_GBP_RISK_CAP:.0f})"
+            )
         return GateResult(
             name="risk_validation",
             passed=passed,
             value={
-                "spread": spread,
+                "spread": round(spread, 1),
                 "open_count": open_count,
-                "risk_gbp": risk_gbp,
+                "risk_gbp": round(risk_gbp, 0),
+                "spread_cap": round(spread_cap, 1),
+                "risk_cap_gbp": STAGE1_GBP_RISK_CAP,
             },
             detail=detail,
         )
 
     def _gate_signal_confidence(self) -> GateResult:
         sig = self._signal_engine.evaluate(self._market)
-        threshold = float(self._points.get_threshold())
+        threshold = float(self._points.trade_confidence_threshold(self._config))
         conf = float(sig.adjusted_confidence)
         passed = sig.signal in ("BUY", "SELL") and conf >= threshold
-        if sig.signal not in ("BUY", "SELL"):
-            detail = f"signal {sig.signal} — no trade"
-        else:
-            detail = f"conf {conf:.1f}% (need >={threshold:.1f}%)"
+        detail, block_reason = signal_gate_explanation(sig, threshold)
+        snap = sig.snapshot or {}
         return GateResult(
             name="signal_confidence",
             passed=passed,
-            value={"signal": sig, "confidence": conf, "threshold": threshold},
+            value={
+                "signal": sig,
+                "direction": sig.signal,
+                "raw_direction": snap.get("raw_signal"),
+                "confidence": conf,
+                "threshold": threshold,
+                "block_reason": block_reason,
+                "setup": sig.setup_key,
+            },
             detail=detail,
         )
 
@@ -498,18 +654,28 @@ class TradingLoop:
         confidence = 0.0
         setup = ""
         atr = 0.0
+        block_reason = ""
+        raw_direction = ""
+        signal_threshold = float(self._points.trade_confidence_threshold(self._config))
         if isinstance(sig, SignalResult):
             direction = str(sig.signal or "WAIT")
             confidence = float(sig.adjusted_confidence)
             setup = str(sig.setup_key or "")
-            try:
-                atr = float((sig.snapshot or {}).get("atr", 0) or 0)
-            except Exception:
-                atr = 0.0
+            snap = sig.snapshot or {}
+            raw_direction = str(snap.get("raw_signal") or "")
+            atr = _atr_from_signal_snapshot(snap)
+            _, block_reason = signal_gate_explanation(sig, signal_threshold)
+        else:
+            for g in ctx.gates:
+                if g.name == "signal_confidence" and isinstance(g.value, dict):
+                    block_reason = str(g.value.get("block_reason") or "")
+                    raw_direction = str(g.value.get("raw_direction") or "")
+                    signal_threshold = float(g.value.get("threshold") or signal_threshold)
+                    break
 
         points_state = self._points.get_state()
         ps = self._points.snapshot()
-        open_positions = self._positions_payload()
+        open_positions = self._positions_payload(quote)
 
         session_open = False
         for g in ctx.gates:
@@ -530,6 +696,9 @@ class TradingLoop:
         elif ctx.all_passed:
             badge = "READY"
 
+        readiness = compute_trade_readiness(ctx.gates)
+        badge_text = format_health_badge_text(badge, readiness)
+
         quote_ts = quote.time if isinstance(quote.time, datetime) else self._clock()
         tick_age_s = max(0.0, (self._clock() - quote_ts).total_seconds())
 
@@ -547,6 +716,21 @@ class TradingLoop:
             except Exception:
                 stream_status = "LIVE"
 
+        eligibility = build_trade_eligibility(
+            gates=ctx.gates,
+            session=self._session,
+            signal_engine=self._signal_engine,
+            market=self._market,
+            epic=self._epic,
+            block_reason=block_reason,
+            sig=sig if isinstance(sig, SignalResult) else None,
+            now=quote_time(self._clock()),
+            quote_ts=quote_ts if isinstance(quote_ts, datetime) else None,
+        )
+        countdown = eligibility.to_dict() if eligibility else None
+
+        price_trend = self._price_trend_payload(quote_ts)
+
         return {
             "type": "tick",
             "ts": _iso_ts(quote_ts),
@@ -560,17 +744,32 @@ class TradingLoop:
             "errors": {"count": 0, "type": None},
             "health": {
                 "badge": badge,
+                "badge_text": badge_text,
+                "readiness": readiness,
                 "gates": gates_payload,
                 "summary": f"{passing} of {total} gates passing"
                 + (f" — {ctx.wait_reason}" if ctx.wait_reason else ""),
             },
             "signal": {
                 "direction": direction,
-                "confidence": confidence,
+                "raw_direction": raw_direction or None,
+                "confidence": int(round(confidence)),
+                "threshold": int(round(signal_threshold)),
+                "block_reason": block_reason or None,
                 "fitness": int(round(ctx.fitness)),
-                "atr": atr,
+                "fitness_threshold": int(round(GATE_PASS_MIN)),
+                "atr": round(atr, 1) if atr else 0.0,
+                "atr_threshold": (
+                    round(float(self._config.min_atr_points), 1)
+                    if float(self._config.min_atr_points) > 0
+                    else None
+                ),
                 "setup": setup,
+                "countdown": countdown,
+                "price_trend": price_trend,
             },
+            "price_trend": price_trend,
+            "trade_eligibility": countdown,
             "points": {
                 "state": points_state,
                 "cumulative": float(ps.cumulative),
@@ -579,44 +778,141 @@ class TradingLoop:
                 "size_multiplier": float(self._points.get_size_multiplier(confidence)),
             },
             "positions": open_positions,
-            "daily_pnl_gbp": self._daily_pnl_signed_gbp(),
-            "balance_gbp": None,
-            "win_rate_20": None,
+            "daily_pnl_gbp": self._daily_pnl_signed_gbp(open_positions),
+            "balance_gbp": self._balance_gbp(),
+            "win_rate_20": self._win_rate_20_pct(),
         }
 
-    def _daily_pnl_signed_gbp(self) -> float:
+    def _price_trend_payload(self, quote_ts: datetime) -> dict[str, Any] | None:
         try:
-            if self._store is None:
-                return 0.0
-            return float(self._store.sum_daily_pnl())
+            df = self._signal_engine.quote_df(self._market)
         except Exception:
-            return 0.0
+            return None
+        if df is None:
+            return None
+        now = quote_ts if isinstance(quote_ts, datetime) else self._clock()
+        try:
+            return compute_price_trend_30m(df, now=now)
+        except Exception:
+            return None
 
-    def _positions_payload(self) -> list[dict[str, Any]]:
-        out: list[dict[str, Any]] = []
+    def _rest_client(self) -> Any | None:
+        try:
+            return self._execution_loop.execution_engine._rest_client  # noqa: SLF001
+        except Exception:
+            return None
+
+    def _account_summary(self) -> dict[str, float | None]:
+        client = self._rest_client()
+        if client is None:
+            return {}
+        try:
+            if hasattr(client, "maybe_refresh_account_summary"):
+                return client.maybe_refresh_account_summary(min_interval=60.0)
+            if hasattr(client, "get_cached_account_summary"):
+                return client.get_cached_account_summary()
+        except Exception:
+            pass
+        return {}
+
+    def _balance_gbp(self) -> float | None:
+        bal = self._account_summary().get("balance")
+        if bal is None:
+            return None
+        try:
+            return float(bal)
+        except (TypeError, ValueError):
+            return None
+
+    def _win_rate_20_pct(self) -> int | None:
+        if self._store is None or not hasattr(self._store, "recent_closed_trades"):
+            return None
+        try:
+            from system.closed_trades_display import is_excluded_display_row
+
+            rows = self._store.recent_closed_trades(40)
+            closed: list[dict[str, Any]] = []
+            for row in rows:
+                if is_excluded_display_row(row):
+                    continue
+                closed.append(row)
+                if len(closed) >= 20:
+                    break
+            if not closed:
+                return None
+            wins = 0
+            for row in closed:
+                result = str(row.get("result") or "").upper()
+                if not result:
+                    pnl = row.get("ig_pnl_currency")
+                    if pnl is None:
+                        pnl = row.get("pnl_points")
+                    try:
+                        pnl_f = float(pnl)
+                        result = "WIN" if pnl_f > 0 else "LOSS" if pnl_f < 0 else "BREAKEVEN"
+                    except (TypeError, ValueError):
+                        result = ""
+                if result == "WIN":
+                    wins += 1
+            return int(round((wins / len(closed)) * 100))
+        except Exception:
+            return None
+
+    def _daily_pnl_signed_gbp(self, open_positions: list[Any] | None = None) -> float:
+        journal = 0.0
+        if self._store is not None:
+            try:
+                journal = float(self._store.sum_daily_pnl())
+            except Exception:
+                journal = 0.0
+        has_open = bool(open_positions)
+        if has_open or journal != 0.0:
+            return journal
+        ig_pl = self._account_summary().get("profit_loss")
+        if ig_pl is not None:
+            try:
+                return float(ig_pl)
+            except (TypeError, ValueError):
+                pass
+        return journal
+
+    def _positions_payload(self, quote: Quote | None = None) -> list[dict[str, Any]]:
+        point_value = float(self._config.get("ig_point_value_gbp", 1.0))
+        raw: list[dict[str, Any]] = []
+
+        def _append_raw(pos: dict[str, Any]) -> None:
+            if not isinstance(pos, dict):
+                return
+            pos_epic = str(pos.get("epic") or "")
+            if self._epic and pos_epic and pos_epic != self._epic:
+                return
+            raw.append(normalize_sync_position(pos))
+
         try:
             snap = self._execution_loop.execution_engine.trade_tracker.snapshot()
             for pos in snap.get("positions") or []:
-                if not isinstance(pos, dict):
-                    continue
-                out.append(
-                    {
-                        "deal_id": pos.get("deal_id") or pos.get("dealId") or "",
-                        "side": pos.get("side") or pos.get("direction") or "",
-                        "entry": pos.get("entry") or pos.get("open_level"),
-                        "current": pos.get("current") or pos.get("mid"),
-                        "stop": pos.get("stop"),
-                        "target": pos.get("target"),
-                        "pnl_gbp": pos.get("pnl_gbp"),
-                        "pnl_pts": pos.get("pnl_pts"),
-                        "trail_active": bool(pos.get("trail_active", False)),
-                        "breakeven_hit": bool(pos.get("breakeven_hit", False)),
-                        "open_mins": pos.get("open_mins"),
-                    }
-                )
+                _append_raw(pos)
         except Exception:
             pass
-        return out
+        if not raw:
+            sync = getattr(self, "_position_sync", None)
+            if sync is not None and hasattr(sync, "snapshot_dict"):
+                try:
+                    for pos in sync.snapshot_dict().get("positions") or []:
+                        _append_raw(pos)
+                except Exception:
+                    pass
+        if not raw and self._store is not None:
+            try:
+                rows = self._store.active_trades(self._epic)
+                raw = positions_from_store_rows(
+                    rows, quote, point_value_gbp=point_value
+                )
+            except Exception:
+                pass
+        return enrich_positions_with_quote(
+            raw, quote, point_value_gbp=point_value, epic=self._epic
+        )
 
 
 def quote_time(clock: datetime | Callable[[], datetime]) -> datetime:
@@ -625,8 +921,10 @@ def quote_time(clock: datetime | Callable[[], datetime]) -> datetime:
 
 def _json_safe(value: Any) -> Any:
     if isinstance(value, SignalResult):
+        snap = value.snapshot or {}
         return {
             "signal": value.signal,
+            "raw_direction": snap.get("raw_signal"),
             "confidence": value.adjusted_confidence,
             "setup": value.setup_key,
         }

@@ -121,21 +121,75 @@ class EnvironmentScorer:
         *,
         config: Config | None = None,
         normal_spread: float | None = None,
+        rest_client: Any | None = None,
+        epic: str = "",
     ) -> None:
         self._engine = signal_engine
         self._config = config
         self._normal_spread = normal_spread
+        self._rest = rest_client
+        self._epic = str(epic or "")
         self._last: EnvironmentScore = EnvironmentScore()
         self._session_open_at: dict[str, datetime] = {}
         self._gap_cap_until: dict[str, datetime] = {}
         self._bars_at_session_open: dict[str, int] = {}
+        self._sentiment_cache: dict[str, float] = {}
+        self._sentiment_detail: dict[str, dict[str, Any]] = {}
 
-    def reset_session(self, market: str, *, opened_at: datetime | None = None) -> None:
-        """Call at session open — resets cold-start bar baseline and gap cap."""
+    def fetch_sentiment(self, epic: str | None = None) -> float:
+        """Fetch IG client sentiment once per session; cache until reset."""
+        key = str(epic or self._epic or "")
+        if not key:
+            return 50.0
+        if key in self._sentiment_cache:
+            return self._sentiment_cache[key]
+        long_pct = 50.0
+        try:
+            if self._rest is not None and hasattr(self._rest, "fetch_client_sentiment"):
+                long_pct = float(self._rest.fetch_client_sentiment(key))
+        except Exception:
+            long_pct = 50.0
+        long_pct = max(0.0, min(100.0, long_pct))
+        self._sentiment_cache[key] = long_pct
+        if long_pct > 80.0:
+            label = "crowded_long"
+            adjustment = -10.0
+        elif long_pct < 20.0:
+            label = "crowded_short"
+            adjustment = -10.0
+        else:
+            label = "neutral"
+            adjustment = 0.0
+        self._sentiment_detail[key] = {
+            "value": long_pct,
+            "label": label,
+            "adjustment": adjustment,
+        }
+        return long_pct
+
+    def get_sentiment_factor(self, market: str) -> dict[str, Any]:
+        key = self._epic or market
+        return dict(
+            self._sentiment_detail.get(
+                key,
+                {"value": 50.0, "label": "neutral", "adjustment": 0.0},
+            )
+        )
+
+    def reset_session(
+        self,
+        market: str,
+        *,
+        opened_at: datetime | None = None,
+        reset_cold_start_baseline: bool = True,
+    ) -> None:
+        """Call at session open — resets gap cap; optionally cold-start bar baseline."""
         now = opened_at or datetime.now()
         self._session_open_at[market] = now
         self._gap_cap_until.pop(market, None)
-        self._bars_at_session_open[market] = self._complete_bar_count(market)
+        if reset_cold_start_baseline:
+            self._bars_at_session_open[market] = self._complete_bar_count(market)
+        self.fetch_sentiment(self._epic or market)
 
     def register_gap_open(self, market: str, *, at: datetime | None = None) -> None:
         """Apply 15-minute score cap after gap > 1.0× ATR (caller detects gap)."""
@@ -230,11 +284,33 @@ class EnvironmentScorer:
         try:
             factors, meta = self._compute_factors(market, quote=quote)
             total = sum(factors.values())
+            sentiment = self.fetch_sentiment(self._epic or market)
+            sent_detail = self.get_sentiment_factor(market)
+            adj = float(sent_detail.get("adjustment", 0.0))
+            if adj != 0.0:
+                total = max(0.0, total + adj)
+                factors["sentiment_adj"] = adj
             capped_cold = False
             capped_gap = False
 
             baseline = self._bars_at_session_open.get(market, 0)
-            bars_since_open = max(0, int(meta["complete_bars"]) - baseline)
+            bars_from_candles = max(0, int(meta["complete_bars"]) - baseline)
+            bars_from_clock = 0
+            opened = self._session_open_at.get(market)
+            if opened is not None:
+                probe = quote.time if quote is not None and isinstance(quote.time, datetime) else datetime.now()
+                if opened.tzinfo is not None:
+                    if probe.tzinfo is None:
+                        probe = probe.replace(tzinfo=opened.tzinfo)
+                    else:
+                        probe = probe.astimezone(opened.tzinfo)
+                bars_from_clock = int(
+                    max(0.0, (probe - opened).total_seconds()) // (5 * 60)
+                )
+            bars_since_open = min(
+                COLD_START_BAR_CAP,
+                max(bars_from_candles, bars_from_clock),
+            )
             if bars_since_open < COLD_START_BAR_CAP:
                 if total > GATE_PASS_MIN:
                     total = GATE_PASS_MIN
@@ -280,15 +356,18 @@ class EnvironmentScorer:
         except Exception:
             return regime_label(SAFE_DEFAULT_SCORE)
 
-    def get_factors(self) -> dict[str, float]:
+    def get_factors(self) -> dict[str, Any]:
         try:
-            return dict(self._last.factors)
+            out: dict[str, Any] = dict(self._last.factors)
+            out["sentiment"] = self.get_sentiment_factor("")
+            return out
         except Exception:
             return {
                 "atr": 15.0,
                 "trend": 12.5,
                 "session": 10.0,
                 "spread": 12.5,
+                "sentiment": {"value": 50.0, "label": "neutral", "adjustment": 0.0},
             }
 
     def last_score(self) -> EnvironmentScore:

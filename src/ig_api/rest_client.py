@@ -731,6 +731,24 @@ class IGRestClient:
             return float(bal) if bal is not None else 0.0
         return 0.0
 
+    def fetch_client_sentiment(self, epic: str) -> float:
+        """IG client sentiment long % (0-100); 50.0 on error."""
+        self.ensure_session()
+        try:
+            r = self.request(
+                "GET",
+                f"/clientsentiment/{epic}",
+                headers=self._auth_headers("1"),
+            )
+            if r.status_code != 200:
+                return 50.0
+            body = r.json()
+            if isinstance(body, dict) and "clientSentiment" in body:
+                body = body["clientSentiment"] or body
+            return float(body.get("longPositionPercentage", 50.0))
+        except Exception:
+            return 50.0
+
     def fetch_price_history(
         self,
         epic: str,
