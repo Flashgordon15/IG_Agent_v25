@@ -5,9 +5,111 @@ function barWidth(v, max = 100) {
   return `${Math.min(100, Math.max(0, (v / max) * 100))}%`;
 }
 
+/** Gate-aligned bar fill: green at/above threshold, amber when close, red below. */
+function barColor(value, threshold, { warnRatio = 0.7 } = {}) {
+  if (value == null || Number.isNaN(Number(value))) return "bg-border";
+  const t = Number(threshold);
+  if (!Number.isFinite(t) || t <= 0) return "bg-blue";
+  const v = Number(value);
+  if (v >= t) return "bg-green";
+  if (v >= t * warnRatio) return "bg-amber";
+  return "bg-red";
+}
+
+const FITNESS_GATE_MIN = 40;
+
+function signalBarThreshold(label, signal) {
+  if (label === "Confidence") return signal.threshold;
+  if (label === "Fitness") return signal.fitness_threshold ?? FITNESS_GATE_MIN;
+  if (label === "ATR") return signal.atr_threshold;
+  return null;
+}
+
+/** Whole-number 0–100 for % displays (fitness, confidence). */
+function pct2(n) {
+  if (n == null || Number.isNaN(Number(n))) return "—";
+  return String(Math.min(99, Math.max(0, Math.round(Number(n)))));
+}
+
+/** Backend gate evaluation order — gates 1–7 fixed in UI. */
+const GATE_ORDER = [
+  "session_open",
+  "cold_start_gap",
+  "environment_fitness",
+  "points_state",
+  "risk_validation",
+  "signal_confidence",
+  "execution",
+];
+
+/** Always render gates 1–7 in GATE_ORDER (no fail-first sort). */
+function orderGates(gates) {
+  const byName = Object.fromEntries((gates || []).map((g) => [g.name, g]));
+  return GATE_ORDER.map(
+    (name) =>
+      byName[name] || {
+        name,
+        pass: false,
+        detail: "—",
+        value: null,
+      },
+  );
+}
+
+function shortenBlockReason(reason) {
+  if (!reason) return "";
+  const rsi = reason.match(/RSI[^:]*:\s*([\d.]+)\s*>\s*max\s*([\d.]+)/i);
+  if (rsi) return `RSI ${rsi[1]} above max ${rsi[2]}`;
+  if (reason.length > 56) return `${reason.slice(0, 53)}…`;
+  return reason;
+}
+
+/** First failing gate detail, else signal / health summary tail. */
+function getBlockingReason(health, signal) {
+  const ordered = orderGates(health.gates);
+  for (const g of ordered) {
+    if (g.pass) continue;
+    if (g.name === "signal_confidence" && g.value?.block_reason) {
+      return shortenBlockReason(String(g.value.block_reason));
+    }
+    if (g.detail) {
+      return String(g.detail)
+        .replace(/^WAIT\s*[—-]\s*/i, "")
+        .trim();
+    }
+    const formatted = formatGateValue(g);
+    if (formatted && formatted !== "—") return formatted;
+  }
+  if (signal?.block_reason) return shortenBlockReason(signal.block_reason);
+  const summary = health.summary || "";
+  const dash = summary.indexOf("—");
+  if (dash >= 0) {
+    const tail = summary.slice(dash + 1).trim();
+    if (tail) return tail.replace(/^[^:]+:\s*/, "");
+  }
+  return null;
+}
+
+function buildSignalStatusLine(signal) {
+  const raw = signal.raw_direction;
+  const dir =
+    raw && raw !== "WAIT" ? raw : signal.direction && signal.direction !== "WAIT" ? signal.direction : null;
+  if (signal.block_reason && dir) {
+    return `${dir} blocked — ${shortenBlockReason(signal.block_reason)}`;
+  }
+  if (dir && signal.confidence != null) {
+    return `${dir} ${pct2(signal.confidence)}% — watching`;
+  }
+  return "WAIT — watching";
+}
+
 function formatGateValue(gate) {
   const { name, value } = gate;
   if (value == null) return "—";
+  if (name === "environment_fitness") {
+    if (value && typeof value === "object" && value.display) return String(value.display);
+    if (typeof value === "number") return `${pct2(value)}%`;
+  }
   if (typeof value !== "object") return String(value);
 
   if (name === "cold_start_gap") {
@@ -17,18 +119,34 @@ function formatGateValue(gate) {
     return `${bars} bars · ${cold} · ${gap}`;
   }
 
+  if (name === "risk_validation") {
+    const spread = value.spread;
+    const open = value.open_count;
+    const risk = value.risk_gbp;
+    const parts = [];
+    if (spread != null) parts.push(`spread ${Number(spread).toFixed(1)} pts`);
+    if (open != null) parts.push(open === 0 ? "flat (0 open)" : `${open} open`);
+    if (risk != null) parts.push(`~£${Math.round(risk)} at risk/trade`);
+    return parts.length ? parts.join(" · ") : "—";
+  }
+
   if (name === "signal_confidence") {
-    const sig = value.signal;
-    const conf =
-      value.confidence ??
-      (sig && typeof sig === "object" ? sig.confidence ?? sig.adjusted_confidence : null);
-    const dir = sig && typeof sig === "object" ? sig.signal ?? sig.direction : null;
+    const conf = value.confidence;
     const threshold = value.threshold;
+    const dir = value.direction ?? value.signal?.signal;
+    const raw = value.raw_direction ?? value.signal?.raw_direction;
+    if (value.block_reason && conf != null) {
+      const head =
+        dir === "WAIT" && raw && raw !== "WAIT"
+          ? `${raw} ${pct2(conf)}% → WAIT`
+          : `${dir ?? "WAIT"} ${pct2(conf)}%`;
+      return `${head} · ${value.block_reason}`;
+    }
     if (dir != null && conf != null && threshold != null) {
-      return `${dir} ${Number(conf).toFixed(1)}% (need ${Number(threshold).toFixed(1)}%)`;
+      return `${dir} ${pct2(conf)}% (need ${pct2(threshold)}%)`;
     }
     if (conf != null && threshold != null) {
-      return `${Number(conf).toFixed(1)}% (need ${Number(threshold).toFixed(1)}%)`;
+      return `${pct2(conf)}% (need ${pct2(threshold)}%)`;
     }
   }
 
@@ -39,14 +157,47 @@ function formatGateValue(gate) {
   }
 }
 
+function formatGateValueCompact(gate) {
+  const { name, value } = gate;
+  if (name === "environment_fitness") {
+    if (value && typeof value === "object" && value.display) return String(value.display);
+    if (typeof value === "number") return `${pct2(value)}%`;
+  }
+  if (name === "session_open") return value === true ? "open" : "closed";
+  if (name === "points_state") return String(value ?? "—");
+  if (name === "cold_start_gap" && value && typeof value === "object") {
+    return `${value.bars ?? 0} bars`;
+  }
+  if (name === "risk_validation" && value && typeof value === "object") {
+    const spread = value.spread;
+    if (spread != null) return `${Number(spread).toFixed(1)} pts`;
+  }
+  if (name === "signal_confidence" && value && typeof value === "object") {
+    const conf = value.confidence;
+    const dir = value.raw_direction ?? value.direction;
+    if (dir && conf != null) return `${dir} ${pct2(conf)}%`;
+  }
+  if (name === "execution") return String(value ?? "armed");
+  const full = formatGateValue(gate);
+  return full.length > 36 ? `${full.slice(0, 33)}…` : full;
+}
+
 function GateCard({ gate, wide }) {
   const pass = gate.pass;
   const border = pass ? "border-l-green" : "border-l-red";
   return (
-    <div className={`card border-l-4 ${border} ${wide ? "col-span-2" : ""}`}>
+    <div
+      className={`card-live border-l-4 ${border} ${wide ? "col-span-2" : ""} min-h-[4.5rem] flex flex-col justify-center`}
+    >
       <p className="label-caps">{gate.name?.replace(/_/g, " ")}</p>
-      <p className="text-white mt-1">{formatGateValue(gate)}</p>
-      <p className="text-muted text-[11px] mt-1">{gate.detail || (pass ? "Passing" : "Blocked")}</p>
+      {pass ? (
+        <p className="text-muted text-[11px] mt-1 leading-snug">{formatGateValueCompact(gate)}</p>
+      ) : (
+        <>
+          <p className="text-red text-[12px] mt-1 leading-snug">{gate.detail || "Blocked"}</p>
+          <p className="text-muted text-[11px] mt-0.5 leading-snug">{formatGateValue(gate)}</p>
+        </>
+      )}
     </div>
   );
 }
@@ -55,12 +206,15 @@ export default function LiveTab({ tick }) {
   const [closeStep, setCloseStep] = useState(0);
   const [closing, setClosing] = useState(false);
   const health = tick?.health || {};
-  const badge = health.badge || "WATCHING";
+  const badgeRaw = String(health.badge || "WATCHING").toUpperCase();
+  const badge = ["WATCHING", "BLOCKED", "READY"].includes(badgeRaw) ? badgeRaw : "WATCHING";
+  const blockingReason = getBlockingReason(health, tick?.signal || {});
   const badgeColor =
     badge === "READY" ? "text-green" : badge === "BLOCKED" ? "text-red" : "text-amber";
-  const gates = health.gates || [];
+  const gates = orderGates(health.gates);
   const signal = tick?.signal || {};
   const pos = (tick?.positions || [])[0];
+  const signalLine = buildSignalStatusLine(signal);
 
   const handleClose = async () => {
     if (!pos?.deal_id) return;
@@ -87,67 +241,87 @@ export default function LiveTab({ tick }) {
   const progress = ((current - stop) / range) * 100;
 
   return (
-    <div className="p-4 space-y-4 max-w-5xl mx-auto">
-      <div className="card text-center">
+    <div className="live-tab p-4 space-y-1.5 max-w-5xl mx-auto">
+      <div className="card-live text-center">
         <p className="label-caps">Master health</p>
         <p className={`price-lg mt-1 ${badgeColor}`}>{badge}</p>
-        <p className="text-muted text-[11px] mt-2">{health.summary || "Awaiting engine data"}</p>
+        <p className="text-muted text-[11px] mt-1 leading-snug">
+          {badge === "READY"
+            ? "All gates passing"
+            : blockingReason || (badge === "WATCHING" ? "Session closed or awaiting data" : "—")}
+        </p>
       </div>
 
-      <div className="grid md:grid-cols-2 gap-4">
-        <div className="card">
+      <div className="grid md:grid-cols-2 gap-1.5">
+        <div className="card-live">
           <p className="label-caps mb-2">Price</p>
-          <div className="flex justify-between items-end">
+          <div className="grid grid-cols-4 gap-2 text-center">
             <div>
               <p className="text-muted text-[11px]">Bid</p>
               <p className="price-lg">{tick?.bid?.toFixed(1) ?? "—"}</p>
             </div>
-            <div className="text-center">
+            <div>
               <p className="text-muted text-[11px]">Spread</p>
               <p className="text-amber font-medium">{tick?.spread?.toFixed(1) ?? "—"}</p>
             </div>
-            <div className="text-right">
+            <div>
               <p className="text-muted text-[11px]">Offer</p>
               <p className="price-lg">{tick?.offer?.toFixed(1) ?? "—"}</p>
             </div>
+            <div>
+              <p className="text-muted text-[11px]">Tick age</p>
+              <p className="text-white font-medium">{tick?.tick_age_s ?? "—"}s</p>
+            </div>
           </div>
-          <p className="text-muted text-[11px] mt-2">Tick age {tick?.tick_age_s ?? "—"}s</p>
         </div>
 
-        <div className="card space-y-3">
+        <div className="card-live space-y-2">
           <p className="label-caps">Signal bars</p>
-          {[
-            ["Confidence", signal.confidence, "%"],
-            ["Fitness", signal.fitness, ""],
-            ["ATR", signal.atr, ""],
-          ].map(([label, val]) => (
-            <div key={label}>
-              <div className="flex justify-between text-[11px] mb-1">
-                <span className="text-muted">{label}</span>
-                <span>
-                  {val}
-                  {label === "Confidence" ? "%" : ""}
-                </span>
+          {["Confidence", "Fitness", "ATR"].map((label) => {
+            const val =
+              label === "Confidence"
+                ? signal.confidence
+                : label === "Fitness"
+                  ? signal.fitness
+                  : signal.atr;
+            const threshold = signalBarThreshold(label, signal);
+            const barMax =
+              label === "ATR" && threshold != null && Number(threshold) > 0
+                ? Math.max(Number(threshold) * 1.5, Number(val) || 0, 1)
+                : 100;
+            return (
+              <div key={label}>
+                <div className="flex justify-between text-[11px] mb-1">
+                  <span className="text-muted">{label}</span>
+                  <span>
+                    {label === "Confidence" || label === "Fitness"
+                      ? val != null
+                        ? `${pct2(val)}%`
+                        : "—"
+                      : (val ?? "—")}
+                  </span>
+                </div>
+                <div className="h-2 rounded bg-bg overflow-hidden">
+                  <div
+                    className={`h-full ${barColor(val, threshold)}`}
+                    style={{ width: barWidth(Number(val) || 0, barMax) }}
+                  />
+                </div>
               </div>
-              <div className="h-2 rounded bg-bg overflow-hidden">
-                <div
-                  className="h-full bg-blue"
-                  style={{ width: barWidth(Number(val) || 0) }}
-                />
-              </div>
-            </div>
-          ))}
+            );
+          })}
+          <p className="text-[11px] text-muted pt-1 border-t border-border leading-snug">{signalLine}</p>
         </div>
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-1.5">
         {[
           ["Open P&L", pos?.pnl_gbp != null ? `£${Number(pos.pnl_gbp).toFixed(2)}` : "—"],
           ["Daily P&L", `£${Number(tick?.daily_pnl_gbp || 0).toFixed(2)}`],
           ["Win rate (20)", tick?.win_rate_20 != null ? `${tick.win_rate_20}%` : "—"],
           ["Balance", tick?.balance_gbp != null ? `£${Number(tick.balance_gbp).toFixed(2)}` : "—"],
         ].map(([k, v]) => (
-          <div key={k} className="card">
+          <div key={k} className="card-live">
             <p className="label-caps">{k}</p>
             <p className="price-lg mt-1">{v}</p>
           </div>
@@ -156,16 +330,15 @@ export default function LiveTab({ tick }) {
 
       <div>
         <p className="label-caps mb-2">Gates</p>
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-2 gap-1.5">
           {gates.map((g) => (
             <GateCard key={g.name} gate={g} wide={g.name === "signal_confidence"} />
           ))}
         </div>
-        <p className="text-muted text-[11px] mt-2">{health.summary || "No gate summary yet"}</p>
       </div>
 
       {pos && (
-        <div className="card border border-border">
+        <div className="card-live border border-border">
           <div className="flex justify-between items-start mb-4">
             <span
               className={`px-2 py-0.5 rounded text-[11px] font-medium ${

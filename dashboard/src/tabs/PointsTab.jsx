@@ -5,6 +5,13 @@ const STATES = [
   { name: "STOP", min: -999, mult: "No trading" },
 ];
 
+const STATE_BAR_COLOR = {
+  HEALTHY: "bg-green",
+  CAUTION: "bg-amber",
+  WARNING: "bg-orange",
+  STOP: "bg-red",
+};
+
 const CONF_TABLE = [
   ["HEALTHY", "≥92% → 1.0×", "85–91% → 0.5×", "80–84% → 0.25×"],
   ["CAUTION", "≥88% → 0.5×", "80–87% → 0.25×", "<80% → blocked"],
@@ -44,7 +51,7 @@ export default function PointsTab({ tick }) {
 
       <div className="card">
         <p className="label-caps mb-4">Threshold bands</p>
-        {STATES.map((s, i) => (
+        {STATES.map((s) => (
           <div key={s.name} className="mb-3">
             <div className="flex justify-between text-[11px] mb-1">
               <span className={state === s.name ? "text-white font-medium" : "text-muted"}>
@@ -54,7 +61,7 @@ export default function PointsTab({ tick }) {
             </div>
             <div className="h-2 rounded bg-bg overflow-hidden">
               <div
-                className={`h-full ${state === s.name ? "bg-blue" : "bg-border"}`}
+                className={`h-full ${STATE_BAR_COLOR[s.name] || "bg-border"}`}
                 style={{ width: state === s.name ? "100%" : "20%" }}
               />
             </div>
@@ -64,8 +71,12 @@ export default function PointsTab({ tick }) {
           Cumulative {cumulative >= 0 ? "+" : ""}
           {cumulative} pts — marker at band {stateIdx + 1}/4
         </p>
-        <div className="h-1 mt-2 rounded bg-border relative">
-          <div className="absolute h-2 w-2 rounded-full bg-blue -top-0.5" style={{ left: `${position}%` }} />
+        <div className="h-1.5 mt-3 rounded bg-border relative">
+          <div
+            className={`absolute h-4 w-4 rounded-full -top-1.5 border-2 border-bg ${STATE_BAR_COLOR[state] || "bg-border"}`}
+            style={{ left: `${position}%`, transform: "translateX(-50%)" }}
+            title={`${cumulative >= 0 ? "+" : ""}${cumulative} pts`}
+          />
         </div>
       </div>
 

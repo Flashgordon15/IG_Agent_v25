@@ -1,5 +1,20 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
+
+/** Collapse consecutive identical reasons; keep latest timestamp and count. */
+function collapseSignalLog(signals) {
+  const out = [];
+  for (const s of signals) {
+    const prev = out[out.length - 1];
+    if (prev && prev.reason === s.reason && prev.badge === s.badge) {
+      prev.count = (prev.count || 1) + 1;
+      prev.timestamp = s.timestamp;
+    } else {
+      out.push({ ...s, count: 1 });
+    }
+  }
+  return out;
+}
 
 export default function TradesTab() {
   const [trades, setTrades] = useState([]);
@@ -22,13 +37,15 @@ export default function TradesTab() {
     return () => clearInterval(id);
   }, []);
 
+  const collapsedSignals = useMemo(() => collapseSignalLog(signals), [signals]);
+
   return (
     <div className="p-4 max-w-5xl mx-auto space-y-6">
       <div>
         <p className="label-caps mb-2">Closed trades</p>
         <div className="space-y-2">
           {trades.length === 0 && (
-            <p className="text-muted card">No IG-confirmed closed trades yet.</p>
+            <p className="text-muted card">No closed trades in journal yet.</p>
           )}
           {trades.map((t, i) => {
             const result = t.pending ? "OPEN" : t.result || "—";
@@ -84,17 +101,22 @@ export default function TradesTab() {
       <div>
         <p className="label-caps mb-2">Signal log (last 50)</p>
         <div className="space-y-1 max-h-96 overflow-y-auto">
-          {signals.map((s, i) => (
-            <div key={i} className="card py-2 flex gap-3 text-[12px]">
+          {collapsedSignals.map((s, i) => (
+            <div key={i} className="card py-2 flex gap-3 text-[12px] items-center">
               <span className="text-muted shrink-0">{s.timestamp}</span>
               <span
-                className={`px-1.5 rounded text-[10px] font-medium ${
+                className={`px-1.5 rounded text-[10px] font-medium shrink-0 ${
                   s.badge === "TRADE" ? "bg-green/20 text-green" : "bg-amber/20 text-amber"
                 }`}
               >
                 {s.badge}
               </span>
-              <span className="text-muted">{s.reason}</span>
+              <span className="text-muted flex-1 min-w-0">
+                {s.reason}
+                {s.count > 1 ? (
+                  <span className="text-white/80 ml-1.5">×{s.count}</span>
+                ) : null}
+              </span>
             </div>
           ))}
         </div>

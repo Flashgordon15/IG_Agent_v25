@@ -7,7 +7,20 @@ export async function fetchJson(path, options = {}) {
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(text || res.statusText);
+    let message = text || res.statusText;
+    try {
+      const body = JSON.parse(text);
+      if (body?.detail) {
+        message = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
+      }
+    } catch {
+      /* use raw text */
+    }
+    if (res.status === 405 && path.includes("/api/system/e2e")) {
+      message =
+        "E2E endpoint not available — quit and restart IG Agent v25 (old process still running).";
+    }
+    throw new Error(message);
   }
   return res.json();
 }
@@ -16,7 +29,7 @@ export const api = {
   state: () => fetchJson("/state"),
   splash: () => fetchJson("/api/splash"),
   dismissSplash: () => fetchJson("/api/splash/dismiss", { method: "POST" }),
-  trades: () => fetchJson("/api/trades"),
+  trades: () => fetchJson("/api/trades?limit=10"),
   signals: () => fetchJson("/api/signals"),
   system: () => fetchJson("/api/system"),
   start: () => fetchJson("/api/start", { method: "POST" }),
@@ -25,4 +38,5 @@ export const api = {
   closeDeal: (dealId) =>
     fetchJson(`/api/close/${encodeURIComponent(dealId)}`, { method: "POST" }),
   runTests: () => fetchJson("/api/system/tests", { method: "POST" }),
+  runE2eCheck: () => fetchJson("/api/system/e2e", { method: "POST" }),
 };
