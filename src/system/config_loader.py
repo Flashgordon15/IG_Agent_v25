@@ -16,13 +16,30 @@ from system.paths import config_dir, project_root, resolve_path
 _MODE: str = "TEST"
 _config: Config | None = None
 _config_lock = threading.RLock()
-_config_file_mtime: float = 0.0  # last known mtime of config_v24.json
+_config_file_mtime: float = 0.0  # last known mtime of active config file
+
+V25_FILE = "config_v25.json"
+V24_FILE = "config_v24.json"
+LEGACY_V23_FILE = "legacy_v23/config_v23.json"
+
+
+def _primary_config_path() -> Path:
+    """Resolve config file: v25 → v24 → legacy v23 (first that exists)."""
+    cd = config_dir()
+    for rel in (V25_FILE, V24_FILE):
+        p = cd / rel
+        if p.exists():
+            return p
+    legacy = cd / LEGACY_V23_FILE
+    if legacy.exists():
+        return legacy
+    return cd / V25_FILE
 
 
 def _config_file_changed() -> bool:
-    """Return True when config_v24.json has been modified since the last load."""
+    """Return True when the active config file has been modified since the last load."""
     try:
-        p = config_dir() / V24_FILE
+        p = _primary_config_path()
         if p.exists():
             mtime = p.stat().st_mtime
             return mtime != _config_file_mtime
@@ -34,14 +51,12 @@ def _config_file_changed() -> bool:
 def _update_config_mtime() -> None:
     global _config_file_mtime
     try:
-        p = config_dir() / V24_FILE
+        p = _primary_config_path()
         if p.exists():
             _config_file_mtime = p.stat().st_mtime
     except Exception:
         pass
 
-V24_FILE = "config_v24.json"
-LEGACY_V23_FILE = "legacy_v23/config_v23.json"
 V22_FALLBACK = "legacy_v22/config_v22_adaptive_autotrader.json"
 SCHEMA_FILE = "config_schema.json"
 
@@ -193,8 +208,7 @@ class ConfigLoader:
         if config_path:
             self._path = Path(config_path)
         else:
-            cd = config_dir()
-            self._path = cd / V24_FILE if (cd / V24_FILE).exists() else cd / LEGACY_V23_FILE
+            self._path = _primary_config_path()
         self._schema_path = config_dir() / SCHEMA_FILE
         self._v22_path = config_dir() / V22_FALLBACK
 

@@ -5,13 +5,47 @@ function barWidth(v, max = 100) {
   return `${Math.min(100, Math.max(0, (v / max) * 100))}%`;
 }
 
+function formatGateValue(gate) {
+  const { name, value } = gate;
+  if (value == null) return "—";
+  if (typeof value !== "object") return String(value);
+
+  if (name === "cold_start_gap") {
+    const bars = value.bars ?? "—";
+    const cold = value.cold ? "cold" : "ready";
+    const gap = value.gap ? "gap" : "ok";
+    return `${bars} bars · ${cold} · ${gap}`;
+  }
+
+  if (name === "signal_confidence") {
+    const sig = value.signal;
+    const conf =
+      value.confidence ??
+      (sig && typeof sig === "object" ? sig.confidence ?? sig.adjusted_confidence : null);
+    const dir = sig && typeof sig === "object" ? sig.signal ?? sig.direction : null;
+    const threshold = value.threshold;
+    if (dir != null && conf != null && threshold != null) {
+      return `${dir} ${Number(conf).toFixed(1)}% (need ${Number(threshold).toFixed(1)}%)`;
+    }
+    if (conf != null && threshold != null) {
+      return `${Number(conf).toFixed(1)}% (need ${Number(threshold).toFixed(1)}%)`;
+    }
+  }
+
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return "—";
+  }
+}
+
 function GateCard({ gate, wide }) {
   const pass = gate.pass;
   const border = pass ? "border-l-green" : "border-l-red";
   return (
     <div className={`card border-l-4 ${border} ${wide ? "col-span-2" : ""}`}>
       <p className="label-caps">{gate.name?.replace(/_/g, " ")}</p>
-      <p className="text-white mt-1">{gate.value != null ? String(gate.value) : "—"}</p>
+      <p className="text-white mt-1">{formatGateValue(gate)}</p>
       <p className="text-muted text-[11px] mt-1">{gate.detail || (pass ? "Passing" : "Blocked")}</p>
     </div>
   );
