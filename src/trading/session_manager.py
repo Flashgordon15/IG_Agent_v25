@@ -246,6 +246,10 @@ class SessionManager:
     def flatten_failures(self) -> int:
         return self._flatten_failures
 
+    @property
+    def session_open_time(self) -> datetime | None:
+        return self._open_time
+
     def flatten_confirmed(self) -> None:
         self._flatten_confirmed = True
         self._flatten_attempts_done.clear()

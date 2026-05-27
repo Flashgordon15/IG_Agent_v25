@@ -36,6 +36,7 @@ from trading.points_engine import PointsEngine
 from trading.session_manager import SessionManager
 from trading.price_trend import compute_price_trend_30m
 from trading.gate_readiness import compute_trade_readiness, format_health_badge_text
+from trading.session_summary import SessionTickTracker, write_session_end_summary
 from trading.trade_eligibility import build_trade_eligibility
 
 STAGE1_GBP_RISK_CAP = 50.0
@@ -183,6 +184,8 @@ class TradingLoop:
         self._lock = threading.Lock()
         self._last_context: TickContext | None = None
         self._tick_count = 0
+        self._session_tracker = SessionTickTracker()
+        self._ml_store: Any | None = None
 
     @property
     def config(self) -> Config:
@@ -233,6 +236,7 @@ class TradingLoop:
                 try:
                     self._run_tick()
                 except Exception as e:
+                    self._session_tracker.record_error()
                     log_engine(
                         f"trading_loop tick error (continuing): "
                         f"{type(e).__name__}: {e}"
@@ -265,6 +269,9 @@ class TradingLoop:
             self._session.on_tick(quote)
         except Exception as e:
             log_engine(f"session_manager.on_tick failed: {type(e).__name__}: {e}")
+
+        if self._session.is_session_open():
+            self._session_tracker.reset_for_session(self._session.session_open_time)
 
         self._flatten_if_needed()
 
@@ -642,6 +649,7 @@ class TradingLoop:
         if open_count <= 0:
             log_engine("FLATTEN CONFIRMED — all positions closed")
             self._session.flatten_confirmed()
+            self._write_session_summary_if_needed(at)
             return
         failures = self._session.record_flatten_failure()
         log_engine(
@@ -650,6 +658,24 @@ class TradingLoop:
         )
         if failures >= 3:
             self._flatten_failed_critical()
+
+    def _write_session_summary_if_needed(self, at: datetime) -> None:
+        try:
+            from data.ml_training_store import MLTrainingStore
+
+            ml = self._ml_store
+            if ml is None:
+                ml = MLTrainingStore()
+            write_session_end_summary(
+                session=self._session,
+                store=self._store,
+                points=self._points,
+                tracker=self._session_tracker,
+                close_at=at,
+                ml_store=ml,
+            )
+        except Exception as e:
+            log_engine(f"session_summary failed: {type(e).__name__}: {e}")
 
     def _flatten_failed_critical(self) -> None:
         log_engine("CRITICAL: FLATTEN FAILED — manual intervention required")
@@ -844,6 +870,12 @@ class TradingLoop:
         countdown = eligibility.to_dict() if eligibility else None
 
         price_trend = self._price_trend_payload(quote_ts)
+
+        if self._session.is_session_open():
+            self._session_tracker.record_tick(
+                block_reason=block_reason or ctx.wait_reason or None,
+                stream_live=stream_status == "LIVE",
+            )
 
         return {
             "type": "tick",
