@@ -85,6 +85,40 @@
   "app_version": "v25-dev",
   "operating_mode": "DEMO",
   "markets": [],
+  "instruments": {
+    "japan_225": {
+      "enabled": true,
+      "epic": "IX.D.NIKKEI.IFM.IP",
+      "name": "Japan 225",
+      "signal_threshold": 85,
+      "max_spread_pts": 35,
+      "best_session": "23:00-06:00 BST"
+    },
+    "eur_usd": {
+      "enabled": false,
+      "epic": "CS.D.EURUSD.CFD.IP",
+      "name": "EUR/USD",
+      "signal_threshold": 88,
+      "max_spread_pts": 3,
+      "best_session": "12:00-17:00 BST"
+    },
+    "wall_street": {
+      "enabled": false,
+      "epic": "IX.D.DOW.IFM.IP",
+      "name": "Wall Street",
+      "signal_threshold": 90,
+      "max_spread_pts": 50,
+      "best_session": "13:30-21:00 BST"
+    },
+    "gold": {
+      "enabled": false,
+      "epic": "CS.D.CFDGOLD.CFD.IP",
+      "name": "Gold",
+      "signal_threshold": 90,
+      "max_spread_pts": 40,
+      "best_session": "08:00-21:00 BST"
+    }
+  },
   "allow_live_trading": true,
   "max_open_positions": 1,
   "max_positions_per_epic": 1,

@@ -50,6 +50,46 @@ def emergency_stop_lock_present() -> bool:
     return (project_root() / LOCK_FILENAME).is_file()
 
 
+def _validate_instruments(config: dict[str, Any], messages: list[str]) -> bool:
+    """Validate instruments registry block (Section 4.5 Step 11)."""
+    instruments = config.get("instruments")
+    if not isinstance(instruments, dict) or not instruments:
+        msg = "missing instruments block"
+        messages.append(f"ERROR: {msg}")
+        log_engine(f"config_validator: {msg}")
+        return False
+
+    enabled: list[tuple[str, dict[str, Any]]] = []
+    for key, inst in instruments.items():
+        if not isinstance(inst, dict):
+            msg = f"instruments.{key} must be an object"
+            messages.append(f"ERROR: {msg}")
+            log_engine(f"config_validator: {msg}")
+            return False
+        if bool(inst.get("enabled")):
+            enabled.append((str(key), inst))
+
+    if not enabled:
+        msg = "no instruments enabled — at least one required"
+        messages.append(f"ERROR: {msg}")
+        log_engine(f"config_validator: {msg}")
+        return False
+
+    ok = True
+    for key, inst in enabled:
+        if _present(inst, ("epic",)) is None:
+            ok = False
+            msg = f"instruments.{key} enabled but missing epic"
+            messages.append(f"ERROR: {msg}")
+            log_engine(f"config_validator: {msg}")
+        if _present(inst, ("name",)) is None:
+            ok = False
+            msg = f"instruments.{key} enabled but missing name"
+            messages.append(f"ERROR: {msg}")
+            log_engine(f"config_validator: {msg}")
+    return ok
+
+
 def apply_config_defaults(config: dict[str, Any]) -> dict[str, Any]:
     """Return a copy with optional defaults applied (does not validate)."""
     out = dict(config)
@@ -100,5 +140,8 @@ def validate_config(config: dict[str, Any]) -> tuple[bool, list[str]]:
         warn = f"missing optional key {key} — using default {default!r}"
         messages.append(f"WARNING: {warn}")
         log_engine(f"config_validator: {warn}")
+
+    if not _validate_instruments(config, messages):
+        valid = False
 
     return valid, messages
