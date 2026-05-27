@@ -1,0 +1,602 @@
+"""Open-trade management — breakeven, trailing, exits (config-driven)."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Callable
+
+from data.learning_store import LearningStore
+from data.models import Quote, TradeRecord
+from system.config import Config
+from system.engine_log import log_engine
+from system.trade_lifecycle_bus import STAGE_POSITION_TRACKING, STATUS_OK, get_lifecycle_bus
+
+if TYPE_CHECKING:
+    from trading.points_engine import PointsEngine
+
+HARD_CAP_ATR_MULTIPLE = 3.0
+PARTIAL_CLOSE_ATR_MULTIPLE = 1.5
+PARTIAL_CLOSE_FRACTION = 0.5
+
+
+class TradeManager:
+    def __init__(
+        self,
+        config: Config,
+        store: LearningStore,
+        on_alert: Callable[[str], None] | None = None,
+        *,
+        skip_ig_synced_exits: bool = False,
+        rest_client: Any | None = None,
+        broker_stop_management: bool = False,
+        points_engine: PointsEngine | None = None,
+    ) -> None:
+        self._cfg = config
+        self.store = store
+        self.on_alert = on_alert
+        self._skip_ig_synced_exits = skip_ig_synced_exits
+        self._rest = rest_client
+        self._broker_stops = bool(broker_stop_management and rest_client is not None)
+        self._points_engine = points_engine
+        self._last_ig_stop: dict[str, float] = {}
+        self._gone_deals: set[str] = set()
+
+    @staticmethod
+    def confidence_band(confidence: float) -> str:
+        if confidence >= 92.0:
+            return "high"
+        if confidence >= 85.0:
+            return "standard"
+        if confidence >= 80.0:
+            return "marginal"
+        return "marginal"
+
+    @staticmethod
+    def get_trail_distance(confidence: float, atr: float) -> float:
+        """ATR-based trail distance fixed at entry by confidence band."""
+        try:
+            atr_v = float(atr)
+            if atr_v <= 0:
+                return 0.0
+            conf = float(confidence)
+            if conf >= 92.0:
+                return 1.75 * atr_v
+            if conf >= 85.0:
+                return 1.50 * atr_v
+            if conf >= 80.0:
+                return 1.00 * atr_v
+            return 1.50 * atr_v
+        except Exception:
+            try:
+                return 1.50 * float(atr)
+            except Exception:
+                return 0.0
+
+    @property
+    def config(self) -> Config:
+        return self._cfg
+
+    def open_trade_from_execution(
+        self,
+        *,
+        market: str,
+        epic: str,
+        side: str,
+        quote: Quote,
+        raw_confidence: float,
+        adjusted_confidence: float,
+        setup_key: str,
+        deal_reference: str,
+        notes: str,
+        execution: dict[str, Any],
+        dry_run: bool,
+        ig_deal_id: str | None = None,
+    ) -> int:
+        cfg = self._cfg
+        size = float(execution.get("size", cfg.trade_size))
+        risk = float(execution.get("risk", cfg.stop_distance_points))
+        limit = float(execution.get("limit", cfg.limit_distance_points))
+
+        entry = float(quote.offer if side == "BUY" else quote.bid)
+        stop = entry - risk if side == "BUY" else entry + risk
+        target = entry + limit if side == "BUY" else entry - limit
+
+        full_notes = (
+            f"{notes} | adaptive execution: risk={risk:.1f}, "
+            f"target_distance={limit:.1f}, size={size:.2f}, "
+            f"{execution.get('notes', '')}"
+        )
+
+        existing = None
+        if ig_deal_id:
+            existing = self.store.find_open_by_deal_id(ig_deal_id)
+        if existing is None and deal_reference:
+            existing = self.store.find_open_by_deal_reference(deal_reference)
+        if existing is not None:
+            trade_id = int(existing["id"])
+            self.store.update_protection_from_execution(
+                trade_id,
+                stop=stop,
+                target=target,
+                setup_key=setup_key,
+                raw_confidence=raw_confidence,
+                adjusted_confidence=adjusted_confidence,
+                notes=f" | {full_notes}",
+                deal_reference=deal_reference,
+            )
+            if ig_deal_id:
+                self.store.set_ig_deal_id(trade_id, ig_deal_id)
+            return trade_id
+
+        extra = {"ig_deal_id": ig_deal_id} if ig_deal_id else None
+        record = TradeRecord(
+            id=None, market=market, epic=epic, side=side, entry=entry, exit=None,
+            size=size, stop=stop, target=target, pnl_points=None, result=None,
+            confidence=raw_confidence, adjusted_confidence=adjusted_confidence,
+            setup_key=setup_key, dry_run=dry_run, deal_reference=deal_reference, notes=full_notes,
+            extra=extra,
+        )
+        trade_id = self.store.open_trade(record)
+        if ig_deal_id:
+            self.store.set_ig_deal_id(trade_id, ig_deal_id)
+
+        entry_atr = float(
+            execution.get("atr")
+            or execution.get("entry_atr")
+            or execution.get("risk")
+            or cfg.stop_distance_points
+            or 0
+        )
+        band = str(execution.get("confidence_band") or self.confidence_band(adjusted_confidence))
+        trail_distance = float(
+            execution.get("trail_distance")
+            or self.get_trail_distance(adjusted_confidence, entry_atr)
+        )
+        if entry_atr > 0 and trail_distance > 0:
+            self.store.set_v25_entry_meta(
+                trade_id,
+                confidence_band=band,
+                entry_atr=entry_atr,
+                trail_distance=trail_distance,
+            )
+
+        if not dry_run:
+            try:
+                from execution.japan225_daily_risk import record_trade_opened
+
+                record_trade_opened(epic)
+            except Exception:
+                pass
+        return trade_id
+
+    def update_from_quote(self, market: str, epic: str, quote: Quote) -> list[str]:
+        cfg = self._cfg
+        messages: list[str] = []
+
+        for tr in self.store.active_trades(epic):
+            side = tr["side"]
+            trade_id = int(tr["id"])
+            keys = tr.keys()
+            ig_deal = str(tr["ig_deal_id"] or "") if "ig_deal_id" in keys else ""
+            entry = float(tr["entry"])
+            stop = float(tr["stop"])
+            target = float(tr["target"])
+            size = float(tr["size"])
+            px = quote.bid if side == "BUY" else quote.offer
+            broker_managed = self._broker_stops and bool(ig_deal)
+            adjusted_conf = float(tr["adjusted_confidence"])
+            entry_atr, trail_distance, _band = self._entry_trail_meta(tr, adjusted_conf)
+
+            if self._skip_ig_synced_exits and ig_deal and not broker_managed:
+                continue
+
+            hard_msg = self._check_hard_cap(
+                market, side, trade_id, entry, stop, target, px, entry_atr, epic
+            )
+            if hard_msg:
+                messages.extend(hard_msg)
+                continue
+
+            prev_stop = stop
+            messages.extend(
+                self._apply_partial_close(
+                    market,
+                    side,
+                    trade_id,
+                    entry,
+                    size,
+                    px,
+                    entry_atr,
+                    adjusted_conf,
+                    ig_deal,
+                    epic,
+                )
+            )
+            row_after_partial = self.store.conn.execute(
+                "SELECT size FROM trades WHERE id=?", (trade_id,)
+            ).fetchone()
+            if row_after_partial:
+                size = float(row_after_partial["size"])
+
+            if cfg.breakeven_enabled:
+                messages.extend(
+                    self._apply_breakeven(
+                        market, side, trade_id, entry, stop, target, px,
+                        cfg.breakeven_trigger_points, cfg.breakeven_lock_points,
+                    )
+                )
+                stop = self._current_stop(trade_id, stop)
+
+            if cfg.adaptive_trailing_stop_enabled:
+                trail_dist = trail_distance
+                if trail_dist <= 0:
+                    trail_dist = float(cfg.trailing_stop_step_points)
+                messages.extend(
+                    self._apply_trailing(
+                        market, side, trade_id, entry, stop, target, px,
+                        cfg.trailing_stop_trigger_points, trail_dist,
+                    )
+                )
+                stop = self._current_stop(trade_id, stop)
+
+            if broker_managed:
+                if abs(stop - prev_stop) >= 0.05:
+                    pushed = self._sync_stop_to_ig(
+                        ig_deal, trade_id=trade_id, side=side, stop=stop, epic=epic
+                    )
+                    if pushed:
+                        msg = messages[-1] if messages else f"IG stop synced stop={stop:.1f}"
+                        get_lifecycle_bus().emit(
+                            STAGE_POSITION_TRACKING,
+                            STATUS_OK,
+                            msg,
+                            deal_id=ig_deal,
+                            stop=stop,
+                        )
+                continue
+
+            hit, exit_price = self._check_exit(side, entry, stop, target, px)
+            if hit and exit_price is not None:
+                from system.pnl_math import classify_result, realised_pnl_points
+
+                pnl = realised_pnl_points(side, entry, exit_price)
+                hit = classify_result(pnl)
+                self.store.close_trade(
+                    trade_id, exit_price, pnl, hit,
+                    f"Closed on {hit} at {exit_price:.1f}; target was {target:.1f}",
+                )
+                get_lifecycle_bus().mark_position_closed(
+                    message=f"Bot closed {hit}",
+                    result=hit,
+                    pnl=pnl,
+                    source="bot",
+                )
+                msg = (
+                    f"TRADE CLOSED {hit} | {market} {side} | entry {entry:.1f} "
+                    f"exit {exit_price:.1f} | {pnl:.1f} pts"
+                )
+                messages.append(msg)
+                if self.on_alert:
+                    self.on_alert(msg)
+
+        return messages
+
+    def _current_stop(self, trade_id: int, fallback: float) -> float:
+        stop = self.store.get_stop(trade_id)
+        return stop if stop is not None else fallback
+
+    def _entry_trail_meta(
+        self, tr: Any, adjusted_confidence: float
+    ) -> tuple[float, float, str]:
+        keys = tr.keys()
+        entry_atr = (
+            float(tr["entry_atr"])
+            if "entry_atr" in keys and tr["entry_atr"] is not None
+            else 0.0
+        )
+        trail_distance = (
+            float(tr["trail_distance"])
+            if "trail_distance" in keys and tr["trail_distance"] is not None
+            else 0.0
+        )
+        band = (
+            str(tr["confidence_band"])
+            if "confidence_band" in keys and tr["confidence_band"]
+            else self.confidence_band(adjusted_confidence)
+        )
+        if trail_distance <= 0 and entry_atr > 0:
+            trail_distance = self.get_trail_distance(adjusted_confidence, entry_atr)
+        return entry_atr, trail_distance, band
+
+    def _profit_points(self, side: str, entry: float, px: float) -> float:
+        return (px - entry) if side == "BUY" else (entry - px)
+
+    def _check_hard_cap(
+        self,
+        market: str,
+        side: str,
+        trade_id: int,
+        entry: float,
+        stop: float,
+        target: float,
+        px: float,
+        entry_atr: float,
+        epic: str,
+    ) -> list[str]:
+        if entry_atr <= 0:
+            return []
+        profit = self._profit_points(side, entry, px)
+        if profit < HARD_CAP_ATR_MULTIPLE * entry_atr:
+            return []
+        from system.pnl_math import classify_result, realised_pnl_points
+
+        exit_price = px
+        pnl = realised_pnl_points(side, entry, exit_price)
+        hit = classify_result(pnl)
+        self.store.close_trade(
+            trade_id,
+            exit_price,
+            pnl,
+            hit,
+            f"Hard cap +{HARD_CAP_ATR_MULTIPLE:.1f}x ATR at {exit_price:.1f}",
+        )
+        msg = (
+            f"HARD CAP EXIT {hit} | {market} {side} | entry {entry:.1f} "
+            f"exit {exit_price:.1f} | {pnl:.1f} pts (+{HARD_CAP_ATR_MULTIPLE:.1f}x ATR)"
+        )
+        log_engine(msg)
+        if self.on_alert:
+            self.on_alert(msg)
+        return [msg]
+
+    def _apply_partial_close(
+        self,
+        market: str,
+        side: str,
+        trade_id: int,
+        entry: float,
+        size: float,
+        px: float,
+        entry_atr: float,
+        adjusted_confidence: float,
+        ig_deal: str,
+        epic: str,
+    ) -> list[str]:
+        if entry_atr <= 0 or size <= 0:
+            return []
+        if self.store.is_partial_close_done(trade_id):
+            return []
+        profit = self._profit_points(side, entry, px)
+        if profit < PARTIAL_CLOSE_ATR_MULTIPLE * entry_atr:
+            return []
+
+        half_size = size * PARTIAL_CLOSE_FRACTION
+        if half_size <= 0:
+            return []
+
+        if ig_deal and self._rest is not None and hasattr(self._rest, "close_position"):
+            try:
+                self._rest.close_position(
+                    ig_deal,
+                    direction=side,
+                    size=half_size,
+                    epic=epic,
+                    verify=False,
+                )
+            except Exception as e:
+                log_engine(
+                    f"Partial close broker failed deal={ig_deal}: {type(e).__name__}: {e}"
+                )
+                return []
+
+        from system.pnl_math import classify_result, realised_pnl_points
+
+        unit_pnl = realised_pnl_points(side, entry, px)
+        banked_pts = unit_pnl * (half_size / size)
+        result = classify_result(banked_pts)
+
+        self.store.update_trade_size(trade_id, size - half_size)
+        self.store.mark_partial_close_done(trade_id)
+        note = f" | Partial close 50% at {px:.1f} banked {banked_pts:.1f} pts"
+        self.store.conn.execute(
+            "UPDATE trades SET notes=COALESCE(notes,'') || ? WHERE id=?",
+            (note, trade_id),
+        )
+        self.store.conn.commit()
+
+        if self._points_engine is not None:
+            try:
+                self._points_engine.record_trade(result, adjusted_confidence, banked_pts)
+            except Exception as e:
+                log_engine(f"points_engine partial close score failed: {type(e).__name__}: {e}")
+
+        msg = (
+            f"PARTIAL CLOSE | {market} | {side} | 50% at {px:.1f} | "
+            f"{banked_pts:.1f} pts banked"
+        )
+        log_engine(msg)
+        if self.on_alert:
+            self.on_alert(msg)
+        return [msg]
+
+    def _apply_breakeven(self, market, side, trade_id, entry, stop, target, px, trigger, offset):
+        msgs: list[str] = []
+        if side == "BUY":
+            profit = px - entry
+            be_stop = entry + offset
+            if profit >= trigger and stop < be_stop:
+                self.store.update_stop(trade_id, be_stop, f" | Stop moved to breakeven {be_stop:.1f}")
+                msgs.append(f"BREAKEVEN STOP MOVED | {market} BUY | stop {be_stop:.1f}")
+        else:
+            profit = entry - px
+            be_stop = entry - offset
+            if profit >= trigger and stop > be_stop:
+                self.store.update_stop(trade_id, be_stop, f" | Stop moved to breakeven {be_stop:.1f}")
+                msgs.append(f"BREAKEVEN STOP MOVED | {market} SELL | stop {be_stop:.1f}")
+        return msgs
+
+    def _apply_trailing(self, market, side, trade_id, entry, stop, target, px, trigger, distance):
+        msgs: list[str] = []
+        if side == "BUY":
+            profit = px - entry
+            trail_stop = px - distance
+            if profit >= trigger and trail_stop > stop and trail_stop < target:
+                self.store.update_stop(trade_id, trail_stop, f" | Trailing stop raised to {trail_stop:.1f}")
+                msgs.append(f"TRAILING STOP RAISED | {market} BUY | stop {trail_stop:.1f}")
+        else:
+            profit = entry - px
+            trail_stop = px + distance
+            if profit >= trigger and trail_stop < stop and trail_stop > target:
+                self.store.update_stop(trade_id, trail_stop, f" | Trailing stop lowered to {trail_stop:.1f}")
+                msgs.append(f"TRAILING STOP LOWERED | {market} SELL | stop {trail_stop:.1f}")
+        return msgs
+
+    def _ig_position_levels(self, deal_id: str) -> tuple[float | None, float | None]:
+        client = self._rest
+        if client is None:
+            return None, None
+        rows: list[dict[str, Any]] = []
+        if hasattr(client, "find_open_position"):
+            row = client.find_open_position(deal_id)
+            if row:
+                rows.append(row)
+        if not rows and hasattr(client, "open_positions"):
+            for item in client.open_positions():
+                pos = item.get("position") or {}
+                if str(pos.get("dealId") or pos.get("dealID") or "") == deal_id:
+                    rows.append(item)
+                    break
+        if not rows:
+            return None, None
+        pos = rows[0].get("position") or {}
+        stop = float(pos.get("stopLevel") or 0)
+        limit = float(pos.get("limitLevel") or 0)
+        return (stop if stop > 0 else None, limit if limit > 0 else None)
+
+    def _ig_stop_level(self, deal_id: str) -> float | None:
+        stop, _ = self._ig_position_levels(deal_id)
+        return stop
+
+    def _ig_position_open(self, deal_id: str) -> bool:
+        client = self._rest
+        if client is None or not deal_id:
+            return False
+        if deal_id in self._gone_deals:
+            return False
+        if hasattr(client, "find_open_position"):
+            return client.find_open_position(deal_id) is not None
+        return self._ig_position_levels(deal_id) != (None, None)
+
+    def _close_local_trade_position_gone(
+        self,
+        *,
+        trade_id: int,
+        deal_id: str,
+        side: str,
+        epic: str,
+    ) -> None:
+        if deal_id:
+            self._gone_deals.add(deal_id)
+        self._last_ig_stop.pop(f"{deal_id}:{trade_id}", None)
+
+        row = self.store.conn.execute(
+            "SELECT entry, closed_at FROM trades WHERE id=?",
+            (trade_id,),
+        ).fetchone()
+        if row is None or row["closed_at"]:
+            return
+
+        entry = float(row["entry"] or 0)
+        self.store.close_trade(
+            trade_id,
+            entry,
+            0.0,
+            "UNKNOWN",
+            notes=f"IG sync: position gone at broker (HTTP 404) deal={deal_id}",
+        )
+        log_engine(
+            f"IG position gone — closed local trade id={trade_id} epic={epic} deal={deal_id}"
+        )
+
+    def _sync_stop_to_ig(
+        self,
+        deal_id: str,
+        *,
+        trade_id: int,
+        side: str,
+        stop: float,
+        epic: str,
+    ) -> bool:
+        if not self._rest or not deal_id:
+            return False
+        if deal_id in self._gone_deals:
+            return False
+
+        cache_key = f"{deal_id}:{trade_id}"
+        last_pushed = self._last_ig_stop.get(cache_key)
+        if last_pushed is not None and abs(last_pushed - stop) < 0.05:
+            return False
+
+        ig_stop = self._ig_stop_level(deal_id)
+        if ig_stop is not None:
+            if side == "BUY" and stop <= ig_stop + 0.05:
+                return False
+            if side == "SELL" and stop >= ig_stop - 0.05:
+                return False
+
+        try:
+            from ig_api.exceptions import IGAPIError, RateLimitError
+            from system.rate_limit_manager import get_rate_limit_manager
+
+            get_rate_limit_manager().check_rest_allowed()
+            if not hasattr(self._rest, "update_position_stops"):
+                return False
+            if not self._ig_position_open(deal_id):
+                self._close_local_trade_position_gone(
+                    trade_id=trade_id,
+                    deal_id=deal_id,
+                    side=side,
+                    epic=epic,
+                )
+                return False
+            _, ig_limit = self._ig_position_levels(deal_id)
+            kwargs: dict[str, float] = {"stop_level": round(stop, 1)}
+            if ig_limit is not None:
+                kwargs["limit_level"] = round(ig_limit, 1)
+            self._rest.update_position_stops(deal_id, **kwargs)
+            self._last_ig_stop[cache_key] = stop
+            limit_note = f" limit={kwargs['limit_level']:.1f}" if "limit_level" in kwargs else ""
+            log_engine(
+                f"IG stop updated epic={epic} deal={deal_id} side={side} stop={stop:.1f}{limit_note}"
+            )
+            return True
+        except RateLimitError as e:
+            log_engine(f"IG stop update skipped — rate limit: {e}")
+        except IGAPIError as e:
+            if getattr(e, "status_code", None) == 404:
+                self._close_local_trade_position_gone(
+                    trade_id=trade_id,
+                    deal_id=deal_id,
+                    side=side,
+                    epic=epic,
+                )
+            else:
+                log_engine(f"IG stop update failed deal={deal_id}: {type(e).__name__}: {e}")
+        except Exception as e:
+            log_engine(f"IG stop update failed deal={deal_id}: {type(e).__name__}: {e}")
+        return False
+
+    @staticmethod
+    def _check_exit(side, entry, stop, target, px):
+        if side == "BUY":
+            if px <= stop:
+                hit = "LOSS" if stop < entry else "BREAKEVEN" if abs(stop - entry) < 1e-9 else "WIN"
+                return hit, stop
+            if px >= target:
+                return "WIN", target
+        else:
+            if px >= stop:
+                hit = "LOSS" if stop > entry else "BREAKEVEN" if abs(stop - entry) < 1e-9 else "WIN"
+                return hit, stop
+            if px <= target:
+                return "WIN", target
+        return None, None

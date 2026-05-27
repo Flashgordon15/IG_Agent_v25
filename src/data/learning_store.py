@@ -126,6 +126,14 @@ class LearningStore:
             c.execute("ALTER TABLE trades ADD COLUMN source TEXT DEFAULT 'strategy'")
         if "ig_close_deal_id" not in cols:
             c.execute("ALTER TABLE trades ADD COLUMN ig_close_deal_id TEXT")
+        if "confidence_band" not in cols:
+            c.execute("ALTER TABLE trades ADD COLUMN confidence_band TEXT")
+        if "entry_atr" not in cols:
+            c.execute("ALTER TABLE trades ADD COLUMN entry_atr REAL")
+        if "trail_distance" not in cols:
+            c.execute("ALTER TABLE trades ADD COLUMN trail_distance REAL")
+        if "partial_close_done" not in cols:
+            c.execute("ALTER TABLE trades ADD COLUMN partial_close_done INTEGER DEFAULT 0")
         # Cooldowns table — survives restarts
         c.execute(
             """
@@ -541,6 +549,51 @@ class LearningStore:
             (deal_id, trade_id),
         )
         self.conn.commit()
+
+    @_locked
+    @_locked
+    def set_v25_entry_meta(
+        self,
+        trade_id: int,
+        *,
+        confidence_band: str,
+        entry_atr: float,
+        trail_distance: float,
+    ) -> None:
+        cols = {row[1] for row in self.conn.execute("PRAGMA table_info(trades)").fetchall()}
+        if "confidence_band" not in cols:
+            return
+        self.conn.execute(
+            """
+            UPDATE trades
+            SET confidence_band=?, entry_atr=?, trail_distance=?
+            WHERE id=?
+            """,
+            (str(confidence_band), float(entry_atr), float(trail_distance), trade_id),
+        )
+        self.conn.commit()
+
+    @_locked
+    def mark_partial_close_done(self, trade_id: int) -> None:
+        cols = {row[1] for row in self.conn.execute("PRAGMA table_info(trades)").fetchall()}
+        if "partial_close_done" not in cols:
+            return
+        self.conn.execute(
+            "UPDATE trades SET partial_close_done=1 WHERE id=?",
+            (trade_id,),
+        )
+        self.conn.commit()
+
+    @_locked
+    def is_partial_close_done(self, trade_id: int) -> bool:
+        cols = {row[1] for row in self.conn.execute("PRAGMA table_info(trades)").fetchall()}
+        if "partial_close_done" not in cols:
+            return False
+        row = self.conn.execute(
+            "SELECT partial_close_done FROM trades WHERE id=?",
+            (trade_id,),
+        ).fetchone()
+        return bool(row and int(row["partial_close_done"] or 0))
 
     @_locked
     def update_trade_size(self, trade_id: int, size: float) -> None:
