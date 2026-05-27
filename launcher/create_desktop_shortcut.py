@@ -2,12 +2,11 @@
 """
 Create ~/Desktop/IG Agent v25.app shortcut to the launcher bundle.
 
-Uses a symlink to launcher/IG Agent v25.app inside the project (reliable for local dev).
+Uses a Finder alias (reliable double-click on macOS; unix symlinks to .app often fail).
 """
 
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -35,8 +34,18 @@ def remove_existing_shortcut(link: Path) -> None:
         link.unlink(missing_ok=True)
 
 
-def create_symlink(bundle: Path, link: Path) -> None:
-    os.symlink(str(bundle), str(link))
+def create_finder_alias(bundle: Path, link: Path) -> None:
+    desktop = link.parent
+    desktop.mkdir(parents=True, exist_ok=True)
+    script = f'''
+tell application "Finder"
+    set desktopFolder to POSIX file "{desktop}"
+    set targetApp to POSIX file "{bundle}"
+    set aliasFile to make new alias file at desktopFolder to targetApp
+    set name of aliasFile to "{SHORTCUT_NAME}"
+end tell
+'''
+    subprocess.run(["osascript", "-e", script], check=True, capture_output=True, text=True)
 
 
 def create_shortcut() -> Path:
@@ -49,19 +58,15 @@ def create_shortcut() -> Path:
 
     link = Path.home() / "Desktop" / SHORTCUT_NAME
     remove_existing_shortcut(link)
-    create_symlink(bundle, link)
+    create_finder_alias(bundle, link)
 
     subprocess.run(["/usr/bin/touch", str(link)], check=False)
-    subprocess.run(
-        ["xattr", "-dr", "com.apple.quarantine", str(bundle)],
-        check=False,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["xattr", "-dr", "com.apple.quarantine", str(link)],
-        check=False,
-        capture_output=True,
-    )
+    for path in (bundle, link):
+        subprocess.run(
+            ["xattr", "-dr", "com.apple.quarantine", str(path)],
+            check=False,
+            capture_output=True,
+        )
     return link
 
 
@@ -78,10 +83,6 @@ def main() -> int:
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
-
-
-def bundle_path_error() -> str:
-    return str((project_root() / "launcher" / SHORTCUT_NAME).resolve())
 
 
 if __name__ == "__main__":

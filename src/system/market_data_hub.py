@@ -10,6 +10,7 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
+from collections.abc import Callable
 from typing import Any
 
 from data.models import Quote
@@ -41,6 +42,7 @@ class MarketDataHub:
         self._fetch_interval_sec = 5.0
         self._last_fetch_ts: dict[str, float] = {}
         self._total_fetches = 0
+        self._listeners: list[Callable[[QuoteSnapshot], None]] = []
 
     def attach_rest(self, rest_client: Any) -> None:
         with self._lock:
@@ -49,6 +51,28 @@ class MarketDataHub:
     def set_min_fetch_interval(self, seconds: float) -> None:
         self._fetch_interval_sec = max(0.5, float(seconds))
 
+    def on_quote(self, callback: Callable[[QuoteSnapshot], None]) -> Callable[[], None]:
+        """Register for hub price updates (Lightstreamer / REST poll)."""
+
+        with self._lock:
+            self._listeners.append(callback)
+
+        def _unsub() -> None:
+            with self._lock:
+                if callback in self._listeners:
+                    self._listeners.remove(callback)
+
+        return _unsub
+
+    def _emit_quote(self, snap: QuoteSnapshot) -> None:
+        with self._lock:
+            listeners = list(self._listeners)
+        for cb in listeners:
+            try:
+                cb(snap)
+            except Exception:
+                pass
+
     def publish(self, epic: str, bid: float, offer: float, *, source: str = "stream") -> QuoteSnapshot:
         snap = QuoteSnapshot(epic=epic, bid=bid, offer=offer, updated_at=time.time(), source=source)
         with self._lock:
@@ -56,6 +80,7 @@ class MarketDataHub:
             rest = self._rest
         if rest is not None and hasattr(rest, "touch_stream_activity"):
             rest.touch_stream_activity()
+        self._emit_quote(snap)
         return snap
 
     def get_snapshot(self, epic: str) -> QuoteSnapshot | None:
@@ -165,3 +190,8 @@ def get_market_data_hub() -> MarketDataHub:
         if _hub is None:
             _hub = MarketDataHub()
         return _hub
+
+
+def on_hub_quote(callback: Callable[[QuoteSnapshot], None]) -> Callable[[], None]:
+    """Subscribe to live hub publishes (dashboard bridge, diagnostics)."""
+    return get_market_data_hub().on_quote(callback)

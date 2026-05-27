@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from api.snapshot import GATE_NAMES
-from api.snapshot_store import write_tick_snapshot
+from api.snapshot_store import publish_tick
 from data.models import Quote
 from execution.trading_loop import TickOutcome, TradingLoop as ExecutionTickLoop
 from signals.signal_engine import SignalResult
@@ -172,6 +172,10 @@ class TradingLoop:
             return ctx
 
         self._tick_count += 1
+        try:
+            self._signal_engine.add_quote(self._market, quote)
+        except Exception as e:
+            log_engine(f"signal_engine.add_quote failed: {type(e).__name__}: {e}")
         try:
             self._session.on_tick(quote)
         except Exception as e:
@@ -466,9 +470,9 @@ class TradingLoop:
 
     def _publish_snapshot(self, ctx: TickContext) -> None:
         try:
-            write_tick_snapshot(self._build_snapshot_payload(ctx))
+            publish_tick(self._build_snapshot_payload(ctx))
         except Exception as e:
-            log_engine(f"write_tick_snapshot failed: {type(e).__name__}: {e}")
+            log_engine(f"publish_tick failed: {type(e).__name__}: {e}")
 
     def _build_snapshot_payload(self, ctx: TickContext) -> dict[str, Any]:
         quote = ctx.quote
@@ -526,15 +530,32 @@ class TradingLoop:
         elif ctx.all_passed:
             badge = "READY"
 
+        quote_ts = quote.time if isinstance(quote.time, datetime) else self._clock()
+        tick_age_s = max(0.0, (self._clock() - quote_ts).total_seconds())
+
+        stream_status = "DISCONNECTED"
+        if spread > 0:
+            try:
+                from system.market_data_hub import get_market_data_hub
+
+                snap = get_market_data_hub().get_snapshot(self._epic)
+                stale_after = float(self._config.refresh_seconds) * 2.0
+                if snap and snap.age_seconds() <= stale_after:
+                    stream_status = "LIVE"
+                else:
+                    stream_status = "STALE"
+            except Exception:
+                stream_status = "LIVE"
+
         return {
             "type": "tick",
-            "ts": _iso_ts(quote.time if isinstance(quote.time, datetime) else self._clock()),
+            "ts": _iso_ts(quote_ts),
             "market_state": market_state,
             "bid": float(quote.bid) if quote.bid else None,
             "offer": float(quote.offer) if quote.offer else None,
             "spread": spread if spread > 0 else None,
-            "tick_age_s": 0,
-            "stream_status": "LIVE" if spread > 0 else "DISCONNECTED",
+            "tick_age_s": round(tick_age_s, 1),
+            "stream_status": stream_status,
             "rest_calls_min": 0,
             "errors": {"count": 0, "type": None},
             "health": {

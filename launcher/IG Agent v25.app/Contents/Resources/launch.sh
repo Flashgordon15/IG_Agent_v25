@@ -28,6 +28,27 @@ notify_failure() {
   fi
 }
 
+open_dashboard() {
+  if command -v open >/dev/null 2>&1; then
+    open "http://127.0.0.1:8080/" 2>/dev/null || true
+  fi
+}
+
+agent_running() {
+  local lock_pid=""
+  if [ -f "${LOCK_FILE}" ]; then
+    lock_pid=$(head -1 "${LOCK_FILE}" 2>/dev/null | awk '{print $1}' || true)
+    if [ -n "${lock_pid}" ] && kill -0 "${lock_pid}" 2>/dev/null; then
+      return 0
+    fi
+  fi
+  if command -v curl >/dev/null 2>&1; then
+    curl -sf --max-time 1 "http://127.0.0.1:8080/health" >/dev/null 2>&1
+    return $?
+  fi
+  return 1
+}
+
 if ! ROOT="$(find_project_root "$SCRIPT_DIR")"; then
   ROOT=""
 fi
@@ -40,15 +61,27 @@ fi
 LOG_DIR="${ROOT}/src/data/logs"
 LOG_FILE="${LOG_DIR}/launcher.log"
 mkdir -p "${LOG_DIR}"
+LOCK_FILE="${ROOT}/src/data/.ig_agent_v24.lock"
 
 log "=== IG Agent v25 launch ==="
 log "script_dir=${SCRIPT_DIR}"
 log "project_root=${ROOT}"
 
+if [ "${LAUNCHER_VALIDATE_ONLY:-}" = "1" ]; then
+  printf '%s\n' "${ROOT}"
+  exit 0
+fi
+
 if [ -f "${ROOT}/emergency_stop.lock" ]; then
   log "ERROR: emergency_stop.lock present"
   notify_failure "Emergency stop lock is set. Delete emergency_stop.lock in the project folder, then retry."
   exit 1
+fi
+
+if agent_running; then
+  log "agent already running — opening dashboard"
+  open_dashboard
+  exit 0
 fi
 
 if ! cd "${ROOT}"; then
@@ -59,8 +92,6 @@ fi
 
 export IG_AGENT_ROOT="${ROOT}"
 export PYTHONPATH="${ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
-
-LOCK_FILE="${ROOT}/src/data/.ig_agent_v24.lock"
 
 clear_stale_lock() {
   local lock_pid=""
@@ -78,28 +109,7 @@ clear_stale_lock() {
   rm -f "${LOCK_FILE}" && log "removed stale instance lock (pid=${lock_pid} not running)" || true
 }
 
-kill_stale_main_pids() {
-  local pattern pid
-  for pattern in \
-    "${ROOT}/src/main.py" \
-    "IG_Agent_v25/src/main.py"
-  do
-    pids=$(pgrep -f "${pattern}" 2>/dev/null || true)
-    for pid in ${pids}; do
-      [ -z "${pid}" ] && continue
-      [ "${pid}" = "$$" ] && continue
-      [ "${pid}" = "${PPID}" ] && continue
-      kill -TERM "${pid}" 2>/dev/null && log "terminated stale pid=${pid} (pattern=${pattern})" || true
-    done
-  done
-}
-
-if command -v pgrep >/dev/null 2>&1; then
-  clear_stale_lock
-  kill_stale_main_pids
-  sleep 1
-  kill_stale_main_pids
-fi
+clear_stale_lock
 
 PY=""
 for candidate in \
@@ -133,10 +143,20 @@ if [ ! -f "${ENTRY}" ]; then
   exit 1
 fi
 
-if [ "${LAUNCHER_VALIDATE_ONLY:-}" = "1" ]; then
-  printf '%s\n' "${ROOT}"
-  exit 0
-fi
+log "start ${PY} ${ENTRY}"
+nohup "${PY}" "${ENTRY}" >>"${LOG_FILE}" 2>&1 &
+CHILD=$!
+log "started pid=${CHILD}"
 
-log "exec ${PY} ${ENTRY}"
-exec "${PY}" "${ENTRY}" >>"${LOG_FILE}" 2>&1
+for _ in $(seq 1 60); do
+  if agent_running; then
+    open_dashboard
+    log "dashboard ready"
+    exit 0
+  fi
+  sleep 0.25
+done
+
+log "WARN: agent did not become ready within 15s"
+notify_failure "IG Agent did not start. Check src/data/logs/launcher.log"
+exit 1

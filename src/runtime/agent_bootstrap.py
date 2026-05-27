@@ -23,6 +23,8 @@ from trading.points_engine import PointsEngine
 from trading.session_manager import SessionManager
 from trading.trading_loop import TradingLoop as AgentTradingLoop
 
+_stream_client: Any | None = None
+
 
 def _resolve_instrument(cfg: Config) -> tuple[str, str]:
     reg = InstrumentRegistry(cfg.as_dict())
@@ -46,7 +48,7 @@ def build_trading_loop(
     store = LearningStore(str(cfg.learning_db))
     signal_engine = SignalEngine(cfg, store)
     points_engine = PointsEngine(store)
-    env_scorer = EnvironmentScorer(cfg, signal_engine)
+    env_scorer = EnvironmentScorer(signal_engine, config=cfg)
     session_manager = SessionManager(
         epic,
         market=market,
@@ -83,10 +85,13 @@ def build_trading_loop(
     if rest_client is not None:
         hub.attach_rest(rest_client)
 
+    interval = float(cfg.refresh_seconds)
+
     def quote_source() -> Quote | None:
-        snap = hub.get_snapshot(epic)
-        if snap is None and rest_client is not None:
-            snap = hub.fetch_if_stale(epic, min_interval=float(cfg.refresh_seconds))
+        if rest_client is not None:
+            snap = hub.fetch_if_stale(epic, min_interval=interval)
+        else:
+            snap = hub.get_snapshot(epic)
         if snap is None or snap.bid <= 0:
             return None
         return snap.to_quote()
@@ -103,3 +108,75 @@ def build_trading_loop(
         quote_source=quote_source,
         learning_store=store,
     )
+
+
+def start_market_stream(cfg: Config, *, rest_client: Any | None) -> Any | None:
+    """Connect IG price stream (Lightstreamer or REST poll) into MarketDataHub."""
+    global _stream_client
+    if rest_client is None:
+        return None
+
+    from system.credentials_holder import get_credentials_holder
+
+    creds = get_credentials_holder().credentials
+    session = getattr(rest_client, "session", None)
+    if creds is None or session is None or not getattr(session, "is_valid", False):
+        log_engine("market stream skipped — no valid IG session")
+        return None
+
+    _market, epic = _resolve_instrument(cfg)
+    hub = get_market_data_hub()
+    hub.attach_rest(rest_client)
+    hub.set_min_fetch_interval(float(cfg.refresh_seconds))
+    hub.fetch_if_stale(epic, min_interval=0.0)
+
+    try:
+        from ig_api.streaming_factory import create_streaming_client
+
+        client = create_streaming_client(
+            creds,
+            session,
+            rest_client=rest_client,
+            poll_interval_seconds=float(cfg.refresh_seconds),
+            transport=cfg.streaming_transport,
+        )
+    except Exception as e:
+        log_engine(f"market stream create failed: {type(e).__name__}: {e}")
+        return None
+
+    def on_price(update: Any) -> None:
+        hub.publish(
+            str(update.epic),
+            float(update.bid),
+            float(update.offer),
+            source="stream",
+        )
+
+    if hasattr(client, "on_price"):
+        client.on_price(on_price)
+    client.subscribe_market(epic)
+    try:
+        client.connect()
+    except Exception as e:
+        log_engine(f"market stream connect failed: {type(e).__name__}: {e}")
+        return None
+
+    _stream_client = client
+    label = getattr(client, "transport_label", "stream")
+    log_engine(f"market stream started epic={epic} transport={label}")
+    return client
+
+
+def stop_market_stream(client: Any | None = None) -> None:
+    """Disconnect IG price stream."""
+    global _stream_client
+    target = client if client is not None else _stream_client
+    if target is None:
+        return
+    try:
+        if hasattr(target, "disconnect"):
+            target.disconnect()
+    except Exception as e:
+        log_engine(f"market stream disconnect failed: {type(e).__name__}: {e}")
+    if target is _stream_client:
+        _stream_client = None

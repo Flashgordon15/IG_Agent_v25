@@ -64,9 +64,14 @@ export function useWebSocket() {
 
     connect();
 
+    const pollId = setInterval(() => {
+      if (mountedRef.current) refreshState();
+    }, 1000);
+
     return () => {
       mountedRef.current = false;
       if (timer) clearTimeout(timer);
+      clearInterval(pollId);
       wsRef.current?.close();
     };
   }, [refreshState]);

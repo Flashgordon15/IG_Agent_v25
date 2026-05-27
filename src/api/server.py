@@ -16,6 +16,13 @@ from api import routes, ws
 from api.snapshot_store import watch_snapshot_file
 from system.paths import project_root
 
+_startup_hooks: list = []
+
+
+def register_api_startup(callback) -> None:
+    """Run callback after WebSocket loop is bound (start stream/trading here)."""
+    _startup_hooks.append(callback)
+
 
 def _dashboard_dist() -> Path:
     return project_root() / "dashboard" / "dist"
@@ -26,6 +33,13 @@ def create_app(*, watch_snapshot: bool = True) -> FastAPI:
     async def lifespan(app: FastAPI):
         loop = asyncio.get_running_loop()
         ws.hub.bind_loop(loop)
+        for hook in list(_startup_hooks):
+            try:
+                hook()
+            except Exception as e:
+                from system.engine_log import log_engine
+
+                log_engine(f"API startup hook failed: {type(e).__name__}: {e}")
         watcher = None
         if watch_snapshot:
             watcher = asyncio.create_task(watch_snapshot_file())

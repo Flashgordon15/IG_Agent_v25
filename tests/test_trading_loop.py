@@ -148,7 +148,7 @@ class TradingLoopTests(unittest.TestCase):
         self.assertTrue(ctx.all_passed)
         loop._execution_loop.process_tick.assert_called_once()
 
-    @patch("trading.trading_loop.write_tick_snapshot")
+    @patch("trading.trading_loop.publish_tick")
     def test_snapshot_written_every_tick(self, snap_mock: MagicMock) -> None:
         loop = _make_loop()
         loop.run_once()
@@ -157,7 +157,7 @@ class TradingLoopTests(unittest.TestCase):
         self.assertEqual(payload["type"], "tick")
         self.assertIn("health", payload)
 
-    @patch("trading.trading_loop.write_tick_snapshot")
+    @patch("trading.trading_loop.publish_tick")
     def test_flatten_invoked_when_should_flatten(self, _snap: MagicMock) -> None:
         flatten = MagicMock(return_value=2)
         loop = _make_loop(on_flatten=flatten)

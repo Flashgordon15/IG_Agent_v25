@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from api.agent_control import register_trading_loop
-from api.server import create_app
+from api.server import create_app, register_api_startup
 from system.config import Config
 from system.config_loader import ConfigLoader
 from system.config_validator import (
@@ -147,6 +147,7 @@ class AgentRuntime:
 
     def __init__(self) -> None:
         self.trading_loop: Any | None = None
+        self._stream_client: Any | None = None
         self._shutting_down = False
 
     def shutdown(self) -> None:
@@ -159,6 +160,11 @@ class AgentRuntime:
                 self.trading_loop.stop()
             except Exception as e:
                 log_engine(f"trading loop stop failed: {type(e).__name__}: {e}")
+        if self._stream_client is not None:
+            from runtime.agent_bootstrap import stop_market_stream
+
+            stop_market_stream(self._stream_client)
+            self._stream_client = None
         release_instance_lock()
         log_engine("shutdown complete")
 
@@ -179,12 +185,20 @@ class AgentRuntime:
             cfg = Config(_data=merged)
 
             rest = _rest_client_if_ready()
-            from runtime.agent_bootstrap import build_trading_loop
+            from runtime.agent_bootstrap import build_trading_loop, start_market_stream
+
+            from api.snapshot_store import wire_hub_quotes_to_dashboard
 
             self.trading_loop = build_trading_loop(cfg, rest_client=rest)
             register_trading_loop(self.trading_loop)
-            self.trading_loop.start()
-            log_engine("orchestrator trading loop started (background)")
+
+            def _start_live_engines() -> None:
+                wire_hub_quotes_to_dashboard(min_interval=0.25)
+                self.trading_loop.start()
+                self._stream_client = start_market_stream(cfg, rest_client=rest)
+                log_engine("orchestrator trading loop started (background)")
+
+            register_api_startup(_start_live_engines)
 
             app = create_app(watch_snapshot=True)
             url = f"http://{_API_HOST}:{_API_PORT}/"

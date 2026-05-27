@@ -127,7 +127,7 @@
   "breakeven_lock_points": 0,
   "default_stop_distance_points": 60,
   "default_limit_distance_points": 120,
-  "stop_distance_points": 90,
+  "stop_distance_points": 45,
   "limit_distance_points": 120,
   "risk_per_trade": 40,
   "max_spread_points": 35,
