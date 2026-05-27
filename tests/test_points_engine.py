@@ -129,6 +129,24 @@ class PointsEngineStateTests(unittest.TestCase):
             self.assertEqual(self.engine.get_state(), "HEALTHY")
 
 
+class PointsEngineThresholdTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        set_points_state_path_for_tests(Path(self.tmp.name) / "points.json")
+        self.engine = PointsEngine(state_path=Path(self.tmp.name) / "points.json")
+
+    def tearDown(self) -> None:
+        set_points_state_path_for_tests(None)
+        self.tmp.cleanup()
+
+    def test_trade_confidence_threshold_is_max_of_points_and_config(self) -> None:
+        cfg = type("Cfg", (), {"signal_threshold": 85.0})()
+        with patch.object(self.engine, "get_threshold", return_value=80.0):
+            self.assertEqual(self.engine.trade_confidence_threshold(cfg), 85.0)
+        with patch.object(self.engine, "get_threshold", return_value=92.0):
+            self.assertEqual(self.engine.trade_confidence_threshold(cfg), 92.0)
+
+
 class PointsEngineSessionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -197,9 +215,19 @@ class PointsEngineThresholdSizeTests(unittest.TestCase):
 
     def test_size_multiplier_caution_bands(self) -> None:
         self._set_state(0.0)
-        self.assertEqual(self.engine.get_size_multiplier(90.0), 0.5)
-        self.assertEqual(self.engine.get_size_multiplier(85.0), 0.25)
+        self.assertEqual(self.engine.get_size_multiplier(89.0), 0.5)
+        self.assertEqual(self.engine.get_size_multiplier(82.0), 0.25)
         self.assertEqual(self.engine.get_size_multiplier(79.0), 0.0)
+
+    def test_size_multiplier_spec_matrix(self) -> None:
+        self._set_state(0.0)
+        self.assertEqual(self.engine.get_size_multiplier(82.0), 0.25)
+        self.assertEqual(self.engine.get_size_multiplier(89.0), 0.5)
+        self._set_state(15.0)
+        self.assertEqual(self.engine.get_size_multiplier(86.0), 0.5)
+        self.assertEqual(self.engine.get_size_multiplier(93.0), 1.0)
+        self._set_state(-20.0, stop=True)
+        self.assertEqual(self.engine.get_size_multiplier(99.0), 0.0)
 
     def test_size_multiplier_warning_only_high(self) -> None:
         self._set_state(-10.0)

@@ -307,6 +307,24 @@ class PointsEngine:
         except Exception:
             return CONF_MARGINAL_MIN
 
+    def trade_confidence_threshold(self, cfg: Any) -> float:
+        """Effective entry bar: higher of points-tier floor and config signal_threshold."""
+        try:
+            return max(self.get_threshold(), float(cfg.signal_threshold))
+        except Exception:
+            return CONF_MARGINAL_MIN
+
+    def session_skips_remaining(self) -> int:
+        try:
+            with _lock:
+                return max(0, int(self._signals_to_skip))
+        except Exception:
+            return 0
+
+    def confidence_band(self, confidence: float) -> str:
+        """Public confidence band label (high / standard / marginal / low)."""
+        return _confidence_band(float(confidence))
+
     def get_size_multiplier(self, confidence: float) -> float:
         """Position size multiplier for confidence and current state (0 = no trade)."""
         try:
@@ -317,7 +335,13 @@ class PointsEngine:
                 return 0.0
 
             conf = float(confidence)
-            if conf < self.get_threshold():
+            if state in ("HEALTHY", "CAUTION"):
+                if conf < CONF_MARGINAL_MIN:
+                    return 0.0
+            elif state == "WARNING":
+                if conf < CONF_HIGH:
+                    return 0.0
+            else:
                 return 0.0
 
             band = _confidence_band(conf)
