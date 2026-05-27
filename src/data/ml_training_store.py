@@ -130,12 +130,87 @@ def _append_line(path: Path, record: dict[str, Any]) -> None:
         os.fsync(f.fileno())
 
 
+def _read_last_nonempty_line(path: Path) -> tuple[str | None, int]:
+    """Return (last non-empty line text, byte offset where that line starts)."""
+    with open(path, "rb") as f:
+        f.seek(0, 2)
+        end = f.tell()
+        if end == 0:
+            return None, 0
+
+        pos = end
+        while pos > 0:
+            f.seek(pos - 1)
+            if f.read(1) in (b"\n", b"\r"):
+                pos -= 1
+            else:
+                break
+
+        if pos == 0:
+            return None, 0
+
+        line_end = pos
+        line_start = pos
+        while line_start > 0:
+            f.seek(line_start - 1)
+            if f.read(1) == b"\n":
+                break
+            line_start -= 1
+
+        f.seek(line_start)
+        raw = f.read(line_end - line_start)
+        return raw.decode("utf-8"), line_start
+
+
+def _truncate_file(path: Path, byte_offset: int) -> None:
+    with open(path, "r+b") as f:
+        f.truncate(byte_offset)
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def _count_nonempty_lines(path: Path) -> int:
+    count = 0
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                count += 1
+    return count
+
+
+def _validate_store_on_startup(path: Path) -> None:
+    try:
+        if not path.exists():
+            return
+        if path.stat().st_size == 0:
+            return
+
+        last_line, line_start = _read_last_nonempty_line(path)
+        if last_line is None:
+            return
+
+        try:
+            json.loads(last_line)
+        except json.JSONDecodeError:
+            _truncate_file(path, line_start)
+            log_engine("WARNING: Repaired truncated ML store entry on startup")
+            return
+
+        count = _count_nonempty_lines(path)
+        log_engine(f"ML store intact: {count} records")
+    except Exception as e:
+        log_engine(
+            f"ml_training_store startup validation failed: {type(e).__name__}: {e}"
+        )
+
+
 class MLTrainingStore:
     """Buffers entry context until IG-confirmed exit, then appends one JSONL line."""
 
     def __init__(self, path: Path | str | None = None, *, version: str = ML_VERSION) -> None:
         self._path = Path(path) if path else default_store_path()
         self._version = str(version)
+        _validate_store_on_startup(self._path)
 
     @property
     def path(self) -> Path:

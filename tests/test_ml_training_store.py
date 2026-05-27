@@ -131,5 +131,59 @@ class MLTrainingStoreTests(unittest.TestCase):
         )
 
 
+class MLTrainingStoreStartupRepairTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "ml_training_store.jsonl"
+        mls.reset_ml_training_store_for_tests()
+
+    def tearDown(self) -> None:
+        mls.reset_ml_training_store_for_tests()
+        self.tmp.cleanup()
+
+    @patch("data.ml_training_store.log_engine")
+    def test_valid_last_line_no_truncation(self, log_mock) -> None:
+        content = '{"deal_id":"A"}\n{"deal_id":"B"}\n'
+        self.path.write_text(content, encoding="utf-8")
+        before_size = self.path.stat().st_size
+        MLTrainingStore(self.path)
+        self.assertEqual(self.path.stat().st_size, before_size)
+        self.assertEqual(self.path.read_text(encoding="utf-8"), content)
+        log_mock.assert_any_call("ML store intact: 2 records")
+
+    @patch("data.ml_training_store.log_engine")
+    def test_invalid_last_line_truncated(self, log_mock) -> None:
+        self.path.write_text('{"deal_id":"A"}\n{"truncated":', encoding="utf-8")
+        MLTrainingStore(self.path)
+        self.assertEqual(self.path.read_text(encoding="utf-8"), '{"deal_id":"A"}\n')
+        log_mock.assert_any_call("WARNING: Repaired truncated ML store entry on startup")
+        intact_calls = [c for c in log_mock.call_args_list if "ML store intact" in str(c)]
+        self.assertEqual(len(intact_calls), 0)
+
+    @patch("data.ml_training_store.log_engine")
+    def test_empty_file_no_error(self, log_mock) -> None:
+        self.path.write_text("", encoding="utf-8")
+        MLTrainingStore(self.path)
+        log_mock.assert_not_called()
+
+    @patch("data.ml_training_store.log_engine")
+    def test_missing_file_no_error(self, log_mock) -> None:
+        missing = self.path.parent / "missing.jsonl"
+        MLTrainingStore(missing)
+        log_mock.assert_not_called()
+
+    @patch("data.ml_training_store.log_engine")
+    def test_single_valid_line_intact(self, log_mock) -> None:
+        self.path.write_text('{"deal_id":"ONLY"}\n', encoding="utf-8")
+        MLTrainingStore(self.path)
+        log_mock.assert_any_call("ML store intact: 1 records")
+
+    @patch("data.ml_training_store.log_engine")
+    def test_trailing_blank_newline_handled(self, log_mock) -> None:
+        self.path.write_text('{"deal_id":"A"}\n\n', encoding="utf-8")
+        MLTrainingStore(self.path)
+        log_mock.assert_any_call("ML store intact: 1 records")
+
+
 if __name__ == "__main__":
     unittest.main()
