@@ -439,12 +439,21 @@ class TradeManager:
         if side == "BUY":
             profit = px - entry
             trail_stop = px - distance
+            if trail_stop < stop:
+                log_engine(
+                    f"ERROR: Trail would move stop backwards — rejected. "
+                    f"current={stop} proposed={trail_stop}"
+                )
+                return []
             if profit >= trigger and trail_stop > stop and trail_stop < target:
                 self.store.update_stop(trade_id, trail_stop, f" | Trailing stop raised to {trail_stop:.1f}")
                 msgs.append(f"TRAILING STOP RAISED | {market} BUY | stop {trail_stop:.1f}")
         else:
             profit = entry - px
             trail_stop = px + distance
+            if trail_stop > stop:
+                log_engine("ERROR: Trail would move stop backwards — rejected.")
+                return []
             if profit >= trigger and trail_stop < stop and trail_stop > target:
                 self.store.update_stop(trade_id, trail_stop, f" | Trailing stop lowered to {trail_stop:.1f}")
                 msgs.append(f"TRAILING STOP LOWERED | {market} SELL | stop {trail_stop:.1f}")

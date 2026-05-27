@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -77,6 +77,30 @@ def _open_trade(store: LearningStore, *, entry: float = 100.0, stop: float = 90.
             setup_key="BUY|bull|asia_early",
             dry_run=True,
             deal_reference="REF1",
+            notes="",
+        )
+    )
+
+
+def _open_sell_trade(store: LearningStore, *, entry: float = 100.0, stop: float = 110.0) -> int:
+    return store.open_trade(
+        TradeRecord(
+            id=None,
+            market="Japan 225",
+            epic="IX.D.NIKKEI.IFM.IP",
+            side="SELL",
+            entry=entry,
+            exit=None,
+            size=2.0,
+            stop=stop,
+            target=entry - 100,
+            pnl_points=None,
+            result=None,
+            confidence=90,
+            adjusted_confidence=90,
+            setup_key="SELL|bear|asia_early",
+            dry_run=True,
+            deal_reference="REF2",
             notes="",
         )
     )
@@ -244,6 +268,84 @@ class TradeManagerExtensionTests(unittest.TestCase):
             self.store.conn.execute("SELECT stop FROM trades WHERE id=?", (tid,)).fetchone()["stop"]
         )
         self.assertAlmostEqual(stop_after, stop_high, places=1)
+
+
+class TrailDirectionAssertionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = LearningStore(str(Path(self.tmp.name) / "t.db"))
+        self.store.connect()
+        self.mgr = TradeManager(_cfg(), self.store, skip_ig_synced_exits=True)
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.tmp.cleanup()
+
+    @patch("trading.trade_manager.log_engine")
+    def test_buy_trail_accepted_when_stop_rises(self, mock_log: MagicMock) -> None:
+        entry, stop, target = 100.0, 90.0, 200.0
+        tid = _open_trade(self.store, entry=entry, stop=stop)
+        px = 150.0
+        msgs = self.mgr._apply_trailing(
+            "Japan 225", "BUY", tid, entry, stop, target, px, trigger=10, distance=25
+        )
+        self.assertTrue(msgs)
+        mock_log.assert_not_called()
+        new_stop = float(
+            self.store.conn.execute("SELECT stop FROM trades WHERE id=?", (tid,)).fetchone()["stop"]
+        )
+        self.assertAlmostEqual(new_stop, px - 25)
+
+    @patch("trading.trade_manager.log_engine")
+    def test_buy_trail_rejected_when_stop_would_fall(self, mock_log: MagicMock) -> None:
+        entry, stop, target = 100.0, 115.0, 200.0
+        tid = _open_trade(self.store, entry=entry, stop=stop)
+        px = 120.0
+        msgs = self.mgr._apply_trailing(
+            "Japan 225", "BUY", tid, entry, stop, target, px, trigger=10, distance=25
+        )
+        self.assertEqual(msgs, [])
+        mock_log.assert_called_once()
+        msg = mock_log.call_args[0][0]
+        self.assertIn("ERROR: Trail would move stop backwards", msg)
+        self.assertIn("current=115", msg)
+        self.assertIn("proposed=95", msg)
+        unchanged = float(
+            self.store.conn.execute("SELECT stop FROM trades WHERE id=?", (tid,)).fetchone()["stop"]
+        )
+        self.assertAlmostEqual(unchanged, stop)
+
+    @patch("trading.trade_manager.log_engine")
+    def test_sell_trail_accepted_when_stop_lowers(self, mock_log: MagicMock) -> None:
+        entry, stop, target = 100.0, 110.0, 0.0
+        tid = _open_sell_trade(self.store, entry=entry, stop=stop)
+        px = 80.0
+        msgs = self.mgr._apply_trailing(
+            "Japan 225", "SELL", tid, entry, stop, target, px, trigger=10, distance=25
+        )
+        self.assertTrue(msgs)
+        mock_log.assert_not_called()
+        new_stop = float(
+            self.store.conn.execute("SELECT stop FROM trades WHERE id=?", (tid,)).fetchone()["stop"]
+        )
+        self.assertAlmostEqual(new_stop, px + 25)
+
+    @patch("trading.trade_manager.log_engine")
+    def test_sell_trail_rejected_when_stop_would_rise(self, mock_log: MagicMock) -> None:
+        entry, stop, target = 100.0, 85.0, 0.0
+        tid = _open_sell_trade(self.store, entry=entry, stop=stop)
+        px = 90.0
+        msgs = self.mgr._apply_trailing(
+            "Japan 225", "SELL", tid, entry, stop, target, px, trigger=10, distance=25
+        )
+        self.assertEqual(msgs, [])
+        mock_log.assert_called_once()
+        msg = mock_log.call_args[0][0]
+        self.assertEqual(msg, "ERROR: Trail would move stop backwards — rejected.")
+        unchanged = float(
+            self.store.conn.execute("SELECT stop FROM trades WHERE id=?", (tid,)).fetchone()["stop"]
+        )
+        self.assertAlmostEqual(unchanged, stop)
 
 
 if __name__ == "__main__":
