@@ -220,6 +220,9 @@ class EnvironmentScorerIntegrationTests(unittest.TestCase):
         self.assertTrue(scorer.last_score().capped_gap_open)
 
     def test_safe_default_on_error(self) -> None:
+        from system.engine_log import get_engine_alerts_snapshot, reset_engine_alerts_for_tests
+
+        reset_engine_alerts_for_tests()
         scorer = EnvironmentScorer(None)
         with patch.object(
             EnvironmentScorer, "_compute_factors", side_effect=RuntimeError("fail")
@@ -228,6 +231,10 @@ class EnvironmentScorerIntegrationTests(unittest.TestCase):
         self.assertEqual(total, SAFE_DEFAULT_SCORE)
         self.assertEqual(scorer.get_regime(), "Marginal")
         self.assertTrue(scorer.last_score().gate_passes)
+        alerts = get_engine_alerts_snapshot()
+        self.assertGreaterEqual(alerts["count"], 1)
+        self.assertEqual(alerts["type"], "env_scorer_fallback")
+        reset_engine_alerts_for_tests()
 
     def test_gate_pass_marginal_band(self) -> None:
         engine = _make_engine_with_bars()

@@ -890,7 +890,7 @@ class TradingLoop:
             "tick_age_s": round(tick_age_s, 1),
             "stream_status": stream_status,
             "rest_calls_min": 0,
-            "errors": {"count": 0, "type": None},
+            "errors": self._errors_snapshot(),
             "health": {
                 "badge": badge,
                 "badge_text": badge_text,
@@ -1006,6 +1006,14 @@ class TradingLoop:
             return int(round((wins / len(closed)) * 100))
         except Exception:
             return None
+
+    def _errors_snapshot(self) -> dict[str, Any]:
+        try:
+            from system.engine_log import get_engine_alerts_snapshot
+
+            return get_engine_alerts_snapshot()
+        except Exception:
+            return {"count": 0, "type": None}
 
     def _daily_pnl_signed_gbp(self, open_positions: list[Any] | None = None) -> float:
         journal = 0.0

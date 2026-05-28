@@ -16,7 +16,7 @@ from data.models import Quote
 from signals.indicators import session_name
 from signals.signal_engine import SignalEngine
 from system.config import Config
-from system.engine_log import log_engine
+from system.engine_log import log_engine, record_engine_warning
 
 GATE_PASS_MIN = 40.0
 SAFE_DEFAULT_SCORE = 50.0
@@ -378,6 +378,11 @@ class EnvironmentScorer:
             log_engine(
                 f"environment_scorer score failed for {market}: "
                 f"{type(e).__name__}: {e}"
+            )
+            record_engine_warning(
+                "env_scorer_fallback",
+                f"{market}: {type(e).__name__}: {e} — using safe default "
+                f"{SAFE_DEFAULT_SCORE:.0f}",
             )
             self._last = EnvironmentScore(
                 total=SAFE_DEFAULT_SCORE,
