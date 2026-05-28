@@ -28,9 +28,15 @@ class SignalResult:
 
 
 class SignalEngine:
-    def __init__(self, config: Config, memory: Any | None = None) -> None:
+    def __init__(
+        self,
+        config: Config,
+        memory: Any | None = None,
+        environment_scorer: Any | None = None,
+    ) -> None:
         self._cfg = config
         self.memory = memory
+        self._environment_scorer = environment_scorer
         self.quotes_by_market: dict[str, list[Quote]] = {}
         # REST OHLC seed — not trimmed by max_live_quotes (stream ticks evict live buffer only).
         self._ohlc_seed: dict[str, list[Quote]] = {}
@@ -202,9 +208,24 @@ class SignalEngine:
             if last is not None and hasattr(last, "get"):
                 rsi = float(last.get("rsi", 0) or 0)
                 atr = float(last.get("atr", 0) or 0)
+            fitness = 0.0
+            if self._environment_scorer is not None:
+                try:
+                    fitness = float(self._environment_scorer.last_score().total)
+                except Exception:
+                    pass
+            gate_blocked_at: str | None = None
+            if not would_have_fired:
+                if not snapshot:
+                    gate_blocked_at = "collecting"
+                elif float(adjusted_score) < float(self._cfg.signal_threshold):
+                    gate_blocked_at = "signal_confidence"
             row = {
                 "timestamp": datetime.now().isoformat(timespec="seconds"),
                 "market": market,
+                "confidence": round(float(adjusted_score), 2),
+                "fitness": round(fitness, 2),
+                "gate_blocked_at": gate_blocked_at,
                 "direction": direction,
                 "raw_score": round(float(raw_score), 2),
                 "adjusted_score": round(float(adjusted_score), 2),
