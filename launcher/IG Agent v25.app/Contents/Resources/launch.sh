@@ -34,19 +34,40 @@ open_dashboard() {
   fi
 }
 
-agent_running() {
-  local lock_pid=""
-  if [ -f "${LOCK_FILE}" ]; then
-    lock_pid=$(head -1 "${LOCK_FILE}" 2>/dev/null | awk '{print $1}' || true)
-    if [ -n "${lock_pid}" ] && kill -0 "${lock_pid}" 2>/dev/null; then
-      return 0
-    fi
-  fi
+dashboard_healthy() {
   if command -v curl >/dev/null 2>&1; then
     curl -sf --max-time 1 "http://127.0.0.1:8080/health" >/dev/null 2>&1
     return $?
   fi
   return 1
+}
+
+lock_holder_alive() {
+  local lock_pid=""
+  if [ ! -f "${LOCK_FILE}" ]; then
+    return 1
+  fi
+  lock_pid=$(head -1 "${LOCK_FILE}" 2>/dev/null | awk '{print $1}' || true)
+  if [ -n "${lock_pid}" ] && kill -0 "${lock_pid}" 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
+wait_for_dashboard() {
+  local mode="$1"
+  # Cold start can take ~30–40s (preflight + trading/stream hooks before /health).
+  for _ in $(seq 1 240); do
+    if dashboard_healthy; then
+      open_dashboard
+      log "dashboard ready (${mode})"
+      exit 0
+    fi
+    sleep 0.25
+  done
+  log "WARN: dashboard did not become healthy within 60s (${mode})"
+  notify_failure "IG Agent did not start. Check src/data/logs/launcher.log"
+  exit 1
 }
 
 if ! ROOT="$(find_project_root "$SCRIPT_DIR")"; then
@@ -61,7 +82,8 @@ fi
 LOG_DIR="${ROOT}/src/data/logs"
 LOG_FILE="${LOG_DIR}/launcher.log"
 mkdir -p "${LOG_DIR}"
-LOCK_FILE="${ROOT}/src/data/.ig_agent_v24.lock"
+LOCK_FILE="${ROOT}/src/data/.ig_agent_v25.lock"
+LEGACY_LOCK_FILE="${ROOT}/src/data/.ig_agent_v24.lock"
 
 log "=== IG Agent v25 launch ==="
 log "script_dir=${SCRIPT_DIR}"
@@ -78,10 +100,15 @@ if [ -f "${ROOT}/emergency_stop.lock" ]; then
   exit 1
 fi
 
-if agent_running; then
+if dashboard_healthy; then
   log "agent already running — opening dashboard"
   open_dashboard
   exit 0
+fi
+
+if lock_holder_alive; then
+  log "instance lock held — waiting for dashboard health"
+  wait_for_dashboard "existing instance"
 fi
 
 if ! cd "${ROOT}"; then
@@ -93,20 +120,26 @@ fi
 export IG_AGENT_ROOT="${ROOT}"
 export PYTHONPATH="${ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
-clear_stale_lock() {
+clear_stale_lock_file() {
+  local file="$1"
   local lock_pid=""
-  if [ ! -f "${LOCK_FILE}" ]; then
+  if [ ! -f "${file}" ]; then
     return 0
   fi
-  lock_pid=$(head -1 "${LOCK_FILE}" 2>/dev/null | awk '{print $1}' || true)
+  lock_pid=$(head -1 "${file}" 2>/dev/null | awk '{print $1}' || true)
   if [ -z "${lock_pid}" ]; then
-    rm -f "${LOCK_FILE}" && log "removed empty instance lock" || true
+    rm -f "${file}" && log "removed empty instance lock ${file}" || true
     return 0
   fi
   if kill -0 "${lock_pid}" 2>/dev/null; then
     return 0
   fi
-  rm -f "${LOCK_FILE}" && log "removed stale instance lock (pid=${lock_pid} not running)" || true
+  rm -f "${file}" && log "removed stale instance lock ${file} (pid=${lock_pid} not running)" || true
+}
+
+clear_stale_lock() {
+  clear_stale_lock_file "${LEGACY_LOCK_FILE}"
+  clear_stale_lock_file "${LOCK_FILE}"
 }
 
 clear_stale_lock
@@ -144,19 +177,10 @@ if [ ! -f "${ENTRY}" ]; then
 fi
 
 log "start ${PY} ${ENTRY}"
+# Launcher opens the dashboard once health is up; tell main.py not to open again.
+export IG_AGENT_FROM_LAUNCHER=1
 nohup "${PY}" "${ENTRY}" >>"${LOG_FILE}" 2>&1 &
 CHILD=$!
 log "started pid=${CHILD}"
 
-for _ in $(seq 1 60); do
-  if agent_running; then
-    open_dashboard
-    log "dashboard ready"
-    exit 0
-  fi
-  sleep 0.25
-done
-
-log "WARN: agent did not become ready within 15s"
-notify_failure "IG Agent did not start. Check src/data/logs/launcher.log"
-exit 1
+wait_for_dashboard "new instance"

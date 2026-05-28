@@ -9,7 +9,8 @@ import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from api import routes, ws
@@ -63,9 +64,40 @@ def create_app(*, watch_snapshot: bool = True) -> FastAPI:
 
     dist = _dashboard_dist()
     if dist.is_dir() and (dist / "index.html").is_file():
-        app.mount("/", StaticFiles(directory=str(dist), html=True), name="dashboard")
+        _mount_dashboard(app, dist)
 
     return app
+
+
+def _mount_dashboard(app: FastAPI, dist: Path) -> None:
+    """
+    Serve React build without mounting StaticFiles at '/'.
+
+    A root StaticFiles mount returns 405 for unknown POST /api/* paths on older
+    builds, which looks like an E2E bug when the agent was not restarted.
+    """
+    assets = dist / "assets"
+    if assets.is_dir():
+        app.mount(
+            "/assets",
+            StaticFiles(directory=str(assets)),
+            name="dashboard-assets",
+        )
+
+    index = dist / "index.html"
+
+    @app.get("/", include_in_schema=False)
+    async def dashboard_root() -> FileResponse:
+        return FileResponse(index)
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def dashboard_static_or_spa(full_path: str) -> FileResponse:
+        if full_path.startswith("api/") or full_path == "ws":
+            raise HTTPException(status_code=404, detail="Not Found")
+        candidate = dist / full_path
+        if candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(index)
 
 
 app = create_app()

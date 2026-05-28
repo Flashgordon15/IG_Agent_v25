@@ -49,12 +49,36 @@ class MainStartupTests(unittest.TestCase):
         self.assertEqual(code, main_mod.EXIT_INSTANCE)
 
     @patch("main.bootstrap_credentials")
+    @patch("main.acquire_instance_lock", return_value=(False, "duplicate Delete"))
+    @patch("main.validate_config", return_value=(True, []))
+    @patch("main.merge_credentials_for_validation")
+    @patch("main.load_raw_config_dict")
+    @patch("system.watchdog_banner.record_startup_failure")
+    def test_instance_lock_duplicate_does_not_record_watchdog_failure(
+        self,
+        watchdog_mock: MagicMock,
+        load_mock: MagicMock,
+        merge_mock: MagicMock,
+        _val_mock: MagicMock,
+        _lock_mock: MagicMock,
+        _boot_mock: MagicMock,
+    ) -> None:
+        load_mock.return_value = _full_config()
+        merge_mock.side_effect = lambda d: d
+        with patch("main.emergency_stop_lock_present", return_value=False):
+            code = main_mod.run_preflight()
+        self.assertEqual(code, main_mod.EXIT_INSTANCE)
+        watchdog_mock.assert_not_called()
+
+    @patch("main.bootstrap_credentials")
     @patch("main.acquire_instance_lock", return_value=(True, "ok"))
     @patch("main.validate_config", return_value=(True, []))
     @patch("main.merge_credentials_for_validation")
     @patch("main.load_raw_config_dict")
+    @patch("system.watchdog_banner.record_startup_success")
     def test_preflight_success(
         self,
+        watchdog_success_mock: MagicMock,
         load_mock: MagicMock,
         merge_mock: MagicMock,
         _val_mock: MagicMock,
@@ -67,6 +91,7 @@ class MainStartupTests(unittest.TestCase):
             code = main_mod.run_preflight()
         self.assertEqual(code, main_mod.EXIT_OK)
         boot_mock.assert_called_once()
+        watchdog_success_mock.assert_called_once()
 
     @patch("main.log_engine")
     def test_merge_credentials_adds_ig_keys(self, _log: MagicMock) -> None:

@@ -27,11 +27,12 @@ from system.config_loader import ConfigLoader
 from system.credentials_loader import try_load_credentials
 from system.ig_rest_session import ensure_shared_authenticated
 
-creds = try_load_credentials()
-if creds is None:
+status = try_load_credentials()
+if not status.ok or status.credentials is None:
     print("WARN: credentials missing — cannot close positions", file=sys.stderr)
     sys.exit(0)
 
+creds = status.credentials
 root = Path(os.environ["IG_AGENT_ROOT"])
 cfg = ConfigLoader(root / "config" / "config_v25.json").load_config()
 rest = ensure_shared_authenticated(creds)
@@ -90,7 +91,12 @@ _kill_project_pids() {
     cmd=$(ps -p "$pid" -o args= 2>/dev/null || true)
     [[ "$cmd" == *emergency_stop.sh* ]] && continue
     kill "$sig" "$pid" 2>/dev/null || true
-  done < <(pgrep -f "${ROOT}" 2>/dev/null || true)
+  done < <(
+    {
+      pgrep -f "${ROOT}/src/main.py" 2>/dev/null || true
+      pgrep -f "${ROOT}/launcher/IG Agent v25.app" 2>/dev/null || true
+    } | sort -u
+  )
 }
 _kill_project_pids TERM
 sleep 1

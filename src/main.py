@@ -43,6 +43,23 @@ _API_HOST = "127.0.0.1"
 _API_PORT = 8080
 
 
+def _is_benign_startup_lock_failure(message: str) -> bool:
+    """
+    Detect lock outcomes that should not count as watchdog startup failures.
+
+    These happen during normal duplicate-launch paths while an existing agent runs.
+    """
+    txt = str(message or "").strip().lower()
+    if not txt:
+        return False
+    benign_markers = (
+        "another ig agent instance is running",
+        "already running",
+        "duplicate",
+    )
+    return any(marker in txt for marker in benign_markers)
+
+
 def check_port_available(port: int) -> bool:
     """Return True if nothing is accepting TCP connections on 127.0.0.1:port."""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -130,13 +147,20 @@ def run_preflight() -> int:
     ok, msg = acquire_instance_lock()
     if not ok:
         try:
-            from system.watchdog_banner import record_startup_failure
+            if not _is_benign_startup_lock_failure(msg):
+                from system.watchdog_banner import record_startup_failure
 
-            record_startup_failure(msg)
+                record_startup_failure(msg)
         except Exception:
             pass
         print(f"IG Agent v25: {msg}", file=sys.stderr)
         return EXIT_INSTANCE
+    try:
+        from system.watchdog_banner import record_startup_success
+
+        record_startup_success()
+    except Exception:
+        pass
 
     holder = bootstrap_credentials()
     if holder.credentials:

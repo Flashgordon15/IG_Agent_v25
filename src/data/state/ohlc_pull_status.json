@@ -1,0 +1,11 @@
+{
+  "block_reason": "allowance",
+  "last_attempted_range": {
+    "from": "2025-07-14T01:40:00",
+    "to": "2025-07-15T01:40:00"
+  },
+  "last_run_time": "2026-05-28T07:31:08",
+  "last_success_timestamp": "2025-07-14T01:35:00",
+  "next_retry_time": "2026-05-28T08:16:08",
+  "status": "blocked"
+}

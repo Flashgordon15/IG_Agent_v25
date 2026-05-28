@@ -236,6 +236,21 @@ class EnvironmentScorerIntegrationTests(unittest.TestCase):
         self.assertEqual(alerts["type"], "env_scorer_fallback")
         reset_engine_alerts_for_tests()
 
+    def test_insufficient_bars_warmup_does_not_emit_engine_warning(self) -> None:
+        from system.engine_log import get_engine_alerts_snapshot, reset_engine_alerts_for_tests
+
+        reset_engine_alerts_for_tests()
+        scorer = EnvironmentScorer(None)
+        with patch.object(
+            EnvironmentScorer, "_compute_factors", side_effect=ValueError("insufficient bars")
+        ):
+            total_1 = scorer.score("Japan 225")
+            total_2 = scorer.score("Japan 225")
+        self.assertEqual(total_1, SAFE_DEFAULT_SCORE)
+        self.assertEqual(total_2, SAFE_DEFAULT_SCORE)
+        alerts = get_engine_alerts_snapshot()
+        self.assertEqual(alerts["count"], 0)
+
     def test_gate_pass_marginal_band(self) -> None:
         engine = _make_engine_with_bars()
         scorer = EnvironmentScorer(engine, normal_spread=7.0)

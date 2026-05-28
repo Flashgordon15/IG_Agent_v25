@@ -13,17 +13,20 @@ _BANNER_PATH = logs_dir() / "watchdog_failed.txt"
 _THRESHOLD = 3
 
 
+def _read_fail_count() -> int:
+    if not _FAIL_COUNT_PATH.is_file():
+        return 0
+    try:
+        data = json.loads(_FAIL_COUNT_PATH.read_text(encoding="utf-8"))
+        return max(0, int(data.get("count", 0)))
+    except Exception:
+        return 0
+
+
 def record_startup_failure(reason: str) -> None:
     """Increment failure count; write banner file on 3rd failure."""
     _FAIL_COUNT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    count = 0
-    if _FAIL_COUNT_PATH.is_file():
-        try:
-            data = json.loads(_FAIL_COUNT_PATH.read_text(encoding="utf-8"))
-            count = int(data.get("count", 0))
-        except Exception:
-            count = 0
-    count += 1
+    count = _read_fail_count() + 1
     _FAIL_COUNT_PATH.write_text(
         json.dumps({"count": count, "last_reason": str(reason)[:200]}),
         encoding="utf-8",
@@ -38,6 +41,19 @@ def record_startup_failure(reason: str) -> None:
         log_engine(
             f"WATCHDOG FAILED — wrote {_BANNER_PATH.name} after {count} failures"
         )
+
+
+def record_startup_success() -> None:
+    """
+    Reset consecutive failure state after a successful startup.
+
+    Keeps watchdog banner behavior tied to *consecutive* startup failures.
+    """
+    if _read_fail_count() <= 0 and not _BANNER_PATH.is_file():
+        return
+    _FAIL_COUNT_PATH.unlink(missing_ok=True)
+    _BANNER_PATH.unlink(missing_ok=True)
+    log_engine("WATCHDOG reset — startup succeeded")
 
 
 def banner_active() -> bool:

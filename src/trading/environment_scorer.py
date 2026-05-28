@@ -136,6 +136,7 @@ class EnvironmentScorer:
         self._sentiment_cache: dict[str, float] = {}
         self._sentiment_detail: dict[str, dict[str, Any]] = {}
         self._primary_market: str = ""
+        self._fallback_warned_for_market: set[str] = set()
 
     def _quote_df(self, market: str, quote_df: pd.DataFrame | None = None) -> pd.DataFrame:
         """Candle source of truth — SignalEngine seed + live quotes (Option A override)."""
@@ -321,10 +322,12 @@ class EnvironmentScorer:
         quote: Quote | None = None,
         quote_df: pd.DataFrame | None = None,
     ) -> float:
+        market_key = str(self._primary_market or market or "")
         try:
             factors, meta = self._compute_factors(
                 market, quote=quote, quote_df=quote_df
             )
+            self._fallback_warned_for_market.discard(market_key)
             total = sum(factors.values())
             sentiment = self.fetch_sentiment(self._epic or market)
             sent_detail = self.get_sentiment_factor(market)
@@ -375,15 +378,26 @@ class EnvironmentScorer:
             )
             return total
         except Exception as e:
-            log_engine(
-                f"environment_scorer score failed for {market}: "
-                f"{type(e).__name__}: {e}"
-            )
-            record_engine_warning(
-                "env_scorer_fallback",
-                f"{market}: {type(e).__name__}: {e} — using safe default "
-                f"{SAFE_DEFAULT_SCORE:.0f}",
-            )
+            err = str(e)
+            is_warmup = isinstance(e, ValueError) and "insufficient bars" in err.lower()
+            if is_warmup:
+                if market_key not in self._fallback_warned_for_market:
+                    log_engine(
+                        f"environment_scorer warmup fallback for {market}: "
+                        f"{type(e).__name__}: {e}"
+                    )
+                    self._fallback_warned_for_market.add(market_key)
+            else:
+                log_engine(
+                    f"environment_scorer score failed for {market}: "
+                    f"{type(e).__name__}: {e}"
+                )
+                record_engine_warning(
+                    "env_scorer_fallback",
+                    f"{market}: {type(e).__name__}: {e} — using safe default "
+                    f"{SAFE_DEFAULT_SCORE:.0f}",
+                )
+                self._fallback_warned_for_market.add(market_key)
             self._last = EnvironmentScore(
                 total=SAFE_DEFAULT_SCORE,
                 regime=regime_label(SAFE_DEFAULT_SCORE),

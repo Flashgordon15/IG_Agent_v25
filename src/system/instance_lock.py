@@ -11,8 +11,25 @@ from pathlib import Path
 from system.engine_log import log_engine
 from system.paths import data_dir
 
-_LOCK_PATH = data_dir() / ".ig_agent_v24.lock"
+_LOCK_PATH = data_dir() / ".ig_agent_v25.lock"
+_LEGACY_LOCK_PATH = data_dir() / ".ig_agent_v24.lock"
 _acquired = False
+
+
+def _clear_stale_lock_file(path: Path, pid: int) -> None:
+    if not path.exists():
+        return
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+        other = int(raw.split()[0]) if raw else 0
+    except (ValueError, OSError):
+        other = 0
+    if other and other != pid and _pid_alive(other):
+        return
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _pid_alive(pid: int) -> bool:
@@ -39,6 +56,7 @@ def acquire_instance_lock() -> tuple[bool, str]:
         return True, "multi-instance override"
 
     pid = os.getpid()
+    _clear_stale_lock_file(_LEGACY_LOCK_PATH, pid)
     if _LOCK_PATH.exists():
         try:
             raw = _LOCK_PATH.read_text(encoding="utf-8").strip()
@@ -47,10 +65,7 @@ def acquire_instance_lock() -> tuple[bool, str]:
             other = 0
         if other and other != pid and _pid_alive(other):
             return False, f"Another IG Agent instance is running (pid {other}). Quit it first."
-        try:
-            _LOCK_PATH.unlink(missing_ok=True)
-        except OSError:
-            pass
+        _clear_stale_lock_file(_LOCK_PATH, pid)
 
     try:
         _LOCK_PATH.write_text(f"{pid}\n", encoding="utf-8")

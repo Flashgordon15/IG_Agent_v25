@@ -62,7 +62,8 @@ def dismiss_splash() -> dict[str, Any]:
     return data
 
 
-def get_closed_trades(limit: int = 50) -> list[dict[str, Any]]:
+def get_closed_trades(limit: int = 10) -> list[dict[str, Any]]:
+    """Last *limit* closed trades by close time (no session/today cutoff)."""
     try:
         from system.config_loader import ConfigLoader
         from system.paths import config_dir
@@ -70,12 +71,16 @@ def get_closed_trades(limit: int = 50) -> list[dict[str, Any]]:
 
         cfg = ConfigLoader(config_dir() / "config_v25.json").load_config()
         store = LearningStore(str(cfg.learning_db))
-        rows = store.recent_closed_trades(limit=limit)
+        want = max(1, int(limit))
+        # Over-fetch so SIM/soak exclusions still yield up to *want* rows.
+        rows = store.recent_closed_trades(limit=max(want * 4, want))
         out: list[dict[str, Any]] = []
         for row in rows:
             if is_excluded_display_row(row):
                 continue
             out.append(_format_trade_row(row))
+            if len(out) >= want:
+                break
         return out
     except Exception:
         return []
@@ -181,27 +186,55 @@ def get_system_info() -> dict[str, Any]:
     }
 
 
+def run_e2e_execution_check() -> dict[str, Any]:
+    """Mock execution pipeline + IG DEMO routing validation (no order placed)."""
+    from system.e2e_execution_check import run_e2e_execution_check as _run
+
+    return _run(include_routing=True)
+
+
 def run_system_tests() -> dict[str, Any]:
+    """Run pytest in-process Python (same interpreter as the agent)."""
+    import sys
+
     root = project_root()
     try:
         proc = subprocess.run(
-            ["python3", "-m", "pytest", "tests/", "-q", "--tb=no"],
+            [sys.executable, "-m", "pytest", "tests/", "-q", "--tb=line"],
             cwd=str(root),
             capture_output=True,
             text=True,
             timeout=180,
-            env={**dict(__import__("os").environ), "PYTHONPATH": str(root / "src")},
+            env={
+                **dict(__import__("os").environ),
+                "PYTHONPATH": str(root / "src"),
+                "IG_AGENT_PYTEST": "1",
+            },
         )
-        out = proc.stdout or ""
+        out = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
         m = re.search(r"(\d+) passed", out)
         passed = int(m.group(1)) if m else 0
         failed_m = re.search(r"(\d+) failed", out)
         failed = int(failed_m.group(1)) if failed_m else 0
-        return {
-            "ok": proc.returncode == 0,
+        err_m = re.search(r"(\d+) error", out)
+        errors = int(err_m.group(1)) if err_m else 0
+        summary = out.strip().splitlines()[-1] if out.strip() else ""
+        if not summary and proc.returncode != 0:
+            summary = (proc.stderr or proc.stdout or "pytest exited non-zero").strip()[:240]
+        ok = proc.returncode == 0 and failed == 0 and errors == 0
+        result: dict[str, Any] = {
+            "ok": ok,
             "passed": passed,
             "failed": failed,
-            "summary": out.strip().splitlines()[-1] if out.strip() else "",
+            "errors": errors,
+            "summary": summary,
         }
+        if not ok and failed == 0 and errors == 0 and not summary:
+            result["error"] = (
+                "pytest did not run (install pytest in this Python or check logs)"
+            )
+        elif not ok and (proc.stderr or "").strip():
+            result["error"] = proc.stderr.strip().splitlines()[-1][:240]
+        return result
     except Exception as e:
-        return {"ok": False, "error": str(e), "passed": 0, "failed": 0}
+        return {"ok": False, "error": str(e), "passed": 0, "failed": 0, "errors": 0}

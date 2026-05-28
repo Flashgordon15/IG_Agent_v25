@@ -33,13 +33,24 @@ class EngineAlertsTests(unittest.TestCase):
         reset_engine_alerts_for_tests()
         scorer = EnvironmentScorer(None)
         with patch.object(
-            EnvironmentScorer, "_compute_factors", side_effect=ValueError("insufficient bars")
+            EnvironmentScorer, "_compute_factors", side_effect=RuntimeError("boom")
         ):
             total = scorer.score("Japan 225")
         self.assertEqual(total, SAFE_DEFAULT_SCORE)
         snap = get_engine_alerts_snapshot()
         self.assertGreaterEqual(snap["count"], 1)
         self.assertEqual(snap["type"], "env_scorer_fallback")
+
+    def test_env_scorer_insufficient_bars_warmup_not_counted(self) -> None:
+        reset_engine_alerts_for_tests()
+        scorer = EnvironmentScorer(None)
+        with patch.object(
+            EnvironmentScorer, "_compute_factors", side_effect=ValueError("insufficient bars")
+        ):
+            total = scorer.score("Japan 225")
+        self.assertEqual(total, SAFE_DEFAULT_SCORE)
+        snap = get_engine_alerts_snapshot()
+        self.assertEqual(snap["count"], 0)
 
 
 if __name__ == "__main__":
