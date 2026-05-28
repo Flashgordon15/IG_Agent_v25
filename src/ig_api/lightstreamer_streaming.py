@@ -65,6 +65,46 @@ class IGLightstreamerStreamingClient:
     def connecting_grace_seconds(self) -> float:
         return _LS_CONNECTING_GRACE_SEC
 
+    def _handle_blank_tick(self, epic: str) -> None:
+        from system.market_data_hub import get_market_data_hub
+
+        get_market_data_hub().enter_maintenance(epic)
+        now = time.time()
+        if now - self._last_blank_tick_log_ts >= _BLANK_TICK_LOG_INTERVAL_SEC:
+            self._last_blank_tick_log_ts = now
+            remaining = max(0.0, self._first_valid_tick_deadline_ts - now)
+            log_engine(
+                f"LS blank BID/OFFER — maintenance epic={epic} "
+                f"(recovery in {remaining:.0f}s if no valid tick)"
+            )
+        self._maybe_schedule_blank_tick_recovery(epic)
+
+    def _maybe_schedule_blank_tick_recovery(self, epic: str) -> None:
+        if self._using_fallback or not self._running or self._first_tick_received:
+            return
+        deadline = self._first_valid_tick_deadline_ts
+        if deadline <= 0 or time.time() < deadline:
+            return
+        if self._blank_tick_resubscribe_scheduled:
+            return
+        self._blank_tick_resubscribe_scheduled = True
+        log_engine(
+            f"LS no valid tick within {_LS_BLANK_TICK_RECONNECT_SEC}s — "
+            f"starting blank-tick recovery epic={epic}"
+        )
+        self._schedule_blank_tick_recovery(epic)
+
+    def _arm_blank_tick_deadline_timer(self, epic: str) -> None:
+        wait = _LS_BLANK_TICK_RECONNECT_SEC
+        outer = self
+
+        def _fire() -> None:
+            if not outer._running or outer._using_fallback:
+                return
+            outer._maybe_schedule_blank_tick_recovery(epic)
+
+        threading.Timer(wait, _fire).start()
+
     def _mark_connected_on_first_tick(self, bid: float, offer: float, epic: str) -> None:
         if self._first_tick_received:
             return
@@ -243,6 +283,7 @@ class IGLightstreamerStreamingClient:
                     ls_client._first_valid_tick_deadline_ts = (
                         time.time() + _LS_BLANK_TICK_RECONNECT_SEC
                     )
+                    ls_client._arm_blank_tick_deadline_timer(epic_name)
 
                 def onUnsubscription(self) -> None:
                     log_engine(f"LS unsubscribed: item={item_name}")
@@ -263,9 +304,7 @@ class IGLightstreamerStreamingClient:
                         bid_text = str(raw_bid or "").strip()
                         offer_text = str(raw_offer or "").strip()
                         if not bid_text or not offer_text:
-                            from system.market_data_hub import get_market_data_hub
-
-                            get_market_data_hub().enter_maintenance(epic_name)
+                            ls_client._handle_blank_tick(epic_name)
                             return
                         log_engine(
                             f"LS raw tick received: item={item} values={field_values}"
@@ -275,9 +314,7 @@ class IGLightstreamerStreamingClient:
                     except (TypeError, ValueError):
                         return
                     if bid <= 0 or offer <= 0:
-                        from system.market_data_hub import get_market_data_hub
-
-                        get_market_data_hub().enter_maintenance(epic_name)
+                        ls_client._handle_blank_tick(epic_name)
                         return
                     from system.market_data_hub import get_market_data_hub
 
@@ -309,6 +346,7 @@ class IGLightstreamerStreamingClient:
             try:
                 self._connect_attempt_ts = time.time()
                 self._first_tick_received = False
+                self._blank_tick_resubscribe_scheduled = False
                 self._teardown_lightstreamer()
                 self._connect_lightstreamer()
                 log_engine(f"LS blank-tick recovery complete — awaiting first tick epic={epic}")

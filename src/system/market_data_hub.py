@@ -173,7 +173,26 @@ class MarketDataHub:
         max_age: if set, return cache without fetch when younger than this.
         """
         if self.is_in_maintenance(epic):
-            return self.get_snapshot(epic)
+            cached = self.get_snapshot(epic)
+            rescue_age = 90.0
+            if cached and cached.bid > 0 and cached.age_seconds() <= rescue_age:
+                return cached
+            try:
+                from system.market_watch.japan225_session import (
+                    is_japan225_epic,
+                    is_scheduled_daily_maintenance,
+                )
+
+                if is_japan225_epic(epic) and not is_scheduled_daily_maintenance(epic):
+                    age_s = cached.age_seconds() if cached else None
+                    log_engine(
+                        f"Hub maintenance rescue: attempting REST fetch for {epic} "
+                        f"(quote age={age_s}s)"
+                    )
+                else:
+                    return cached
+            except Exception:
+                return cached
 
         interval = self._fetch_interval_sec if min_interval is None else min_interval
         with self._lock:

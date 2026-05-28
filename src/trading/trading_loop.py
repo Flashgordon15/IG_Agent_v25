@@ -917,6 +917,15 @@ class TradingLoop:
 
         quote_ts = quote.time if isinstance(quote.time, datetime) else self._clock()
         tick_age_s = max(0.0, (self._clock() - quote_ts).total_seconds())
+        if hub_maint or session_maint:
+            try:
+                from system.market_data_hub import get_market_data_hub
+
+                snap = get_market_data_hub().get_snapshot(self._epic)
+                if snap and snap.bid > 0:
+                    tick_age_s = max(tick_age_s, snap.age_seconds())
+            except Exception:
+                pass
 
         stream_status = "DISCONNECTED"
         if hub_maint or session_maint:
