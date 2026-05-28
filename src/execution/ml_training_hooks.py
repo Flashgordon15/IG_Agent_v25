@@ -21,7 +21,7 @@ def configure_ml_training(
     environment_scorer: Any | None = None,
 ) -> None:
     global _ml_store, _points_engine, _environment_scorer
-    _ml_store = ml_store or MLTrainingStore()
+    _ml_store = ml_store
     _points_engine = points_engine
     _environment_scorer = environment_scorer
 

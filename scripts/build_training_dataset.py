@@ -1,96 +1,120 @@
 #!/usr/bin/env python3
-"""Merge replay + ML training JSONL into training_dataset.csv (weight 1× / 3×)."""
+"""
+Merge replay_results.jsonl (weight 1.0) and ml_training_store.jsonl (weight 3.0)
+into training_dataset.csv.
+
+  PYTHONPATH=src python3 scripts/build_training_dataset.py
+"""
 
 from __future__ import annotations
 
 import csv
 import json
 import sys
-from collections import Counter
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from system.engine_log import log_engine
 from system.paths import data_dir
 
 REPLAY_PATH = data_dir() / "replay_results.jsonl"
 ML_PATH = data_dir() / "ml_training_store.jsonl"
 OUT_PATH = data_dir() / "training_dataset.csv"
 
-FEATURE_KEYS = (
-    "confidence",
-    "rsi",
-    "atr",
-    "spread",
-    "fitness_score",
-    "session_window",
-    "volume_regime",
-    "trend_bias",
-)
+REPLAY_WEIGHT = 1.0
+ML_WEIGHT = 3.0
 
 
-def _load_jsonl(path: Path) -> list[dict]:
+def _warn(message: str) -> None:
+    try:
+        log_engine(message)
+    except Exception:
+        print(message, file=sys.stderr)
+
+
+def _stable_key(row: dict[str, Any]) -> str:
+    parts = [
+        str(row.get("timestamp") or row.get("entry_time") or ""),
+        str(row.get("deal_id") or ""),
+        str(row.get("setup_key") or row.get("setup_name") or ""),
+        str(row.get("direction") or ""),
+    ]
+    key = "|".join(parts)
+    if key.replace("|", "").strip():
+        return key
+    return json.dumps(row, sort_keys=True, default=str)
+
+
+def _load_jsonl(path: Path, *, label: str) -> list[dict[str, Any]]:
     if not path.is_file():
+        _warn(f"build_training_dataset: missing {label} at {path}")
         return []
-    rows: list[dict] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rows.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
+    rows: list[dict[str, Any]] = []
+    with path.open(encoding="utf-8") as fh:
+        for line_no, line in enumerate(fh, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                _warn(
+                    f"build_training_dataset: skip invalid JSON in {path.name} "
+                    f"line {line_no}"
+                )
+                continue
+            if isinstance(obj, dict):
+                rows.append(obj)
     return rows
 
 
-def _row_features(row: dict) -> dict:
-    out: dict[str, float | str] = {}
-    for k in FEATURE_KEYS:
-        v = row.get(k)
-        if v is None:
-            out[k] = 0.0 if k != "session_window" else "unknown"
-        elif isinstance(v, (int, float)):
-            out[k] = float(v)
-        else:
-            out[k] = str(v)
-    label = row.get("label") or row.get("result") or row.get("fwd_6_win")
-    if label in (True, 1, "1", "WIN", "win"):
-        out["label"] = 1
-    elif label in (False, 0, "0", "LOSS", "loss"):
-        out["label"] = 0
-    else:
-        try:
-            out["label"] = int(bool(label))
-        except (TypeError, ValueError):
-            out["label"] = 0
+def _cell_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float, str)):
+        return str(value)
+    return json.dumps(value, sort_keys=True, default=str)
+
+
+def _flatten_row(row: dict[str, Any], sample_weight: float) -> dict[str, str]:
+    out = {k: _cell_value(v) for k, v in row.items()}
+    out["sample_weight"] = _cell_value(sample_weight)
     return out
 
 
 def main() -> int:
-    merged: list[dict] = []
-    for row in _load_jsonl(REPLAY_PATH):
-        merged.append(_row_features(row))
-    for row in _load_jsonl(ML_PATH):
-        feat = _row_features(row)
-        merged.extend([feat] * 3)
+    replay_raw = _load_jsonl(REPLAY_PATH, label="replay_results.jsonl")
+    ml_raw = _load_jsonl(ML_PATH, label="ml_training_store.jsonl")
 
-    if not merged:
-        print("No rows — create replay_results.jsonl or ml_training_store.jsonl first")
-        return 1
+    replay_sorted = sorted(replay_raw, key=_stable_key)
+    ml_sorted = sorted(ml_raw, key=_stable_key)
 
-    fieldnames = list(FEATURE_KEYS) + ["label"]
+    replay_rows = [_flatten_row(r, REPLAY_WEIGHT) for r in replay_sorted]
+    ml_rows = [_flatten_row(r, ML_WEIGHT) for r in ml_sorted]
+    all_rows = replay_rows + ml_rows
+
+    all_keys: set[str] = set()
+    for row in all_rows:
+        all_keys.update(row)
+    data_fields = sorted(k for k in all_keys if k != "sample_weight")
+    fieldnames = data_fields + (["sample_weight"] if "sample_weight" in all_keys else [])
+
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(OUT_PATH, "w", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames)
-        w.writeheader()
-        for row in merged:
-            w.writerow({k: row.get(k, 0) for k in fieldnames})
+    with OUT_PATH.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        for row in all_rows:
+            writer.writerow({k: row.get(k, "") for k in fieldnames})
 
-    labels = Counter(int(r.get("label", 0)) for r in merged)
-    print(f"{len(merged)} rows, {len(FEATURE_KEYS)} features, label distribution: {dict(labels)}")
-    print(f"Wrote {OUT_PATH}")
+    replay_n = len(replay_rows)
+    ml_n = len(ml_rows)
+    total = len(all_rows)
+    print(f"Replay rows: {replay_n} | Training rows: {ml_n} | Total: {total}")
     return 0
 
 

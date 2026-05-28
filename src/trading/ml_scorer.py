@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import pickle
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +83,32 @@ class MLScorer:
         except Exception as e:
             log_engine(f"ml_scorer predict failed: {type(e).__name__}: {e}")
             return 0.5
+
+    def score(
+        self,
+        features: dict[str, float] | None = None,
+        *,
+        use_ml_signal: bool = False,
+        timeout_s: float = 0.05,
+    ) -> float:
+        """Return ML probability in [0, 1]; 0 when disabled, untrained, timed out, or on error."""
+        try:
+            if not use_ml_signal:
+                return 0.0
+            if self._model is None:
+                return 0.0
+            feats = dict(features or {})
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                fut = pool.submit(self.predict, feats)
+                try:
+                    prob = float(fut.result(timeout=timeout_s))
+                except FuturesTimeoutError:
+                    log_engine(f"ml_scorer score timed out after {timeout_s}s")
+                    return 0.0
+            return max(0.0, min(1.0, prob))
+        except Exception as e:
+            log_engine(f"ml_scorer score failed: {type(e).__name__}: {e}")
+            return 0.0
 
     def save(self) -> None:
         if self._model is None:
