@@ -468,7 +468,8 @@ class LearningStore:
                         (row["id"],),
                     ).fetchone()
                     if detail and not is_excluded_display_row(dict(detail)):
-                        from trading.points_engine import PointsEngine
+                        from execution.ml_training_hooks import get_points_engine
+                        from system.engine_log import log_engine
 
                         conf = float(
                             detail["adjusted_confidence"]
@@ -476,9 +477,16 @@ class LearningStore:
                             or 0
                         )
                         pts = float(detail["pnl_points"] or 0)
-                        PointsEngine(self).record_trade(
-                            str(result), conf, pts, pnl_gbp=float(ig_pnl)
-                        )
+                        pe = get_points_engine()
+                        if pe is not None:
+                            pe.record_trade(
+                                str(result), conf, pts, pnl_gbp=float(ig_pnl)
+                            )
+                        else:
+                            log_engine(
+                                "points_engine full close: live instance not available "
+                                "(configure_ml_training not yet called)"
+                            )
                 except Exception as e:
                     from system.engine_log import log_engine
 

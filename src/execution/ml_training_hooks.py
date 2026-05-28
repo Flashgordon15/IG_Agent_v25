@@ -14,6 +14,12 @@ _points_engine: Any | None = None
 _environment_scorer: Any | None = None
 
 
+def get_points_engine():
+    """Return the live PointsEngine instance wired at bootstrap.
+    Returns None if configure_ml_training has not been called yet."""
+    return _points_engine
+
+
 def configure_ml_training(
     *,
     ml_store: MLTrainingStore | None = None,
