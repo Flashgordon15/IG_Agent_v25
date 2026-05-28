@@ -165,6 +165,10 @@ class PointsEngine:
             self._apply_payload(data)
             self._sync_stop_latch()
             self._last_nominal = _nominal_state(self._cumulative)
+            log_engine(
+                f"points_engine: loaded from state — cumulative={self._cumulative:.1f} "
+                f"state={self.get_state()}"
+            )
         except Exception as e:
             log_engine(f"points_engine load failed: {type(e).__name__}: {e}")
 

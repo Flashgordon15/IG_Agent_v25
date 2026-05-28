@@ -217,7 +217,9 @@ class EnvironmentScorer:
     def on_ohlc_bootstrapped(self, market: str) -> None:
         """After OHLC seed lands in SignalEngine.quote_df — refresh cold-start baseline."""
         self._primary_market = str(market or self._primary_market or "")
-        self._bars_at_session_open[market] = self._complete_bar_count(market)
+        bars = self._complete_bar_count(market)
+        self._bars_at_session_open[market] = bars
+        log_engine(f"environment_scorer: bootstrapped from {bars} bars")
 
     def register_gap_open(self, market: str, *, at: datetime | None = None) -> None:
         """Apply 15-minute score cap after gap > 1.0× ATR (caller detects gap)."""

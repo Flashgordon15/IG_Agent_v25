@@ -30,6 +30,10 @@ def configure_ml_training(
     _ml_store = ml_store
     _points_engine = points_engine
     _environment_scorer = environment_scorer
+    log_engine(
+        f"ml_training: configured — "
+        f"points_engine={'wired' if points_engine is not None else 'None'}"
+    )
 
 
 def _snapshot_field(snapshot: dict[str, Any], key: str, default: Any = 0.0) -> Any:

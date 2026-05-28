@@ -270,6 +270,7 @@ class AgentRuntime:
 
             import uvicorn
 
+            log_engine(f"API server: started on port {_API_PORT}")
             uvicorn.run(app, host=_API_HOST, port=_API_PORT, log_level="info")
             return EXIT_OK
         finally:
