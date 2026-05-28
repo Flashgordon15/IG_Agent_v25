@@ -90,7 +90,9 @@ class DashboardApiTests(unittest.TestCase):
         with patch("api.dashboard_data.get_closed_trades", return_value=[]):
             r = self.client.get("/api/trades")
             self.assertEqual(r.status_code, 200)
-            self.assertIn("trades", r.json())
+            body = r.json()
+            self.assertIn("active", body)
+            self.assertIn("closed", body)
         with patch("api.dashboard_data.get_signal_log", return_value=[]):
             r = self.client.get("/api/signals")
             self.assertEqual(r.status_code, 200)

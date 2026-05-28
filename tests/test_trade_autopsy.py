@@ -86,6 +86,7 @@ class TradeAutopsyTests(unittest.TestCase):
         )
         elapsed_ms = (time.monotonic() - started) * 1000.0
         self.assertLess(elapsed_ms, 50.0)
+        time.sleep(0.2)
 
 
 if __name__ == "__main__":

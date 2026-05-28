@@ -1,0 +1,589 @@
+import { useEffect, useRef, useState } from "react";
+
+// ---------------------------------------------------------------------------
+// Helpers — gate / block reason (aligned with LiveTab)
+// ---------------------------------------------------------------------------
+
+const GATE_ORDER = [
+  "session_open",
+  "cold_start_gap",
+  "environment_fitness",
+  "points_state",
+  "risk_validation",
+  "signal_confidence",
+  "execution",
+];
+
+function orderGates(gates) {
+  const byName = Object.fromEntries((gates || []).map((g) => [g.name, g]));
+  return GATE_ORDER.map(
+    (name) =>
+      byName[name] || {
+        name,
+        pass: false,
+        detail: "—",
+        value: null,
+      },
+  );
+}
+
+function shortenBlockReason(reason) {
+  if (!reason) return "";
+  const rsi = reason.match(/RSI[^:]*:\s*([\d.]+)\s*>\s*max\s*([\d.]+)/i);
+  if (rsi) return `RSI ${rsi[1]} above max ${rsi[2]}`;
+  if (reason.length > 72) return `${reason.slice(0, 69)}…`;
+  return reason;
+}
+
+function getBlockingReason(health, signal) {
+  const ordered = orderGates(health?.gates);
+  for (const g of ordered) {
+    if (g.pass) continue;
+    if (g.name === "signal_confidence" && g.value?.block_reason) {
+      return shortenBlockReason(String(g.value.block_reason));
+    }
+    if (g.detail) {
+      return String(g.detail)
+        .replace(/^WAIT\s*[—-]\s*/i, "")
+        .trim();
+    }
+  }
+  if (signal?.block_reason) return shortenBlockReason(signal.block_reason);
+  const summary = health?.summary || "";
+  const dash = summary.indexOf("—");
+  if (dash >= 0) {
+    const tail = summary.slice(dash + 1).trim();
+    if (tail) return tail.replace(/^[^:]+:\s*/, "");
+  }
+  return null;
+}
+
+function firstFailingGate(health) {
+  return orderGates(health?.gates).find((g) => !g.pass) ?? null;
+}
+
+function resolveGateBlockedReason(state) {
+  if (state?.gate_blocked_reason) return state.gate_blocked_reason;
+  const health = state?.health || {};
+  const signal = state?.signal || {};
+  return getBlockingReason(health, signal);
+}
+
+function resolveGateBlockedAt(state) {
+  if (state?.gate_blocked_at) return state.gate_blocked_at;
+  const failing = firstFailingGate(state?.health);
+  if (failing?.blocked_at) return failing.blocked_at;
+  const reason = resolveGateBlockedReason(state);
+  if (reason && state?.ts) return state.ts;
+  return null;
+}
+
+function resolveAgentState(state) {
+  return state?.agent_state ?? state?.points?.state ?? "—";
+}
+
+function agentStateMeta(stateName) {
+  const s = String(stateName ?? "").toUpperCase();
+  switch (s) {
+    case "HEALTHY":
+      return {
+        label: "HEALTHY",
+        banner: "border-success/40 bg-success/10 text-success",
+        description: "Full size bands available per confidence.",
+      };
+    case "CAUTION":
+      return {
+        label: "CAUTION",
+        banner: "border-warning/40 bg-warning/10 text-warning",
+        description: "Reduced size bands — need cumulative above +10 pts for HEALTHY.",
+      };
+    case "WARNING":
+      return {
+        label: "WARNING",
+        banner: "border-warning/40 bg-warning/10 text-warning",
+        description: "Minimal size only at ≥92% confidence.",
+      };
+    case "DANGER":
+      return {
+        label: "DANGER",
+        banner: "border-danger/40 bg-danger/10 text-danger",
+        description: "Elevated risk — trading heavily restricted.",
+      };
+    case "STOP":
+      return {
+        label: "STOP",
+        banner: "border-danger/40 bg-danger/10 text-danger animate-pulse",
+        description: "Trading halted — manual review required.",
+      };
+    default:
+      return {
+        label: s || "—",
+        banner: "border-border bg-card text-muted",
+        description: "Agent state unknown — awaiting data.",
+      };
+  }
+}
+
+function resolveSignalConfidence(state) {
+  const raw =
+    state?.signal?.confidence ??
+    state?.signal_strength ??
+    state?.health?.gates?.find((g) => g.name === "signal_confidence")?.value
+      ?.confidence;
+  if (raw == null || Number.isNaN(Number(raw))) return null;
+  return Math.min(99, Math.max(0, Math.round(Number(raw))));
+}
+
+function resolveMlProbability(state) {
+  const sigGate = (state?.health?.gates || []).find(
+    (g) => g.name === "signal_confidence",
+  );
+  const fromGate = sigGate?.value?.ml_probability;
+  if (fromGate != null && !Number.isNaN(Number(fromGate))) return Number(fromGate);
+
+  const fromSignal = state?.signal?.ml_probability;
+  if (fromSignal != null && !Number.isNaN(Number(fromSignal))) return Number(fromSignal);
+
+  const apiMl = state?.ml_confidence;
+  if (apiMl != null && !Number.isNaN(Number(apiMl)) && Number(apiMl) <= 1) {
+    return Number(apiMl);
+  }
+
+  return null;
+}
+
+function resolvePositions(state) {
+  return state?.positions ?? state?.active_trades ?? [];
+}
+
+function resolveMlDecisionLog(state) {
+  const log = state?.ml_decision_log;
+  return Array.isArray(log) ? log.slice(-50).reverse() : [];
+}
+
+function fmtPrice(v) {
+  if (v == null || Number.isNaN(Number(v))) return "—";
+  return Number(v).toFixed(1);
+}
+
+function fmtGbp(v) {
+  if (v == null || Number.isNaN(Number(v))) return "—";
+  const n = Number(v);
+  const sign = n >= 0 ? "+" : "";
+  return `${sign}£${n.toFixed(2)}`;
+}
+
+function fmtTs(ts) {
+  if (!ts) return "—";
+  try {
+    return new Date(ts).toLocaleString("en-GB", {
+      dateStyle: "short",
+      timeStyle: "medium",
+    });
+  } catch {
+    return String(ts);
+  }
+}
+
+function fmtLogTs(entry) {
+  const ts = entry?.ts ?? entry?.timestamp ?? entry?.time;
+  if (!ts) return "—";
+  try {
+    return new Date(ts).toLocaleTimeString("en-GB", {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+  } catch {
+    return String(ts);
+  }
+}
+
+function fmtLogLine(entry) {
+  if (entry == null) return "—";
+  if (typeof entry === "string") return entry;
+  const parts = [
+    entry.decision,
+    entry.action,
+    entry.label,
+    entry.setup,
+    entry.direction,
+  ].filter(Boolean);
+  if (parts.length) return parts.join(" · ");
+  if (entry.message) return String(entry.message);
+  try {
+    return JSON.stringify(entry);
+  } catch {
+    return "—";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Sub-components
+// ---------------------------------------------------------------------------
+
+function usePriceFlash(value) {
+  const prev = useRef(value);
+  const [flash, setFlash] = useState(null);
+
+  useEffect(() => {
+    if (value == null || Number.isNaN(Number(value))) {
+      prev.current = value;
+      return undefined;
+    }
+    const num = Number(value);
+    const prevNum = prev.current != null ? Number(prev.current) : null;
+    if (prevNum != null && !Number.isNaN(prevNum) && num !== prevNum) {
+      setFlash(num > prevNum ? "up" : "down");
+      const timer = window.setTimeout(() => setFlash(null), 450);
+      prev.current = num;
+      return () => window.clearTimeout(timer);
+    }
+    prev.current = num;
+    return undefined;
+  }, [value]);
+
+  return flash;
+}
+
+function PriceHero({ label, value }) {
+  const flash = usePriceFlash(value);
+  const flashClass =
+    flash === "up"
+      ? "bg-success/20 ring-2 ring-success/40"
+      : flash === "down"
+        ? "bg-danger/20 ring-2 ring-danger/40"
+        : "ring-0 ring-transparent";
+
+  return (
+    <div className="flex flex-1 flex-col items-center">
+      <span className="label-caps">{label}</span>
+      <span
+        className={[
+          "mt-1 rounded-md px-3 py-1 font-mono text-3xl font-semibold tabular-nums leading-none transition-all duration-300 sm:text-4xl",
+          "text-foreground",
+          flashClass,
+        ].join(" ")}
+      >
+        {fmtPrice(value)}
+      </span>
+    </div>
+  );
+}
+
+function Gauge({ label, value, max, disabled, disabledLabel, formatValue }) {
+  const pct =
+    disabled || value == null
+      ? 0
+      : Math.min(100, Math.max(0, (Number(value) / max) * 100));
+  const r = 36;
+  const c = 2 * Math.PI * r;
+  const offset = c - (pct / 100) * c;
+
+  let strokeClass = "stroke-accent";
+  if (!disabled && value != null) {
+    const ratio = Number(value) / max;
+    if (ratio >= 0.7) strokeClass = "stroke-success";
+    else if (ratio >= 0.4) strokeClass = "stroke-warning";
+    else strokeClass = "stroke-danger";
+  }
+
+  return (
+    <div className="flex flex-1 flex-col items-center rounded-lg border border-border bg-card p-3">
+      <p className="label-caps">{label}</p>
+      <div className="relative my-2 h-[88px] w-[88px]">
+        <svg viewBox="0 0 88 88" className="h-full w-full -rotate-90">
+          <circle
+            cx="44"
+            cy="44"
+            r={r}
+            fill="none"
+            className="stroke-border"
+            strokeWidth="8"
+          />
+          {!disabled && (
+            <circle
+              cx="44"
+              cy="44"
+              r={r}
+              fill="none"
+              className={`${strokeClass} transition-all duration-500`}
+              strokeWidth="8"
+              strokeLinecap="round"
+              strokeDasharray={c}
+              strokeDashoffset={offset}
+            />
+          )}
+        </svg>
+        <div className="absolute inset-0 flex items-center justify-center">
+          {disabled ? (
+            <span className="text-center text-[10px] font-semibold uppercase leading-tight text-muted">
+              {disabledLabel}
+            </span>
+          ) : (
+            <span className="font-mono text-lg font-semibold tabular-nums text-foreground">
+              {formatValue(value)}
+            </span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Card({ title, children, className = "" }) {
+  return (
+    <section
+      className={[
+        "rounded-lg border border-border bg-card p-3 sm:p-4",
+        className,
+      ].join(" ")}
+    >
+      {title && <h2 className="label-caps mb-2">{title}</h2>}
+      {children}
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// LivePanel
+// ---------------------------------------------------------------------------
+
+export default function LivePanel({ state, wsConnected }) {
+  if (!state) {
+    return (
+      <div className="mx-auto max-w-5xl space-y-3 px-1">
+        <div className="rounded-lg border border-border bg-card p-6 text-center text-muted">
+          Waiting for state…
+        </div>
+      </div>
+    );
+  }
+
+  const health = state.health || {};
+  const signal = state.signal || {};
+  const agentState = resolveAgentState(state);
+  const agent = agentStateMeta(agentState);
+  const positions = resolvePositions(state);
+  const gateReason = resolveGateBlockedReason(state);
+  const gateBlockedAt = resolveGateBlockedAt(state);
+  const failingGate = firstFailingGate(health);
+  const signalConf = resolveSignalConfidence(state);
+  const mlProb = resolveMlProbability(state);
+  const mlDisabled = mlProb == null && state?.ml_enabled !== true;
+  const mlLog = resolveMlDecisionLog(state);
+  const allGatesPass = orderGates(health.gates).every((g) => g.pass);
+
+  return (
+    <div className="mx-auto max-w-5xl space-y-3 px-1 pb-4">
+      {/* 1. Bid/Offer hero */}
+      <Card className="py-4">
+        <div className="flex items-stretch justify-center gap-2 sm:gap-6">
+          <PriceHero label="Bid" value={state.bid} />
+          <div className="hidden w-px self-stretch bg-border sm:block" aria-hidden />
+          <PriceHero label="Offer" value={state.offer} />
+        </div>
+
+        {/* 2. Last update time */}
+        <p className="mt-3 text-center text-[11px] text-muted">
+          Last update{" "}
+          <span className="tabular-nums text-foreground">{fmtTs(state.ts)}</span>
+          {!wsConnected && (
+            <span className="ml-2 text-warning">· polling</span>
+          )}
+        </p>
+      </Card>
+
+      {/* 3. Agent state banner */}
+      <div
+        className={[
+          "w-full rounded-lg border px-3 py-2.5 sm:px-4",
+          agent.banner,
+        ].join(" ")}
+      >
+        <p className="text-sm font-semibold uppercase tracking-wide">
+          {agent.label}
+        </p>
+        <p className="mt-0.5 text-[12px] leading-snug opacity-90">
+          {agent.description}
+        </p>
+      </div>
+
+      {/* 4. Active trades table */}
+      <Card title="Active trades">
+        <div className="-mx-1 overflow-x-auto">
+          <table className="w-full min-w-[520px] text-left text-[11px] sm:text-[12px]">
+            <thead>
+              <tr className="border-b border-border text-muted">
+                <th className="px-2 py-1.5 font-normal">Epic</th>
+                <th className="px-2 py-1.5 font-normal">Side</th>
+                <th className="px-2 py-1.5 font-normal">Entry</th>
+                <th className="px-2 py-1.5 font-normal">Current</th>
+                <th className="px-2 py-1.5 font-normal">P&amp;L GBP</th>
+                <th className="px-2 py-1.5 font-normal">Trail Stop</th>
+                <th className="px-2 py-1.5 font-normal">Open (mins)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {positions.length === 0 ? (
+                <tr>
+                  <td
+                    colSpan={7}
+                    className="px-2 py-4 text-center text-muted"
+                  >
+                    No open positions
+                  </td>
+                </tr>
+              ) : (
+                positions.map((pos, idx) => {
+                  const pnl = pos.pnl_gbp ?? pos.unrealised_pnl_gbp ?? pos.upl;
+                  const pnlNum = pnl != null ? Number(pnl) : null;
+                  const pnlColor =
+                    pnlNum == null
+                      ? "text-foreground"
+                      : pnlNum >= 0
+                        ? "text-success"
+                        : "text-danger";
+                  const side = String(pos.side ?? pos.direction ?? "").toUpperCase();
+                  const sideColor =
+                    side === "BUY" ? "text-success" : side === "SELL" ? "text-danger" : "text-foreground";
+                  const stop = pos.stop ?? pos.stop_level;
+                  const trailLabel =
+                    stop != null
+                      ? `${fmtPrice(stop)}${pos.trail_active ? " T" : ""}`
+                      : "—";
+                  const key =
+                    pos.deal_id ??
+                    pos.id ??
+                    `${pos.epic ?? "row"}-${idx}`;
+
+                  return (
+                    <tr
+                      key={key}
+                      className="border-b border-border/60 last:border-0"
+                    >
+                      <td className="px-2 py-2 font-mono text-foreground">
+                        {pos.epic || "—"}
+                      </td>
+                      <td className={`px-2 py-2 font-medium ${sideColor}`}>
+                        {side || "—"}
+                      </td>
+                      <td className="px-2 py-2 tabular-nums">
+                        {fmtPrice(pos.entry ?? pos.entry_price ?? pos.level)}
+                      </td>
+                      <td className="px-2 py-2 tabular-nums">
+                        {fmtPrice(pos.current ?? pos.mark)}
+                      </td>
+                      <td className={`px-2 py-2 tabular-nums font-medium ${pnlColor}`}>
+                        {fmtGbp(pnlNum)}
+                      </td>
+                      <td className="px-2 py-2 tabular-nums">{trailLabel}</td>
+                      <td className="px-2 py-2 tabular-nums">
+                        {pos.open_mins != null ? Math.round(Number(pos.open_mins)) : "—"}
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+      {/* 5. Why No Trade gate card */}
+      <Card title="Why no trade">
+        {allGatesPass && !gateReason ? (
+          <p className="text-[12px] text-success">
+            All gates passing — agent ready when signal fires.
+          </p>
+        ) : (
+          <div className="space-y-1.5 text-[12px]">
+            {gateBlockedAt && (
+              <p className="text-muted">
+                Blocked at{" "}
+                <span className="tabular-nums text-foreground">
+                  {fmtTs(gateBlockedAt)}
+                </span>
+              </p>
+            )}
+            {failingGate?.name && (
+              <p className="text-muted">
+                Gate{" "}
+                <span className="text-foreground">
+                  {failingGate.name.replace(/_/g, " ")}
+                </span>
+              </p>
+            )}
+            <p className="leading-snug text-foreground">
+              {gateReason ||
+                health.badge_text ||
+                health.summary ||
+                signal.block_reason ||
+                "Session closed or awaiting data"}
+            </p>
+            {health.readiness?.label && (
+              <p className="text-[11px] text-muted">{health.readiness.label}</p>
+            )}
+          </div>
+        )}
+      </Card>
+
+      {/* 6. Two gauges */}
+      <div className="grid grid-cols-2 gap-2 sm:gap-3">
+        <Gauge
+          label="Signal confidence"
+          value={signalConf}
+          max={99}
+          disabled={signalConf == null}
+          disabledLabel="—"
+          formatValue={(v) => `${v}%`}
+        />
+        <Gauge
+          label="ML confidence"
+          value={mlProb}
+          max={1}
+          disabled={mlDisabled}
+          disabledLabel="ML disabled"
+          formatValue={(v) => v.toFixed(2)}
+        />
+      </div>
+
+      {/* 7. ML decision log */}
+      <Card title="ML decision log">
+        <div className="max-h-48 overflow-y-auto rounded border border-border/60 bg-bg/50">
+          {mlLog.length === 0 ? (
+            <p className="px-2 py-3 text-center text-[11px] text-muted">
+              No ML decisions recorded
+            </p>
+          ) : (
+            <ul className="divide-y divide-border/60">
+              {mlLog.map((entry, idx) => (
+                <li
+                  key={entry.id ?? idx}
+                  className="flex flex-wrap items-baseline gap-x-2 px-2 py-1.5 text-[11px]"
+                >
+                  <span className="shrink-0 tabular-nums text-muted">
+                    {fmtLogTs(entry)}
+                  </span>
+                  <span className="min-w-0 flex-1 text-foreground">
+                    {fmtLogLine(entry)}
+                  </span>
+                  {entry.confidence != null && (
+                    <span className="shrink-0 tabular-nums text-accent">
+                      {Number(entry.confidence) <= 1
+                        ? Number(entry.confidence).toFixed(2)
+                        : `${Math.round(Number(entry.confidence))}%`}
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <p className="mt-1.5 text-[10px] text-muted">
+          Showing latest {Math.min(50, mlLog.length)} entries
+        </p>
+      </Card>
+    </div>
+  );
+}
