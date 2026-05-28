@@ -55,7 +55,7 @@ def _nominal_state(cumulative: float) -> PointsStateName:
         return "HEALTHY"
     if cumulative >= -5.0:
         return "CAUTION"
-    if cumulative >= -15.0:
+    if cumulative >= -30.0:
         return "WARNING"
     return "STOP"
 
