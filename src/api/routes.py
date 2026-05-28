@@ -23,7 +23,14 @@ from api.dashboard_data import (
     get_signal_log,
     get_system_info,
     read_version_state,
+    run_e2e_execution_check,
     run_system_tests,
+)
+from api.intelligence_data import (
+    learning_status,
+    replay_summary,
+    run_replay_pipeline,
+    shadow_today,
 )
 from api.snapshot_store import get_tick, snapshot_age_s
 
@@ -82,7 +89,7 @@ def api_emergency_stop() -> dict[str, Any]:
 
 
 @router.get("/api/trades")
-def api_trades(limit: int = 50) -> dict[str, Any]:
+def api_trades(limit: int = 10) -> dict[str, Any]:
     trades = get_closed_trades(limit=min(100, max(1, limit)))
     points_total = sum(float(t.get("points_score") or 0) for t in trades)
     return {"trades": trades, "points_total": points_total}
@@ -98,9 +105,35 @@ def api_system() -> dict[str, Any]:
     return get_system_info()
 
 
+@router.get("/api/replay/summary")
+def api_replay_summary() -> dict[str, Any]:
+    return replay_summary()
+
+
+@router.get("/api/shadow/today")
+def api_shadow_today() -> dict[str, Any]:
+    return shadow_today()
+
+
+@router.get("/api/learning/status")
+def api_learning_status() -> dict[str, Any]:
+    return learning_status()
+
+
+@router.post("/api/replay/run")
+def api_replay_run() -> dict[str, Any]:
+    return run_replay_pipeline()
+
+
 @router.post("/api/system/tests")
 def api_system_tests() -> dict[str, Any]:
     return run_system_tests()
+
+
+@router.post("/api/system/e2e")
+def api_system_e2e() -> dict[str, Any]:
+    """E2E execution check — mock pipeline + IG DEMO routing (no order)."""
+    return run_e2e_execution_check()
 
 
 @router.post("/api/close/{deal_id}")

@@ -5,6 +5,7 @@ import LiveTab from "./tabs/LiveTab";
 import TradesTab from "./tabs/TradesTab";
 import PointsTab from "./tabs/PointsTab";
 import SystemTab from "./tabs/SystemTab";
+import IntelligenceTab from "./tabs/IntelligenceTab";
 import { api } from "./api/client";
 import { useWebSocket } from "./hooks/useWebSocket";
 
@@ -13,6 +14,7 @@ const TABS = [
   { id: "trades", label: "Trades" },
   { id: "points", label: "Points" },
   { id: "system", label: "System" },
+  { id: "intelligence", label: "Intelligence" },
 ];
 
 export default function App() {
@@ -43,8 +45,15 @@ export default function App() {
     );
   }
 
+  const watchdogMsg = tick?.watchdog_failed;
+
   return (
     <div className="min-h-screen flex flex-col">
+      {watchdogMsg ? (
+        <div className="bg-red text-white text-center text-sm py-2 px-3 font-medium">
+          WATCHDOG FAILURE — {watchdogMsg}
+        </div>
+      ) : null}
       <StatusBar tick={tick} reconnecting={reconnecting} onErrorsClick={goSystem} />
       <nav className="flex border-b border-border bg-surface px-2">
         {TABS.map((t) => (
@@ -63,6 +72,7 @@ export default function App() {
         {tab === "trades" && <TradesTab />}
         {tab === "points" && <PointsTab tick={tick} />}
         {tab === "system" && <SystemTab tick={tick} reconnecting={reconnecting} />}
+        {tab === "intelligence" && <IntelligenceTab />}
       </main>
     </div>
   );

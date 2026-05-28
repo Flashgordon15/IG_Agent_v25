@@ -38,5 +38,9 @@ export const api = {
   closeDeal: (dealId) =>
     fetchJson(`/api/close/${encodeURIComponent(dealId)}`, { method: "POST" }),
   runTests: () => fetchJson("/api/system/tests", { method: "POST" }),
+  replaySummary: () => fetchJson("/api/replay/summary"),
+  shadowToday: () => fetchJson("/api/shadow/today"),
+  learningStatus: () => fetchJson("/api/learning/status"),
+  replayRun: () => fetchJson("/api/replay/run", { method: "POST" }),
   runE2eCheck: () => fetchJson("/api/system/e2e", { method: "POST" }),
 };
