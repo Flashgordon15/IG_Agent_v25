@@ -423,6 +423,29 @@ class IgTransactionSync:
                     f"Deal reconciled: open={open_id[:16] or order_ref[:16]} "
                     f"close={close_ref[:16]} — IG P&L confirmed {sym}{pnl:+.2f}"
                 )
+                try:
+                    from trading.trade_autopsy import write_trade_autopsy
+
+                    deal_key = open_id or order_ref or close_ref
+                    write_trade_autopsy(
+                        deal_key,
+                        {
+                            "entry_time": local.get("opened_at"),
+                            "exit_time": local.get("closed_at"),
+                            "side": local.get("side"),
+                            "size": local.get("size"),
+                            "entry_price": local.get("entry"),
+                            "exit_price": local.get("exit"),
+                            "setup_key": local.get("setup_key"),
+                            "confidence": local.get("adjusted_confidence"),
+                            "exit_reason": "ig_transaction_sync",
+                            "pnl_gbp": pnl,
+                            "pnl_pts": local.get("pnl_points"),
+                            "deal_id": deal_key,
+                        },
+                    )
+                except Exception:
+                    pass
         return reconciled
 
     @staticmethod

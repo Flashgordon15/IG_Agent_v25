@@ -13,6 +13,7 @@ from data.models import Quote
 from signals.indicators import atr, bucket, ema, floor_time, rsi, session_name, vol_regime
 from system.config import Config
 from system.config_loader import get_config
+from system.paths import data_dir
 
 
 @dataclass
@@ -181,6 +182,45 @@ class SignalEngine:
 
         return 0.0, f"learning neutral: winrate {wr:.0%}, avg {avg:.1f} pts"
 
+    def _append_shadow_log(
+        self,
+        market: str,
+        *,
+        direction: str,
+        raw_score: float,
+        adjusted_score: float,
+        would_have_fired: bool,
+        snapshot: dict[str, Any],
+    ) -> None:
+        try:
+            import json
+            from datetime import datetime
+
+            last = snapshot.get("last")
+            rsi = 0.0
+            atr = 0.0
+            if last is not None and hasattr(last, "get"):
+                rsi = float(last.get("rsi", 0) or 0)
+                atr = float(last.get("atr", 0) or 0)
+            row = {
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+                "market": market,
+                "direction": direction,
+                "raw_score": round(float(raw_score), 2),
+                "adjusted_score": round(float(adjusted_score), 2),
+                "would_have_fired": bool(would_have_fired),
+                "rsi": round(rsi, 2),
+                "atr": round(atr, 2),
+                "session": session_name(),
+                "setup_key": str(snapshot.get("setup_key") or ""),
+            }
+            path = data_dir() / "shadow_log.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row) + "\n")
+        except Exception:
+            pass
+
     def evaluate(self, market: str) -> SignalResult:
         cfg = self._cfg
         df = self.quote_df(market)
@@ -191,7 +231,16 @@ class SignalEngine:
         # plus one currently-open bar (iloc[-1]) that is excluded from signal logic.
         if len(c5) < 4 or len(c15) < 3:
             self.last_snapshot[market] = {}
-            return SignalResult("WAIT", 0.0, 0.0, 0.0, "WAIT|collecting", "Collecting live data", {})
+            empty = SignalResult("WAIT", 0.0, 0.0, 0.0, "WAIT|collecting", "Collecting live data", {})
+            self._append_shadow_log(
+                market,
+                direction="WAIT",
+                raw_score=0.0,
+                adjusted_score=0.0,
+                would_have_fired=False,
+                snapshot={},
+            )
+            return empty
 
         c5i = self.add_indicators(c5)
         c15i = self.add_indicators(c15)
@@ -379,4 +428,13 @@ class SignalEngine:
             # direction on the same bar time (rare) can still fire.
             self._last_signal_bar.pop(market, None)
 
+        would_fire = signal in ("BUY", "SELL") and float(adjusted) >= float(threshold)
+        self._append_shadow_log(
+            market,
+            direction=signal,
+            raw_score=float(raw_conf),
+            adjusted_score=float(adjusted),
+            would_have_fired=would_fire,
+            snapshot=snapshot,
+        )
         return SignalResult(signal, float(raw_conf), float(adjusted), float(delta), setup, notes, snapshot)
