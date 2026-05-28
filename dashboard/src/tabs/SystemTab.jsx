@@ -190,7 +190,7 @@ export default function SystemTab({ tick, reconnecting }) {
           <button
             type="button"
             disabled={!!busy}
-            className="px-4 py-2 rounded border border-blue text-blue font-medium"
+            className="px-4 py-2 rounded border border-accent text-accent font-medium"
             onClick={async () => {
               setBusy("e2e");
               setE2e(null);
@@ -220,7 +220,7 @@ export default function SystemTab({ tick, reconnecting }) {
           <button
             type="button"
             disabled={!!busy}
-            className="px-4 py-2 rounded border border-blue text-blue"
+            className="px-4 py-2 rounded border border-accent text-accent"
             onClick={async () => {
               setBusy("tests");
               setTests(null);

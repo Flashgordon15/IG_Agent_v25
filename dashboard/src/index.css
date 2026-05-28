@@ -29,7 +29,7 @@
     @apply px-4 py-2 text-[13px] font-medium text-muted border-b-2 border-transparent;
   }
   .tab-btn-active {
-    @apply text-white border-blue;
+    @apply text-white border-accent;
   }
   .price-lg {
     @apply text-[22px] font-medium leading-tight;
