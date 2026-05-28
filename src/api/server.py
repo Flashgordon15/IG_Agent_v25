@@ -203,6 +203,12 @@ def api_learning_status() -> dict[str, Any]:
                    ) AS win_rate
             FROM trades
             WHERE closed_at IS NOT NULL AND setup_key IS NOT NULL
+              AND (source IS NULL
+                   OR (source NOT LIKE '%sim%'
+                       AND source NOT LIKE '%soak%'
+                       AND source NOT LIKE '%proof%'
+                       AND source NOT LIKE '%replay%'
+                       AND source NOT LIKE '%test%'))
             GROUP BY setup_key
             ORDER BY win_rate DESC
             LIMIT 5

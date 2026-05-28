@@ -430,6 +430,13 @@ class LearningStore:
                 break
         if not row:
             return False
+        already_confirmed = False
+        pre = self.conn.execute(
+            "SELECT ig_pnl_currency FROM trades WHERE id=?",
+            (row["id"],),
+        ).fetchone()
+        if pre is not None and pre["ig_pnl_currency"] is not None:
+            already_confirmed = True
         sets = ["ig_pnl_currency=?", "result=?"]
         params: list[Any] = [ig_pnl, result]
         close_id = str(ig_close_deal_id or deal_id or deal_reference or "").strip()
@@ -447,6 +454,38 @@ class LearningStore:
         self.conn.commit()
         ok = self.conn.total_changes > 0
         if ok:
+            if (
+                not already_confirmed
+                and not self.is_partial_close_done(row["id"])
+            ):
+                try:
+                    detail = self.conn.execute(
+                        """
+                        SELECT source, setup_key, deal_reference, ig_deal_id, dry_run,
+                               pnl_points, adjusted_confidence, confidence
+                        FROM trades WHERE id=?
+                        """,
+                        (row["id"],),
+                    ).fetchone()
+                    if detail and not is_excluded_display_row(dict(detail)):
+                        from trading.points_engine import PointsEngine
+
+                        conf = float(
+                            detail["adjusted_confidence"]
+                            or detail["confidence"]
+                            or 0
+                        )
+                        pts = float(detail["pnl_points"] or 0)
+                        PointsEngine(self).record_trade(
+                            str(result), conf, pts, pnl_gbp=float(ig_pnl)
+                        )
+                except Exception as e:
+                    from system.engine_log import log_engine
+
+                    log_engine(
+                        f"points_engine full close score failed: "
+                        f"{type(e).__name__}: {e}"
+                    )
             try:
                 from execution.ml_training_hooks import record_ml_exit_for_deal
 

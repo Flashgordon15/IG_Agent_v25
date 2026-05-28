@@ -91,11 +91,16 @@ def _format_trade_row(row: dict[str, Any]) -> dict[str, Any]:
     pnl_gbp = row.get("ig_pnl_currency")
     if pnl_gbp is not None:
         pnl_gbp = float(pnl_gbp)
-    result = str(row.get("result") or "").upper()
-    if not result:
-        result = "WIN" if pnl_pts > 0 else "LOSS" if pnl_pts < 0 else "OPEN"
     if row.get("closed_at") is None:
         result = "OPEN"
+    elif pnl_gbp is None:
+        result = "PENDING"
+    elif pnl_gbp > 0:
+        result = "WIN"
+    elif pnl_gbp < 0:
+        result = "LOSS"
+    else:
+        result = "BREAKEVEN"
     points_score = row.get("points_score")
     return {
         "direction": row.get("side") or row.get("direction"),

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
+import threading
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
@@ -17,7 +19,7 @@ from zoneinfo import ZoneInfo
 
 from data.ml_training_store import MLTrainingStore
 from system.engine_log import log_engine
-from system.paths import logs_dir
+from system.paths import logs_dir, project_root
 
 if TYPE_CHECKING:
     from data.learning_store import LearningStore
@@ -291,6 +293,41 @@ def notify_macos(message: str) -> None:
         pass
 
 
+def _launch_reconcile_pending_trades() -> None:
+    script = project_root() / "scripts" / "reconcile_pending_trades.py"
+    if not script.is_file():
+        return
+    try:
+        log_engine("reconcile_pending_trades: RUN start")
+        proc = subprocess.Popen(
+            [sys.executable, str(script)],
+            cwd=str(project_root()),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+        def _wait() -> None:
+            try:
+                rc = proc.wait()
+                if rc == 0:
+                    log_engine("reconcile_pending_trades: RUN complete")
+                else:
+                    log_engine(f"reconcile_pending_trades: RUN exited {rc}")
+            except Exception as exc:
+                log_engine(
+                    f"reconcile_pending_trades: wait failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+
+        threading.Thread(target=_wait, daemon=True).start()
+    except Exception as exc:
+        log_engine(
+            f"reconcile_pending_trades: launch failed: "
+            f"{type(exc).__name__}: {exc}"
+        )
+
+
 def write_session_end_summary(
     *,
     session: SessionManager,
@@ -342,4 +379,5 @@ def write_session_end_summary(
         f"£{trades.pnl_gbp:+.2f}"
     )
     tracker.mark_written()
+    _launch_reconcile_pending_trades()
     return path
