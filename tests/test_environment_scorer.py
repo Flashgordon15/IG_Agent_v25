@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from data.models import Quote
+from signals.signal_engine import SignalEngine
 from trading.environment_scorer import (
     SAFE_DEFAULT_SCORE,
     EnvironmentScorer,
@@ -23,6 +24,7 @@ from trading.environment_scorer import (
     score_spread_factor,
     score_trend_factor,
 )
+from trading.ohlc_bootstrap import bootstrap_ohlc_for_session
 
 
 class FactorUnitTests(unittest.TestCase):
@@ -109,6 +111,82 @@ def _make_engine_with_bars(n_5m: int = 25) -> MagicMock:
 
 
 class EnvironmentScorerIntegrationTests(unittest.TestCase):
+    def test_score_uses_bootstrapped_signal_engine_candles(self) -> None:
+        cfg = MagicMock()
+        cfg.max_live_quotes = 100
+        cfg.max_spread_points = 35.0
+        cfg.fast_ema = 9
+        cfg.slow_ema = 21
+        cfg.rsi_period = 14
+        cfg.atr_period = 14
+        engine = SignalEngine(cfg)
+        rest = MagicMock()
+        bars = []
+        base = datetime(2026, 5, 27, 10, 0)
+        for i in range(30):
+            t = base + timedelta(minutes=5 * i)
+            bars.append(
+                {
+                    "time": f"{t.year}/{t.month:02d}/{t.day:02d}:{t.hour:02d}:{t.minute:02d}:00",
+                    "high": 100.0 + i,
+                    "low": 99.0 + i,
+                    "bid_close": 99.5 + i,
+                    "offer_close": 100.5 + i,
+                    "close": 100.0 + i,
+                }
+            )
+        rest.fetch_price_history.return_value = bars
+        scorer = EnvironmentScorer(engine, normal_spread=7.0)
+        market = "Japan 225"
+        n = bootstrap_ohlc_for_session(
+            rest, engine, "EPIC", market, environment_scorer=scorer
+        )
+        self.assertEqual(n, 30)
+        factors, meta = scorer._compute_factors(
+            market, quote_df=engine.quote_df(market)
+        )
+        self.assertGreaterEqual(int(meta["complete_bars"]), 10)
+        self.assertIn("atr", factors)
+
+    def test_score_option_a_quote_df_after_bootstrap(self) -> None:
+        cfg = MagicMock()
+        cfg.max_live_quotes = 50
+        cfg.max_spread_points = 35.0
+        cfg.fast_ema = 9
+        cfg.slow_ema = 21
+        cfg.rsi_period = 14
+        cfg.atr_period = 14
+        engine = SignalEngine(cfg)
+        rest = MagicMock()
+        base = datetime(2026, 5, 27, 10, 0)
+        bars = [
+            {
+                "time": f"{(base + timedelta(minutes=5 * i)).year}/"
+                f"{(base + timedelta(minutes=5 * i)).month:02d}/"
+                f"{(base + timedelta(minutes=5 * i)).day:02d}:"
+                f"{(base + timedelta(minutes=5 * i)).hour:02d}:"
+                f"{(base + timedelta(minutes=5 * i)).minute:02d}:00",
+                "high": 110.0 + i,
+                "low": 100.0 + i,
+                "bid_close": 105.0,
+                "offer_close": 106.0,
+                "close": 105.0,
+            }
+            for i in range(100)
+        ]
+        rest.fetch_price_history.return_value = bars
+        scorer = EnvironmentScorer(engine, normal_spread=7.0)
+        market = "Japan 225"
+        bootstrap_ohlc_for_session(
+            rest, engine, "IX.D.NIKKEI.IFM.IP", market, environment_scorer=scorer
+        )
+        for j in range(300):
+            engine.add_quote(market, Quote(datetime(2026, 5, 28, 12, 0, j % 60), 100.0, 101.0))
+        qdf = engine.quote_df(market)
+        total = scorer.score(market, quote_df=qdf)
+        self.assertGreater(total, 0.0)
+        self.assertNotIn("insufficient bars", str(scorer.last_score().factors))
+
     def test_score_returns_all_factors(self) -> None:
         engine = _make_engine_with_bars()
         scorer = EnvironmentScorer(engine, normal_spread=7.0)

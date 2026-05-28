@@ -448,7 +448,10 @@ class TradingLoop:
 
     def _gate_environment_fitness(self, quote: Quote) -> GateResult:
         try:
-            score = float(self._env.score(self._market, quote=quote))
+            quote_df = self._signal_engine.quote_df(self._market)
+            score = float(
+                self._env.score(self._market, quote=quote, quote_df=quote_df)
+            )
         except Exception as e:
             log_engine(
                 f"environment_fitness gate: score failed for {self._market}: "

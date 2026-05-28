@@ -135,6 +135,28 @@ class EnvironmentScorer:
         self._bars_at_session_open: dict[str, int] = {}
         self._sentiment_cache: dict[str, float] = {}
         self._sentiment_detail: dict[str, dict[str, Any]] = {}
+        self._primary_market: str = ""
+
+    def _quote_df(self, market: str, quote_df: pd.DataFrame | None = None) -> pd.DataFrame:
+        """Candle source of truth — SignalEngine seed + live quotes (Option A override)."""
+        if quote_df is not None:
+            return quote_df
+        if self._engine is None:
+            return pd.DataFrame()
+        return self._engine.quote_df(market)
+
+    def _candle_frames(
+        self,
+        market: str,
+        *,
+        quote_df: pd.DataFrame | None = None,
+    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        if self._engine is None:
+            raise ValueError("signal_engine required")
+        if isinstance(self._engine, SignalEngine):
+            return self._engine.candle_frames(market, quote_df=quote_df)
+        df = self._quote_df(market, quote_df)
+        return df, self._engine.candles(df, 5), self._engine.candles(df, 15)
 
     def fetch_sentiment(self, epic: str | None = None) -> float:
         """Fetch IG client sentiment once per session; cache until reset."""
@@ -191,6 +213,11 @@ class EnvironmentScorer:
             self._bars_at_session_open[market] = self._complete_bar_count(market)
         self.fetch_sentiment(self._epic or market)
 
+    def on_ohlc_bootstrapped(self, market: str) -> None:
+        """After OHLC seed lands in SignalEngine.quote_df — refresh cold-start baseline."""
+        self._primary_market = str(market or self._primary_market or "")
+        self._bars_at_session_open[market] = self._complete_bar_count(market)
+
     def register_gap_open(self, market: str, *, at: datetime | None = None) -> None:
         """Apply 15-minute score cap after gap > 1.0× ATR (caller detects gap)."""
         now = at or datetime.now()
@@ -200,8 +227,7 @@ class EnvironmentScorer:
         if self._engine is None:
             return 0
         try:
-            df = self._engine.quote_df(market)
-            c5 = self._engine.candles(df, 5)
+            _, c5, _ = self._candle_frames(market)
             return max(0, len(c5) - 1)
         except Exception:
             return 0
@@ -220,16 +246,24 @@ class EnvironmentScorer:
         market: str,
         *,
         quote: Quote | None = None,
+        quote_df: pd.DataFrame | None = None,
     ) -> tuple[dict[str, float], dict[str, Any]]:
         if self._engine is None:
             raise ValueError("signal_engine required")
 
         cfg = self._config or self._engine.config
-        df = self._engine.quote_df(market)
-        c5 = self._engine.candles(df, 5)
-        c15 = self._engine.candles(df, 15)
+        key = self._primary_market or market
+        df, c5, c15 = self._candle_frames(key, quote_df=quote_df)
         if len(c5) < 2 or len(c15) < 2:
-            raise ValueError("insufficient bars")
+            seed_n = (
+                int(self._engine.ohlc_seed_count(key))
+                if hasattr(self._engine, "ohlc_seed_count")
+                else 0
+            )
+            raise ValueError(
+                "insufficient bars "
+                f"(market={market!r}, quotes={len(df)}, seed={seed_n}, c5={len(c5)}, c15={len(c15)})"
+            )
 
         c5i = self._engine.add_indicators(c5)
         c15i = self._engine.add_indicators(c15)
@@ -280,9 +314,17 @@ class EnvironmentScorer:
         }
         return factors, meta
 
-    def score(self, market: str, *, quote: Quote | None = None) -> float:
+    def score(
+        self,
+        market: str,
+        *,
+        quote: Quote | None = None,
+        quote_df: pd.DataFrame | None = None,
+    ) -> float:
         try:
-            factors, meta = self._compute_factors(market, quote=quote)
+            factors, meta = self._compute_factors(
+                market, quote=quote, quote_df=quote_df
+            )
             total = sum(factors.values())
             sentiment = self.fetch_sentiment(self._epic or market)
             sent_detail = self.get_sentiment_factor(market)
@@ -373,5 +415,11 @@ class EnvironmentScorer:
     def last_score(self) -> EnvironmentScore:
         return self._last
 
-    def gate_passes(self, market: str, *, quote: Quote | None = None) -> bool:
-        return self.score(market, quote=quote) >= GATE_PASS_MIN
+    def gate_passes(
+        self,
+        market: str,
+        *,
+        quote: Quote | None = None,
+        quote_df: pd.DataFrame | None = None,
+    ) -> bool:
+        return self.score(market, quote=quote, quote_df=quote_df) >= GATE_PASS_MIN

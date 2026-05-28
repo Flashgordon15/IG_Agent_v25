@@ -172,7 +172,9 @@ def build_trading_loop(
     if rest_client is not None and session_manager.is_session_open():
         from trading.ohlc_bootstrap import bootstrap_ohlc_for_session
 
-        bootstrap_ohlc_for_session(rest_client, signal_engine, epic, market)
+        bootstrap_ohlc_for_session(
+            rest_client, signal_engine, epic, market, environment_scorer=env_scorer
+        )
     return loop
 
 

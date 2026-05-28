@@ -31,6 +31,8 @@ class SignalEngine:
         self._cfg = config
         self.memory = memory
         self.quotes_by_market: dict[str, list[Quote]] = {}
+        # REST OHLC seed — not trimmed by max_live_quotes (stream ticks evict live buffer only).
+        self._ohlc_seed: dict[str, list[Quote]] = {}
         self.last_snapshot: dict[str, dict[str, Any]] = {}
         # Track last closed bar per market to avoid duplicate signals on same bar.
         self._last_signal_bar: dict[str, Any] = {}
@@ -39,17 +41,74 @@ class SignalEngine:
     def config(self) -> Config:
         return get_config()
 
+    def _resolve_market_key(self, market: str) -> str:
+        key = str(market or "").strip()
+        if not key:
+            return key
+        if key in self._ohlc_seed or key in self.quotes_by_market:
+            return key
+        low = key.lower()
+        for bucket in (self._ohlc_seed, self.quotes_by_market):
+            for existing in bucket:
+                if str(existing).lower() == low:
+                    return str(existing)
+        return key
+
+    def seed_ohlc_history(
+        self,
+        market: str,
+        quotes: list[Quote],
+        *,
+        aliases: list[str] | None = None,
+    ) -> int:
+        """Replace IG OHLC bootstrap quotes for *market* (shared by quote_df / scorers)."""
+        ordered = sorted(quotes, key=lambda q: q.time)
+        if not ordered:
+            return 0
+        keys: list[str] = []
+        for raw in (market, *(aliases or [])):
+            key = str(raw or "").strip()
+            if key and key not in keys:
+                keys.append(key)
+        if not keys:
+            return 0
+        for key in keys:
+            self._ohlc_seed[key] = ordered
+        return len(ordered)
+
+    def ohlc_seed_count(self, market: str) -> int:
+        key = self._resolve_market_key(market)
+        return len(self._ohlc_seed.get(key, []))
+
+    def _quotes_for_market(self, market: str) -> list[Quote]:
+        key = self._resolve_market_key(market)
+        seed = self._ohlc_seed.get(key, [])
+        live = self.quotes_by_market.get(key, [])
+        if not seed:
+            return list(live)
+        if not live:
+            return list(seed)
+        return sorted(seed + live, key=lambda q: q.time)
+
     def add_quote(self, market: str, quote: Quote) -> None:
         self.quotes_by_market.setdefault(market, []).append(quote)
         self.quotes_by_market[market] = self.quotes_by_market[market][-self._cfg.max_live_quotes:]
 
     def quote_df(self, market: str) -> pd.DataFrame:
+        key = self._resolve_market_key(market)
         return pd.DataFrame(
             [
                 {"time": q.time, "bid": q.bid, "offer": q.offer, "mid": q.mid, "spread": q.spread}
-                for q in self.quotes_by_market.get(market, [])
+                for q in self._quotes_for_market(key)
             ]
         )
+
+    def candle_frames(
+        self, market: str, *, quote_df: pd.DataFrame | None = None
+    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        """Return (quote_df, 5m candles, 15m candles) from seed + live quotes."""
+        df = quote_df if quote_df is not None else self.quote_df(market)
+        return df, self.candles(df, 5), self.candles(df, 15)
 
     def candles(self, df: pd.DataFrame, minutes: int) -> pd.DataFrame:
         if df.empty:
@@ -152,9 +211,17 @@ class SignalEngine:
         closed_bar_key = (market, str(last.get("time", last.name)), close_px_key)
         if self._last_signal_bar.get(market) == closed_bar_key:
             snap = self.last_snapshot.get(market, {})
+            raw = float(snap.get("raw_confidence", 0) or 0)
+            adjusted = float(snap.get("adjusted_confidence", 0) or 0)
+            delta = float(snap.get("learning_delta", 0) or 0)
             return SignalResult(
-                "WAIT", 0.0, 0.0, 0.0, snap.get("setup_key", "WAIT|dup"),
-                "Awaiting next closed bar (duplicate suppressed)", snap,
+                "WAIT",
+                raw,
+                adjusted,
+                delta,
+                str(snap.get("setup_key") or "WAIT|dup"),
+                "Awaiting next closed bar (duplicate suppressed)",
+                snap,
             )
 
         atr_ok = cfg.min_atr_points <= 0 or float(last.get("atr", 0)) >= cfg.min_atr_points

@@ -324,6 +324,7 @@ class SessionManager:
                     self._signal_engine,
                     self._epic,
                     self._market,
+                    environment_scorer=self._env_scorer,
                 )
 
         if quote is not None:
