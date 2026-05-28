@@ -3,28 +3,32 @@ from __future__ import annotations
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from system.ohlc_fetch_window import (
-    FETCH_WINDOW_END_MINUTES,
-    FETCH_WINDOW_START_MINUTES,
-    in_ohlc_fetch_quiet_window,
-    is_fetch_window_allowed,
-)
+from system.ohlc_fetch_window import is_fetch_window_open
 
 LONDON = ZoneInfo("Europe/London")
 
 
-def _london(hour: int, minute: int) -> datetime:
-    return datetime(2026, 5, 28, hour, minute, tzinfo=LONDON)
+def _london(year: int, month: int, day: int, hour: int, minute: int) -> datetime:
+    return datetime(year, month, day, hour, minute, tzinfo=LONDON)
 
 
-def test_fetch_window_boundaries() -> None:
-    assert FETCH_WINDOW_START_MINUTES == 7 * 60
-    assert FETCH_WINDOW_END_MINUTES == 22 * 60 + 30
-    assert not is_fetch_window_allowed(_london(6, 59))
-    assert is_fetch_window_allowed(_london(7, 0))
-    assert is_fetch_window_allowed(_london(12, 0))
-    assert is_fetch_window_allowed(_london(22, 29))
-    assert not is_fetch_window_allowed(_london(22, 30))
-    assert not is_fetch_window_allowed(_london(23, 0))
-    assert in_ohlc_fetch_quiet_window(_london(22, 30))
-    assert not in_ohlc_fetch_quiet_window(_london(7, 0))
+def test_inside_window() -> None:
+    assert is_fetch_window_open(_london(2026, 5, 28, 12, 0)) is True
+
+
+def test_outside_window_early_morning() -> None:
+    assert is_fetch_window_open(_london(2026, 5, 28, 3, 0)) is False
+
+
+def test_exactly_0700() -> None:
+    assert is_fetch_window_open(_london(2026, 5, 28, 7, 0)) is True
+
+
+def test_exactly_2230() -> None:
+    assert is_fetch_window_open(_london(2026, 5, 28, 22, 30)) is False
+
+
+def test_dst_spring_forward_boundary() -> None:
+    # Europe/London spring forward 2026-03-29: 01:00 GMT -> 02:00 BST (no local 01:xx).
+    # 07:00 BST on transition day is still inside the fetch window.
+    assert is_fetch_window_open(_london(2026, 3, 29, 7, 0)) is True

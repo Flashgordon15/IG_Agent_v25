@@ -25,7 +25,7 @@ from system.credentials_loader import try_load_credentials
 from system.engine_log import log_engine
 from system.ig_rest_session import ensure_shared_authenticated
 from system.paths import data_dir
-from system.ohlc_fetch_window import in_ohlc_fetch_quiet_window
+from system.ohlc_fetch_window import is_fetch_window_open
 from system.rest_api_budget import RestBudgetPausedError, ohlc_bootstrap_rest_window
 from trading.ohlc_bootstrap import _parse_bar_time
 
@@ -297,13 +297,7 @@ def _append_bars(path: Path, bars: list[dict], seen: set[str], last_written: str
 
 
 def main() -> int:
-    if in_ohlc_fetch_quiet_window():
-        msg = (
-            "OHLC fetch skipped: quiet window 22:30–07:00 Europe/London "
-            "(allowed 07:00–22:30). Re-run during the allowed window."
-        )
-        print(msg)
-        log_engine(msg)
+    if not is_fetch_window_open():
         return 0
 
     status = try_load_credentials()
@@ -330,6 +324,7 @@ def main() -> int:
                 pull_status.update(
                     {
                         "status": "blocked_waiting_retry",
+                        "run_status": "blocked_waiting_retry",
                         "last_run_time": now_iso,
                     }
                 )
@@ -374,6 +369,7 @@ def main() -> int:
     pull_status.update(
         {
             "status": "running",
+            "run_status": "running",
             "last_run_time": now_iso,
             "last_attempted_range": {"from": date_from, "to": date_to},
             "block_reason": None,
@@ -491,6 +487,7 @@ def main() -> int:
         pull_status.update(
             {
                 "status": "blocked",
+                "run_status": "blocked",
                 "block_reason": blocked.get("block_reason"),
                 "next_retry_time": blocked.get("next_retry_time"),
                 "last_run_time": _iso_bar_time(datetime.now(LONDON)),
@@ -502,6 +499,7 @@ def main() -> int:
         pull_status.update(
             {
                 "status": "ok",
+                "run_status": "complete",
                 "block_reason": None,
                 "next_retry_time": None,
                 "last_run_time": _iso_bar_time(datetime.now(LONDON)),

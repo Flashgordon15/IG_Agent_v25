@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime
@@ -24,9 +25,11 @@ from system.paths import data_dir
 LONDON = ZoneInfo("Europe/London")
 CACHE_PATH = data_dir() / "ohlc_cache" / "nikkei_5m.jsonl"
 RESULTS_PATH = data_dir() / "replay_results.jsonl"
-STATE_PATH = data_dir() / "replay_scheduler_state.json"
+STATE_PATH = data_dir() / "replay_state.json"
+ANALYSIS_PATH = data_dir() / "replay_analysis.txt"
 HARD_STOP_HOUR = 22
 HARD_STOP_MIN = 30
+_CALIBRATION_RE = re.compile(r"signal_threshold:\s*(\d+)")
 
 
 def _now_london() -> datetime:
@@ -50,7 +53,35 @@ def _load_state() -> dict:
 
 def _save_state(state: dict) -> None:
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STATE_PATH.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    tmp_path = STATE_PATH.with_suffix(".json.tmp")
+    tmp_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    tmp_path.replace(STATE_PATH)
+
+
+def _calibration_factor_from_report(report: str) -> float:
+    match = _CALIBRATION_RE.search(report)
+    if not match:
+        return 1.0
+    return round(int(match.group(1)) / 100.0, 2)
+
+
+def _merge_analysis_append(previous: str, new_report: str, run_ts: str) -> str:
+    prev = previous.strip()
+    new = new_report.strip()
+    if not prev:
+        return new + ("\n" if not new.endswith("\n") else "")
+    if prev == new:
+        return prev + ("\n" if not prev.endswith("\n") else "")
+    sep = f"\n\n=== REPLAY RUN {run_ts} ===\n\n"
+    merged = prev + sep + new
+    return merged + ("\n" if not merged.endswith("\n") else "")
+
+
+def _write_analysis(text: str) -> None:
+    ANALYSIS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = ANALYSIS_PATH.with_suffix(".txt.tmp")
+    tmp_path.write_text(text, encoding="utf-8")
+    tmp_path.replace(ANALYSIS_PATH)
 
 
 def _run_script(name: str) -> int:
@@ -79,14 +110,20 @@ def main() -> int:
     state = _load_state()
     bars_before = 0
     if CACHE_PATH.is_file():
-        bars_before = sum(1 for _ in CACHE_PATH.read_text(encoding="utf-8").splitlines() if _.strip())
+        bars_before = sum(
+            1 for _ in CACHE_PATH.read_text(encoding="utf-8").splitlines() if _.strip()
+        )
 
     rc = _run_script("fetch_historical_ohlc.py")
     if rc not in (0,):
         log_engine(f"replay_scheduler: fetch exited {rc}")
         return rc
 
-    bars_after_fetch = sum(1 for _ in CACHE_PATH.read_text(encoding="utf-8").splitlines() if _.strip()) if CACHE_PATH.is_file() else 0
+    bars_after_fetch = (
+        sum(1 for _ in CACHE_PATH.read_text(encoding="utf-8").splitlines() if _.strip())
+        if CACHE_PATH.is_file()
+        else 0
+    )
     new_fetch = max(0, bars_after_fetch - bars_before)
 
     rc = _run_script("replay_signals.py")
@@ -97,17 +134,22 @@ def main() -> int:
         log_engine("replay_scheduler: stopped before analysis — quiet window")
         return 0
 
+    previous_analysis = (
+        ANALYSIS_PATH.read_text(encoding="utf-8") if ANALYSIS_PATH.is_file() else ""
+    )
     rc = _run_script("analyse_replay.py")
     if rc != 0:
         return rc
 
-    results_after = 0
-    if RESULTS_PATH.is_file():
-        results_after = sum(1 for _ in RESULTS_PATH.read_text(encoding="utf-8").splitlines() if _.strip())
+    new_report = (
+        ANALYSIS_PATH.read_text(encoding="utf-8") if ANALYSIS_PATH.is_file() else ""
+    )
+    merged = _merge_analysis_append(previous_analysis, new_report, now.isoformat())
+    _write_analysis(merged)
 
-    state["last_run"] = now.isoformat()
-    state["bars_cache"] = bars_after_fetch
-    state["results_rows"] = results_after
+    state["last_replay_timestamp"] = now.isoformat()
+    state["bar_count"] = bars_after_fetch
+    state["calibration_factor"] = _calibration_factor_from_report(new_report)
     _save_state(state)
     log_engine(f"Nightly replay complete: {new_fetch} new bars")
     return 0
