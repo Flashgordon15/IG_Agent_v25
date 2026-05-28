@@ -6,8 +6,10 @@ Reduces duplicate GET /markets calls and keeps bid/offer timestamps aligned.
 
 from __future__ import annotations
 
+import statistics
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from collections.abc import Callable
@@ -45,6 +47,8 @@ class MarketDataHub:
         self._listeners: list[Callable[[QuoteSnapshot], None]] = []
         self._maintenance_epics: set[str] = set()
         self._maintenance_logged: set[str] = set()
+        self._spread_history: dict[str, deque[float]] = {}
+        self._spread_history_max = 200
 
     def attach_rest(self, rest_client: Any) -> None:
         with self._lock:
@@ -98,9 +102,37 @@ class MarketDataHub:
         with self._lock:
             return str(epic) in self._maintenance_epics
 
+    def record_spread(self, epic: str, spread_pts: float) -> None:
+        """Track rolling spreads for dynamic normal median (gate 5)."""
+        if spread_pts <= 0:
+            return
+        key = str(epic)
+        with self._lock:
+            hist = self._spread_history.setdefault(key, deque(maxlen=self._spread_history_max))
+            hist.append(float(spread_pts))
+
+    def normal_spread(self, epic: str, *, fallback: float) -> float:
+        with self._lock:
+            hist = self._spread_history.get(str(epic))
+        if not hist or len(hist) < 5:
+            return float(fallback)
+        try:
+            return float(statistics.median(hist))
+        except statistics.StatisticsError:
+            return float(fallback)
+
+    def spread_stats(self, epic: str, *, fallback: float) -> dict[str, float]:
+        current_snap = self.get_snapshot(epic)
+        current = 0.0
+        if current_snap and current_snap.bid > 0 and current_snap.offer > 0:
+            current = max(0.0, current_snap.offer - current_snap.bid)
+        normal = self.normal_spread(epic, fallback=fallback)
+        return {"current": current, "normal": normal, "samples": float(len(self._spread_history.get(str(epic), [])))}
+
     def publish(self, epic: str, bid: float, offer: float, *, source: str = "stream") -> QuoteSnapshot:
         if bid > 0 and offer > 0:
             self.exit_maintenance(epic)
+            self.record_spread(epic, offer - bid)
         snap = QuoteSnapshot(epic=epic, bid=bid, offer=offer, updated_at=time.time(), source=source)
         with self._lock:
             self._quotes[epic] = snap

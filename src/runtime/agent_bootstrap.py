@@ -45,6 +45,7 @@ def start_ig_position_sync(
     *,
     epic: str,
     interval_seconds: float,
+    points_engine: Any | None = None,
 ) -> Any | None:
     """Start background IG open-position sync and attach to trade tracker."""
     global _position_sync
@@ -58,6 +59,7 @@ def start_ig_position_sync(
             store,
             epic=epic,
             interval_seconds=float(interval_seconds),
+            points_engine=points_engine,
         )
         tracker.attach_sync(sync)
         sync.start()
@@ -122,6 +124,7 @@ def build_trading_loop(
             tracker,
             epic=epic,
             interval_seconds=float(cfg.position_sync_seconds),
+            points_engine=points_engine,
         )
     exec_engine = ExecutionEngine(
         mode=exec_mode,
@@ -132,6 +135,8 @@ def build_trading_loop(
         points_engine=points_engine,
         environment_scorer=env_scorer,
     )
+    if position_sync is not None:
+        exec_engine.attach_position_sync(position_sync)
     journal_path = str(cfg.get("decision_log_file", "") or "")
     journal = DecisionJournal(journal_path) if journal_path else None
     execution_loop = ExecutionTickLoop(

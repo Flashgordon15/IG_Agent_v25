@@ -28,11 +28,13 @@ class OrderValidator:
         adaptive: AdaptiveEngine | None = None,
         cooldown: CooldownTracker | None = None,
         store: Any | None = None,
+        points_engine: Any | None = None,
     ) -> None:
         self._cfg = config
         self.adaptive = adaptive or AdaptiveEngine(config)
         self.cooldown = cooldown or CooldownTracker(config.cooldown_seconds)
         self._store = store
+        self._points = points_engine
 
     @property
     def config(self) -> Config:
@@ -89,12 +91,17 @@ class OrderValidator:
         if not atr_ok:
             reasons.append(atr_msg)
 
-        conf_ok = signal.adjusted_confidence >= cfg.signal_threshold
+        conf_floor = (
+            self._points.trade_confidence_threshold(cfg)
+            if self._points is not None
+            else float(cfg.signal_threshold)
+        )
+        conf_ok = signal.adjusted_confidence >= conf_floor
         checks["confidence"] = conf_ok
         if not conf_ok:
             reasons.append(
                 f"Adjusted confidence {signal.adjusted_confidence:.0f}% "
-                f"below threshold {cfg.signal_threshold}"
+                f"below threshold {conf_floor:.0f}"
             )
 
         pending_open = False
@@ -135,10 +142,12 @@ class OrderValidator:
         if count > 0 and count < max_pos:
             cd_ok = True
         else:
-            cd_ok = not self.cooldown.is_active(signal.epic)
+            cd_ok = not self.cooldown.is_active(signal.epic, signal.direction)
         checks["cooldown"] = cd_ok
         if not cd_ok:
-            reasons.append(f"Cooldown active ({self.cooldown.format_remaining(signal.epic)} remaining)")
+            reasons.append(
+                f"Cooldown active ({self.cooldown.format_remaining(signal.epic, signal.direction)} remaining)"
+            )
 
         allowed = all(checks.values()) and not reasons
         return ValidationResult(allowed=allowed, reasons=reasons, checks=checks)
@@ -200,9 +209,9 @@ class OrderValidator:
     def _store_count_fallback(store_has_position: Callable[[str], bool], epic: str) -> int:
         return 1 if store_has_position(epic) else 0
 
-    def check_cooldown(self, epic: str) -> tuple[bool, str]:
-        if self.cooldown.is_active(epic):
-            return False, f"Cooldown ({self.cooldown.format_remaining(epic)})"
+    def check_cooldown(self, epic: str, direction: str | None = None) -> tuple[bool, str]:
+        if self.cooldown.is_active(epic, direction):
+            return False, f"Cooldown ({self.cooldown.format_remaining(epic, direction)})"
         return True, ""
 
     def check_circuit_breaker(self) -> tuple[bool, str]:

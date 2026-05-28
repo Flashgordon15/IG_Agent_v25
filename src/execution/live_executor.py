@@ -144,6 +144,20 @@ class LiveExecutor:
                 execution_params=execution_params,
             )
 
+        from execution.market_suspension import gate_detail as suspend_detail
+        from execution.market_suspension import is_blocked
+
+        if is_blocked():
+            reason = suspend_detail() or "Market suspended — orders blocked 5 min"
+            update_demo_diagnostics(last_rejection=reason)
+            trace_execution("ORDER", "LiveExecutor.execute", decision=f"REJECTED: {reason}")
+            return ExecutionResult(
+                success=False,
+                action="REJECTED",
+                rejection_reason=reason,
+                execution_params=execution_params,
+            )
+
         if japan225_daily_risk_paused(signal.epic):
             detail = japan225_daily_risk_reason(signal.epic)
             reason = (
@@ -449,6 +463,9 @@ class LiveExecutor:
                     execution_params=execution_params,
                 )
             except (IGAPIError, IGOrderError) as e:
+                from execution.market_suspension import note_ig_order_error
+
+                note_ig_order_error(e)
                 status_code = getattr(e, "status_code", None)
                 last_error = str(e)
                 update_demo_diagnostics(
@@ -573,7 +590,7 @@ class LiveExecutor:
             epic=signal.epic,
             deal_id=confirm.get("deal_id"),
         )
-        cooldown.record(signal.epic)
+        cooldown.record(signal.epic, direction=signal.direction)
         trade_manager.open_trade_from_execution(
             market=signal.market,
             epic=signal.epic,

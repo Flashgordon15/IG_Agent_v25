@@ -129,6 +129,12 @@ def run_preflight() -> int:
 
     ok, msg = acquire_instance_lock()
     if not ok:
+        try:
+            from system.watchdog_banner import record_startup_failure
+
+            record_startup_failure(msg)
+        except Exception:
+            pass
         print(f"IG Agent v25: {msg}", file=sys.stderr)
         return EXIT_INSTANCE
 

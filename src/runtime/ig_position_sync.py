@@ -7,7 +7,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable
 
 from system.demo_execution_trace import trace_execution, update_demo_diagnostics
@@ -76,10 +76,12 @@ class IgPositionSync:
         on_alert: Callable[[str], None] | None = None,
         on_changed: Callable[[], None] | None = None,
         transaction_sync: Any | None = None,
+        points_engine: Any | None = None,
     ) -> None:
         self._rest = rest_client
         self._store = store
         self._txn_sync = transaction_sync
+        self._points_engine = points_engine
         self._epic = epic
         self._interval = interval_seconds
         self._on_alert = on_alert
@@ -172,15 +174,21 @@ class IgPositionSync:
                     "deal_id": p.deal_id,
                     "epic": p.epic,
                     "direction": p.direction,
+                    "side": p.direction,
                     "size": p.size,
                     "level": p.level,
+                    "entry": p.level,
                     "upl": p.upl,
+                    "pnl_gbp": p.upl,
                     "market_name": p.market_name,
                     "deal_reference": p.deal_reference,
                     "stop_level": p.stop_level,
                     "limit_level": p.limit_level,
+                    "stop": p.stop_level or None,
+                    "target": p.limit_level or None,
                     "bid": p.bid,
                     "offer": p.offer,
+                    "current": p.bid if p.direction == "BUY" else p.offer,
                     "currency": p.currency,
                 }
                 for p in s.positions
@@ -328,6 +336,10 @@ class IgPositionSync:
                 self._on_changed()
             except Exception as e:
                 log_engine(f"IG sync on_changed callback error: {e}")
+        try:
+            self._check_stale_pending_trades()
+        except Exception as e:
+            log_engine(f"stale pending trade check failed: {type(e).__name__}: {e}")
         return self.snapshot()
 
     def _loop(self) -> None:
@@ -693,7 +705,18 @@ class IgPositionSync:
                 self._store.update_trade_upl(trade_id, matched.upl, matched.level)
 
             if matched.size < size - 1e-6:
-                self._store.update_trade_size(trade_id, matched.size)
+                new_size = float(matched.size)
+                self._store.update_trade_size(trade_id, new_size)
+                self._confirm_partial_close(
+                    trade_id=trade_id,
+                    deal_id=deal_id,
+                    side=side,
+                    entry=float(entry),
+                    old_size=float(size),
+                    new_size=new_size,
+                    px=float(matched.level or entry),
+                    row=row,
+                )
                 with self._lock:
                     self._snapshot.last_ig_event = (
                         f"partial close deal={deal_id} size {size}->{matched.size}"
@@ -704,10 +727,6 @@ class IgPositionSync:
                     f"partial close {size}->{matched.size}",
                     trade_id=trade_id,
                     deal_id=deal_id,
-                )
-                log_engine(
-                    f"IG sync partial close trade id={trade_id} "
-                    f"size {size} -> {matched.size}"
                 )
                 trace_execution(
                     "SYNC",
@@ -790,6 +809,68 @@ class IgPositionSync:
             self._txn_sync_pending = False
 
         return changed
+
+    def _confirm_partial_close(
+        self,
+        *,
+        trade_id: int,
+        deal_id: str,
+        side: str,
+        entry: float,
+        old_size: float,
+        new_size: float,
+        px: float,
+        row: Any,
+    ) -> None:
+        if old_size <= 0 or new_size >= old_size:
+            return
+        from system.pnl_math import classify_result, realised_pnl_points
+
+        closed_frac = (old_size - new_size) / old_size
+        unit_pnl = realised_pnl_points(side, entry, px)
+        banked_pts = unit_pnl * closed_frac
+        result = classify_result(banked_pts)
+        keys = row.keys()
+        conf = float(row["adjusted_confidence"] or 0) if "adjusted_confidence" in keys else 0.0
+        if self._points_engine is not None:
+            try:
+                self._points_engine.record_trade(result, conf, banked_pts)
+            except Exception as e:
+                log_engine(f"points_engine partial close score failed: {type(e).__name__}: {e}")
+        if hasattr(self._store, "mark_partial_close_done"):
+            try:
+                self._store.mark_partial_close_done(trade_id)
+            except Exception:
+                pass
+        log_engine(
+            f"PARTIAL CLOSE confirmed deal={deal_id} "
+            f"size {old_size:.2f}->{new_size:.2f} banked {banked_pts:.1f} pts"
+        )
+
+    def _check_stale_pending_trades(self) -> None:
+        """Warn when open trades lack IG deal confirmation for > 24 hours."""
+        from system.engine_log import record_engine_warning
+
+        cutoff = datetime.now() - timedelta(hours=24)
+        for row in self._deduped_open_rows():
+            keys = row.keys()
+            deal_id = str(row["ig_deal_id"] or "") if "ig_deal_id" in keys else ""
+            if deal_id:
+                continue
+            opened_raw = str(row["opened_at"] or "") if "opened_at" in keys else ""
+            if not opened_raw:
+                continue
+            try:
+                opened = datetime.fromisoformat(opened_raw.replace("Z", ""))
+            except ValueError:
+                continue
+            if opened > cutoff:
+                continue
+            ref = str(row["deal_reference"] or "") if "deal_reference" in keys else ""
+            warn_id = ref or f"trade-{row['id']}"
+            msg = f"PENDING trade >24h — deal_id missing ({warn_id})"
+            log_engine(f"WARNING: {msg}")
+            record_engine_warning("pending_trade_stale", msg)
 
     def _update_diagnostics(self) -> None:
         s = self.snapshot()

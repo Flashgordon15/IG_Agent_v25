@@ -7,6 +7,7 @@ Sections 4.2 and 4.3 of the v25 spec. Persists to src/data/state/points_state.js
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -25,6 +26,9 @@ ROLLING_TRADE_WINDOW = 20
 SESSION_LOSS_STREAK_TRIGGER = 3
 SIGNALS_TO_SKIP_AFTER_STREAK = 3
 DAY_STOP_SESSION_SCORE = -5.0
+RAPID_DRAWDOWN_GBP = 100.0
+RAPID_DRAWDOWN_WINDOW_SEC = 3600.0
+RAPID_DRAWDOWN_COOLDOWN_SEC = 1800.0
 
 CONF_HIGH = 92.0
 CONF_STANDARD_MIN = 85.0
@@ -99,6 +103,8 @@ class PointsEngine:
         self._day_stopped = False
         self._stop_latched = False
         self._last_nominal: PointsStateName = "HEALTHY"
+        self._gbp_loss_events: list[tuple[float, float]] = []
+        self._rapid_cooldown_until: float = 0.0
         self._load()
 
     def _snapshot(self) -> PointsSnapshot:
@@ -116,9 +122,12 @@ class PointsEngine:
         )
 
     def _payload(self) -> dict[str, Any]:
+        eff = self._effective_state_unlocked()
         return {
             "version": STATE_VERSION,
             "cumulative": self._cumulative,
+            "cumulative_points": self._cumulative,
+            "state": eff,
             "session_score": self._session_score,
             "last_trade_score": self._last_trade_score,
             "consecutive_losses": self._consecutive_losses,
@@ -130,7 +139,8 @@ class PointsEngine:
         }
 
     def _apply_payload(self, data: dict[str, Any]) -> None:
-        self._cumulative = float(data.get("cumulative", 0.0))
+        cum = data.get("cumulative_points", data.get("cumulative", 0.0))
+        self._cumulative = float(cum)
         self._session_score = float(data.get("session_score", 0.0))
         self._last_trade_score = float(data.get("last_trade_score", 0.0))
         self._consecutive_losses = int(data.get("consecutive_losses", 0))
@@ -238,9 +248,38 @@ class PointsEngine:
 
         return 0.0
 
+    def note_realised_gbp_loss(self, loss_gbp: float) -> None:
+        """Rolling 60-minute GBP loss — force WARNING for 30 minutes when > £100."""
+        try:
+            if loss_gbp >= 0:
+                return
+            amount = abs(float(loss_gbp))
+            now = time.time()
+            with _lock:
+                self._gbp_loss_events.append((now, amount))
+                cutoff = now - RAPID_DRAWDOWN_WINDOW_SEC
+                self._gbp_loss_events = [
+                    (t, a) for t, a in self._gbp_loss_events if t >= cutoff
+                ]
+                total = sum(a for _, a in self._gbp_loss_events)
+                if total > RAPID_DRAWDOWN_GBP:
+                    self._rapid_cooldown_until = now + RAPID_DRAWDOWN_COOLDOWN_SEC
+                    log_engine("RAPID DRAWDOWN — cooling 30min")
+                    self._persist()
+        except Exception as e:
+            log_engine(f"points_engine rapid drawdown failed: {type(e).__name__}: {e}")
+
     def _effective_state_unlocked(self) -> PointsStateName:
         if self._stop_latched:
             return "STOP"
+
+        if time.time() < self._rapid_cooldown_until:
+            nominal = _nominal_state(self._cumulative)
+            rank = {"HEALTHY": 0, "CAUTION": 1, "WARNING": 2, "STOP": 3}
+            forced: PointsStateName = "WARNING"
+            if rank[nominal] > rank[forced]:
+                return nominal
+            return forced
 
         nominal = _nominal_state(self._cumulative)
         if nominal == "STOP":
@@ -254,9 +293,18 @@ class PointsEngine:
             candidates.append("CAUTION")
         return min(candidates, key=lambda s: rank[s])
 
-    def record_trade(self, result: str, confidence: float, pnl_pts: float) -> float:
+    def record_trade(
+        self,
+        result: str,
+        confidence: float,
+        pnl_pts: float,
+        *,
+        pnl_gbp: float | None = None,
+    ) -> float:
         """Score trade, update cumulative/session state, persist. Returns points scored."""
         try:
+            if pnl_gbp is not None and float(pnl_gbp) < 0:
+                self.note_realised_gbp_loss(float(pnl_gbp))
             score = self._score_trade(result, confidence, pnl_pts)
             result_u = str(result or "").upper()
 

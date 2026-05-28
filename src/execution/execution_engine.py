@@ -85,6 +85,7 @@ class ExecutionEngine:
         )
         self._test = TestSimulator(config, store, self._trade_manager, self._cooldown)
         self._rest_client = rest_client
+        self._position_sync: Any | None = None
         self._live = None
         if rest_client:
             from execution.live_executor import LiveExecutor
@@ -126,6 +127,10 @@ class ExecutionEngine:
 
     def attach_trade_tracker(self, tracker: TradeTracker) -> None:
         self._tracker = tracker
+
+    def attach_position_sync(self, sync: Any) -> None:
+        """Cached IG position counts for pre-entry double-check (no extra REST)."""
+        self._position_sync = sync
 
     def update_positions(self, market: str, epic: str, quote: Quote) -> list[str]:
         return self._trade_manager.update_from_quote(market, epic, quote)
@@ -295,6 +300,49 @@ class ExecutionEngine:
             "risk": risk.stop_distance,
             "limit": risk.limit_distance,
         }
+
+        if self.mode.uses_broker():
+            from execution.market_suspension import gate_detail as suspend_detail
+            from execution.market_suspension import is_blocked
+            from execution.margin_preflight import apply_margin_preflight
+
+            if is_blocked():
+                reason = suspend_detail() or "Market suspended"
+                bus = get_lifecycle_bus()
+                bus.emit(STAGE_RISK, STATUS_FAIL, reason)
+                bus.finalize_rejected(reason, stage=STAGE_RISK)
+                return ExecutionResult(
+                    success=False,
+                    action="REJECTED",
+                    rejection_reason=reason,
+                    execution_params=execution_params,
+                )
+            execution_params = apply_margin_preflight(
+                self.config, execution_params, account_available
+            )
+            if execution_params.pop("_margin_skip", False):
+                reason = "Insufficient margin for minimum size"
+                bus = get_lifecycle_bus()
+                bus.emit(STAGE_RISK, STATUS_FAIL, reason)
+                bus.finalize_rejected(reason, stage=STAGE_RISK)
+                return ExecutionResult(
+                    success=False,
+                    action="REJECTED",
+                    rejection_reason=reason,
+                    execution_params=execution_params,
+                )
+            blocked, pos_reason = self._pre_entry_position_check(signal)
+            if blocked:
+                bus = get_lifecycle_bus()
+                bus.emit(STAGE_RISK, STATUS_FAIL, pos_reason)
+                bus.finalize_rejected(pos_reason, stage=STAGE_RISK)
+                return ExecutionResult(
+                    success=False,
+                    action="REJECTED",
+                    rejection_reason=pos_reason,
+                    execution_params=execution_params,
+                )
+
         get_lifecycle_bus().emit(
             STAGE_RISK,
             STATUS_OK,
@@ -342,6 +390,23 @@ class ExecutionEngine:
         return self._live.execute(
             signal, execution_params, self._trade_manager, self._cooldown, mode=self.mode
         )
+
+    def _pre_entry_position_check(self, signal: TradeSignal) -> tuple[bool, str]:
+        sync = self._position_sync
+        if sync is None:
+            return False, ""
+        try:
+            ig = int(sync.count_for_epic(signal.epic))
+            local = int(self._tracker.count_open_for_epic(signal.epic))
+            if ig != local and hasattr(sync, "sync_once"):
+                sync.sync_once()
+                ig = int(sync.count_for_epic(signal.epic))
+                local = int(self._tracker.count_open_for_epic(signal.epic))
+            if ig > 0:
+                return True, f"IG confirms {ig} open position(s) on {signal.epic}"
+        except Exception:
+            pass
+        return False, ""
 
     def wait_pending_orders(self, *, timeout: float = 30.0) -> None:
         """Wait for background broker order workers (tests / E2E)."""

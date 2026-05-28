@@ -9,6 +9,14 @@ if TYPE_CHECKING:
     from data.learning_store import LearningStore
 
 
+def cooldown_key(epic: str, direction: str | None = None) -> str:
+    """Per epic:direction cooldown — BUY must not block SELL."""
+    ep = str(epic or "").strip()
+    if not direction:
+        return ep
+    return f"{ep}:{str(direction).upper()}"
+
+
 class CooldownTracker:
     def __init__(self, cooldown_seconds: int, store: Any | None = None) -> None:
         self.cooldown_seconds = cooldown_seconds
@@ -31,26 +39,34 @@ class CooldownTracker:
         except Exception:
             pass
 
-    def record(self, epic: str, when: datetime | None = None) -> None:
-        self._last_trade[epic] = when or datetime.now()
+    def record(
+        self,
+        epic: str,
+        when: datetime | None = None,
+        *,
+        direction: str | None = None,
+    ) -> None:
+        key = cooldown_key(epic, direction)
+        self._last_trade[key] = when or datetime.now()
         if self._store is not None:
             try:
-                self._store.record_cooldown(epic, self.cooldown_seconds)
+                self._store.record_cooldown(key, self.cooldown_seconds)
             except Exception:
                 pass
 
-    def remaining_seconds(self, epic: str) -> int:
-        last = self._last_trade.get(epic)
+    def remaining_seconds(self, epic: str, direction: str | None = None) -> int:
+        key = cooldown_key(epic, direction)
+        last = self._last_trade.get(key)
         if not last:
             return 0
         elapsed = (datetime.now() - last).total_seconds()
         return max(0, int(self.cooldown_seconds - elapsed))
 
-    def is_active(self, epic: str) -> bool:
-        return self.remaining_seconds(epic) > 0
+    def is_active(self, epic: str, direction: str | None = None) -> bool:
+        return self.remaining_seconds(epic, direction) > 0
 
-    def format_remaining(self, epic: str) -> str:
-        secs = self.remaining_seconds(epic)
+    def format_remaining(self, epic: str, direction: str | None = None) -> str:
+        secs = self.remaining_seconds(epic, direction)
         if secs <= 0:
             return "READY"
         m, s = divmod(secs, 60)

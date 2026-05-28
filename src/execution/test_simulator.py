@@ -59,7 +59,7 @@ class TestSimulator:
         ref = "SIM-" + "".join(random.choices(string.ascii_uppercase, k=8))
         bus = get_lifecycle_bus()
         bus.emit(STAGE_IG_RESPONSE, STATUS_OK, f"simulated ref={ref}", deal_reference=ref)
-        self.cooldown.record(signal.epic)
+        self.cooldown.record(signal.epic, direction=signal.direction)
 
         trade_id = self.trade_manager.open_trade_from_execution(
             market=signal.market, epic=signal.epic, side=signal.direction,

@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 from typing import Any
 
 from system.paths import logs_dir
 
 _LOG = logs_dir() / "engine.log"
+_ROTATE_BYTES = 10 * 1024 * 1024
+_ROTATE_BACKUP = 7
+_file_handler: RotatingFileHandler | None = None
 _alerts_lock = threading.Lock()
 _warning_count = 0
 _warning_last_type: str | None = None
@@ -19,15 +24,43 @@ def _pytest_isolated() -> bool:
     return os.environ.get("IG_AGENT_PYTEST", "").strip() == "1"
 
 
-def log_engine(message: str) -> None:
-    from system.log_rotator import rotate_if_needed
-
+def _engine_file_handler() -> RotatingFileHandler:
+    global _file_handler
+    if _file_handler is not None:
+        return _file_handler
     _LOG.parent.mkdir(parents=True, exist_ok=True)
-    rotate_if_needed(_LOG)
-    line = f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | {message}\n"
-    with open(_LOG, "a", encoding="utf-8") as f:
-        f.write(line)
+    handler = RotatingFileHandler(
+        _LOG,
+        maxBytes=_ROTATE_BYTES,
+        backupCount=_ROTATE_BACKUP,
+        encoding="utf-8",
+    )
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    _file_handler = handler
+    return handler
+
+
+def log_engine(message: str) -> None:
+    _LOG.parent.mkdir(parents=True, exist_ok=True)
+    line = f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | {message}"
+    try:
+        handler = _engine_file_handler()
+        record = logging.LogRecord(
+            name="ig_agent.engine_file",
+            level=logging.INFO,
+            pathname=str(_LOG),
+            lineno=0,
+            msg=line,
+            args=(),
+            exc_info=None,
+        )
+        handler.emit(record)
+        handler.flush()
+    except Exception:
+        pass
     if _pytest_isolated():
+        with open(_LOG, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
         return
     try:
         from system.logger import get_logger

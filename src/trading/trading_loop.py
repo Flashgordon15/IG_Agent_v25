@@ -186,6 +186,7 @@ class TradingLoop:
         self._tick_count = 0
         self._session_tracker = SessionTickTracker()
         self._ml_store: Any | None = None
+        self._balance_refresher: Any | None = None
 
     @property
     def config(self) -> Config:
@@ -261,6 +262,15 @@ class TradingLoop:
             return ctx
 
         self._tick_count += 1
+        try:
+            from system.market_data_hub import get_market_data_hub
+
+            spread_pts = max(0.0, float(quote.offer) - float(quote.bid))
+            if spread_pts > 0:
+                get_market_data_hub().record_spread(self._epic, spread_pts)
+        except Exception:
+            pass
+        self._maybe_refresh_account_balance()
         try:
             self._signal_engine.add_quote(self._market, quote)
         except Exception as e:
@@ -528,9 +538,40 @@ class TradingLoop:
             detail=detail,
         )
 
+    def _maybe_refresh_account_balance(self) -> None:
+        client = self._rest_client()
+        if client is None:
+            return
+        try:
+            if self._balance_refresher is None:
+                from system.account_balance_refresh import AccountBalanceRefresher
+
+                self._balance_refresher = AccountBalanceRefresher(
+                    client,
+                    open_count_fn=self._ig_open_position_count,
+                )
+            self._balance_refresher.maybe_refresh()
+        except Exception:
+            pass
+
     def _gate_risk_validation(self, quote: Quote) -> GateResult:
+        from execution.market_suspension import gate_detail, is_blocked
+        from system.market_data_hub import get_market_data_hub
+
+        if is_blocked():
+            detail = gate_detail() or "Market suspended"
+            return GateResult(
+                name="risk_validation",
+                passed=False,
+                value={"market_suspended": True},
+                detail=detail,
+            )
+
         spread = max(0.0, float(quote.offer) - float(quote.bid))
-        normal = float(self._config.max_spread_points)
+        cfg_normal = float(self._config.max_spread_points)
+        normal = get_market_data_hub().normal_spread(
+            self._epic, fallback=cfg_normal
+        )
         spread_cap = normal * SPREAD_NORMAL_MULTIPLIER
         spread_ok = spread <= spread_cap if normal > 0 else True
 
@@ -546,14 +587,17 @@ class TradingLoop:
 
         passed = spread_ok and position_ok and risk_ok
         if not spread_ok:
-            detail = f"spread {spread:.1f} > {spread_cap:.1f} (1.5× normal)"
+            detail = (
+                f"spread {spread:.1f} > {spread_cap:.1f} "
+                f"(1.5× normal {normal:.1f}, cfg {cfg_normal:.1f})"
+            )
         elif not position_ok:
             detail = f"open positions {open_count} (max {STAGE1_MAX_OPEN_POSITIONS - 1})"
         elif not risk_ok:
             detail = f"risk £{risk_gbp:.2f} > £{STAGE1_GBP_RISK_CAP:.0f} cap"
         else:
             detail = (
-                f"OK — spread {spread:.1f} pts (max {spread_cap:.1f}), "
+                f"OK — spread {spread:.1f} pts (normal {normal:.1f}, max {spread_cap:.1f}), "
                 f"flat, risk £{risk_gbp:.0f} (cap £{STAGE1_GBP_RISK_CAP:.0f})"
             )
         return GateResult(
@@ -561,6 +605,8 @@ class TradingLoop:
             passed=passed,
             value={
                 "spread": round(spread, 1),
+                "spread_normal": round(normal, 1),
+                "spread_config": round(cfg_normal, 1),
                 "open_count": open_count,
                 "risk_gbp": round(risk_gbp, 0),
                 "spread_cap": round(spread_cap, 1),
@@ -573,6 +619,33 @@ class TradingLoop:
         sig = self._signal_engine.evaluate(self._market)
         threshold = float(self._points.trade_confidence_threshold(self._config))
         conf = float(sig.adjusted_confidence)
+        rules_conf = conf
+        ml_prob: float | None = None
+        if bool(self._config.get("USE_ML_SIGNAL", False)):
+            try:
+                from trading.ml_scorer import get_ml_scorer
+
+                scorer = get_ml_scorer()
+                if scorer.is_trained():
+                    snap = sig.snapshot or {}
+                    last = snap.get("last")
+                    features = {
+                        "confidence": rules_conf,
+                        "rsi": float(last.get("rsi", 0)) if last is not None and hasattr(last, "get") else 0.0,
+                        "atr": float(last.get("atr", 0)) if last is not None and hasattr(last, "get") else 0.0,
+                        "spread": float(last.get("spread", 0)) if last is not None and hasattr(last, "get") else 0.0,
+                        "fitness_score": float(snap.get("fitness_score", 0) or 0),
+                        "session_window": str(snap.get("session") or "unknown"),
+                        "volume_regime": str(snap.get("vol_regime") or "unknown"),
+                        "trend_bias": "mixed",
+                    }
+                    ml_prob = scorer.predict(features)
+                    conf = (rules_conf * 0.6) + (ml_prob * 100.0 * 0.4)
+                    log_engine(
+                        f"ML score {ml_prob:.3f} rules {rules_conf:.1f} blended {conf:.1f}"
+                    )
+            except Exception as e:
+                log_engine(f"ML gate blend skipped: {type(e).__name__}: {e}")
         passed = sig.signal in ("BUY", "SELL") and conf >= threshold
         detail, block_reason = signal_gate_explanation(sig, threshold)
         snap = sig.snapshot or {}
@@ -584,6 +657,8 @@ class TradingLoop:
                 "direction": sig.signal,
                 "raw_direction": snap.get("raw_signal"),
                 "confidence": conf,
+                "rules_confidence": rules_conf,
+                "ml_probability": ml_prob,
                 "threshold": threshold,
                 "block_reason": block_reason,
                 "setup": sig.setup_key,
@@ -880,13 +955,42 @@ class TradingLoop:
                 stream_live=stream_status == "LIVE",
             )
 
+        watchdog_banner = None
+        try:
+            from system.watchdog_banner import banner_active, banner_message
+
+            if banner_active():
+                watchdog_banner = banner_message()
+        except Exception:
+            pass
+
+        spread_stats: dict[str, float] = {}
+        try:
+            from system.market_data_hub import get_market_data_hub
+
+            spread_stats = get_market_data_hub().spread_stats(
+                self._epic, fallback=float(self._config.max_spread_points)
+            )
+        except Exception:
+            pass
+
+        sentiment_factor: dict[str, Any] = {}
+        try:
+            sentiment_factor = self._env.get_sentiment_factor(self._market)
+        except Exception:
+            pass
+
         return {
             "type": "tick",
             "ts": _iso_ts(quote_ts),
+            "watchdog_failed": watchdog_banner,
             "market_state": market_state,
             "bid": float(quote.bid) if quote.bid else None,
             "offer": float(quote.offer) if quote.offer else None,
             "spread": spread if spread > 0 else None,
+            "spread_normal": spread_stats.get("normal"),
+            "spread_current": spread_stats.get("current"),
+            "sentiment": sentiment_factor,
             "tick_age_s": round(tick_age_s, 1),
             "stream_status": stream_status,
             "rest_calls_min": 0,
