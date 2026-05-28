@@ -340,7 +340,11 @@ class PointsEngine:
         try:
             with _lock:
                 return self._effective_state_unlocked()
-        except Exception:
+        except Exception as exc:
+            log_engine(
+                f"points_engine: get_state EXCEPTION — safe-default HEALTHY"
+                f" ({type(exc).__name__}: {exc})"
+            )
             return "HEALTHY"
 
     def get_threshold(self) -> float:
@@ -416,8 +420,12 @@ class PointsEngine:
                 return 0.0
 
             return 0.0
-        except Exception:
-            return 0.25
+        except Exception as exc:
+            log_engine(
+                f"points_engine: get_size_multiplier EXCEPTION — safe-default 0.5x"
+                f" ({type(exc).__name__}: {exc})"
+            )
+            return 0.5
 
     def is_session_paused(self) -> bool:
         try:
