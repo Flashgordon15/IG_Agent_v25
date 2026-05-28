@@ -120,7 +120,7 @@
       "best_session": "08:00-21:00 BST"
     }
   },
-  "allow_live_trading": true,
+  "allow_live_trading": false,
   "max_open_positions": 1,
   "max_positions_per_epic": 1,
   "max_daily_loss_gbp": 200.0,

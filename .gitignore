@@ -8,3 +8,14 @@ src/data/ml_training_store.jsonl
 dashboard/node_modules/
 .DS_Store
 config/credentials/
+
+# Runtime data — never commit
+src/data/*.jsonl
+src/data/*.csv
+src/data/autopsy/
+src/data/ml_model/
+src/data/ohlc_cache/
+src/data/state/
+src/data/replay_analysis.txt
+src/data/training_dataset.csv
+.node-local/
