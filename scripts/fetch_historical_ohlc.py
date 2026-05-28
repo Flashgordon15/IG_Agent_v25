@@ -4,7 +4,7 @@ Fetch Japan 225 MINUTE_5 OHLC from IG REST into append-only JSONL cache.
 
   PYTHONPATH=src python3 scripts/fetch_historical_ohlc.py
 
-Refuses to run 22:30–07:00 Europe/London (live session REST budget protection).
+Allowed only 07:00–22:30 Europe/London (quiet 22:30–07:00 for live REST budget).
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from system.credentials_loader import try_load_credentials
 from system.engine_log import log_engine
 from system.ig_rest_session import ensure_shared_authenticated
 from system.paths import data_dir
+from system.ohlc_fetch_window import in_ohlc_fetch_quiet_window
 from system.rest_api_budget import RestBudgetPausedError, ohlc_bootstrap_rest_window
 from trading.ohlc_bootstrap import _parse_bar_time
 
@@ -50,13 +51,6 @@ MAX_BACKOFF_SEC = 240.0
 ALLOWANCE_RETRY_MINUTES = 45
 RATE_LIMIT_RETRY_MINUTES = 12
 THROTTLE_RETRY_MINUTES = 5
-
-
-def _in_live_trading_window(now: datetime | None = None) -> bool:
-    """True during 22:30–07:00 BST — do not consume REST budget for backfill."""
-    now = now or datetime.now(LONDON)
-    minutes = now.hour * 60 + now.minute
-    return False  # TEMPORARILY DISABLED
 
 
 def _iso_bar_time(dt: datetime) -> str:
@@ -303,10 +297,10 @@ def _append_bars(path: Path, bars: list[dict], seen: set[str], last_written: str
 
 
 def main() -> int:
-    if _in_live_trading_window():
+    if in_ohlc_fetch_quiet_window():
         msg = (
-# TEMPORARILY DISABLED
-            "(22:30–07:00 Europe/London). Re-run outside this window."
+            "OHLC fetch skipped: quiet window 22:30–07:00 Europe/London "
+            "(allowed 07:00–22:30). Re-run during the allowed window."
         )
         print(msg)
         log_engine(msg)
