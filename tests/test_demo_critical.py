@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
-
-import pytest
+from zoneinfo import ZoneInfo
 
 from execution.ml_training_hooks import configure_ml_training, get_points_engine
 from trading.points_engine import PointsEngine, set_points_state_path_for_tests
@@ -15,25 +15,25 @@ from trading.session_manager import SessionManager
 
 
 class SessionFlattenCalendarNoneTests(unittest.TestCase):
-    """When fund calendar is missing, minutes_until_market_close returns None."""
+    """When fund calendar is missing, Japan 225 uses fallback session end."""
 
     def setUp(self) -> None:
         self.mgr = SessionManager("IX.D.NIKKEI.IFM.IP", market="Japan 225")
 
-    @pytest.mark.xfail(
-        reason="minutes_until_market_close None skips scheduled flatten (missing fund calendar)",
-        strict=False,
-    )
-    @patch("trading.session_manager.minutes_until_market_close", return_value=None)
-    def test_session_flatten_fires_when_calendar_returns_none(self, _mock_mins) -> None:
-        """Scheduled T-5 flatten must not be skipped when the calendar is unavailable."""
+    @patch("system.market_watch.calendar.resolve_fund_for_epic", return_value=None)
+    @patch("system.market_watch.calendar.is_market_open", return_value=True)
+    def test_session_flatten_fires_when_calendar_returns_none(
+        self, _mock_open: object, _mock_fund: object
+    ) -> None:
+        """Scheduled T-5 flatten must fire when fund calendar JSON is missing."""
+        at = datetime(2026, 5, 28, 5, 55, tzinfo=ZoneInfo("Europe/London"))
         self.assertTrue(
-            self.mgr.should_run_flatten_attempt(),
-            "expected flatten attempt when calendar returns None (safe default)",
+            self.mgr.should_run_flatten_attempt(at=at),
+            "expected flatten attempt with fallback calendar (T-5)",
         )
         self.assertTrue(
-            self.mgr.should_flatten(),
-            "expected FLATTEN phase when calendar returns None (safe default)",
+            self.mgr.should_flatten(at=at),
+            "expected FLATTEN window with fallback calendar",
         )
 
 

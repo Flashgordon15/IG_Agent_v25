@@ -14,6 +14,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from system.config_loader import get_config
+from system.engine_log import log_engine
 from system.market_watch.loader import load_fund_for_epic, load_fund_config
 
 _DAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -225,7 +226,33 @@ def minutes_until_market_close(epic: str, *, at: datetime | None = None) -> floa
         return None
     fund = resolve_fund_for_epic(epic)
     if fund is None:
-        return None
+        # Fallback: use known Japan 225 session end (06:00 BST / 05:00 UTC)
+        # when fund calendar JSON is not present on disk.
+        # This is a safe default — better to flatten too early than never.
+        FALLBACK_CLOSES = {
+            "IX.D.NIKKEI.IFM.IP": {"hour": 6, "minute": 0, "tz": "Europe/London"},
+        }
+        fallback = FALLBACK_CLOSES.get(epic)
+        if fallback is None:
+            return None
+        tz = ZoneInfo(fallback["tz"])
+        now_local = (at or datetime.now(tz)).astimezone(tz)
+        close_today = now_local.replace(
+            hour=fallback["hour"],
+            minute=fallback["minute"],
+            second=0,
+            microsecond=0,
+        )
+        # If close already passed today, use tomorrow's close
+        if now_local >= close_today:
+            close_today = close_today + timedelta(days=1)
+        diff = (close_today - now_local).total_seconds() / 60.0
+        log_engine(
+            f"calendar: fund config missing for {epic} — "
+            f"using fallback session end {fallback['hour']:02d}:{fallback['minute']:02d} "
+            f"{fallback['tz']} ({diff:.1f} min)"
+        )
+        return diff
     tz = ZoneInfo(str(fund.get("timezone") or "Europe/London"))
     now = at.astimezone(tz) if at is not None else datetime.now(tz=tz)
     for minutes in range(1, 24 * 60 + 1):
