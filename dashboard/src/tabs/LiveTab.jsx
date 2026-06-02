@@ -19,7 +19,9 @@ function barColor(value, threshold, { warnRatio = 0.7 } = {}) {
 const FITNESS_GATE_MIN = 40;
 
 function signalBarThreshold(label, signal) {
-  if (label === "Confidence") return signal.threshold;
+  if (label === "Confidence") {
+    return signal.min_size_threshold ?? signal.threshold;
+  }
   if (label === "Fitness") return signal.fitness_threshold ?? FITNESS_GATE_MIN;
   if (label === "ATR") return signal.atr_threshold;
   return null;
@@ -299,6 +301,16 @@ export default function LiveTab({ tick }) {
               label === "ATR" && threshold != null && Number(threshold) > 0
                 ? Math.max(Number(threshold) * 1.5, Number(val) || 0, 1)
                 : 100;
+            const ff = signal.fitness_factors;
+            const factorRows =
+              label === "Fitness" && ff && typeof ff === "object"
+                ? [
+                    ["ATR", ff.atr, ff.max?.atr],
+                    ["Trend", ff.trend, ff.max?.trend],
+                    ["Session", ff.session, ff.max?.session],
+                    ["Spread", ff.spread, ff.max?.spread],
+                  ]
+                : null;
             return (
               <div key={label}>
                 <div className="flex justify-between text-[11px] mb-1">
@@ -317,6 +329,47 @@ export default function LiveTab({ tick }) {
                     style={{ width: barWidth(Number(val) || 0, barMax) }}
                   />
                 </div>
+                {label === "Confidence" && signal.config_signal_threshold != null && (
+                  <ul className="mt-1 space-y-0.5 text-[10px] text-muted">
+                    <li className="flex justify-between">
+                      <span>Config</span>
+                      <span className="tabular-nums">
+                        {Math.round(Number(signal.config_signal_threshold))}%
+                      </span>
+                    </li>
+                    <li className="flex justify-between">
+                      <span>Gate ({signal.points_state ?? "—"})</span>
+                      <span className="tabular-nums">
+                        {Math.round(Number(signal.threshold ?? 0))}%
+                      </span>
+                    </li>
+                    <li className="flex justify-between font-medium text-foreground">
+                      <span>Min size</span>
+                      <span className="tabular-nums">
+                        {Math.round(Number(signal.min_size_threshold ?? 0))}%
+                      </span>
+                    </li>
+                  </ul>
+                )}
+                {factorRows && (
+                  <ul className="mt-1 space-y-0.5 text-[10px] text-muted font-mono">
+                    {factorRows.map(([name, pts, max]) => (
+                      <li key={name} className="flex justify-between gap-2">
+                        <span>{name}</span>
+                        <span>
+                          {pts != null ? Math.round(Number(pts)) : "—"}/
+                          {max != null ? Math.round(Number(max)) : "—"}
+                        </span>
+                      </li>
+                    ))}
+                    {ff.sentiment_adjustment ? (
+                      <li className="flex justify-between gap-2 text-amber">
+                        <span>Sentiment</span>
+                        <span>{Math.round(Number(ff.sentiment_adjustment))}</span>
+                      </li>
+                    ) : null}
+                  </ul>
+                )}
               </div>
             );
           })}

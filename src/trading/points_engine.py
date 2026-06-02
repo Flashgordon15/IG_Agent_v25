@@ -370,6 +370,22 @@ class PointsEngine:
         except Exception:
             return CONF_MARGINAL_MIN
 
+    def min_size_confidence_threshold(self) -> float:
+        """Minimum confidence for meaningful size (0.5× band) in the current points state."""
+        try:
+            state = self.get_state()
+            if state in ("STOP",) or self.is_day_stopped():
+                return 100.0
+            if state == "WARNING":
+                return CONF_HIGH
+            if state == "CAUTION":
+                return 88.0
+            if state == "HEALTHY":
+                return CONF_STANDARD_MIN
+            return CONF_MARGINAL_MIN
+        except Exception:
+            return CONF_MARGINAL_MIN
+
     def session_skips_remaining(self) -> int:
         try:
             with _lock:

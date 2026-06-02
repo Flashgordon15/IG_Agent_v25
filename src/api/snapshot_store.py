@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from api.snapshot import _iso_now, build_default_tick, normalize_tick
+from api.snapshot import _iso_now, build_default_tick, enrich_signal_thresholds, normalize_tick
 from system.paths import data_dir
 from system.state_manager import atomic_write_json, read_json_file
 
@@ -115,6 +115,9 @@ def push_hub_quote_to_dashboard(
     _last_hub_push_ts = now
 
     tick = dict(get_tick())
+    sig = tick.get("signal")
+    if isinstance(sig, dict):
+        tick["signal"] = dict(sig)
     tick["bid"] = float(bid)
     tick["offer"] = float(offer)
     tick["spread"] = round(float(offer) - float(bid), 2)
@@ -159,27 +162,37 @@ def publish_tick(payload: dict[str, Any], *, notify: bool = True) -> dict[str, A
     return tick
 
 
+def _tick_for_readers(tick: dict[str, Any]) -> dict[str, Any]:
+    """Copy + enrich so WebSocket/poll always expose threshold fields."""
+    out = dict(tick)
+    sig = out.get("signal")
+    if isinstance(sig, dict):
+        out["signal"] = dict(sig)
+    enrich_signal_thresholds(out)
+    return out
+
+
 def get_tick() -> dict[str, Any]:
     """Return latest snapshot (memory cache, refreshed from disk if newer)."""
     global _cached, _cached_mtime
     path = snapshot_path()
     with _lock:
         if not path.exists():
-            return dict(_cached)
+            return _tick_for_readers(_cached)
         try:
             mtime = path.stat().st_mtime
         except OSError:
-            return dict(_cached)
+            return _tick_for_readers(_cached)
         if mtime <= _cached_mtime:
-            return dict(_cached)
+            return _tick_for_readers(_cached)
     data = read_json_file(path)
     if not isinstance(data, dict):
-        return dict(_cached)
+        return _tick_for_readers(_cached)
     tick = normalize_tick(data)
     with _lock:
         _cached = tick
         _cached_mtime = mtime
-    return dict(tick)
+    return _tick_for_readers(tick)
 
 
 def snapshot_age_s() -> float | None:

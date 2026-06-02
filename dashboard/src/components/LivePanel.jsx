@@ -271,6 +271,93 @@ function PriceHero({ label, value }) {
   );
 }
 
+function resolveThresholdFields(signal, state, pointsState) {
+  const sigGate = (state?.health?.gates || []).find(
+    (g) => g.name === "signal_confidence",
+  );
+  const gate = sigGate?.value;
+  const pick = (sigKey, topKey, gateKey) => {
+    const fromSig = signal?.[sigKey];
+    if (fromSig != null && !Number.isNaN(Number(fromSig))) return Number(fromSig);
+    const fromTop = state?.[topKey];
+    if (fromTop != null && !Number.isNaN(Number(fromTop))) return Number(fromTop);
+    const fromGate = gate?.[gateKey ?? sigKey];
+    if (fromGate != null && !Number.isNaN(Number(fromGate))) return Number(fromGate);
+    return null;
+  };
+  return {
+    current: pick("confidence", "signal_strength", "confidence"),
+    config: pick("config_signal_threshold", "config_signal_threshold", "config_signal_threshold"),
+    effective: pick("threshold", "signal_threshold", "threshold"),
+    minSize: pick("min_size_threshold", "min_size_threshold", "min_size_threshold"),
+    stateLabel:
+      pointsState ||
+      signal?.points_state ||
+      state?.points?.state ||
+      gate?.points_state ||
+      "—",
+  };
+}
+
+function SignalConfidenceBreakdown({ signal, state, pointsState }) {
+  const { current, config, effective, minSize, stateLabel } = resolveThresholdFields(
+    signal,
+    state,
+    pointsState,
+  );
+
+  const rows = [
+    { label: "Config threshold", value: config, highlight: false },
+    {
+      label: `Effective gate (${stateLabel})`,
+      value: effective,
+      highlight: false,
+    },
+    { label: "Min size threshold", value: minSize, highlight: false },
+    { label: "Current", value: current, highlight: true },
+  ];
+
+  return (
+    <div className="rounded-lg border border-border bg-card p-3 sm:p-4">
+      <p className="label-caps mb-2">Signal confidence</p>
+      <ul className="space-y-1.5 text-[12px]">
+        {rows.map(({ label, value, highlight }) => {
+          const n = value != null && !Number.isNaN(Number(value)) ? Number(value) : null;
+          const belowMin =
+            highlight && n != null && minSize != null && n < Number(minSize);
+          const belowGate =
+            highlight &&
+            n != null &&
+            effective != null &&
+            n < Number(effective) &&
+            !belowMin;
+          return (
+            <li
+              key={label}
+              className={[
+                "flex justify-between gap-3 tabular-nums",
+                highlight ? "font-semibold text-foreground" : "text-muted",
+                belowMin ? "text-danger" : belowGate ? "text-warning" : "",
+              ].join(" ")}
+            >
+              <span className={highlight ? "" : ""}>{label}</span>
+              <span>{n != null ? `${Math.round(n)}%` : "—"}</span>
+            </li>
+          );
+        })}
+      </ul>
+      {current != null &&
+        minSize != null &&
+        Number(current) < Number(minSize) && (
+          <p className="mt-2 text-[11px] leading-snug text-danger">
+            Need ≥{Math.round(Number(minSize))}% for 0.5× size in {stateLabel} (config{" "}
+            {config != null ? Math.round(Number(config)) : "—"}% alone is not enough).
+          </p>
+        )}
+    </div>
+  );
+}
+
 function Gauge({ label, value, max, disabled, disabledLabel, formatValue }) {
   const pct =
     disabled || value == null
@@ -368,7 +455,6 @@ export default function LivePanel({ state, wsConnected }) {
   const gateReason = resolveGateBlockedReason(state);
   const gateBlockedAt = resolveGateBlockedAt(state);
   const failingGate = firstFailingGate(health);
-  const signalConf = resolveSignalConfidence(state);
   const mlProb = resolveMlProbability(state);
   const mlDisabled = mlProb == null && state?.ml_enabled !== true;
   const mlLog = resolveMlDecisionLog(state);
@@ -528,15 +614,12 @@ export default function LivePanel({ state, wsConnected }) {
         )}
       </Card>
 
-      {/* 6. Two gauges */}
-      <div className="grid grid-cols-2 gap-2 sm:gap-3">
-        <Gauge
-          label="Signal confidence"
-          value={signalConf}
-          max={99}
-          disabled={signalConf == null}
-          disabledLabel="—"
-          formatValue={(v) => `${v}%`}
+      {/* 6. Signal confidence thresholds + ML gauge */}
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 sm:gap-3">
+        <SignalConfidenceBreakdown
+          signal={signal}
+          state={state}
+          pointsState={state.points?.state}
         />
         <Gauge
           label="ML confidence"
@@ -547,6 +630,39 @@ export default function LivePanel({ state, wsConnected }) {
           formatValue={(v) => v.toFixed(2)}
         />
       </div>
+
+      {signal.fitness_factors && typeof signal.fitness_factors === "object" && (
+        <Card title={`Environment fitness ${signal.fitness ?? "—"}%`}>
+          <ul className="space-y-1 text-[11px] font-mono">
+            {[
+              ["ATR", signal.fitness_factors.atr, signal.fitness_factors.max?.atr],
+              ["Trend", signal.fitness_factors.trend, signal.fitness_factors.max?.trend],
+              ["Session", signal.fitness_factors.session, signal.fitness_factors.max?.session],
+              ["Spread", signal.fitness_factors.spread, signal.fitness_factors.max?.spread],
+            ].map(([name, pts, max]) => (
+              <li key={name} className="flex justify-between gap-2 text-muted">
+                <span>{name}</span>
+                <span className="text-foreground tabular-nums">
+                  {pts != null ? Math.round(Number(pts)) : "—"} /{" "}
+                  {max != null ? Math.round(Number(max)) : "—"}
+                </span>
+              </li>
+            ))}
+            {signal.fitness_factors.sentiment_adjustment ? (
+              <li className="flex justify-between gap-2 text-amber">
+                <span>Sentiment adj</span>
+                <span className="tabular-nums">
+                  {Math.round(Number(signal.fitness_factors.sentiment_adjustment))}
+                </span>
+              </li>
+            ) : null}
+          </ul>
+          <p className="mt-2 text-[10px] text-muted leading-snug">
+            Environment gate needs ≥{signal.fitness_threshold ?? 40}% (sum of ATR / trend /
+            session / spread factors).
+          </p>
+        </Card>
+      )}
 
       {/* 7. ML decision log */}
       <Card title="ML decision log">

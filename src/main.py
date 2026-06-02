@@ -41,6 +41,7 @@ EXIT_INSTANCE = 4
 _BROWSER_DELAY_SEC = 3.0
 _API_HOST = "127.0.0.1"
 _API_PORT = 8080
+_DASHBOARD_URL = "http://localhost:8080/"
 
 
 def _is_benign_startup_lock_failure(message: str) -> bool:
@@ -265,8 +266,8 @@ class AgentRuntime:
             register_api_startup(_start_live_engines)
 
             app = create_app(watch_snapshot=True)
-            url = f"http://{_API_HOST}:{_API_PORT}/"
-            _open_browser_delayed(url)
+            if not os.environ.get("IG_AGENT_FROM_LAUNCHER"):
+                _open_browser_delayed(_DASHBOARD_URL)
 
             import uvicorn
 

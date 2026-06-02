@@ -114,10 +114,17 @@ function agentStateDescription(state, stateName) {
     parts.push(`max ${fmtMult(mult)} size`);
   }
 
-  const threshold =
-    pts.threshold ?? pts.trade_threshold ?? sig.threshold ?? pts.confidence_floor;
-  if (threshold != null && Number.isFinite(Number(threshold))) {
-    parts.push(`threshold ${Math.round(Number(threshold))}%`);
+  const configThr = sig.config_signal_threshold;
+  const gateThr = sig.threshold ?? pts.trade_threshold;
+  const minSize = sig.min_size_threshold;
+  if (configThr != null && Number.isFinite(Number(configThr))) {
+    parts.push(`config ${Math.round(Number(configThr))}%`);
+  }
+  if (gateThr != null && Number.isFinite(Number(gateThr))) {
+    parts.push(`gate ${Math.round(Number(gateThr))}%`);
+  }
+  if (minSize != null && Number.isFinite(Number(minSize))) {
+    parts.push(`min size ${Math.round(Number(minSize))}%`);
   }
 
   const { maxPositions, openCount } = resolveRiskMeta(state);

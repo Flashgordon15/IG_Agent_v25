@@ -146,6 +146,10 @@ class PointsEngineThresholdTests(unittest.TestCase):
         with patch.object(self.engine, "get_threshold", return_value=92.0):
             self.assertEqual(self.engine.trade_confidence_threshold(cfg), 92.0)
 
+    def test_min_size_confidence_threshold_caution_is_88(self) -> None:
+        with patch.object(self.engine, "get_state", return_value="CAUTION"):
+            self.assertEqual(self.engine.min_size_confidence_threshold(), 88.0)
+
 
 class PointsEngineSessionTests(unittest.TestCase):
     def setUp(self) -> None:

@@ -7,8 +7,13 @@ snapshot_store.publish_tick() (Step 9).
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from typing import Any
+
+from system.paths import logs_dir
+
+_DEBUG_SIGNAL_KEYS_LOGGED = False
 
 GATE_NAMES: tuple[str, ...] = (
     "session_open",
@@ -69,6 +74,9 @@ def build_default_tick() -> dict[str, Any]:
         "signal": {
             "direction": "WAIT",
             "confidence": 0.0,
+            "threshold": 70,
+            "config_signal_threshold": 70,
+            "points_state": "CAUTION",
             "fitness": 0,
             "atr": 0.0,
             "setup": "",
@@ -87,10 +95,140 @@ def build_default_tick() -> dict[str, Any]:
     }
 
 
+def _signal_confidence_gate_value(tick: dict[str, Any]) -> dict[str, Any] | None:
+    for g in (tick.get("health") or {}).get("gates") or []:
+        if isinstance(g, dict) and g.get("name") == "signal_confidence":
+            val = g.get("value")
+            if isinstance(val, dict):
+                return val
+    return None
+
+
+def _int_pct(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(round(float(value)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _fallback_thresholds_for_state(state: str | None) -> dict[str, int]:
+    """Display fallbacks when gate/signal omit threshold fields (hub quote-only ticks)."""
+    from trading.points_engine import CONF_HIGH, CONF_MARGINAL_MIN, CONF_STANDARD_MIN
+
+    st = (state or "CAUTION").upper()
+    if st == "WARNING":
+        floor = int(CONF_HIGH)
+        min_size = int(CONF_HIGH)
+    elif st == "CAUTION":
+        floor = int(CONF_MARGINAL_MIN)
+        min_size = 88
+    elif st == "HEALTHY":
+        floor = int(CONF_MARGINAL_MIN)
+        min_size = int(CONF_STANDARD_MIN)
+    else:
+        floor = int(CONF_MARGINAL_MIN)
+        min_size = int(CONF_MARGINAL_MIN)
+    return {"points_confidence_floor": floor, "min_size_threshold": min_size}
+
+
+def enrich_signal_thresholds(tick: dict[str, Any]) -> None:
+    """
+    Ensure top-level signal carries config / effective / min-size thresholds.
+
+    The Live dashboard reads signal.config_signal_threshold and
+    signal.min_size_threshold on every WebSocket tick. Hub quote merges can
+    republish a cached tick that predates those fields; copy from the
+    signal_confidence gate when present, otherwise derive from points state.
+    """
+    signal = tick.get("signal")
+    if not isinstance(signal, dict):
+        signal = {}
+        tick["signal"] = signal
+
+    gate = _signal_confidence_gate_value(tick)
+    points = tick.get("points") if isinstance(tick.get("points"), dict) else {}
+    state = (
+        signal.get("points_state")
+        or (gate.get("points_state") if gate else None)
+        or points.get("state")
+    )
+
+    if gate:
+        for key in (
+            "threshold",
+            "config_signal_threshold",
+            "points_confidence_floor",
+            "min_size_threshold",
+        ):
+            pct = _int_pct(gate.get(key))
+            if pct is not None:
+                signal[key] = pct
+        if gate.get("points_state"):
+            signal["points_state"] = str(gate["points_state"])
+
+    if signal.get("config_signal_threshold") is None:
+        try:
+            from system.config_loader import load_config
+
+            signal["config_signal_threshold"] = _int_pct(load_config().signal_threshold)
+        except Exception:
+            signal["config_signal_threshold"] = 70
+
+    fallbacks = _fallback_thresholds_for_state(
+        str(state) if state is not None else None
+    )
+    if signal.get("points_confidence_floor") is None:
+        signal["points_confidence_floor"] = fallbacks["points_confidence_floor"]
+    if _int_pct(gate.get("min_size_threshold") if gate else None) is None:
+        signal["min_size_threshold"] = fallbacks["min_size_threshold"]
+
+    if signal.get("threshold") is None:
+        cfg = int(signal.get("config_signal_threshold") or 70)
+        floor = int(signal.get("points_confidence_floor") or 80)
+        signal["threshold"] = max(cfg, floor)
+
+    if signal.get("points_state") is None and state is not None:
+        signal["points_state"] = str(state)
+
+
+def _log_signal_keys_once(tick: dict[str, Any]) -> None:
+    """One-time debug line to launcher.log — confirms normalize_tick signal shape."""
+    global _DEBUG_SIGNAL_KEYS_LOGGED
+    if _DEBUG_SIGNAL_KEYS_LOGGED or os.environ.get("IG_AGENT_PYTEST", "").strip() == "1":
+        return
+    _DEBUG_SIGNAL_KEYS_LOGGED = True
+    signal = tick.get("signal")
+    keys = sorted(signal.keys()) if isinstance(signal, dict) else []
+    sample = {}
+    if isinstance(signal, dict):
+        for key in (
+            "config_signal_threshold",
+            "min_size_threshold",
+            "threshold",
+            "confidence",
+            "points_state",
+        ):
+            if key in signal:
+                sample[key] = signal[key]
+    line = (
+        f"normalize_tick signal keys={keys!r} sample={sample!r} "
+        f"points.state={(tick.get('points') or {}).get('state')!r}"
+    )
+    log_path = logs_dir() / "launcher.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(f"{stamp} | {line}\n")
+
+
 def normalize_tick(payload: dict[str, Any]) -> dict[str, Any]:
     """Merge partial publisher updates onto defaults; always include type tick."""
     base = build_default_tick()
     if not isinstance(payload, dict):
+        enrich_signal_thresholds(base)
+        _log_signal_keys_once(base)
         return base
     for key, val in payload.items():
         if key == "health" and isinstance(val, dict):
@@ -110,4 +248,6 @@ def normalize_tick(payload: dict[str, Any]) -> dict[str, Any]:
     base["type"] = "tick"
     if not base.get("ts"):
         base["ts"] = _iso_now()
+    enrich_signal_thresholds(base)
+    _log_signal_keys_once(base)
     return base

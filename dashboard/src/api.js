@@ -13,8 +13,9 @@ async function getJson(path, options = {}) {
   }
 }
 
+/** Full tick snapshot (same schema as WebSocket) — not the flat /api/state summary. */
 export function fetchState() {
-  return getJson("/api/state");
+  return getJson("/state");
 }
 
 export function fetchTrades() {

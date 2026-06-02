@@ -23,6 +23,10 @@ from system.config import Config
 from system.engine_log import log_engine
 from system.paths import project_root
 from trading.environment_scorer import (
+    FACTOR_ATR_MAX,
+    FACTOR_SESSION_MAX,
+    FACTOR_SPREAD_MAX,
+    FACTOR_TREND_MAX,
     GATE_PASS_MIN,
     SAFE_DEFAULT_SCORE,
     EnvironmentScorer,
@@ -456,6 +460,35 @@ class TradingLoop:
             detail=detail,
         )
 
+    def _fitness_factors_payload(self) -> dict[str, Any]:
+        """Decomposed environment fitness for dashboard /state (atr/trend/session/spread)."""
+        try:
+            raw = self._env.get_factors()
+            last = self._env.last_score()
+            sentiment = raw.get("sentiment")
+            if not isinstance(sentiment, dict):
+                sentiment = self._env.get_sentiment_factor(self._market)
+            return {
+                "atr": round(float(raw.get("atr", 0)), 2),
+                "trend": round(float(raw.get("trend", 0)), 2),
+                "session": round(float(raw.get("session", 0)), 2),
+                "spread": round(float(raw.get("spread", 0)), 2),
+                "sentiment_adjustment": round(float(raw.get("sentiment_adj", 0)), 2),
+                "max": {
+                    "atr": FACTOR_ATR_MAX,
+                    "trend": FACTOR_TREND_MAX,
+                    "session": FACTOR_SESSION_MAX,
+                    "spread": FACTOR_SPREAD_MAX,
+                },
+                "total": round(float(last.total), 1),
+                "gate_min": GATE_PASS_MIN,
+                "capped_cold_start": bool(last.capped_cold_start),
+                "capped_gap_open": bool(last.capped_gap_open),
+                "sentiment": sentiment,
+            }
+        except Exception:
+            return {}
+
     def _gate_environment_fitness(self, quote: Quote) -> GateResult:
         try:
             quote_df = self._signal_engine.quote_df(self._market)
@@ -480,10 +513,16 @@ class TradingLoop:
         detail = f"fitness {score_int}% (need >={int(GATE_PASS_MIN)}%)"
         if sent_label and sent_label != "neutral":
             detail += f" — {sent_label}"
+        factors_payload = self._fitness_factors_payload()
         return GateResult(
             name="environment_fitness",
             passed=passed,
-            value={"score": score_int, "display": f"{score_int}%", "sentiment": sent},
+            value={
+                "score": score_int,
+                "display": f"{score_int}%",
+                "sentiment": sent,
+                "factors": factors_payload,
+            },
             detail=detail,
         )
 
@@ -660,6 +699,12 @@ class TradingLoop:
                 "rules_confidence": rules_conf,
                 "ml_probability": ml_prob,
                 "threshold": threshold,
+                "config_signal_threshold": float(self._config.signal_threshold),
+                "points_confidence_floor": float(self._points.get_threshold()),
+                "min_size_threshold": float(
+                    self._points.min_size_confidence_threshold()
+                ),
+                "points_state": self._points.get_state(),
                 "block_reason": block_reason,
                 "setup": sig.setup_key,
             },
@@ -1017,9 +1062,16 @@ class TradingLoop:
                 "raw_direction": raw_direction or None,
                 "confidence": int(round(confidence)),
                 "threshold": int(round(signal_threshold)),
+                "config_signal_threshold": int(round(float(self._config.signal_threshold))),
+                "points_confidence_floor": int(round(float(self._points.get_threshold()))),
+                "min_size_threshold": int(
+                    round(float(self._points.min_size_confidence_threshold()))
+                ),
+                "points_state": points_state,
                 "block_reason": block_reason or None,
                 "fitness": int(round(ctx.fitness)),
                 "fitness_threshold": int(round(GATE_PASS_MIN)),
+                "fitness_factors": self._fitness_factors_payload(),
                 "atr": round(atr, 1) if atr else 0.0,
                 "atr_threshold": (
                     round(float(self._config.min_atr_points), 1)
