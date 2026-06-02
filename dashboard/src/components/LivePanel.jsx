@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { fmtPrice } from "../utils/fmtPrice.js";
 
 // ---------------------------------------------------------------------------
 // Helpers — gate / block reason (aligned with LiveTab)
@@ -161,11 +162,6 @@ function resolveMlDecisionLog(state) {
   return Array.isArray(log) ? log.slice(-50).reverse() : [];
 }
 
-function fmtPrice(v) {
-  if (v == null || Number.isNaN(Number(v))) return "—";
-  return Number(v).toFixed(1);
-}
-
 function fmtGbp(v) {
   if (v == null || Number.isNaN(Number(v))) return "—";
   const n = Number(v);
@@ -246,7 +242,7 @@ function usePriceFlash(value) {
   return flash;
 }
 
-function PriceHero({ label, value }) {
+function PriceHero({ label, value, epic }) {
   const flash = usePriceFlash(value);
   const flashClass =
     flash === "up"
@@ -265,7 +261,7 @@ function PriceHero({ label, value }) {
           flashClass,
         ].join(" ")}
       >
-        {fmtPrice(value)}
+        {fmtPrice(value, epic)}
       </span>
     </div>
   );
@@ -437,18 +433,41 @@ function Card({ title, children, className = "" }) {
 // ---------------------------------------------------------------------------
 
 function marketTabOptions(rawState) {
-  const markets = rawState?.markets;
-  if (markets && typeof markets === "object") {
+  const markets =
+    rawState?.markets && typeof rawState.markets === "object"
+      ? rawState.markets
+      : null;
+  const labels =
+    rawState?.instrument_labels && typeof rawState.instrument_labels === "object"
+      ? rawState.instrument_labels
+      : {};
+
+  const enabled = Array.isArray(rawState?.enabled_epics)
+    ? rawState.enabled_epics.filter(Boolean)
+    : [];
+
+  if (enabled.length) {
+    return enabled.map((epic) => {
+      const m = markets?.[epic];
+      return {
+        epic,
+        label: m?.market || labels[epic] || m?.instrument_id || epic,
+      };
+    });
+  }
+
+  if (markets) {
     return Object.entries(markets).map(([epic, m]) => ({
       epic,
-      label: m.market || m.instrument_id || epic,
+      label: m.market || labels[epic] || m.instrument_id || epic,
     }));
   }
+
   if (rawState?.epic) {
     return [
       {
         epic: rawState.epic,
-        label: rawState.market || rawState.epic,
+        label: rawState.market || labels[rawState.epic] || rawState.epic,
       },
     ];
   }
@@ -462,6 +481,7 @@ export default function LivePanel({
   onSelectEpic,
   wsConnected,
 }) {
+  const epic = state?.epic ?? state?.selected_epic ?? selectedEpic ?? "";
   const tabs = marketTabOptions(rawState ?? state);
 
   if (!state) {
@@ -515,9 +535,9 @@ export default function LivePanel({
       {/* 1. Bid/Offer hero */}
       <Card className="py-4">
         <div className="flex items-stretch justify-center gap-2 sm:gap-6">
-          <PriceHero label="Bid" value={state.bid} />
+          <PriceHero label="Bid" value={state.bid} epic={epic} />
           <div className="hidden w-px self-stretch bg-border sm:block" aria-hidden />
-          <PriceHero label="Offer" value={state.offer} />
+          <PriceHero label="Offer" value={state.offer} epic={epic} />
         </div>
 
         {/* 2. Last update time */}
@@ -586,7 +606,7 @@ export default function LivePanel({
                   const stop = pos.stop ?? pos.stop_level;
                   const trailLabel =
                     stop != null
-                      ? `${fmtPrice(stop)}${pos.trail_active ? " T" : ""}`
+                      ? `${fmtPrice(stop, pos.epic ?? epic)}${pos.trail_active ? " T" : ""}`
                       : "—";
                   const key =
                     pos.deal_id ??
@@ -605,10 +625,10 @@ export default function LivePanel({
                         {side || "—"}
                       </td>
                       <td className="px-2 py-2 tabular-nums">
-                        {fmtPrice(pos.entry ?? pos.entry_price ?? pos.level)}
+                        {fmtPrice(pos.entry ?? pos.entry_price ?? pos.level, pos.epic ?? epic)}
                       </td>
                       <td className="px-2 py-2 tabular-nums">
-                        {fmtPrice(pos.current ?? pos.mark)}
+                        {fmtPrice(pos.current ?? pos.mark, pos.epic ?? epic)}
                       </td>
                       <td className={`px-2 py-2 tabular-nums font-medium ${pnlColor}`}>
                         {fmtGbp(pnlNum)}

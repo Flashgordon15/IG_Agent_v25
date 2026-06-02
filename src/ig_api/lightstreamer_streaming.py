@@ -115,6 +115,12 @@ class IGLightstreamerStreamingClient:
         log_engine(
             f"Lightstreamer CONNECTED — first tick received bid={bid} offer={offer} epic={epic}"
         )
+        try:
+            from system.stream_ready import signal_stream_ready
+
+            signal_stream_ready(source=f"lightstreamer:{epic}")
+        except Exception:
+            pass
 
     @property
     def transport_label(self) -> str:
@@ -432,6 +438,14 @@ class IGLightstreamerStreamingClient:
         if self._using_fallback:
             return
         self._using_fallback = True
+        try:
+            from system.telegram_notifier import get_telegram_notifier
+
+            notifier = get_telegram_notifier()
+            if notifier is not None:
+                notifier.notify_rest_fallback()
+        except Exception:
+            pass
         self._teardown_lightstreamer()
         self._fallback = IGStreamingClient(
             self._credentials,

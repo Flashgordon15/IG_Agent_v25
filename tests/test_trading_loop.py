@@ -16,7 +16,12 @@ sys.path.insert(0, str(ROOT / "src"))
 from data.models import Quote
 from execution.trading_loop import TickOutcome
 from signals.signal_engine import SignalResult
-from trading.trading_loop import GateResult, TradingLoop, signal_gate_explanation
+from trading.trading_loop import (
+    STAGE1_GBP_RISK_CAP,
+    GateResult,
+    TradingLoop,
+    signal_gate_explanation,
+)
 
 
 def _quote() -> Quote:
@@ -51,10 +56,18 @@ def _make_loop(**overrides) -> TradingLoop:
     config = MagicMock()
     config.refresh_seconds = 0.05
     config.max_spread_points = 35.0
+    config.max_positions_per_epic = 1
     config.stop_distance_points = 40.0
     config.trade_size = 1.0
+    config.adaptive_min_trade_size = 0.5
+    config.adaptive_max_trade_size = 5.0
     config.currency_code = "GBP"
-    config.get = MagicMock(return_value=1.0)
+    config.get = MagicMock(
+        side_effect=lambda key, default=None: {
+            "ig_point_value_gbp": 1.0,
+            "risk_cap_gbp": None,
+        }.get(key, default)
+    )
 
     session = MagicMock()
     session.is_session_open.return_value = True
@@ -75,6 +88,7 @@ def _make_loop(**overrides) -> TradingLoop:
     points.is_day_stopped.return_value = False
     points.get_threshold.return_value = 80.0
     points.get_size_multiplier.return_value = 1.0
+    points.trade_confidence_threshold.return_value = 80.0
     points.snapshot.return_value = MagicMock(
         cumulative=0.0,
         session_score=0.0,
@@ -292,6 +306,76 @@ class TradingLoopTests(unittest.TestCase):
         rows = loop._positions_payload(_quote())
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["pnl_gbp"], 8.0)
+
+
+class RiskValidationGateTests(unittest.TestCase):
+    def test_uses_ig_min_deal_size_for_actual_risk(self) -> None:
+        loop = _make_loop()
+        loop._epic = "CS.D.CFPGOLD.CFP.IP"
+        loop._config.stop_distance_points = 10.0
+        loop._config.trade_size = 10.0
+        loop._config.get = MagicMock(
+            side_effect=lambda key, default=None: {
+                "ig_point_value_gbp": 1.0,
+                "risk_cap_gbp": 150,
+            }.get(key, default)
+        )
+        loop._points.get_size_multiplier.return_value = 0.25
+        rest = MagicMock()
+        rest.fetch_market_constraints.return_value = {"min_deal_size": 10.0}
+        loop._execution_loop.execution_engine._rest_client = rest
+
+        with patch("system.market_data_hub.get_market_data_hub") as hub_mock:
+            hub_mock.return_value.normal_spread.return_value = 1.0
+            gate = loop._gate_risk_validation(_quote())
+
+        self.assertTrue(gate.passed)
+        self.assertEqual(gate.value["effective_size"], 2.5)
+        self.assertEqual(gate.value["actual_size"], 10.0)
+        self.assertEqual(gate.value["ig_min_deal_size"], 10.0)
+        self.assertEqual(gate.value["risk_gbp"], 100.0)
+        self.assertEqual(gate.value["risk_cap_gbp"], 150)
+
+    def test_per_instrument_risk_cap_override(self) -> None:
+        loop = _make_loop()
+        loop._config.stop_distance_points = 45.0
+        loop._config.trade_size = 1.0
+        loop._config.get = MagicMock(
+            side_effect=lambda key, default=None: {
+                "ig_point_value_gbp": 1.0,
+                "risk_cap_gbp": 50,
+            }.get(key, default)
+        )
+        loop._points.get_size_multiplier.return_value = 1.0
+        rest = MagicMock()
+        rest.fetch_market_constraints.return_value = {"min_deal_size": 1.0}
+        loop._execution_loop.execution_engine._rest_client = rest
+
+        with patch("system.market_data_hub.get_market_data_hub") as hub_mock:
+            hub_mock.return_value.normal_spread.return_value = 10.0
+            gate = loop._gate_risk_validation(_quote())
+
+        self.assertTrue(gate.passed)
+        self.assertEqual(gate.value["risk_gbp"], 45.0)
+        self.assertEqual(gate.value["risk_cap_gbp"], 50)
+
+    def test_falls_back_to_stage1_cap_when_no_instrument_override(self) -> None:
+        loop = _make_loop()
+        loop._config.get = MagicMock(
+            side_effect=lambda key, default=None: {
+                "ig_point_value_gbp": 1.0,
+                "risk_cap_gbp": None,
+            }.get(key, default)
+        )
+        rest = MagicMock()
+        rest.fetch_market_constraints.return_value = {"min_deal_size": 1.0}
+        loop._execution_loop.execution_engine._rest_client = rest
+
+        with patch("system.market_data_hub.get_market_data_hub") as hub_mock:
+            hub_mock.return_value.normal_spread.return_value = 10.0
+            gate = loop._gate_risk_validation(_quote())
+
+        self.assertEqual(gate.value["risk_cap_gbp"], STAGE1_GBP_RISK_CAP)
 
 
 if __name__ == "__main__":

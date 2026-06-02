@@ -99,11 +99,13 @@
       "min_atr_points": 20,
       "ig_point_value_gbp": 1.0,
       "trade_size": 1.0,
+      "risk_cap_gbp": 50,
+      "stale_threshold_seconds": 10,
       "best_session": "23:00-06:00 BST",
       "trading_session_whitelist": ["asia_early"]
     },
     "eur_usd": {
-      "enabled": false,
+      "enabled": true,
       "epic": "CS.D.EURUSD.CFD.IP",
       "name": "EUR/USD",
       "signal_threshold": 70,
@@ -114,6 +116,8 @@
       "min_atr_points": 0,
       "ig_point_value_gbp": 1.0,
       "trade_size": 1.0,
+      "risk_cap_gbp": 10,
+      "stale_threshold_seconds": 30,
       "best_session": "12:00-17:00 BST",
       "trading_session_whitelist": ["london_morning", "london_us_overlap"]
     },
@@ -127,7 +131,7 @@
       "trading_session_whitelist": ["london_us_overlap", "us_afternoon"]
     },
     "gold": {
-      "enabled": false,
+      "enabled": true,
       "epic": "CS.D.CFPGOLD.CFP.IP",
       "name": "Spot Gold",
       "signal_threshold": 70,
@@ -138,6 +142,8 @@
       "min_atr_points": 2,
       "ig_point_value_gbp": 1.0,
       "trade_size": 10,
+      "risk_cap_gbp": 150,
+      "stale_threshold_seconds": 15,
       "best_session": "08:00-21:00 BST",
       "trading_session_whitelist": ["london_morning", "london_us_overlap"]
     }
@@ -196,5 +202,10 @@
   "test_replay_use_multi_regime": true,
   "market_watch_enabled": true,
   "market_watch_fund_id": "japan_225",
-  "rest_budget_warn_per_minute": 6
+  "rest_budget_warn_per_minute": 6,
+  "telegram": {
+    "enabled": true,
+    "bot_token": "8729749582:AAEN6fjlg8ZeIo3L5nlsGyk3yn_w31oEDFc",
+    "chat_id": "1347145610"
+  }
 }

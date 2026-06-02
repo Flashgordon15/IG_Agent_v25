@@ -197,6 +197,13 @@ class ExecutionEngine:
                 if notes
                 else f"points {self._points.get_state()} ×{mult:.2f}"
             )
+        if self._env_scorer is not None:
+            try:
+                settings["fitness_score"] = float(
+                    self._env_scorer.score(signal.market, quote=signal.quote)
+                )
+            except Exception:
+                settings["fitness_score"] = 0.0
         trace_execution(
             "ADAPTIVE",
             "AdaptiveEngine.settings",

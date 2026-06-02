@@ -317,13 +317,41 @@ def _parse_args() -> argparse.Namespace:
         default="",
         help="ISO start date (default: resume cache or 2024-01-01; new epics try last 90d)",
     )
+    parser.add_argument(
+        "--source",
+        choices=("ig", "yahoo"),
+        default="ig",
+        help="Data source: ig (default) or yahoo (5m, max ~60d). IG allowance blocks auto-fallback to yahoo.",
+    )
     return parser.parse_args()
+
+
+def _run_yahoo_seed(epic: str, market: str) -> int:
+    from data.ohlc_yahoo_seeder import EPIC_YAHOO_MAP, fetch_yahoo_ohlc_for_epic
+
+    if epic not in EPIC_YAHOO_MAP:
+        print(f"FAIL: no Yahoo mapping for epic {epic}", file=sys.stderr)
+        return 1
+    try:
+        count = fetch_yahoo_ohlc_for_epic(epic, market=market)
+    except Exception as e:
+        print(f"FAIL: Yahoo fetch — {e}", file=sys.stderr)
+        log_engine(f"Yahoo OHLC fallback failed: {type(e).__name__}: {e}")
+        return 1
+    cache_path = ohlc_cache_path(epic, market=market)
+    print(f"Yahoo seed OK: {count} bars → {cache_path}")
+    log_engine(f"Yahoo OHLC fallback OK: {count} bars epic={epic}")
+    return 0
 
 
 def main() -> int:
     args = _parse_args()
     epic = str(args.epic or DEFAULT_EPIC).strip()
     market = str(args.market or "").strip()
+    source = str(args.source or "ig").strip().lower()
+
+    if source == "yahoo":
+        return _run_yahoo_seed(epic, market or DEFAULT_MARKET)
 
     if not is_fetch_window_open():
         return 0
@@ -519,6 +547,26 @@ def main() -> int:
     print(f"Date range: {first_ts or 'n/a'} to {last_out or 'n/a'}")
     print(f"File: {cache_path}")
     print(f"File size: {file_size:,} bytes")
+    yahoo_fallback = 0
+    if blocked and str(blocked.get("block_reason") or "") in ("allowance", "rate_limit"):
+        print("IG historical blocked — retrying with Yahoo Finance fallback...")
+        log_engine("OHLC fetch: IG blocked, attempting Yahoo fallback")
+        yahoo_fallback = _run_yahoo_seed(epic, market or DEFAULT_MARKET)
+        if yahoo_fallback == 0:
+            blocked = None
+            allowance_blocked = False
+            last_out = _read_last_timestamp(cache_path) or last_out
+            if cache_path.is_file():
+                with cache_path.open("r", encoding="utf-8") as handle:
+                    for line in handle:
+                        if line.strip():
+                            try:
+                                ts = str(json.loads(line).get("t") or "")
+                                if ts:
+                                    seen.add(ts)
+                            except json.JSONDecodeError:
+                                pass
+
     if blocked:
         pull_status.update(
             {
@@ -543,7 +591,9 @@ def main() -> int:
             }
         )
         _save_status(status_path, pull_status)
-    if allowance_blocked:
+    if yahoo_fallback == 0 and not blocked:
+        print("Status: OK (Yahoo Finance fallback)")
+    elif allowance_blocked:
         print("Status: partial (historical allowance gate hit)")
     elif blocked:
         print(f"Status: partial ({blocked.get('block_reason')})")

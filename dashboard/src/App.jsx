@@ -22,6 +22,9 @@ const POLL_INTERVAL_MS = 5000;
 
 function listMarketEpics(state) {
   if (!state) return [];
+  if (Array.isArray(state.enabled_epics) && state.enabled_epics.length) {
+    return state.enabled_epics.filter(Boolean);
+  }
   const markets = state.markets;
   if (markets && typeof markets === "object") {
     return Object.keys(markets);
@@ -318,6 +321,7 @@ export default function App() {
     winRate: state?.win_rate_20,
     dailyPnl: state?.daily_pnl_gbp,
     streamStatus: viewState?.stream_status,
+    epic: viewState?.epic ?? selectedEpic,
     spreadCurrent: viewState?.spread_current ?? viewState?.spread,
     spreadNormal: viewState?.spread_normal,
     sentiment: viewState?.sentiment,

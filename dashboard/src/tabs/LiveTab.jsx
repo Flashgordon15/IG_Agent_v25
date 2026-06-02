@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api } from "../api/client";
+import { fmtPrice } from "../utils/fmtPrice.js";
 
 function barWidth(v, max = 100) {
   return `${Math.min(100, Math.max(0, (v / max) * 100))}%`;
@@ -270,7 +271,7 @@ export default function LiveTab({ tick }) {
           <div className="grid grid-cols-4 gap-2 text-center">
             <div>
               <p className="text-muted text-[11px]">Bid</p>
-              <p className="price-lg">{tick?.bid?.toFixed(1) ?? "—"}</p>
+              <p className="price-lg">{fmtPrice(tick?.bid, tick?.epic) ?? "—"}</p>
             </div>
             <div>
               <p className="text-muted text-[11px]">Spread</p>
@@ -278,7 +279,7 @@ export default function LiveTab({ tick }) {
             </div>
             <div>
               <p className="text-muted text-[11px]">Offer</p>
-              <p className="price-lg">{tick?.offer?.toFixed(1) ?? "—"}</p>
+              <p className="price-lg">{fmtPrice(tick?.offer, tick?.epic) ?? "—"}</p>
             </div>
             <div>
               <p className="text-muted text-[11px]">Tick age</p>

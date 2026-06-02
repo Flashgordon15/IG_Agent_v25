@@ -1,14 +1,12 @@
+import { fmtPrice } from "../utils/fmtPrice.js";
+
 function isNil(v) {
   return v == null || v === "";
 }
 
-function dash(v, formatter) {
+function dash(v, formatter, epic) {
   if (isNil(v) || (typeof v === "number" && Number.isNaN(v))) return "—";
-  return formatter ? formatter(v) : v;
-}
-
-function fmtPrice(v) {
-  return Number(v).toFixed(1);
+  return formatter ? formatter(v, epic) : v;
 }
 
 function fmtPoints(v) {
@@ -150,6 +148,7 @@ function Stat({ label, value, valueClassName = "text-foreground" }) {
 export default function Header({
   bid,
   offer,
+  epic,
   agentState,
   pointsTrade,
   pointsSession,
@@ -198,12 +197,12 @@ export default function Header({
         <div className="flex shrink-0 items-baseline gap-2 font-mono text-price leading-none">
           <span className="text-muted">
             <span className="label-caps mr-1 font-sans">Bid</span>
-            <span className="text-foreground">{dash(bid, fmtPrice)}</span>
+            <span className="text-foreground">{dash(bid, fmtPrice, epic)}</span>
           </span>
           <span className="text-border">|</span>
           <span className="text-muted">
             <span className="label-caps mr-1 font-sans">Offer</span>
-            <span className="text-foreground">{dash(offer, fmtPrice)}</span>
+            <span className="text-foreground">{dash(offer, fmtPrice, epic)}</span>
           </span>
         </div>
 

@@ -99,6 +99,7 @@ def write_tick_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def push_hub_quote_to_dashboard(
+    epic: str,
     bid: float,
     offer: float,
     *,
@@ -109,6 +110,9 @@ def push_hub_quote_to_dashboard(
     global _last_hub_push_ts
     if bid <= 0 or offer <= 0:
         return
+    epic_key = str(epic or "").strip()
+    if not epic_key:
+        return
     now = time.time()
     if now - _last_hub_push_ts < _hub_push_min_interval:
         return
@@ -118,16 +122,37 @@ def push_hub_quote_to_dashboard(
     sig = tick.get("signal")
     if isinstance(sig, dict):
         tick["signal"] = dict(sig)
-    tick["bid"] = float(bid)
-    tick["offer"] = float(offer)
-    tick["spread"] = round(float(offer) - float(bid), 2)
-    tick["tick_age_s"] = (
-        round(float(tick_age_s), 1) if tick_age_s is not None else 0.0
-    )
-    tick["stream_status"] = stream_status
-    tick["ts"] = _iso_now()
-    if tick.get("market_state") == "OFFLINE" and bid > 0:
-        tick["market_state"] = "OPEN"
+
+    spread = round(float(offer) - float(bid), 5)
+    age = round(float(tick_age_s), 1) if tick_age_s is not None else 0.0
+    ts = _iso_now()
+
+    markets = tick.get("markets")
+    if isinstance(markets, dict):
+        next_markets = {k: dict(v) if isinstance(v, dict) else v for k, v in markets.items()}
+        slice_tick = dict(next_markets.get(epic_key) or {})
+        slice_tick["epic"] = epic_key
+        slice_tick["bid"] = float(bid)
+        slice_tick["offer"] = float(offer)
+        slice_tick["spread"] = spread
+        slice_tick["tick_age_s"] = age
+        slice_tick["stream_status"] = stream_status
+        slice_tick["ts"] = ts
+        if slice_tick.get("market_state") == "OFFLINE":
+            slice_tick["market_state"] = "OPEN"
+        next_markets[epic_key] = slice_tick
+        tick["markets"] = next_markets
+
+    top_epic = str(tick.get("selected_epic") or tick.get("epic") or "")
+    if not top_epic or top_epic == epic_key:
+        tick["bid"] = float(bid)
+        tick["offer"] = float(offer)
+        tick["spread"] = spread
+        tick["tick_age_s"] = age
+        tick["stream_status"] = stream_status
+        tick["ts"] = ts
+        if tick.get("market_state") == "OFFLINE" and bid > 0:
+            tick["market_state"] = "OPEN"
     publish_tick(tick, notify=True)
 
 
@@ -140,6 +165,7 @@ def wire_hub_quotes_to_dashboard(*, min_interval: float = 0.25) -> Callable[[], 
 
     def _on_hub(snap: Any) -> None:
         push_hub_quote_to_dashboard(
+            str(getattr(snap, "epic", "") or ""),
             float(snap.bid),
             float(snap.offer),
             tick_age_s=float(snap.age_seconds()),

@@ -580,3 +580,21 @@ class Config:
     @property
     def sim_apply_slippage(self) -> bool:
         return bool(self._data.get("sim_apply_slippage", False))
+
+    # --- Telegram notifications ---
+    @property
+    def telegram(self) -> dict[str, Any]:
+        raw = self._data.get("telegram")
+        return dict(raw) if isinstance(raw, dict) else {}
+
+    @property
+    def telegram_enabled(self) -> bool:
+        return bool(self.telegram.get("enabled", False))
+
+    @property
+    def telegram_bot_token(self) -> str:
+        return str(self.telegram.get("bot_token", "") or "").strip()
+
+    @property
+    def telegram_chat_id(self) -> str:
+        return str(self.telegram.get("chat_id", "") or "").strip()

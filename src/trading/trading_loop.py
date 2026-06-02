@@ -43,7 +43,7 @@ from trading.gate_readiness import compute_trade_readiness, format_health_badge_
 from trading.session_summary import SessionTickTracker, write_session_end_summary
 from trading.trade_eligibility import build_trade_eligibility
 
-STAGE1_GBP_RISK_CAP = 50.0
+STAGE1_GBP_RISK_CAP = 150.0
 SPREAD_NORMAL_MULTIPLIER = 1.5
 DAILY_LOSS_LIMIT_GBP = 200.0
 STAGE1_MAX_OPEN_POSITIONS = 1
@@ -242,6 +242,9 @@ class TradingLoop:
         return self._run_tick()
 
     def _loop_thread(self) -> None:
+        from system.stream_ready import wait_stream_ready
+
+        wait_stream_ready(timeout=120.0)
         try:
             while not self._stop.is_set():
                 try:
@@ -626,10 +629,39 @@ class TradingLoop:
         position_ok = open_count < max_per_epic
 
         stop = float(self._config.stop_distance_points)
-        size = float(self._config.trade_size)
+        base_size = float(self._config.trade_size)
         point_value = float(self._config.get("ig_point_value_gbp", 1.0))
-        risk_gbp = stop * size * point_value
-        risk_ok = risk_gbp <= STAGE1_GBP_RISK_CAP
+        # Plan with points-tier minimum size (CAUTION → 0.25× at 80%+, 0.5× at 88%+).
+        from trading.points_engine import CONF_MARGINAL_MIN
+
+        planning_conf = max(
+            CONF_MARGINAL_MIN,
+            float(self._points.trade_confidence_threshold(self._config)),
+        )
+        size_mult = float(self._points.get_size_multiplier(planning_conf))
+        effective_size = max(
+            float(self._config.adaptive_min_trade_size),
+            min(
+                float(self._config.adaptive_max_trade_size),
+                base_size * size_mult,
+            ),
+        )
+        constraints = self._fetch_market_constraints()
+        ig_min_raw = constraints.get("min_deal_size", effective_size)
+        try:
+            ig_min_size = float(ig_min_raw)
+        except (TypeError, ValueError):
+            ig_min_size = effective_size
+        actual_size = max(effective_size, ig_min_size)
+        risk_gbp = stop * actual_size * point_value
+        cap_raw = self._config.get("risk_cap_gbp")
+        try:
+            risk_cap = (
+                float(cap_raw) if cap_raw is not None else STAGE1_GBP_RISK_CAP
+            )
+        except (TypeError, ValueError):
+            risk_cap = STAGE1_GBP_RISK_CAP
+        risk_ok = risk_gbp <= risk_cap
 
         passed = spread_ok and position_ok and risk_ok
         if not spread_ok:
@@ -640,11 +672,15 @@ class TradingLoop:
         elif not position_ok:
             detail = f"open positions {open_count} (max {max_per_epic})"
         elif not risk_ok:
-            detail = f"risk £{risk_gbp:.2f} > £{STAGE1_GBP_RISK_CAP:.0f} cap"
+            detail = (
+                f"risk £{risk_gbp:.2f} > £{risk_cap:.0f} cap "
+                f"(stop {stop:.1f} × size {actual_size:.2g} × £/pt {point_value:.2f}"
+                f"{', IG min' if actual_size > effective_size else ''})"
+            )
         else:
             detail = (
                 f"OK — spread {spread:.1f} pts (normal {normal:.1f}, max {spread_cap:.1f}), "
-                f"flat, risk £{risk_gbp:.0f} (cap £{STAGE1_GBP_RISK_CAP:.0f})"
+                f"flat, risk £{risk_gbp:.0f} (cap £{risk_cap:.0f})"
             )
         return GateResult(
             name="risk_validation",
@@ -654,9 +690,17 @@ class TradingLoop:
                 "spread_normal": round(normal, 1),
                 "spread_config": round(cfg_normal, 1),
                 "open_count": open_count,
-                "risk_gbp": round(risk_gbp, 0),
+                "risk_gbp": round(risk_gbp, 2),
+                "base_size": round(base_size, 3),
+                "effective_size": round(effective_size, 3),
+                "actual_size": round(actual_size, 3),
+                "ig_min_deal_size": round(ig_min_size, 3),
+                "size_multiplier": round(size_mult, 3),
+                "stop_points": round(stop, 1),
+                "point_value_gbp": round(point_value, 3),
                 "spread_cap": round(spread_cap, 1),
-                "risk_cap_gbp": STAGE1_GBP_RISK_CAP,
+                "risk_cap_gbp": risk_cap,
+                "points_state": self._points.get_state(),
             },
             detail=detail,
         )
@@ -996,15 +1040,45 @@ class TradingLoop:
         elif spread > 0:
             try:
                 from system.market_data_hub import get_market_data_hub
+                from system.stream_ready import is_stream_ready
 
                 snap = get_market_data_hub().get_snapshot(self._epic)
-                stale_after = float(self._config.refresh_seconds) * 2.0
+                cap_raw = self._config.get("stale_threshold_seconds")
+                try:
+                    stale_after = (
+                        float(cap_raw)
+                        if cap_raw is not None
+                        else float(self._config.refresh_seconds) * 2.0
+                    )
+                except (TypeError, ValueError):
+                    stale_after = float(self._config.refresh_seconds) * 2.0
+                if is_stream_ready():
+                    stale_after = max(stale_after, 60.0)
                 if snap and snap.age_seconds() <= stale_after:
                     stream_status = "LIVE"
                 else:
                     stream_status = "STALE"
             except Exception:
                 stream_status = "LIVE"
+
+        if stream_status == "STALE" and tick_age_s > 60.0:
+            try:
+                from system.telegram_notifier import get_telegram_notifier
+
+                notifier = get_telegram_notifier()
+                if notifier is not None:
+                    notifier.notify_stream_stale(self._epic, tick_age_s)
+            except Exception:
+                pass
+        elif stream_status == "LIVE":
+            try:
+                from system.telegram_notifier import get_telegram_notifier
+
+                notifier = get_telegram_notifier()
+                if notifier is not None:
+                    notifier.clear_stream_stale(self._epic)
+            except Exception:
+                pass
 
         eligibility = build_trade_eligibility(
             gates=ctx.gates,
@@ -1136,6 +1210,16 @@ class TradingLoop:
             return self._execution_loop.execution_engine._rest_client  # noqa: SLF001
         except Exception:
             return None
+
+    def _fetch_market_constraints(self) -> dict[str, Any]:
+        """IG dealing rules for this epic (cached on REST client when available)."""
+        client = self._rest_client()
+        if client is None or not hasattr(client, "fetch_market_constraints"):
+            return {}
+        try:
+            return client.fetch_market_constraints(self._epic)
+        except Exception:
+            return {}
 
     def _account_summary(self) -> dict[str, float | None]:
         client = self._rest_client()

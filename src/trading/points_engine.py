@@ -103,6 +103,7 @@ class PointsEngine:
         self._day_stopped = False
         self._stop_latched = False
         self._last_nominal: PointsStateName = "HEALTHY"
+        self._telegram_last_effective: PointsStateName | None = None
         self._gbp_loss_events: list[tuple[float, float]] = []
         self._rapid_cooldown_until: float = 0.0
         self._load()
@@ -169,12 +170,32 @@ class PointsEngine:
                 f"points_engine: loaded from state — cumulative={self._cumulative:.1f} "
                 f"state={self.get_state()}"
             )
+            self._maybe_notify_telegram_state()
         except Exception as e:
             log_engine(f"points_engine load failed: {type(e).__name__}: {e}")
 
     def _sync_stop_latch(self) -> None:
         if _nominal_state(self._cumulative) == "STOP":
             self._stop_latched = True
+
+    def _maybe_notify_telegram_state(self) -> None:
+        try:
+            from system.telegram_notifier import get_telegram_notifier
+
+            notifier = get_telegram_notifier()
+            if notifier is None or not notifier.enabled:
+                return
+            new_state = self.get_state()
+            old = self._telegram_last_effective
+            if old is not None and new_state != old:
+                notifier.notify_points_state_change(
+                    old, new_state, float(self._cumulative)
+                )
+            self._telegram_last_effective = new_state
+        except Exception as e:
+            log_engine(
+                f"points_engine telegram notify failed: {type(e).__name__}: {e}"
+            )
 
     def _on_nominal_transition(self, new_nominal: PointsStateName) -> None:
         old = self._last_nominal
@@ -335,6 +356,7 @@ class PointsEngine:
             self._on_nominal_transition(new_nominal)
             self._sync_stop_latch()
             self._persist()
+            self._maybe_notify_telegram_state()
             return score
         except Exception as e:
             log_engine(f"points_engine record_trade failed: {type(e).__name__}: {e}")

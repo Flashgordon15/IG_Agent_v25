@@ -96,6 +96,12 @@ class IGStreamingClient:
             return
         self._first_tick_received = True
         self._set_state(ConnectionState.CONNECTED)
+        try:
+            from system.stream_ready import signal_stream_ready
+
+            signal_stream_ready(source="rest_poll")
+        except Exception:
+            pass
         update_demo_diagnostics(streaming_status="connected", streaming_auth_status="authenticated")
         log_demo_rest(
             "IG streaming connected (REST poll)",

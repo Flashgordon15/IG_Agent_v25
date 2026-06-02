@@ -77,11 +77,13 @@ class IgPositionSync:
         on_changed: Callable[[], None] | None = None,
         transaction_sync: Any | None = None,
         points_engine: Any | None = None,
+        managed_epics: set[str] | frozenset[str] | None = None,
     ) -> None:
         self._rest = rest_client
         self._store = store
         self._txn_sync = transaction_sync
         self._points_engine = points_engine
+        self._managed_epics = frozenset(managed_epics or ())
         self._epic = epic
         self._interval = interval_seconds
         self._on_alert = on_alert
@@ -104,6 +106,34 @@ class IgPositionSync:
 
     def register_on_changed(self, callback: Callable[[], None]) -> None:
         self._on_changed = callback
+
+    def _configured_account_id(self) -> str:
+        return str(getattr(self._rest, "account_id", "") or "").strip().upper()
+
+    def _session_account_id(self) -> str:
+        auth = getattr(self._rest, "_auth", None)
+        tokens = getattr(auth, "tokens", None) if auth is not None else None
+        return str(getattr(tokens, "account_id", "") or "").strip().upper()
+
+    def _is_managed_epic(self, epic: str) -> bool:
+        if not self._managed_epics:
+            return True
+        return str(epic or "").strip() in self._managed_epics
+
+    def _positions_for_sync(self, positions: list[SyncedPosition]) -> list[SyncedPosition]:
+        """Keep only agent-managed epics; IG positions are already session/account scoped."""
+        if not self._managed_epics:
+            return positions
+        kept = [p for p in positions if self._is_managed_epic(p.epic)]
+        skipped = len(positions) - len(kept)
+        if skipped:
+            sample = next((p for p in positions if not self._is_managed_epic(p.epic)), None)
+            epic_hint = sample.epic if sample else "?"
+            log_engine(
+                f"IG position sync ignored {skipped} non-managed position(s) "
+                f"(example epic={epic_hint}, managed={sorted(self._managed_epics)})"
+            )
+        return kept
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -299,8 +329,15 @@ class IgPositionSync:
         try:
             with ig_rest_sync_lock():
                 mgr.check_rest_allowed()
+                configured = self._configured_account_id()
+                session_acct = self._session_account_id()
+                if configured and session_acct and configured != session_acct:
+                    log_engine(
+                        f"IG position sync session/account mismatch: "
+                        f"configured={configured} session={session_acct}"
+                    )
                 raw = self._rest.open_positions()
-                ig_positions = self._parse_positions(raw)
+                ig_positions = self._positions_for_sync(self._parse_positions(raw))
                 for p in ig_positions:
                     self._seen_on_ig.add(p.deal_id)
                 changed = self._reconcile(ig_positions)
@@ -820,6 +857,9 @@ class IgPositionSync:
         for row in self._deduped_open_rows():
             keys = row.keys()
             deal_id = str(row["ig_deal_id"] or "") if "ig_deal_id" in keys else ""
+            row_epic = str(row["epic"] or "") if "epic" in keys else ""
+            if not self._is_managed_epic(row_epic):
+                continue
             if not deal_id or deal_id in ig_by_deal:
                 continue
             trade_id = int(row["id"])

@@ -180,13 +180,25 @@ if [ ! -f "${ENTRY}" ]; then
   exit 1
 fi
 
-log "launch: cd ${ROOT} && PYTHONPATH=src ${PY} src/main.py"
+CAFF_ARGS=()
+if command -v caffeinate >/dev/null 2>&1; then
+  CAFF_ARGS=(caffeinate -i -s)
+  log "caffeinate enabled (-i -s) — prevents sleep while agent runs"
+else
+  log "WARN: caffeinate not found — Mac may sleep and stop the agent overnight"
+fi
+
+log "launch: cd ${ROOT} && PYTHONPATH=src ${CAFF_ARGS[*]:-} ${PY} src/main.py"
 # Launcher opens the dashboard once health is up; tell main.py not to open again.
 export IG_AGENT_FROM_LAUNCHER=1
 (
   cd "${ROOT}" || exit 1
   export PYTHONPATH="${ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
-  exec "${PY}" src/main.py
+  if ((${#CAFF_ARGS[@]})); then
+    exec "${CAFF_ARGS[@]}" "${PY}" src/main.py
+  else
+    exec "${PY}" src/main.py
+  fi
 ) >>"${LOG_FILE}" 2>&1 &
 CHILD=$!
 disown "${CHILD}" 2>/dev/null || true

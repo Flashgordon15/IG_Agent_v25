@@ -4,6 +4,7 @@ Build orchestration trading loops and execution stack for v25 main entry.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from datetime import datetime
 from typing import Any, Callable
@@ -40,6 +41,8 @@ _INSTRUMENT_CFG_KEYS = (
     "min_atr_points",
     "ig_point_value_gbp",
     "trade_size",
+    "risk_cap_gbp",
+    "stale_threshold_seconds",
 )
 
 
@@ -63,6 +66,7 @@ def start_ig_position_sync(
     epic: str = "",
     interval_seconds: float,
     points_engine: Any | None = None,
+    managed_epics: set[str] | frozenset[str] | None = None,
 ) -> Any | None:
     """Start background IG open-position sync and attach to trade tracker."""
     global _position_sync
@@ -77,6 +81,7 @@ def start_ig_position_sync(
             epic=epic,
             interval_seconds=float(interval_seconds),
             points_engine=points_engine,
+            managed_epics=managed_epics,
         )
         tracker.attach_sync(sync)
         sync.start()
@@ -194,12 +199,6 @@ def _build_single_loop(
         instrument_id=instrument_id,
     )
 
-    if rest_client is not None and session_manager.is_session_open():
-        from trading.ohlc_bootstrap import bootstrap_ohlc_for_session
-
-        bootstrap_ohlc_for_session(
-            rest_client, signal_engine, epic, market, environment_scorer=env_scorer
-        )
     return loop
 
 
@@ -218,6 +217,17 @@ def build_market_orchestrator(
     store = LearningStore(str(cfg.learning_db))
     points_engine = PointsEngine(store)
 
+    try:
+        from system.telegram_notifier import (
+            configure_telegram,
+            set_heartbeat_provider,
+            start_telegram_heartbeat,
+        )
+
+        configure_telegram(cfg)
+    except Exception as e:
+        log_engine(f"telegram configure failed: {type(e).__name__}: {e}")
+
     exec_mode = mode
     if exec_mode is None:
         exec_mode = ExecutionMode.DEMO if rest_client is not None else ExecutionMode.TEST
@@ -227,6 +237,11 @@ def build_market_orchestrator(
         from execution.trade_tracker import TradeTracker
 
         tracker = TradeTracker(store, prefer_ig=True)
+        managed_epics = frozenset(
+            str(inst.get("epic") or "").strip()
+            for _iid, inst in enabled
+            if str(inst.get("epic") or "").strip()
+        )
         position_sync = start_ig_position_sync(
             rest_client,
             store,
@@ -234,6 +249,7 @@ def build_market_orchestrator(
             epic="",
             interval_seconds=float(cfg.position_sync_seconds),
             points_engine=points_engine,
+            managed_epics=managed_epics,
         )
 
     loops: list[AgentTradingLoop] = []
@@ -251,14 +267,73 @@ def build_market_orchestrator(
             )
         )
 
+    from trading.ohlc_bootstrap import bootstrap_ohlc_parallel
+
+    bootstrap_ohlc_parallel(rest_client, loops)
+
+    if rest_client is None:
+        from system.stream_ready import signal_stream_ready
+
+        signal_stream_ready(source="test_mode_no_stream")
+
     primary_epic = str(enabled[0][1].get("epic") or cfg.epic)
-    orch = MarketOrchestrator(cfg, loops, primary_epic=primary_epic)
+    enabled_epics = [
+        str(inst.get("epic") or "").strip()
+        for _iid, inst in enabled
+        if str(inst.get("epic") or "").strip()
+    ]
+    instrument_meta = {
+        str(inst.get("epic") or "").strip(): {
+            "name": str(inst.get("name") or iid),
+            "instrument_id": iid,
+        }
+        for iid, inst in enabled
+        if str(inst.get("epic") or "").strip()
+    }
+    orch = MarketOrchestrator(
+        cfg,
+        loops,
+        primary_epic=primary_epic,
+        enabled_epics=enabled_epics,
+        instrument_meta=instrument_meta,
+    )
     if len(loops) > 1:
         attach_snapshot_handlers(orch)
     log_engine(
         f"market_orchestrator built: {len(loops)} markets "
         f"({', '.join(l._epic for l in loops)})"
     )
+
+    try:
+        from api.snapshot_store import get_tick
+        from system.telegram_notifier import (
+            get_telegram_notifier,
+            set_heartbeat_provider,
+            start_telegram_heartbeat,
+        )
+
+        def _heartbeat_snapshot() -> dict[str, Any]:
+            tick = get_tick()
+            sig = tick.get("signal") or {}
+            pts = tick.get("points") or {}
+            positions = tick.get("positions") or []
+            return {
+                "fitness": float(sig.get("fitness") or tick.get("fitness_score") or 0),
+                "signal": float(sig.get("confidence") or 0),
+                "stream": str(tick.get("stream_status") or "DISCONNECTED"),
+                "positions": len(positions) if isinstance(positions, list) else 0,
+                "cumulative": float(pts.get("cumulative") or 0),
+                "state": str(pts.get("state") or points_engine.get_state()),
+            }
+
+        set_heartbeat_provider(_heartbeat_snapshot)
+        start_telegram_heartbeat()
+        notifier = get_telegram_notifier()
+        if notifier is not None and notifier.enabled:
+            notifier.notify_startup(state_restored=True)
+    except Exception as e:
+        log_engine(f"telegram heartbeat setup failed: {type(e).__name__}: {e}")
+
     return orch
 
 
@@ -298,6 +373,10 @@ def start_market_stream(cfg: Config, *, rest_client: Any | None) -> Any | None:
     epics = [e for e in epics if e]
     if not epics:
         epics = [str(cfg.epic)]
+
+    from system.stream_ready import reset_stream_ready
+
+    reset_stream_ready()
 
     hub = get_market_data_hub()
     hub.attach_rest(rest_client)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Callable
 
 from data.learning_store import LearningStore
@@ -166,6 +167,16 @@ class TradeManager:
                 record_trade_opened(epic)
             except Exception:
                 pass
+        self._telegram_trade_opened(
+            market=market,
+            side=side,
+            entry=entry,
+            size=size,
+            stop=stop,
+            target=target,
+            adjusted_confidence=adjusted_confidence,
+            execution=execution,
+        )
         return trade_id
 
     def update_from_quote(self, market: str, epic: str, quote: Quote) -> list[str]:
@@ -260,6 +271,11 @@ class TradeManager:
 
                 pnl = realised_pnl_points(side, entry, exit_price)
                 hit = classify_result(pnl)
+                pts_before = (
+                    float(self._points_engine._cumulative)
+                    if self._points_engine is not None
+                    else None
+                )
                 self.store.close_trade(
                     trade_id, exit_price, pnl, hit,
                     f"Closed on {hit} at {exit_price:.1f}; target was {target:.1f}",
@@ -270,6 +286,13 @@ class TradeManager:
                     pnl=pnl,
                     source="bot",
                 )
+                self._telegram_trade_closed(
+                    trade_id,
+                    exit_price=exit_price,
+                    pnl_pts=pnl,
+                    result=hit,
+                    points_before=pts_before,
+                )
                 msg = (
                     f"TRADE CLOSED {hit} | {market} {side} | entry {entry:.1f} "
                     f"exit {exit_price:.1f} | {pnl:.1f} pts"
@@ -279,6 +302,99 @@ class TradeManager:
                     self.on_alert(msg)
 
         return messages
+
+    def _telegram_trade_opened(
+        self,
+        *,
+        market: str,
+        side: str,
+        entry: float,
+        size: float,
+        stop: float,
+        target: float,
+        adjusted_confidence: float,
+        execution: dict[str, Any],
+    ) -> None:
+        try:
+            from system.telegram_notifier import get_telegram_notifier
+
+            notifier = get_telegram_notifier()
+            if notifier is None or not notifier.enabled:
+                return
+            fitness = float(execution.get("fitness_score") or 0)
+            notifier.notify_trade_opened(
+                market=market,
+                direction=side,
+                entry=entry,
+                size=size,
+                stop=stop,
+                target=target,
+                signal_pct=float(adjusted_confidence),
+                fitness_pct=fitness,
+            )
+        except Exception as e:
+            log_engine(f"telegram trade open notify failed: {type(e).__name__}: {e}")
+
+    def _telegram_trade_closed(
+        self,
+        trade_id: int,
+        *,
+        exit_price: float,
+        pnl_pts: float,
+        result: str,
+        points_before: float | None = None,
+    ) -> None:
+        try:
+            from system.telegram_notifier import get_telegram_notifier
+
+            notifier = get_telegram_notifier()
+            if notifier is None or not notifier.enabled:
+                return
+            row = self.store.conn.execute(
+                "SELECT market, side, entry, opened_at, ig_pnl_currency, "
+                "adjusted_confidence FROM trades WHERE id=?",
+                (trade_id,),
+            ).fetchone()
+            if row is None:
+                return
+            market = str(row["market"] or "")
+            side = str(row["side"] or "")
+            entry = float(row["entry"] or 0)
+            opened_at = row["opened_at"]
+            duration_mins: float | None = None
+            if opened_at:
+                try:
+                    opened = datetime.fromisoformat(
+                        str(opened_at).replace("Z", "+00:00")
+                    )
+                    if opened.tzinfo is not None:
+                        opened = opened.replace(tzinfo=None)
+                    duration_mins = max(
+                        0.0, (datetime.now() - opened).total_seconds() / 60.0
+                    )
+                except (TypeError, ValueError):
+                    duration_mins = None
+            ig_pnl = row["ig_pnl_currency"]
+            pnl_gbp = float(ig_pnl) if ig_pnl is not None else None
+            pts_after: float | None = None
+            state = "CAUTION"
+            if self._points_engine is not None:
+                pts_after = float(self._points_engine._cumulative)
+                state = self._points_engine.get_state()
+            notifier.notify_trade_closed(
+                market=market,
+                direction=side,
+                entry=entry,
+                exit_price=exit_price,
+                pnl_gbp=pnl_gbp,
+                pnl_pts=float(pnl_pts),
+                duration_mins=duration_mins,
+                points_before=pts_before,
+                points_after=pts_after,
+                points_state=state,
+            )
+        except Exception as e:
+            log_engine(f"telegram trade close notify failed: {type(e).__name__}: {e}")
 
     def _current_stop(self, trade_id: int, fallback: float) -> float:
         stop = self.store.get_stop(trade_id)
@@ -332,12 +448,24 @@ class TradeManager:
         exit_price = px
         pnl = realised_pnl_points(side, entry, exit_price)
         hit = classify_result(pnl)
+        pts_before = (
+            float(self._points_engine._cumulative)
+            if self._points_engine is not None
+            else None
+        )
         self.store.close_trade(
             trade_id,
             exit_price,
             pnl,
             hit,
             f"Hard cap +{HARD_CAP_ATR_MULTIPLE:.1f}x ATR at {exit_price:.1f}",
+        )
+        self._telegram_trade_closed(
+            trade_id,
+            exit_price=exit_price,
+            pnl_pts=pnl,
+            result=hit,
+            points_before=pts_before,
         )
         msg = (
             f"HARD CAP EXIT {hit} | {market} {side} | entry {entry:.1f} "

@@ -225,6 +225,12 @@ class AgentRuntime:
 
             stop_market_stream(self._stream_client)
             self._stream_client = None
+        try:
+            from system.telegram_notifier import stop_telegram_heartbeat
+
+            stop_telegram_heartbeat()
+        except Exception:
+            pass
         release_instance_lock()
         log_engine("shutdown complete")
 
@@ -268,8 +274,8 @@ class AgentRuntime:
 
             def _start_live_engines() -> None:
                 wire_hub_quotes_to_dashboard(min_interval=0.25)
-                self.trading_loop.start()
                 self._stream_client = start_market_stream(cfg, rest_client=rest)
+                self.trading_loop.start()
                 from system.replay_daily_scheduler import start_replay_daily_scheduler
 
                 start_replay_daily_scheduler()
@@ -314,6 +320,14 @@ def main() -> None:
         raise
     except Exception as e:
         log_engine(f"CRITICAL: {type(e).__name__}: {e}")
+        try:
+            from system.telegram_notifier import get_telegram_notifier
+
+            notifier = get_telegram_notifier()
+            if notifier is not None and notifier.enabled:
+                notifier.notify_crash(f"{type(e).__name__}: {e}")
+        except Exception:
+            pass
         runtime.shutdown()
         raise SystemExit(1) from e
 

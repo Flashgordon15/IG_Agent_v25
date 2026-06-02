@@ -106,6 +106,9 @@ def _bootstrap_from_cache(
         return 0
 
 
+MIN_CACHE_BARS_FOR_BOOTSTRAP = 100
+
+
 def bootstrap_ohlc_for_session(
     rest_client: Any,
     signal_engine: SignalEngine,
@@ -115,11 +118,22 @@ def bootstrap_ohlc_for_session(
     num_points: int = 100,
     resolution: str = "MINUTE_5",
     environment_scorer: EnvironmentScorer | None = None,
+    prefer_cache: bool = True,
 ) -> int:
     """Inject historical bars into SignalEngine; returns count injected (0 on failure)."""
     try:
-        if rest_client is None or signal_engine is None:
+        if signal_engine is None:
             return 0
+        if prefer_cache:
+            cached = _bootstrap_from_cache(
+                epic, market, signal_engine, environment_scorer, num_points
+            )
+            if cached >= MIN_CACHE_BARS_FOR_BOOTSTRAP:
+                return cached
+        if rest_client is None:
+            return _bootstrap_from_cache(
+                epic, market, signal_engine, environment_scorer, num_points
+            )
         fetch = getattr(rest_client, "fetch_price_history", None)
         if not callable(fetch):
             log_engine("OHLC bootstrap: fetch_price_history unavailable")
@@ -167,3 +181,44 @@ def bootstrap_ohlc_for_session(
     except Exception as e:
         log_engine(f"OHLC bootstrap warning: {type(e).__name__}: {e}")
         return 0
+
+
+def bootstrap_ohlc_parallel(
+    rest_client: Any,
+    loops: list[Any],
+    *,
+    max_workers: int = 3,
+) -> None:
+    """Bootstrap OHLC for all trading loops in parallel (cache-first per epic)."""
+    if not loops:
+        return
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _bootstrap_loop(loop: Any) -> int:
+        if rest_client is None:
+            return 0
+        try:
+            if not loop._session.is_session_open():
+                return 0
+        except Exception:
+            return 0
+        return bootstrap_ohlc_for_session(
+            rest_client,
+            loop._signal_engine,
+            loop._epic,
+            loop._market,
+            environment_scorer=loop._env,
+            prefer_cache=True,
+        )
+
+    workers = min(max(1, int(max_workers)), len(loops))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_bootstrap_loop, loop) for loop in loops]
+        for fut in as_completed(futures):
+            try:
+                fut.result()
+            except Exception as e:
+                log_engine(
+                    f"OHLC parallel bootstrap error: {type(e).__name__}: {e}"
+                )
