@@ -2,7 +2,7 @@
 """
 Create ~/Desktop/IG Agent v25.app shortcut to the launcher bundle.
 
-Uses a Finder alias (reliable double-click on macOS; unix symlinks to .app often fail).
+Uses a symlink (not a Finder alias) so macOS shows the real app icon on Desktop.
 """
 
 from __future__ import annotations
@@ -25,6 +25,12 @@ def remove_existing_shortcut(link: Path) -> None:
     if link.is_symlink():
         link.unlink()
         return
+    if link.is_dir():
+        import shutil
+
+        shutil.rmtree(link)
+        return
+    # Finder alias or stale file
     subprocess.run(
         ["osascript", "-e", f'tell application "Finder" to delete POSIX file "{link}"'],
         check=False,
@@ -34,18 +40,11 @@ def remove_existing_shortcut(link: Path) -> None:
         link.unlink(missing_ok=True)
 
 
-def create_finder_alias(bundle: Path, link: Path) -> None:
+def create_symlink_shortcut(bundle: Path, link: Path) -> None:
     desktop = link.parent
     desktop.mkdir(parents=True, exist_ok=True)
-    script = f'''
-tell application "Finder"
-    set desktopFolder to POSIX file "{desktop}"
-    set targetApp to POSIX file "{bundle}"
-    set aliasFile to make new alias file at desktopFolder to targetApp
-    set name of aliasFile to "{SHORTCUT_NAME}"
-end tell
-'''
-    subprocess.run(["osascript", "-e", script], check=True, capture_output=True, text=True)
+    remove_existing_shortcut(link)
+    link.symlink_to(bundle, target_is_directory=True)
 
 
 def create_shortcut() -> Path:
@@ -57,10 +56,9 @@ def create_shortcut() -> Path:
         )
 
     link = Path.home() / "Desktop" / SHORTCUT_NAME
-    remove_existing_shortcut(link)
-    create_finder_alias(bundle, link)
+    create_symlink_shortcut(bundle, link)
 
-    subprocess.run(["/usr/bin/touch", str(link)], check=False)
+    subprocess.run(["/usr/bin/touch", str(bundle)], check=False)
     for path in (bundle, link):
         subprocess.run(
             ["xattr", "-dr", "com.apple.quarantine", str(path)],
@@ -76,9 +74,9 @@ def main() -> int:
         return 1
     try:
         link = create_shortcut()
-        target = link.resolve() if link.exists() else "(missing)"
+        bundle = (project_root() / "launcher" / BUNDLE_NAME).resolve()
         print(f"Desktop shortcut: {link}")
-        print(f"  -> {target}")
+        print(f"  -> {bundle}")
         return 0
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)

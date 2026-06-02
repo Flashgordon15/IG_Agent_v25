@@ -9,6 +9,7 @@ Allowed only 07:00–22:30 Europe/London (quiet 22:30–07:00 for live REST budg
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -28,14 +29,16 @@ from system.paths import data_dir
 from system.ohlc_fetch_window import is_fetch_window_open
 from system.rest_api_budget import RestBudgetPausedError, ohlc_bootstrap_rest_window
 from trading.ohlc_bootstrap import _parse_bar_time
+from trading.ohlc_cache_paths import ohlc_cache_path
 
-EPIC = "IX.D.NIKKEI.IFM.IP"
+DEFAULT_EPIC = "IX.D.NIKKEI.IFM.IP"
+EPIC = DEFAULT_EPIC
+DEFAULT_MARKET = "Japan 225"
 RESOLUTION = "MINUTE_5"
 DATE_FROM_DEFAULT = "2024-01-01T00:00:00"
 PAGE_SIZE = 1000
 REST_SLEEP_SEC = 12.0
 PROGRESS_EVERY = 500
-CACHE_PATH = data_dir() / "ohlc_cache" / "nikkei_5m.jsonl"
 STATUS_PATH = data_dir() / "state" / "ohlc_pull_status.json"
 LONDON = ZoneInfo("Europe/London")
 ALLOWANCE_ERR = "error.public-api.exceeded-account-historical-data-allowance"
@@ -296,7 +299,32 @@ def _append_bars(path: Path, bars: list[dict], seen: set[str], last_written: str
     return added, max_written
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Fetch IG MINUTE_5 OHLC into JSONL cache")
+    parser.add_argument(
+        "--epic",
+        default=DEFAULT_EPIC,
+        help=f"IG epic (default {DEFAULT_EPIC})",
+    )
+    parser.add_argument(
+        "--market",
+        default="",
+        help="Display name for cache slug when epic is not predefined",
+    )
+    parser.add_argument(
+        "--from",
+        dest="date_from",
+        default="",
+        help="ISO start date (default: resume cache or 2024-01-01; new epics try last 90d)",
+    )
+    return parser.parse_args()
+
+
 def main() -> int:
+    args = _parse_args()
+    epic = str(args.epic or DEFAULT_EPIC).strip()
+    market = str(args.market or "").strip()
+
     if not is_fetch_window_open():
         return 0
 
@@ -306,7 +334,8 @@ def main() -> int:
         return 1
 
     rest = ensure_shared_authenticated(status.credentials)
-    cache_path = CACHE_PATH
+    cache_path = ohlc_cache_path(epic, market=market or DEFAULT_MARKET)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
     status_path = STATUS_PATH
     pull_status = _load_status(status_path)
     now_iso = _iso_bar_time(datetime.now(LONDON))
@@ -333,7 +362,14 @@ def main() -> int:
         except ValueError:
             pass
     last_ts = _read_last_timestamp(cache_path)
-    date_from = _resume_from(last_ts, DATE_FROM_DEFAULT)
+    if args.date_from:
+        date_from = str(args.date_from).strip()
+    elif last_ts:
+        date_from = _resume_from(last_ts, DATE_FROM_DEFAULT)
+    elif epic != DEFAULT_EPIC:
+        date_from = _iso_bar_time(datetime.now(LONDON) - timedelta(days=90))
+    else:
+        date_from = _resume_from(last_ts, DATE_FROM_DEFAULT)
     date_to = _iso_bar_time(datetime.now(LONDON))
 
     if last_ts:
@@ -389,7 +425,7 @@ def main() -> int:
             try:
                 raw_rows, page_data, blocked = _fetch_page(
                     rest,
-                    epic=EPIC,
+                    epic=epic,
                     page_number=page,
                     date_from=chunk_from,
                     date_to=chunk_to,
@@ -477,7 +513,7 @@ def main() -> int:
                         pass
 
     print("=== FETCH SUMMARY ===")
-    print(f"Epic: {EPIC} resolution: {RESOLUTION}")
+    print(f"Epic: {epic} resolution: {RESOLUTION}")
     print(f"Bars added this run: {total_added}")
     print(f"Total bars in cache: {len(seen)}")
     print(f"Date range: {first_ts or 'n/a'} to {last_out or 'n/a'}")

@@ -273,67 +273,86 @@ class IGLightstreamerStreamingClient:
                 f"adapter_set=default data_adapter=default"
             )
             sub = Subscription(mode, [item_name], fields)
-            price_subs = self._price_subs
-            epic_name = epic
-            ls_client = self
-
-            class _Listener:
-                def onSubscription(self) -> None:
-                    log_engine(f"LS subscription confirmed: item={item_name}")
-                    ls_client._first_valid_tick_deadline_ts = (
-                        time.time() + _LS_BLANK_TICK_RECONNECT_SEC
-                    )
-                    ls_client._arm_blank_tick_deadline_timer(epic_name)
-
-                def onUnsubscription(self) -> None:
-                    log_engine(f"LS unsubscribed: item={item_name}")
-
-                def onSubscriptionError(self, code: int, message: str) -> None:
-                    log_engine(
-                        f"LS subscription ERROR: item={item_name} code={code} message={message}"
-                    )
-
-                def onItemUpdate(self, update: Any) -> None:
-                    try:
-                        item = update.getItemName() if hasattr(update, "getItemName") else item_name
-                        field_values = {}
-                        if hasattr(update, "getFields"):
-                            field_values = dict(update.getFields())
-                        raw_bid = update.getValue("BID") if hasattr(update, "getValue") else None
-                        raw_offer = update.getValue("OFFER") if hasattr(update, "getValue") else None
-                        bid_text = str(raw_bid or "").strip()
-                        offer_text = str(raw_offer or "").strip()
-                        if not bid_text or not offer_text:
-                            ls_client._handle_blank_tick(epic_name)
-                            return
-                        log_engine(
-                            f"LS raw tick received: item={item} values={field_values}"
-                        )
-                        bid = float(bid_text)
-                        offer = float(offer_text)
-                    except (TypeError, ValueError):
-                        return
-                    if bid <= 0 or offer <= 0:
-                        ls_client._handle_blank_tick(epic_name)
-                        return
-                    from system.market_data_hub import get_market_data_hub
-
-                    get_market_data_hub().publish(
-                        epic_name, bid, offer, source="lightstreamer"
-                    )
-                    log_engine(
-                        f"Hub quote updated from Lightstreamer: bid={bid} offer={offer} "
-                        f"age=0s epic={epic_name}"
-                    )
-                    ls_client._mark_connected_on_first_tick(bid, offer, epic_name)
-                    pu = PriceUpdate(
-                        epic=epic_name, bid=bid, offer=offer, timestamp=time.time()
-                    )
-                    price_subs.emit(pu)
-
-            sub.addListener(_Listener())
+            sub.addListener(self._build_market_listener(epic, item_name))
             client.subscribe(sub)
             self._subscriptions.append(sub)
+
+    @staticmethod
+    def _epic_from_item_name(item_name: str, fallback: str) -> str:
+        raw = str(item_name or "").strip()
+        if raw.startswith("MARKET:"):
+            return raw.split(":", 1)[1]
+        return fallback
+
+    def _build_market_listener(self, epic: str, item_name: str) -> Any:
+        """Build LS listener with epic bound per subscription (avoid loop closure bug)."""
+        epic_name = str(epic)
+        bound_item = str(item_name)
+        price_subs = self._price_subs
+        ls_client = self
+
+        class _Listener:
+            def onSubscription(self) -> None:
+                log_engine(f"LS subscription confirmed: item={bound_item}")
+                ls_client._first_valid_tick_deadline_ts = (
+                    time.time() + _LS_BLANK_TICK_RECONNECT_SEC
+                )
+                ls_client._arm_blank_tick_deadline_timer(epic_name)
+
+            def onUnsubscription(self) -> None:
+                log_engine(f"LS unsubscribed: item={bound_item}")
+
+            def onSubscriptionError(self, code: int, message: str) -> None:
+                log_engine(
+                    f"LS subscription ERROR: item={bound_item} code={code} message={message}"
+                )
+
+            def onItemUpdate(self, update: Any) -> None:
+                try:
+                    item = (
+                        update.getItemName()
+                        if hasattr(update, "getItemName")
+                        else bound_item
+                    )
+                    resolved_epic = IGLightstreamerStreamingClient._epic_from_item_name(
+                        str(item), epic_name
+                    )
+                    field_values = {}
+                    if hasattr(update, "getFields"):
+                        field_values = dict(update.getFields())
+                    raw_bid = update.getValue("BID") if hasattr(update, "getValue") else None
+                    raw_offer = update.getValue("OFFER") if hasattr(update, "getValue") else None
+                    bid_text = str(raw_bid or "").strip()
+                    offer_text = str(raw_offer or "").strip()
+                    if not bid_text or not offer_text:
+                        ls_client._handle_blank_tick(resolved_epic)
+                        return
+                    log_engine(
+                        f"LS raw tick received: item={item} values={field_values}"
+                    )
+                    bid = float(bid_text)
+                    offer = float(offer_text)
+                except (TypeError, ValueError):
+                    return
+                if bid <= 0 or offer <= 0:
+                    ls_client._handle_blank_tick(resolved_epic)
+                    return
+                from system.market_data_hub import get_market_data_hub
+
+                get_market_data_hub().publish(
+                    resolved_epic, bid, offer, source="lightstreamer"
+                )
+                log_engine(
+                    f"Hub quote updated from Lightstreamer: bid={bid} offer={offer} "
+                    f"age=0s epic={resolved_epic}"
+                )
+                ls_client._mark_connected_on_first_tick(bid, offer, resolved_epic)
+                pu = PriceUpdate(
+                    epic=resolved_epic, bid=bid, offer=offer, timestamp=time.time()
+                )
+                price_subs.emit(pu)
+
+        return _Listener()
 
     def _schedule_blank_tick_recovery(self, epic: str) -> None:
         if self._using_fallback or not self._running:

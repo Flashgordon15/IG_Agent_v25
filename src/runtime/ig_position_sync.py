@@ -195,23 +195,72 @@ class IgPositionSync:
             ],
         }
 
+    def _snapshot_confidence_pct(self) -> float | None:
+        """Latest dashboard/trading-loop signal confidence (0–100), if published."""
+        try:
+            from api.snapshot_store import get_tick
+
+            tick = get_tick()
+            sig = tick.get("signal") if isinstance(tick, dict) else None
+            if isinstance(sig, dict) and sig.get("confidence") is not None:
+                return float(sig["confidence"])
+        except Exception:
+            pass
+        return None
+
+    def _needs_fast_position_sync(self) -> bool:
+        """True when broker state or in-flight orders need frequent GET /positions."""
+        from system.rest_api_budget import is_order_in_flight
+
+        if is_order_in_flight():
+            return True
+        with self._lock:
+            for p in self._snapshot.positions:
+                if p.stop_level <= 0 or p.limit_level <= 0:
+                    return True
+        return False
+
     def _effective_interval(self) -> float:
-        """Adaptive poll: faster with open positions, slower when flat."""
+        """
+        Adaptive poll: 15s when managing open risk, 30s when flat or low signal.
+
+        ``position_sync_seconds`` from config is not the loop wait — it only feeds
+        account refresh spacing on successful sync (``max(60, interval * 4)``).
+        """
+        from system.config_loader import get_config
+
+        cfg = get_config(reload=False)
+        fast = float(getattr(cfg, "position_sync_open_fast_seconds", 15.0))
+        relaxed = float(getattr(cfg, "position_sync_open_relaxed_seconds", 30.0))
+        conf_floor = float(getattr(cfg, "position_sync_relaxed_below_confidence", 70.0))
+
         with self._lock:
             open_positions = int(self._snapshot.total_open)
-        if open_positions > 0:
-            interval = 15.0
-            if getattr(self, "_last_logged_interval", None) != interval:
-                self._last_logged_interval = interval
-                noun = "position" if open_positions == 1 else "positions"
-                log_engine(
-                    f"Position sync interval: 15s ({open_positions} {noun} open)"
-                )
+        if open_positions <= 0:
+            interval = relaxed
+            reason = "flat — no positions"
+        elif self._needs_fast_position_sync():
+            interval = fast
+            noun = "position" if open_positions == 1 else "positions"
+            reason = f"{open_positions} {noun} open (protection or order in flight)"
         else:
-            interval = 30.0
-            if getattr(self, "_last_logged_interval", None) != interval:
-                self._last_logged_interval = interval
-                log_engine("Position sync interval: 30s (flat — no positions)")
+            conf = self._snapshot_confidence_pct()
+            if conf is not None and conf < conf_floor:
+                interval = relaxed
+                noun = "position" if open_positions == 1 else "positions"
+                reason = (
+                    f"{open_positions} {noun} open, signal {conf:.0f}% "
+                    f"< {conf_floor:.0f}%"
+                )
+            else:
+                interval = fast
+                noun = "position" if open_positions == 1 else "positions"
+                conf_s = f"{conf:.0f}%" if conf is not None else "n/a"
+                reason = f"{open_positions} {noun} open (signal {conf_s})"
+
+        if getattr(self, "_last_logged_interval", None) != interval:
+            self._last_logged_interval = interval
+            log_engine(f"Position sync interval: {interval:.0f}s ({reason})")
         return interval
 
     def sync_once(self) -> IgSyncSnapshot:

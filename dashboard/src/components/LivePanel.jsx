@@ -436,7 +436,34 @@ function Card({ title, children, className = "" }) {
 // LivePanel
 // ---------------------------------------------------------------------------
 
-export default function LivePanel({ state, wsConnected }) {
+function marketTabOptions(rawState) {
+  const markets = rawState?.markets;
+  if (markets && typeof markets === "object") {
+    return Object.entries(markets).map(([epic, m]) => ({
+      epic,
+      label: m.market || m.instrument_id || epic,
+    }));
+  }
+  if (rawState?.epic) {
+    return [
+      {
+        epic: rawState.epic,
+        label: rawState.market || rawState.epic,
+      },
+    ];
+  }
+  return [];
+}
+
+export default function LivePanel({
+  state,
+  rawState,
+  selectedEpic,
+  onSelectEpic,
+  wsConnected,
+}) {
+  const tabs = marketTabOptions(rawState ?? state);
+
   if (!state) {
     return (
       <div className="mx-auto max-w-5xl space-y-3 px-1">
@@ -462,6 +489,29 @@ export default function LivePanel({ state, wsConnected }) {
 
   return (
     <div className="mx-auto max-w-5xl space-y-3 px-1 pb-4">
+      {tabs.length > 1 && (
+        <div className="flex flex-wrap gap-1 rounded-lg border border-border bg-card p-1">
+          {tabs.map((tab) => {
+            const active = tab.epic === selectedEpic;
+            return (
+              <button
+                key={tab.epic}
+                type="button"
+                onClick={() => onSelectEpic?.(tab.epic)}
+                className={[
+                  "rounded-md px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide transition-colors sm:text-xs",
+                  active
+                    ? "bg-accent text-accent-foreground"
+                    : "text-muted hover:bg-muted/20 hover:text-foreground",
+                ].join(" ")}
+              >
+                {tab.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       {/* 1. Bid/Offer hero */}
       <Card className="py-4">
         <div className="flex items-stretch justify-center gap-2 sm:gap-6">

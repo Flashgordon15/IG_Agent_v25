@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { WS_URL } from "./config.js";
 import { fetchState } from "./api.js";
 import Header from "./components/Header.jsx";
@@ -19,6 +19,36 @@ const TABS = [
 const WS_BACKOFF_INITIAL_MS = 1000;
 const WS_BACKOFF_MAX_MS = 30000;
 const POLL_INTERVAL_MS = 5000;
+
+function listMarketEpics(state) {
+  if (!state) return [];
+  const markets = state.markets;
+  if (markets && typeof markets === "object") {
+    return Object.keys(markets);
+  }
+  if (state.epic) return [state.epic];
+  return [];
+}
+
+function resolveMarketView(state, selectedEpic) {
+  if (!state) return null;
+  const markets = state.markets;
+  if (!markets || !selectedEpic || !markets[selectedEpic]) {
+    return state;
+  }
+  const slice = markets[selectedEpic];
+  return {
+    ...state,
+    ...slice,
+    points: state.points,
+    positions: state.positions,
+    balance_gbp: state.balance_gbp,
+    daily_pnl_gbp: state.daily_pnl_gbp,
+    win_rate_20: state.win_rate_20,
+    markets,
+    selected_epic: selectedEpic,
+  };
+}
 
 function positionKey(position) {
   return (
@@ -142,6 +172,7 @@ export default function App() {
   const [state, setState] = useState(null);
   const [wsConnected, setWsConnected] = useState(false);
   const [reconnecting, setReconnecting] = useState(true);
+  const [selectedEpic, setSelectedEpic] = useState(null);
 
   const prevStateRef = useRef(null);
   const soundRef = useRef(null);
@@ -155,6 +186,20 @@ export default function App() {
       setState(next);
     }
   }, []);
+
+  useEffect(() => {
+    const epics = listMarketEpics(state);
+    if (!epics.length) return;
+    const preferred = state?.selected_epic || epics[0];
+    if (!selectedEpic || !epics.includes(selectedEpic)) {
+      setSelectedEpic(preferred);
+    }
+  }, [state, selectedEpic]);
+
+  const viewState = useMemo(
+    () => resolveMarketView(state, selectedEpic),
+    [state, selectedEpic],
+  );
 
   useEffect(() => {
     let mounted = true;
@@ -262,20 +307,20 @@ export default function App() {
   }, []);
 
   const headerProps = {
-    state,
-    bid: state?.bid,
-    offer: state?.offer,
+    state: viewState,
+    bid: viewState?.bid,
+    offer: viewState?.offer,
     agentState: state?.points?.state ?? state?.agent_state,
     pointsTrade: state?.points?.last_trade,
     pointsSession: state?.points?.session,
     pointsCumulative: state?.points?.cumulative,
-    fitness: state?.signal?.fitness,
+    fitness: viewState?.signal?.fitness,
     winRate: state?.win_rate_20,
     dailyPnl: state?.daily_pnl_gbp,
-    streamStatus: state?.stream_status,
-    spreadCurrent: state?.spread_current ?? state?.spread,
-    spreadNormal: state?.spread_normal,
-    sentiment: state?.sentiment,
+    streamStatus: viewState?.stream_status,
+    spreadCurrent: viewState?.spread_current ?? viewState?.spread,
+    spreadNormal: viewState?.spread_normal,
+    sentiment: viewState?.sentiment,
     wsConnected,
     reconnecting,
   };
@@ -314,7 +359,15 @@ export default function App() {
       )}
 
       <main className="min-h-0 flex-1 overflow-y-auto px-2 py-3 sm:px-4 sm:py-4">
-        {tab === "live" && <LivePanel state={state} wsConnected={wsConnected} />}
+        {tab === "live" && (
+          <LivePanel
+            state={viewState}
+            rawState={state}
+            selectedEpic={selectedEpic}
+            onSelectEpic={setSelectedEpic}
+            wsConnected={wsConnected}
+          />
+        )}
         {tab === "trades" && <TradesPanel state={state} />}
         {tab === "points" && <PointsPanel state={state} />}
         {tab === "intelligence" && <IntelligencePanel state={state} />}

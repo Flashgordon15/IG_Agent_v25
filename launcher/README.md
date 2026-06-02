@@ -9,9 +9,17 @@ python3 launcher/build_mac_app.py
 ```
 
 This creates `launcher/IG Agent v25.app` and a symlink on your Desktop:
-`~/Desktop/IG Agent v25.app`.
+`~/Desktop/IG Agent v25.app` (symlink — shows the real app icon; not a Finder alias).
 
-Double-click starts `src/main.py` (trading loop + dashboard on http://localhost:8080).
+Double-click starts the agent in the background (no Terminal window) and opens
+http://localhost:8080/ in your default browser when the API is healthy.
+
+Equivalent command:
+
+```bash
+cd /path/to/IG_Agent_v25
+PYTHONPATH=src python3 src/main.py
+```
 
 ## What the launcher does
 

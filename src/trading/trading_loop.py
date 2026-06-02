@@ -162,6 +162,9 @@ class TradingLoop:
         on_flatten: Callable[[], int] | None = None,
         position_sync: Any | None = None,
         clock: Callable[[], datetime] | None = None,
+        publish_snapshots: bool = True,
+        on_snapshot: Callable[[dict[str, Any]], None] | None = None,
+        instrument_id: str = "",
     ) -> None:
         self._config = config
         self._market = market
@@ -181,6 +184,9 @@ class TradingLoop:
         self._on_flatten = on_flatten
         self._position_sync = position_sync
         self._clock = clock or datetime.now
+        self._publish_snapshots = bool(publish_snapshots)
+        self._on_snapshot = on_snapshot
+        self._instrument_id = str(instrument_id or "")
 
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -616,7 +622,8 @@ class TradingLoop:
 
         tracker = self._execution_loop.execution_engine.trade_tracker
         open_count = int(tracker.count_open_for_epic(self._epic))
-        position_ok = open_count < STAGE1_MAX_OPEN_POSITIONS
+        max_per_epic = max(1, int(self._config.max_positions_per_epic))
+        position_ok = open_count < max_per_epic
 
         stop = float(self._config.stop_distance_points)
         size = float(self._config.trade_size)
@@ -631,7 +638,7 @@ class TradingLoop:
                 f"(1.5× normal {normal:.1f}, cfg {cfg_normal:.1f})"
             )
         elif not position_ok:
-            detail = f"open positions {open_count} (max {STAGE1_MAX_OPEN_POSITIONS - 1})"
+            detail = f"open positions {open_count} (max {max_per_epic})"
         elif not risk_ok:
             detail = f"risk £{risk_gbp:.2f} > £{STAGE1_GBP_RISK_CAP:.0f} cap"
         else:
@@ -875,9 +882,20 @@ class TradingLoop:
 
     def _publish_snapshot(self, ctx: TickContext) -> None:
         try:
-            publish_tick(self._build_snapshot_payload(ctx))
+            payload = self._build_snapshot_payload(ctx)
+            if self._on_snapshot is not None:
+                self._on_snapshot(payload)
+            elif self._publish_snapshots:
+                publish_tick(payload)
         except Exception as e:
             log_engine(f"publish_tick failed: {type(e).__name__}: {e}")
+
+    def build_snapshot_payload(self, ctx: TickContext | None = None) -> dict[str, Any]:
+        """Build dashboard tick payload (orchestrator merge / tests)."""
+        target = ctx if ctx is not None else self.last_context
+        if target is None:
+            return {}
+        return self._build_snapshot_payload(target)
 
     def _build_snapshot_payload(self, ctx: TickContext) -> dict[str, Any]:
         quote = ctx.quote
@@ -1036,6 +1054,9 @@ class TradingLoop:
 
         return {
             "type": "tick",
+            "epic": self._epic,
+            "market": self._market,
+            "instrument_id": self._instrument_id or None,
             "ts": _iso_ts(quote_ts),
             "watchdog_failed": watchdog_banner,
             "market_state": market_state,

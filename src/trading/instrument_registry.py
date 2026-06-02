@@ -30,17 +30,42 @@ class InstrumentRegistry:
 
     def get_enabled(self) -> list[dict[str, Any]]:
         """Instruments with enabled=true only."""
-        return [
-            deepcopy(inst)
-            for inst in self._instruments.values()
-            if bool(inst.get("enabled"))
-        ]
+        return [inst for _iid, inst in self.get_enabled_with_ids()]
+
+    def get_enabled_with_ids(self) -> list[tuple[str, dict[str, Any]]]:
+        """Enabled instruments as (instrument_id, config dict) preserving config order."""
+        out: list[tuple[str, dict[str, Any]]] = []
+        for iid, inst in self._instruments.items():
+            if bool(inst.get("enabled")):
+                row = deepcopy(inst)
+                row.setdefault("instrument_id", iid)
+                out.append((iid, row))
+        return out
+
+    def get_by_id(self, instrument_id: str) -> dict[str, Any] | None:
+        key = str(instrument_id or "").strip()
+        if not key or key not in self._instruments:
+            return None
+        row = deepcopy(self._instruments[key])
+        row.setdefault("instrument_id", key)
+        return row
 
     def get_by_epic(self, epic: str) -> dict[str, Any] | None:
         epic_key = str(epic or "").strip()
         if not epic_key:
             return None
-        for inst in self._instruments.values():
+        for iid, inst in self._instruments.items():
             if str(inst.get("epic") or "").strip() == epic_key:
-                return deepcopy(inst)
+                row = deepcopy(inst)
+                row.setdefault("instrument_id", iid)
+                return row
         return None
+
+    def session_whitelist_for_epic(self, epic: str) -> list[str]:
+        inst = self.get_by_epic(epic)
+        if not inst:
+            return []
+        wl = inst.get("trading_session_whitelist")
+        if isinstance(wl, list) and wl:
+            return [str(s) for s in wl]
+        return []

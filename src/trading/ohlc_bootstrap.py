@@ -51,9 +51,10 @@ def _bootstrap_from_cache(
 ) -> int:
     """Seed SignalEngine from local JSONL cache when IG REST is unavailable."""
     import json
-    from system.paths import data_dir
 
-    cache_path = data_dir() / "ohlc_cache" / "nikkei_5m.jsonl"
+    from trading.ohlc_cache_paths import ohlc_cache_path
+
+    cache_path = ohlc_cache_path(epic, market=market)
     if not cache_path.is_file():
         log_engine(f"OHLC bootstrap: no local cache at {cache_path}")
         return 0
@@ -97,7 +98,7 @@ def _bootstrap_from_cache(
             environment_scorer.on_ohlc_bootstrapped(market)
         log_engine(
             f"OHLC bootstrap: injected {count} bars from local cache for {epic} "
-            f"(market={market}, source=nikkei_5m.jsonl)"
+            f"(market={market}, source={cache_path.name})"
         )
         return count
     except Exception as e:

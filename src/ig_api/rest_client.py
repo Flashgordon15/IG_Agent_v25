@@ -565,15 +565,30 @@ class IGRestClient:
         epic: str,
         *,
         max_age_seconds: float = 5.0,
+        constraints_fallback_seconds: float = 60.0,
     ) -> tuple[float, float]:
         """
-        Fresh bid/offer for streaming/UI — short cache (default 1s).
-        Dealing rules use the separate 300s constraints cache.
+        Fresh bid/offer for streaming/UI — short live cache (default 5s).
+
+        When constraints were fetched recently, reuse snapshot bid/offer instead
+        of a second GET /markets/{epic} (same payload, separate cache keys).
         """
         now = time.time()
         cached = self._live_price_cache.get(epic)
         if cached and now - float(cached.get("ts", 0)) < max_age_seconds:
             return float(cached["bid"]), float(cached["offer"])
+
+        constraints_entry = self._market_constraints_cache.get(epic)
+        if constraints_entry:
+            age = now - float(constraints_entry.get("ts", 0))
+            if age < max(float(constraints_fallback_seconds), max_age_seconds):
+                data = constraints_entry.get("data") or {}
+                bid = float(data.get("bid", 0))
+                offer = float(data.get("offer", 0))
+                if bid > 0 and offer > 0:
+                    self._live_price_cache[epic] = {"ts": now, "bid": bid, "offer": offer}
+                    self._bid, self._offer = bid, offer
+                    return bid, offer
 
         self.ensure_session()
         r = self.request("GET", f"/markets/{epic}", headers=self._auth_headers("3"))

@@ -250,17 +250,29 @@ class AgentRuntime:
             cfg = Config(_data=merged)
 
             rest = _rest_client_if_ready()
-            from runtime.agent_bootstrap import build_trading_loop, start_market_stream
+            from runtime.agent_bootstrap import (
+                build_market_orchestrator,
+                start_market_stream,
+            )
+            from runtime.ig_account_verify import verify_account_on_broker
+            from system.credentials_loader import try_load_credentials
 
             from api.snapshot_store import wire_hub_quotes_to_dashboard
 
-            self.trading_loop = build_trading_loop(cfg, rest_client=rest)
+            cred_status = try_load_credentials()
+            if rest is not None and cred_status.ok and cred_status.credentials:
+                verify_account_on_broker(rest, cred_status.credentials)
+
+            self.trading_loop = build_market_orchestrator(cfg, rest_client=rest)
             register_trading_loop(self.trading_loop)
 
             def _start_live_engines() -> None:
                 wire_hub_quotes_to_dashboard(min_interval=0.25)
                 self.trading_loop.start()
                 self._stream_client = start_market_stream(cfg, rest_client=rest)
+                from system.replay_daily_scheduler import start_replay_daily_scheduler
+
+                start_replay_daily_scheduler()
                 log_engine("orchestrator trading loop started (background)")
 
             register_api_startup(_start_live_engines)

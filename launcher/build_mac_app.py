@@ -29,11 +29,36 @@ def project_root() -> Path:
 
 
 def ensure_placeholder_png(png_path: Path) -> None:
-    if png_path.is_file():
+    """Ensure a branded 512×512 PNG exists for icon.icns generation."""
+    if png_path.is_file() and png_path.stat().st_size > 4000:
         return
     png_path.parent.mkdir(parents=True, exist_ok=True)
     width, height = 512, 512
-    raw = b"".join(b"\x00" + (b"\x00\x3a\x8a\xff" * width) for _ in range(height))
+    bg = (13, 17, 23, 255)
+    fg = (63, 185, 80, 255)
+
+    def on_line(x: int, y: int) -> bool:
+        pts = ((40, 380), (140, 280), (260, 320), (480, 120))
+        for i in range(len(pts) - 1):
+            x0, y0 = pts[i]
+            x1, y1 = pts[i + 1]
+            dx, dy = x1 - x0, y1 - y0
+            length_sq = dx * dx + dy * dy
+            if length_sq <= 0:
+                continue
+            t = max(0.0, min(1.0, ((x - x0) * dx + (y - y0) * dy) / length_sq))
+            px = x0 + t * dx
+            py = y0 + t * dy
+            if (x - px) ** 2 + (y - py) ** 2 <= 14 ** 2:
+                return True
+        return False
+
+    raw = b""
+    for y in range(height):
+        raw += b"\x00"
+        for x in range(width):
+            r, g, b, a = fg if on_line(x, y) else bg
+            raw += bytes((r, g, b, a))
 
     def chunk(tag: bytes, data: bytes) -> bytes:
         body = tag + data

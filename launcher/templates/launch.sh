@@ -28,15 +28,19 @@ notify_failure() {
   fi
 }
 
+DASHBOARD_URL="http://localhost:8080/"
+HEALTH_URL="http://localhost:8080/health"
+
 open_dashboard() {
   if command -v open >/dev/null 2>&1; then
-    open "http://127.0.0.1:8080/" 2>/dev/null || true
+    # Use localhost (not 127.0.0.1) so dashboard API_BASE matches CORS allow_origins.
+    open -g "${DASHBOARD_URL}" 2>/dev/null || open "${DASHBOARD_URL}" 2>/dev/null || true
   fi
 }
 
 dashboard_healthy() {
   if command -v curl >/dev/null 2>&1; then
-    curl -sf --max-time 1 "http://127.0.0.1:8080/health" >/dev/null 2>&1
+    curl -sf --max-time 1 "${HEALTH_URL}" >/dev/null 2>&1
     return $?
   fi
   return 1
@@ -176,11 +180,16 @@ if [ ! -f "${ENTRY}" ]; then
   exit 1
 fi
 
-log "start ${PY} ${ENTRY}"
+log "launch: cd ${ROOT} && PYTHONPATH=src ${PY} src/main.py"
 # Launcher opens the dashboard once health is up; tell main.py not to open again.
 export IG_AGENT_FROM_LAUNCHER=1
-nohup "${PY}" "${ENTRY}" >>"${LOG_FILE}" 2>&1 &
+(
+  cd "${ROOT}" || exit 1
+  export PYTHONPATH="${ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
+  exec "${PY}" src/main.py
+) >>"${LOG_FILE}" 2>&1 &
 CHILD=$!
-log "started pid=${CHILD}"
+disown "${CHILD}" 2>/dev/null || true
+log "started pid=${CHILD} (background, no terminal)"
 
 wait_for_dashboard "new instance"

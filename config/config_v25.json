@@ -93,15 +93,29 @@
       "name": "Japan 225",
       "signal_threshold": 70,
       "max_spread_pts": 35,
-      "best_session": "23:00-06:00 BST"
+      "stop_distance_points": 45,
+      "adaptive_min_risk_points": 25,
+      "adaptive_max_risk_points": 90,
+      "min_atr_points": 20,
+      "ig_point_value_gbp": 1.0,
+      "trade_size": 1.0,
+      "best_session": "23:00-06:00 BST",
+      "trading_session_whitelist": ["asia_early"]
     },
     "eur_usd": {
       "enabled": false,
       "epic": "CS.D.EURUSD.CFD.IP",
       "name": "EUR/USD",
-      "signal_threshold": 88,
+      "signal_threshold": 70,
       "max_spread_pts": 3,
-      "best_session": "12:00-17:00 BST"
+      "stop_distance_points": 5,
+      "adaptive_min_risk_points": 2,
+      "adaptive_max_risk_points": 15,
+      "min_atr_points": 0,
+      "ig_point_value_gbp": 1.0,
+      "trade_size": 1.0,
+      "best_session": "12:00-17:00 BST",
+      "trading_session_whitelist": ["london_morning", "london_us_overlap"]
     },
     "wall_street": {
       "enabled": false,
@@ -109,18 +123,26 @@
       "name": "Wall Street",
       "signal_threshold": 90,
       "max_spread_pts": 50,
-      "best_session": "13:30-21:00 BST"
+      "best_session": "13:30-21:00 BST",
+      "trading_session_whitelist": ["london_us_overlap", "us_afternoon"]
     },
     "gold": {
       "enabled": false,
-      "epic": "CS.D.CFDGOLD.CFD.IP",
-      "name": "Gold",
-      "signal_threshold": 90,
+      "epic": "CS.D.CFPGOLD.CFP.IP",
+      "name": "Spot Gold",
+      "signal_threshold": 70,
       "max_spread_pts": 40,
-      "best_session": "08:00-21:00 BST"
+      "stop_distance_points": 10,
+      "adaptive_min_risk_points": 5,
+      "adaptive_max_risk_points": 40,
+      "min_atr_points": 2,
+      "ig_point_value_gbp": 1.0,
+      "trade_size": 10,
+      "best_session": "08:00-21:00 BST",
+      "trading_session_whitelist": ["london_morning", "london_us_overlap"]
     }
   },
-  "allow_live_trading": false,
+  "allow_live_trading": true,
   "max_open_positions": 1,
   "max_positions_per_epic": 1,
   "max_daily_loss_gbp": 200.0,
@@ -154,6 +176,9 @@
   "stream_poll_seconds": 8,
   "streaming_transport": "auto",
   "position_sync_seconds": 25,
+  "position_sync_open_fast_seconds": 15,
+  "position_sync_open_relaxed_seconds": 30,
+  "position_sync_relaxed_below_confidence": 70,
   "startup_delay_seconds": 20,
   "startup_countdown_seconds": 15,
   "startup_countdown_seconds_soak": 4,

@@ -59,7 +59,7 @@ class OrderValidator:
             return ValidationResult(allowed=False, reasons=reasons, checks=checks)
         checks["signal"] = True
 
-        session_ok, session_msg = self.check_session()
+        session_ok, session_msg = self.check_session(signal.epic)
         checks["session"] = session_ok
         if not session_ok:
             reasons.append(session_msg)
@@ -152,11 +152,25 @@ class OrderValidator:
         allowed = all(checks.values()) and not reasons
         return ValidationResult(allowed=allowed, reasons=reasons, checks=checks)
 
-    def check_session(self) -> tuple[bool, str]:
+    def check_session(self, epic: str = "") -> tuple[bool, str]:
         cfg = self._cfg
         if not cfg.trading_hours_enabled:
             return True, ""
-        whitelist = cfg.trading_session_whitelist
+        whitelist: list[str] = []
+        target_epic = str(epic or cfg.epic or "").strip()
+        if target_epic:
+            try:
+                from trading.instrument_registry import InstrumentRegistry
+
+                wl = InstrumentRegistry(cfg.as_dict()).session_whitelist_for_epic(
+                    target_epic
+                )
+                if wl:
+                    whitelist = wl
+            except Exception:
+                whitelist = []
+        if not whitelist:
+            whitelist = list(cfg.trading_session_whitelist)
         if not whitelist:
             return True, ""
         sess = session_name()

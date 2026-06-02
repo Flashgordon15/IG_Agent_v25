@@ -1,9 +1,10 @@
 """
-Build orchestration trading loop and execution stack for v25 main entry.
+Build orchestration trading loops and execution stack for v25 main entry.
 """
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime
 from typing import Any, Callable
 
@@ -13,8 +14,10 @@ from data.models import Quote
 from execution.execution_engine import ExecutionEngine
 from execution.trading_loop import TradingLoop as ExecutionTickLoop
 from execution.types import ExecutionMode
+from runtime.market_orchestrator import MarketOrchestrator, attach_snapshot_handlers
 from signals.signal_engine import SignalEngine
 from system.config import Config
+from system.config_validator import apply_config_defaults
 from system.engine_log import log_engine
 from system.market_data_hub import get_market_data_hub
 from trading.environment_scorer import EnvironmentScorer
@@ -27,15 +30,29 @@ _stream_client: Any | None = None
 _position_sync: Any | None = None
 
 
-def _resolve_instrument(cfg: Config) -> tuple[str, str]:
-    reg = InstrumentRegistry(cfg.as_dict())
-    enabled = reg.get_enabled()
-    if enabled:
-        inst = enabled[0]
-        return str(inst.get("name") or cfg.market_search or "Market"), str(
-            inst.get("epic") or cfg.epic
-        )
-    return str(cfg.market_search or "Market"), str(cfg.epic)
+_INSTRUMENT_CFG_KEYS = (
+    "signal_threshold",
+    "max_spread_pts",
+    "stop_distance_points",
+    "default_stop_distance_points",
+    "adaptive_min_risk_points",
+    "adaptive_max_risk_points",
+    "min_atr_points",
+    "ig_point_value_gbp",
+    "trade_size",
+)
+
+
+def _config_for_instrument(cfg: Config, inst: dict[str, Any]) -> Config:
+    data = deepcopy(cfg.as_dict())
+    for key in _INSTRUMENT_CFG_KEYS:
+        if inst.get(key) is not None:
+            if key == "max_spread_pts":
+                data["max_spread_points"] = float(inst[key])
+            else:
+                data[key] = inst[key]
+    merged = apply_config_defaults(data)
+    return Config(_data=merged)
 
 
 def start_ig_position_sync(
@@ -43,7 +60,7 @@ def start_ig_position_sync(
     store: Any,
     tracker: Any,
     *,
-    epic: str,
+    epic: str = "",
     interval_seconds: float,
     points_engine: Any | None = None,
 ) -> Any | None:
@@ -64,7 +81,8 @@ def start_ig_position_sync(
         tracker.attach_sync(sync)
         sync.start()
         _position_sync = sync
-        log_engine(f"IG position sync attached epic={epic}")
+        label = epic or "all"
+        log_engine(f"IG position sync attached epic={label}")
         return sync
     except Exception as e:
         log_engine(f"IG position sync start failed: {type(e).__name__}: {e}")
@@ -85,20 +103,27 @@ def stop_ig_position_sync(sync: Any | None = None) -> None:
         _position_sync = None
 
 
-def build_trading_loop(
+def _build_single_loop(
     cfg: Config,
     *,
-    rest_client: Any | None = None,
-    mode: ExecutionMode | None = None,
+    instrument_id: str,
+    inst: dict[str, Any],
+    rest_client: Any | None,
+    mode: ExecutionMode,
+    store: LearningStore,
+    points_engine: PointsEngine,
+    position_sync: Any | None,
 ) -> AgentTradingLoop:
-    """Wire orchestrator loop with execution process_tick (enabled Japan 225 only)."""
-    market, epic = _resolve_instrument(cfg)
-    store = LearningStore(str(cfg.learning_db))
-    signal_engine = SignalEngine(cfg, store)
-    points_engine = PointsEngine(store)
+    market = str(inst.get("name") or instrument_id)
+    epic = str(inst.get("epic") or cfg.epic)
+    loop_cfg = _config_for_instrument(cfg, inst)
+    signal_engine = SignalEngine(loop_cfg, store)
     env_scorer = EnvironmentScorer(
-        signal_engine, config=cfg, rest_client=rest_client, epic=epic
+        signal_engine, config=loop_cfg, rest_client=rest_client, epic=epic
     )
+    prime = InstrumentRegistry(cfg.as_dict()).session_whitelist_for_epic(epic)
+    if prime:
+        env_scorer.set_prime_sessions(prime)
     session_manager = SessionManager(
         epic,
         market=market,
@@ -108,27 +133,15 @@ def build_trading_loop(
         rest_client=rest_client,
     )
 
-    exec_mode = mode
-    if exec_mode is None:
-        exec_mode = ExecutionMode.DEMO if rest_client is not None else ExecutionMode.TEST
-
-    trade_tracker_store = store
     from execution.trade_tracker import TradeTracker
 
-    tracker = TradeTracker(trade_tracker_store, prefer_ig=rest_client is not None)
-    position_sync = None
-    if rest_client is not None:
-        position_sync = start_ig_position_sync(
-            rest_client,
-            store,
-            tracker,
-            epic=epic,
-            interval_seconds=float(cfg.position_sync_seconds),
-            points_engine=points_engine,
-        )
+    tracker = TradeTracker(store, prefer_ig=rest_client is not None)
+    if position_sync is not None:
+        tracker.attach_sync(position_sync)
+
     exec_engine = ExecutionEngine(
-        mode=exec_mode,
-        config=cfg,
+        mode=mode,
+        config=loop_cfg,
         store=store,
         rest_client=rest_client,
         trade_tracker=tracker,
@@ -137,6 +150,7 @@ def build_trading_loop(
     )
     if position_sync is not None:
         exec_engine.attach_position_sync(position_sync)
+
     journal_path = str(cfg.get("decision_log_file", "") or "")
     journal = DecisionJournal(journal_path) if journal_path else None
     execution_loop = ExecutionTickLoop(
@@ -152,17 +166,20 @@ def build_trading_loop(
 
     interval = float(cfg.refresh_seconds)
 
-    def quote_source() -> Quote | None:
-        if rest_client is not None:
-            snap = hub.fetch_if_stale(epic, min_interval=interval)
-        else:
-            snap = hub.get_snapshot(epic)
-        if snap is None or snap.bid <= 0:
-            return None
-        return snap.to_quote()
+    def quote_source(epic_key: str = epic, min_iv: float = interval) -> Callable[[], Quote | None]:
+        def _source() -> Quote | None:
+            if rest_client is not None:
+                snap = hub.fetch_if_stale(epic_key, min_interval=min_iv)
+            else:
+                snap = hub.get_snapshot(epic_key)
+            if snap is None or snap.bid <= 0:
+                return None
+            return snap.to_quote()
+
+        return _source
 
     loop = AgentTradingLoop(
-        cfg,
+        loop_cfg,
         market=market,
         epic=epic,
         session_manager=session_manager,
@@ -170,10 +187,13 @@ def build_trading_loop(
         points_engine=points_engine,
         signal_engine=signal_engine,
         execution_loop=execution_loop,
-        quote_source=quote_source,
+        quote_source=quote_source(),
         learning_store=store,
         position_sync=position_sync,
+        publish_snapshots=True,
+        instrument_id=instrument_id,
     )
+
     if rest_client is not None and session_manager.is_session_open():
         from trading.ohlc_bootstrap import bootstrap_ohlc_for_session
 
@@ -183,8 +203,84 @@ def build_trading_loop(
     return loop
 
 
+def build_market_orchestrator(
+    cfg: Config,
+    *,
+    rest_client: Any | None = None,
+    mode: ExecutionMode | None = None,
+) -> MarketOrchestrator:
+    """Phase A — one loop per enabled instrument, shared PointsEngine."""
+    reg = InstrumentRegistry(cfg.as_dict())
+    enabled = reg.get_enabled_with_ids()
+    if not enabled:
+        raise ValueError("No enabled instruments in config")
+
+    store = LearningStore(str(cfg.learning_db))
+    points_engine = PointsEngine(store)
+
+    exec_mode = mode
+    if exec_mode is None:
+        exec_mode = ExecutionMode.DEMO if rest_client is not None else ExecutionMode.TEST
+
+    position_sync = None
+    if rest_client is not None:
+        from execution.trade_tracker import TradeTracker
+
+        tracker = TradeTracker(store, prefer_ig=True)
+        position_sync = start_ig_position_sync(
+            rest_client,
+            store,
+            tracker,
+            epic="",
+            interval_seconds=float(cfg.position_sync_seconds),
+            points_engine=points_engine,
+        )
+
+    loops: list[AgentTradingLoop] = []
+    for iid, inst in enabled:
+        loops.append(
+            _build_single_loop(
+                cfg,
+                instrument_id=iid,
+                inst=inst,
+                rest_client=rest_client,
+                mode=exec_mode,
+                store=store,
+                points_engine=points_engine,
+                position_sync=position_sync,
+            )
+        )
+
+    primary_epic = str(enabled[0][1].get("epic") or cfg.epic)
+    orch = MarketOrchestrator(cfg, loops, primary_epic=primary_epic)
+    if len(loops) > 1:
+        attach_snapshot_handlers(orch)
+    log_engine(
+        f"market_orchestrator built: {len(loops)} markets "
+        f"({', '.join(l._epic for l in loops)})"
+    )
+    return orch
+
+
+def build_trading_loop(
+    cfg: Config,
+    *,
+    rest_client: Any | None = None,
+    mode: ExecutionMode | None = None,
+) -> AgentTradingLoop | MarketOrchestrator:
+    """Backward-compatible entry — orchestrator when multiple markets enabled."""
+    reg = InstrumentRegistry(cfg.as_dict())
+    if len(reg.get_enabled()) > 1:
+        return build_market_orchestrator(cfg, rest_client=rest_client, mode=mode)
+    orch = build_market_orchestrator(cfg, rest_client=rest_client, mode=mode)
+    loop = orch.primary
+    if loop is None:
+        raise ValueError("No trading loop built")
+    return loop
+
+
 def start_market_stream(cfg: Config, *, rest_client: Any | None) -> Any | None:
-    """Connect IG price stream (Lightstreamer or REST poll) into MarketDataHub."""
+    """Connect IG price stream and subscribe all enabled epics."""
     global _stream_client
     if rest_client is None:
         return None
@@ -197,11 +293,17 @@ def start_market_stream(cfg: Config, *, rest_client: Any | None) -> Any | None:
         log_engine("market stream skipped — no valid IG session")
         return None
 
-    _market, epic = _resolve_instrument(cfg)
+    reg = InstrumentRegistry(cfg.as_dict())
+    epics = [str(inst.get("epic") or "") for _iid, inst in reg.get_enabled_with_ids()]
+    epics = [e for e in epics if e]
+    if not epics:
+        epics = [str(cfg.epic)]
+
     hub = get_market_data_hub()
     hub.attach_rest(rest_client)
     hub.set_min_fetch_interval(float(cfg.refresh_seconds))
-    hub.fetch_if_stale(epic, min_interval=0.0)
+    for epic in epics:
+        hub.fetch_if_stale(epic, min_interval=0.0)
 
     try:
         from ig_api.streaming_factory import create_streaming_client
@@ -227,7 +329,8 @@ def start_market_stream(cfg: Config, *, rest_client: Any | None) -> Any | None:
 
     if hasattr(client, "on_price"):
         client.on_price(on_price)
-    client.subscribe_market(epic)
+    for epic in epics:
+        client.subscribe_market(epic)
     try:
         client.connect()
     except Exception as e:
@@ -238,7 +341,7 @@ def start_market_stream(cfg: Config, *, rest_client: Any | None) -> Any | None:
     label = getattr(client, "transport_label", "stream")
     if callable(label):
         label = label()
-    log_engine(f"market stream started epic={epic} transport={label}")
+    log_engine(f"market stream started epics={epics} transport={label}")
     return client
 
 

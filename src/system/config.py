@@ -459,6 +459,18 @@ class Config:
         return float(self._data.get("position_sync_seconds", 25.0))
 
     @property
+    def position_sync_open_fast_seconds(self) -> float:
+        return float(self._data.get("position_sync_open_fast_seconds", 15.0))
+
+    @property
+    def position_sync_open_relaxed_seconds(self) -> float:
+        return float(self._data.get("position_sync_open_relaxed_seconds", 30.0))
+
+    @property
+    def position_sync_relaxed_below_confidence(self) -> float:
+        return float(self._data.get("position_sync_relaxed_below_confidence", 70.0))
+
+    @property
     def startup_countdown_seconds(self) -> float:
         raw = self._data.get("startup_countdown_seconds")
         if raw is None:

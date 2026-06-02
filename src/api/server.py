@@ -155,9 +155,11 @@ def api_points() -> dict[str, Any]:
 
 @router.get("/api/replay/summary")
 def api_replay_summary() -> dict[str, Any]:
+    from system.replay_scheduler_state import load_replay_scheduler_state
+
     rows = _read_jsonl(_data("replay_results.jsonl"))
     last_entry = rows[-1] if rows else {}
-    replay_state = _read_json_safe(_data("replay_scheduler_state.json"))
+    replay_state = load_replay_scheduler_state()
     return {"last_result": last_entry, "replay_state": replay_state}
 
 
@@ -235,40 +237,37 @@ def api_learning_status() -> dict[str, Any]:
     }
 
 
-_replay_proc: subprocess.Popen | None = None  # type: ignore[type-arg]
 _replay_mutex = threading.Lock()
 
 
 @router.post("/api/replay/run")
 def api_replay_run() -> JSONResponse:
-    global _replay_proc
-    try:
-        from zoneinfo import ZoneInfo
-    except ImportError:
-        from backports.zoneinfo import ZoneInfo  # type: ignore[no-redef]
+    from system.replay_scheduler_runner import in_replay_api_window, run_replay_pipeline
+    from system.replay_scheduler_state import load_replay_scheduler_state
 
-    london = ZoneInfo("Europe/London")
-    now = datetime.now(london)
-    minutes = now.hour * 60 + now.minute
-    if minutes < 7 * 60 or minutes >= 22 * 60 + 30:
+    if not in_replay_api_window():
         return JSONResponse(
             {"ok": False, "error": "outside trading window 07:00\u201322:30 London"},
             status_code=409,
         )
+    state = load_replay_scheduler_state()
+    if str(state.get("status") or "") == "running":
+        return JSONResponse(
+            {"ok": False, "error": "replay already running"},
+            status_code=423,
+        )
     with _replay_mutex:
-        if _replay_proc is not None and _replay_proc.poll() is None:
-            return JSONResponse(
-                {"ok": False, "error": "replay already running"},
-                status_code=423,
-            )
-        script = project_root() / "scripts" / "replay_scheduler.py"
+
+        def _run() -> None:
+            try:
+                run_replay_pipeline(scheduled=False)
+            except Exception as exc:
+                from system.engine_log import log_engine
+
+                log_engine(f"api replay run failed: {type(exc).__name__}: {exc}")
+
         try:
-            _replay_proc = subprocess.Popen(
-                [sys.executable, str(script)],
-                cwd=str(project_root()),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            threading.Thread(target=_run, name="replay-manual", daemon=True).start()
         except Exception as exc:
             return JSONResponse(
                 {"ok": False, "error": f"launch failed: {type(exc).__name__}: {exc}"},

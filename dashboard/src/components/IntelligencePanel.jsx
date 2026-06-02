@@ -3,6 +3,7 @@ import {
   fetchLearningStatus,
   fetchReplaySummary,
   fetchShadowToday,
+  triggerReplay,
 } from "../api.js";
 
 // ---------------------------------------------------------------------------
@@ -88,29 +89,48 @@ function normalizeReplay(raw) {
     raw.calibration_factor != null
   ) {
     return {
-      lastRunTime: raw.last_run_time,
-      barsProcessed: raw.bars_processed,
+      lastRunTime: raw.last_run_time ?? raw.last_run,
+      barsProcessed: raw.bars_processed ?? raw.bars_cache,
       calibrationFactor: raw.calibration_factor,
+      status: raw.status ?? "idle",
     };
   }
 
   const replayState = raw.replay_state || {};
   const lastResult = raw.last_result || {};
+  const schedulerTime =
+    replayState.last_run_time ??
+    replayState.last_run ??
+    replayState.last_replay_timestamp;
   return {
-    lastRunTime:
-      replayState.last_run_time ??
-      replayState.last_replay_timestamp ??
-      lastResult.timestamp ??
-      lastResult.bar_time ??
-      raw.last_updated,
+    lastRunTime: schedulerTime ?? lastResult.timestamp ?? lastResult.bar_time ?? raw.last_updated,
     barsProcessed:
       replayState.bars_processed ??
       replayState.bar_count ??
-      raw.bars_analysed ??
-      raw.bars_cache,
+      replayState.bars_cache ??
+      replayState.results_rows ??
+      raw.bars_analysed,
     calibrationFactor:
       replayState.calibration_factor ?? raw.calibration_factor,
+    status: replayState.status ?? "idle",
   };
+}
+
+function isReplayApiWindowOpen() {
+  try {
+    const parts = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Europe/London",
+      hour: "numeric",
+      minute: "numeric",
+      hour12: false,
+    }).formatToParts(new Date());
+    const hour = Number(parts.find((p) => p.type === "hour")?.value ?? 0);
+    const minute = Number(parts.find((p) => p.type === "minute")?.value ?? 0);
+    const mins = hour * 60 + minute;
+    return mins >= 7 * 60 && mins < 22 * 60 + 30;
+  } catch {
+    return true;
+  }
 }
 
 function normalizeShadow(raw) {
@@ -198,7 +218,13 @@ function signalQualityMeta(rate) {
 }
 
 function hasReplayRun(replay) {
-  return replay?.lastRunTime != null && replay.lastRunTime !== "";
+  if (replay?.status === "running") return true;
+  const t = replay?.lastRunTime;
+  if (t == null || t === "") return false;
+  if (typeof t === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(t)) {
+    return true;
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -217,6 +243,9 @@ export default function IntelligencePanel({ state: _state }) {
   const [replayError, setReplayError] = useState(null);
   const [shadowError, setShadowError] = useState(null);
   const [learningError, setLearningError] = useState(null);
+  const [replayRunning, setReplayRunning] = useState(false);
+  const [replayRunError, setReplayRunError] = useState(null);
+  const replayWindowOpen = isReplayApiWindowOpen();
 
   const loadAll = useCallback(async () => {
     setReplayLoading(true);
@@ -260,6 +289,37 @@ export default function IntelligencePanel({ state: _state }) {
     return () => window.clearInterval(id);
   }, [loadAll]);
 
+  useEffect(() => {
+    if (!replayRunning) return undefined;
+    const id = window.setInterval(loadAll, 5000);
+    return () => window.clearInterval(id);
+  }, [replayRunning, loadAll]);
+
+  useEffect(() => {
+    if (replay?.status === "running") {
+      setReplayRunning(true);
+    } else if (replay?.status === "idle" || replay?.status === "failed") {
+      setReplayRunning(false);
+    }
+  }, [replay?.status]);
+
+  const handleRunReplay = async () => {
+    setReplayRunError(null);
+    setReplayRunning(true);
+    const result = await triggerReplay();
+    if (!result?.ok) {
+      setReplayRunning(false);
+      setReplayRunError(
+        result?.error ||
+          (result?.status === 409
+            ? "Outside 07:00–22:30 London"
+            : "Failed to start replay"),
+      );
+      return;
+    }
+    await loadAll();
+  };
+
   const replayMeta =
     replay?.calibrationFactor != null
       ? calibrationMeta(replay.calibrationFactor)
@@ -269,6 +329,32 @@ export default function IntelligencePanel({ state: _state }) {
   return (
     <div className="mx-auto max-w-5xl space-y-3 px-1 pb-4">
       <Card title="Replay summary" loading={replayLoading}>
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={handleRunReplay}
+            disabled={!replayWindowOpen || replayRunning}
+            title={
+              replayWindowOpen
+                ? "Run fetch + replay + analysis now"
+                : "Replay only runs 07:00–22:30 London (outside live quiet hours)"
+            }
+            className={[
+              "rounded border px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide transition-colors",
+              !replayWindowOpen || replayRunning
+                ? "cursor-not-allowed border-border bg-bg text-muted opacity-60"
+                : "border-accent bg-accent/15 text-accent hover:bg-accent/25",
+            ].join(" ")}
+          >
+            {replayRunning ? "Running…" : "Run replay"}
+          </button>
+          {replayRunning && (
+            <span className="text-[11px] text-muted">Pipeline in progress…</span>
+          )}
+        </div>
+        {replayRunError && (
+          <p className="mb-2 text-[12px] text-danger">{replayRunError}</p>
+        )}
         {replayError ? (
           <p className="py-2 text-[12px] text-danger">{replayError}</p>
         ) : replayLoading && !replay ? (

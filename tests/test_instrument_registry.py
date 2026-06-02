@@ -21,7 +21,7 @@ class InstrumentRegistryTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
 
-    def test_get_enabled_only_japan_225(self) -> None:
+    def test_get_enabled_japan_225_only(self) -> None:
         reg = InstrumentRegistry(self.config)
         enabled = reg.get_enabled()
         self.assertEqual(len(enabled), 1)

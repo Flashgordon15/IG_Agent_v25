@@ -200,6 +200,14 @@ class MarketDataHub:
             cached = self._quotes.get(epic)
             last_fetch = self._last_fetch_ts.get(epic, 0.0)
 
+        try:
+            from system.rest_api_budget import hub_quote_stream_fresh
+
+            if hub_quote_stream_fresh(epic=epic) and cached and cached.bid > 0:
+                return cached
+        except Exception:
+            pass
+
         if cached and cached.bid > 0:
             age = cached.age_seconds()
             if max_age is not None and age <= max_age:

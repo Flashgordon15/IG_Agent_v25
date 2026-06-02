@@ -122,26 +122,9 @@ def learning_status() -> dict[str, Any]:
 
 
 def run_replay_pipeline() -> dict[str, Any]:
-    from zoneinfo import ZoneInfo
+    from system.replay_scheduler_runner import in_replay_api_window, run_replay_pipeline as _run
 
-    london = ZoneInfo("Europe/London")
-    now = datetime.now(london)
-    minutes = now.hour * 60 + now.minute
-    if minutes >= 22 * 60 + 30 or minutes < 7 * 60:
+    if not in_replay_api_window():
         return {"ok": False, "error": "Replay blocked during live window 22:30–07:00 BST"}
-    import subprocess
-    import sys
-
-    script = project_root() / "scripts" / "replay_scheduler.py"
-    proc = subprocess.run(
-        [sys.executable, str(script)],
-        cwd=str(project_root()),
-        capture_output=True,
-        text=True,
-    )
-    return {
-        "ok": proc.returncode == 0,
-        "returncode": proc.returncode,
-        "stdout": (proc.stdout or "")[-2000:],
-        "stderr": (proc.stderr or "")[-2000:],
-    }
+    rc = _run(scheduled=False)
+    return {"ok": rc == 0, "returncode": rc}

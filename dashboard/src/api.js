@@ -38,8 +38,24 @@ export function fetchLearningStatus() {
   return getJson("/api/learning/status");
 }
 
-export function triggerReplay() {
-  return getJson("/api/replay/run", { method: "POST" });
+export async function triggerReplay() {
+  try {
+    const res = await fetch(`${API_BASE}/api/replay/run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return {
+        ok: false,
+        status: res.status,
+        error: data?.error || res.statusText || "Request failed",
+      };
+    }
+    return { ok: true, status: res.status, ...data };
+  } catch (err) {
+    return { ok: false, error: err?.message || "Network error" };
+  }
 }
 
 export async function postEmergencyStop() {
