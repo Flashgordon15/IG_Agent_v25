@@ -2,6 +2,50 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../api/client.js";
 import { fmtPrice } from "../utils/fmtPrice.js";
 
+function FlattenAllButton() {
+  const [step, setStep] = useState(0); // 0=idle, 1=confirm, 2=loading
+  const [result, setResult] = useState("");
+  if (step === 2) return <p className="mt-2 text-[11px] text-muted">Closing all…</p>;
+  if (result) return <p className="mt-2 text-[12px] text-muted">{result}</p>;
+  if (step === 1) {
+    return (
+      <div className="mt-3 flex gap-2">
+        <button
+          className="flex-1 rounded bg-danger py-2 text-[12px] font-semibold text-white"
+          onClick={async () => {
+            setStep(2);
+            try {
+              const r = await fetch("/api/flatten/all", { method: "POST" });
+              const d = await r.json().catch(() => ({}));
+              setResult(d.ok ? `Closed ${d.count ?? 0} position(s).` : "Flatten failed");
+            } catch { setResult("Network error"); }
+            setStep(0);
+          }}
+        >
+          Confirm — Close All
+        </button>
+        <button
+          className="rounded border border-border px-3 py-2 text-[12px] text-muted"
+          onClick={() => setStep(0)}
+        >
+          Cancel
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div className="mt-3 border-t border-border pt-3">
+      <button
+        type="button"
+        onClick={() => setStep(1)}
+        className="w-full rounded border border-danger/60 py-2 text-[12px] font-semibold text-danger hover:bg-danger/10"
+      >
+        CLOSE ALL POSITIONS
+      </button>
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Helpers — gate / block reason (aligned with LiveTab)
 // ---------------------------------------------------------------------------
@@ -709,6 +753,7 @@ export default function LivePanel({
             )}
           </div>
         )}
+        {positions.length > 1 && <FlattenAllButton />}
       </Card>
 
       {/* 5. Why No Trade gate card */}

@@ -332,7 +332,11 @@ def build_market_orchestrator(
         start_telegram_heartbeat()
         notifier = get_telegram_notifier()
         if notifier is not None and notifier.enabled:
-            notifier.notify_startup(state_restored=True)
+            notifier.notify_startup(
+                state_restored=True,
+                market_count=len(loops),
+                points_state=points_engine.get_state(),
+            )
     except Exception as e:
         log_engine(f"telegram heartbeat setup failed: {type(e).__name__}: {e}")
 

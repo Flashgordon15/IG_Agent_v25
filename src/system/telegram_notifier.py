@@ -186,18 +186,34 @@ class TelegramNotifier:
             self._alert_last_sent[key] = now
         self._send_async(text)
 
+    def send(self, text: str) -> None:
+        """Async send — convenience alias for fire-and-forget messages."""
+        self._send_async(text)
+
     def send_alert(self, message: str, *, dedupe_key: str | None = None) -> None:
-        line = message if message.startswith(("⚠️", "❌", "💓", "🟢", "🔴")) else f"⚠️ {message}"
+        line = message if message.startswith(("⚠️", "❌", "💓", "🟢", "🔴", "🚨")) else f"⚠️ {message}"
         if dedupe_key:
             self._alert_deduped(dedupe_key, line)
         else:
             self._send_async(line)
 
-    def notify_startup(self, *, state_restored: bool = True) -> None:
-        if state_restored:
-            self.send_now("⚠️ Agent restarted — state restored")
-        else:
-            self.send_now("⚠️ Agent restarted")
+    def notify_startup(
+        self,
+        *,
+        state_restored: bool = True,
+        market_count: int = 0,
+        points_state: str = "CAUTION",
+    ) -> None:
+        markets_line = f"Markets: {market_count} active | " if market_count else ""
+        self.send_now(
+            f"🟢 IG Agent v25 started\n{markets_line}Points: {points_state}"
+        )
+
+    def notify_shutdown(self) -> None:
+        self.send_now("🔴 IG Agent v25 stopped")
+
+    def notify_critical(self, message: str) -> None:
+        self._send_async(f"🚨 CRITICAL: {message}")
 
     def notify_crash(self, error: str) -> None:
         self._send_async(f"❌ Agent crash — check logs immediately\n{error[:500]}")
@@ -243,21 +259,12 @@ class TelegramNotifier:
         target: float,
         signal_pct: float,
         fitness_pct: float,
+        points_state: str = "CAUTION",
     ) -> None:
-        if direction == "BUY":
-            stop_delta = stop - entry
-            limit_delta = target - entry
-        else:
-            stop_delta = entry - stop
-            limit_delta = entry - target
         text = (
-            f"🟢 Trade Opened — {market}\n"
-            f"Direction: {direction}\n"
-            f"Entry: {self._fmt_price(entry)}\n"
-            f"Size: {size:g}\n"
-            f"Stop: {self._fmt_price(stop)} ({self._fmt_signed_pts(stop_delta)})\n"
-            f"Limit: {self._fmt_price(target)} ({self._fmt_signed_pts(limit_delta)})\n"
-            f"Signal: {signal_pct:.0f}% | Fitness: {fitness_pct:.0f}%"
+            f"📈 {market} {direction} at {self._fmt_price(entry)}\n"
+            f"Size:{size:g} Stop:{self._fmt_price(stop)} Signal:{signal_pct:.0f}%\n"
+            f"Fitness:{fitness_pct:.0f}% Points:{points_state}"
         )
         self._send_async(text)
 
@@ -275,28 +282,24 @@ class TelegramNotifier:
         points_after: float | None,
         points_state: str,
     ) -> None:
+        win = pnl_pts >= 0
+        emoji = "✅ WIN" if win else "❌ LOSS"
         if pnl_gbp is not None:
-            gbp_sign = "+" if pnl_gbp >= 0 else ""
-            pnl_line = f"P&L: {gbp_sign}£{abs(pnl_gbp):,.2f} ({self._fmt_signed_pts(pnl_pts)})"
+            sign = "+" if win else "-"
+            gbp_str = f"{sign}£{abs(pnl_gbp):,.2f}"
         else:
-            pnl_line = f"P&L: {self._fmt_signed_pts(pnl_pts)}"
-        dur_line = (
-            f"Duration: {int(duration_mins)} mins"
-            if duration_mins is not None
-            else "Duration: —"
+            gbp_str = None
+        pts_sign = "+" if pnl_pts >= 0 else ""
+        pts_str = f"{pts_sign}{pnl_pts:.1f}pts"
+        cumulative = points_after if points_after is not None else 0.0
+        first_line = (
+            f"{emoji} {market} {gbp_str} {pts_str}"
+            if gbp_str
+            else f"{emoji} {market} {pts_str}"
         )
-        pts_line = ""
-        if points_before is not None and points_after is not None:
-            pts_line = (
-                f"\nPoints: {points_before:.1f} → {points_after:.1f} ({points_state})"
-            )
         text = (
-            f"🔴 Trade Closed — {market}\n"
-            f"Direction: {direction}\n"
-            f"Entry: {self._fmt_price(entry)} → Exit: {self._fmt_price(exit_price)}\n"
-            f"{pnl_line}\n"
-            f"{dur_line}"
-            f"{pts_line}"
+            f"{first_line}\n"
+            f"Cumulative: {cumulative:.1f}pts {points_state}"
         )
         self._send_async(text)
 

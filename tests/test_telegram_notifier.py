@@ -50,7 +50,8 @@ class TelegramNotifierTests(unittest.TestCase):
         with patch.object(n, "send_now") as send_now:
             n.notify_startup(state_restored=True)
         send_now.assert_called_once()
-        self.assertIn("restarted", send_now.call_args[0][0])
+        text = send_now.call_args[0][0]
+        self.assertIn("IG Agent v25 started", text)
 
     def test_trade_open_message_format(self) -> None:
         n = TelegramNotifier(enabled=False, bot_token="", chat_id="")
@@ -66,7 +67,8 @@ class TelegramNotifierTests(unittest.TestCase):
                 fitness_pct=52.0,
             )
         text = send.call_args[0][0]
-        self.assertIn("Trade Opened", text)
+        self.assertIn("Japan 225", text)
+        self.assertIn("BUY", text)
         self.assertIn("67,350", text)
         self.assertIn("91%", text)
 

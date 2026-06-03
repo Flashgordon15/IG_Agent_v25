@@ -90,7 +90,7 @@ class OrchestratorPostBootstrapGatesTests(unittest.TestCase):
         rest = MagicMock()
         rest.fetch_price_history.return_value = _ohlc_bars(100)
         injected = bootstrap_ohlc_for_session(
-            rest, signal_engine, epic, market, environment_scorer=env_scorer
+            rest, signal_engine, epic, market, environment_scorer=env_scorer, prefer_cache=False
         )
         self.assertEqual(injected, 100)
 

@@ -1,6 +1,11 @@
 import { useState } from "react";
 import { postEmergencyStop } from "../api.js";
 
+async function postJson(url) {
+  const r = await fetch(url, { method: "POST" });
+  try { return await r.json(); } catch { return { ok: r.ok }; }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -137,6 +142,45 @@ export default function SystemPanel({ state, wsConnected, reconnecting }) {
   const [confirmInput, setConfirmInput] = useState("");
   const [resultMsg, setResultMsg] = useState("");
   const [loading, setLoading] = useState(false);
+  const [agentModal, setAgentModal] = useState(null); // "stop" | "restart" | null
+  const [agentConfirmInput, setAgentConfirmInput] = useState("");
+  const [agentLoading, setAgentLoading] = useState(false);
+  const [agentResult, setAgentResult] = useState("");
+  const [flattenLoading, setFlattenLoading] = useState(false);
+  const [flattenResult, setFlattenResult] = useState("");
+
+  const openAgentModal = (type) => {
+    setAgentModal(type);
+    setAgentConfirmInput("");
+    setAgentResult("");
+  };
+  const closeAgentModal = () => {
+    if (agentLoading) return;
+    setAgentModal(null);
+    setAgentConfirmInput("");
+    setAgentResult("");
+  };
+  const handleAgentAction = async () => {
+    if (agentConfirmInput.toUpperCase() !== "CONFIRM" || agentLoading) return;
+    setAgentLoading(true);
+    setAgentResult("");
+    const endpoint = agentModal === "stop" ? "/api/agent/stop" : "/api/agent/restart";
+    const r = await postJson(endpoint);
+    setAgentLoading(false);
+    setAgentResult(
+      r.ok
+        ? agentModal === "stop" ? "Agent stopped." : "Agent restarted."
+        : "Action failed — check engine.log"
+    );
+  };
+
+  const handleFlattenAll = async () => {
+    setFlattenLoading(true);
+    setFlattenResult("");
+    const r = await postJson("/api/flatten/all");
+    setFlattenLoading(false);
+    setFlattenResult(r.ok ? `Closed ${r.count ?? 0} position(s).` : "Flatten failed — check logs");
+  };
 
   const openModal = () => {
     setConfirmInput("");
@@ -277,6 +321,73 @@ export default function SystemPanel({ state, wsConnected, reconnecting }) {
         </Card>
       </div>
 
+      {/* Health panel */}
+      <Card title="Health">
+        <dl className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-3">
+          <StatusRow label="Agent Uptime">
+            <span className="tabular-nums">{uptime ?? "—"}</span>
+          </StatusRow>
+          <StatusRow label="Open Positions">
+            <span className="tabular-nums">{state?.open_positions ?? state?.positions?.length ?? 0}</span>
+          </StatusRow>
+          <StatusRow label="Today P&L">
+            <span className={`tabular-nums font-medium ${(state?.today_pnl ?? 0) >= 0 ? "text-success" : "text-danger"}`}>
+              {state?.today_pnl != null ? `${state.today_pnl >= 0 ? "+" : ""}£${Number(state.today_pnl).toFixed(2)}` : "—"}
+            </span>
+          </StatusRow>
+          <StatusRow label="Points">
+            <span className="tabular-nums">
+              {state?.points?.cumulative != null
+                ? `${state.points.cumulative}pts ${state.points.state ?? ""}`
+                : "—"}
+            </span>
+          </StatusRow>
+          <StatusRow label="Last Gate">
+            <span className="tabular-nums text-muted">
+              {state?.last_gate_eval_ago ?? state?.gate_eval_ago ?? "—"}
+            </span>
+          </StatusRow>
+          <StatusRow label="Markets">
+            <span className="text-foreground text-[11px]">
+              {Array.isArray(state?.market_statuses)
+                ? state.market_statuses.map(m => `${m.name}:${m.status}`).join(" | ")
+                : (state?.stream_status ?? "—")}
+            </span>
+          </StatusRow>
+        </dl>
+      </Card>
+
+      {/* Agent controls */}
+      <Card title="Agent controls">
+        <div className="flex flex-wrap gap-2 pt-1">
+          <button
+            type="button"
+            onClick={() => openAgentModal("stop")}
+            className="rounded border border-danger/60 bg-danger/10 px-4 py-2 text-[11px] font-bold uppercase tracking-wide text-danger hover:bg-danger/20"
+          >
+            STOP AGENT
+          </button>
+          <button
+            type="button"
+            onClick={() => openAgentModal("restart")}
+            className="rounded border border-warning/60 bg-warning/10 px-4 py-2 text-[11px] font-bold uppercase tracking-wide text-warning hover:bg-warning/20"
+          >
+            RESTART AGENT
+          </button>
+          <button
+            type="button"
+            onClick={handleFlattenAll}
+            disabled={flattenLoading}
+            className="rounded border border-danger/40 px-4 py-2 text-[11px] font-semibold uppercase text-danger hover:bg-danger/10 disabled:opacity-60"
+          >
+            {flattenLoading ? "Closing…" : "CLOSE ALL POSITIONS"}
+          </button>
+        </div>
+        {flattenResult && (
+          <p className="mt-2 text-[12px] text-muted">{flattenResult}</p>
+        )}
+      </Card>
+
       <div className="flex flex-col items-center gap-3 pt-2">
         <button
           type="button"
@@ -286,6 +397,55 @@ export default function SystemPanel({ state, wsConnected, reconnecting }) {
           EMERGENCY STOP
         </button>
       </div>
+
+      {agentModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="w-full max-w-md rounded-lg border border-border bg-card p-4 shadow-xl sm:p-5">
+            <h3 className="text-sm font-semibold text-foreground">
+              {agentModal === "stop" ? "Stop Agent" : "Restart Agent"}
+            </h3>
+            <p className="mt-2 text-[12px] leading-snug text-muted">
+              {agentModal === "stop"
+                ? "All positions will be closed first, then the trading loop will stop. Type CONFIRM to proceed."
+                : "All positions will be closed, then the loop restarts. Type CONFIRM to proceed."}
+            </p>
+            <input
+              type="text"
+              value={agentConfirmInput}
+              onChange={(e) => setAgentConfirmInput(e.target.value)}
+              placeholder="CONFIRM"
+              autoComplete="off"
+              disabled={agentLoading}
+              className="mt-4 w-full rounded border border-border bg-bg px-3 py-2 font-mono text-sm text-foreground outline-none focus:border-warning/60 disabled:opacity-60"
+            />
+            {agentResult && (
+              <p className="mt-3 text-[12px] font-medium text-warning">{agentResult}</p>
+            )}
+            <div className="mt-4 flex flex-wrap justify-end gap-2">
+              <button
+                type="button"
+                onClick={closeAgentModal}
+                disabled={agentLoading}
+                className="rounded border border-border px-4 py-2 text-[12px] text-muted hover:text-foreground disabled:opacity-60"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleAgentAction}
+                disabled={agentConfirmInput.toUpperCase() !== "CONFIRM" || agentLoading}
+                className={`rounded px-4 py-2 text-[12px] font-semibold uppercase text-white transition-opacity disabled:cursor-not-allowed disabled:opacity-40 ${agentModal === "stop" ? "bg-danger" : "bg-warning"}`}
+              >
+                {agentLoading ? "Working…" : "Confirm"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {modalOpen && (
         <div

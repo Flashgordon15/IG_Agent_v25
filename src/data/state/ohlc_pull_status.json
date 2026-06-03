@@ -1,12 +1,12 @@
 {
-  "block_reason": "allowance",
+  "block_reason": null,
   "last_attempted_range": {
-    "from": "2025-08-25T13:45:00",
-    "to": "2025-08-26T13:45:00"
+    "from": "2026-06-02T20:55:00",
+    "to": "2026-06-03T07:05:51"
   },
-  "last_run_time": "2026-06-02T20:07:40",
-  "last_success_timestamp": "2025-08-25T13:40:00",
-  "next_retry_time": "2026-06-02T20:47:18",
-  "run_status": "blocked_waiting_retry",
-  "status": "blocked_waiting_retry"
+  "last_run_time": "2026-06-03T07:06:34",
+  "last_success_timestamp": "2026-06-03T06:55:00",
+  "next_retry_time": null,
+  "run_status": "complete",
+  "status": "ok"
 }

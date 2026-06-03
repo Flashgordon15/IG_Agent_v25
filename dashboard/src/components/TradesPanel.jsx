@@ -1,3 +1,5 @@
+import React from "react";
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -181,6 +183,58 @@ function ResultBadge({ result }) {
 }
 
 // ---------------------------------------------------------------------------
+// ClosePositionButton — per-row confirm + close
+// ---------------------------------------------------------------------------
+
+function ClosePositionButton({ dealId, epic }) {
+  const [confirming, setConfirming] = React.useState(false);
+  const [loading, setLoading] = React.useState(false);
+  const [done, setDone] = React.useState(false);
+
+  if (done) return <span className="text-success text-[10px]">Closed</span>;
+  if (loading) return <span className="text-muted text-[10px]">…</span>;
+  if (confirming) {
+    return (
+      <span className="flex gap-1 items-center">
+        <button
+          className="rounded bg-danger px-1.5 py-0.5 text-[10px] font-semibold text-white"
+          onClick={async () => {
+            setLoading(true);
+            try {
+              const endpoint = dealId
+                ? `/api/close/${dealId}`
+                : `/api/flatten/${encodeURIComponent(epic)}`;
+              await fetch(endpoint, { method: "POST" });
+              setDone(true);
+            } catch (e) {
+              console.error(e);
+            }
+            setLoading(false);
+            setConfirming(false);
+          }}
+        >
+          Confirm
+        </button>
+        <button
+          className="rounded border border-border px-1.5 py-0.5 text-[10px] text-muted"
+          onClick={() => setConfirming(false)}
+        >
+          Cancel
+        </button>
+      </span>
+    );
+  }
+  return (
+    <button
+      className="rounded border border-danger/60 px-1.5 py-0.5 text-[10px] text-danger hover:bg-danger/10"
+      onClick={() => setConfirming(true)}
+    >
+      Close
+    </button>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // TradesPanel
 // ---------------------------------------------------------------------------
 
@@ -215,13 +269,14 @@ export default function TradesPanel({ state }) {
                 <th className="px-2 py-1.5 font-normal">Trail Stop</th>
                 <th className="px-2 py-1.5 font-normal">Break-even</th>
                 <th className="px-2 py-1.5 font-normal">Time Open</th>
+                <th className="px-2 py-1.5 font-normal">Close</th>
               </tr>
             </thead>
             <tbody>
               {positions.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={8}
+                    colSpan={9}
                     className="px-2 py-4 text-center text-muted"
                   >
                     No open positions
@@ -274,6 +329,12 @@ export default function TradesPanel({ state }) {
                         {openMins != null
                           ? `${Math.round(Number(openMins))}m`
                           : "—"}
+                      </td>
+                      <td className="px-2 py-2">
+                        <ClosePositionButton
+                          dealId={pos.deal_id}
+                          epic={pos.epic || pos.market || ""}
+                        />
                       </td>
                     </tr>
                   );

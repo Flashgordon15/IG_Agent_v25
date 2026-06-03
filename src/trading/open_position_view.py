@@ -4,10 +4,28 @@ Dashboard open-position rows — IG sync fields + per-tick quote unrealized P&L.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from data.models import Quote
 from system.pnl_math import realised_pnl_points
+
+
+def _compute_open_mins(pos: dict[str, Any]) -> float | None:
+    """Return minutes since entry from open_mins (pre-computed) or opened_at timestamp."""
+    if pos.get("open_mins") is not None:
+        try:
+            return float(pos["open_mins"])
+        except (TypeError, ValueError):
+            pass
+    opened_at = pos.get("opened_at") or pos.get("entry_time")
+    if not opened_at:
+        return None
+    try:
+        opened = datetime.fromisoformat(str(opened_at).replace("Z", ""))
+        return max(0.0, (datetime.now() - opened).total_seconds() / 60.0)
+    except Exception:
+        return None
 
 
 def _side(pos: dict[str, Any]) -> str:
@@ -82,7 +100,7 @@ def normalize_sync_position(pos: dict[str, Any]) -> dict[str, Any]:
         "size": float(pos.get("size") or 0),
         "trail_active": bool(pos.get("trail_active", False)),
         "breakeven_hit": bool(pos.get("breakeven_hit", False)),
-        "open_mins": pos.get("open_mins"),
+        "open_mins": _compute_open_mins(pos),
         "epic": pos.get("epic") or "",
     }
 

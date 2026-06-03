@@ -33,11 +33,17 @@ EPIC_YAHOO_MAP: dict[str, tuple[str, str]] = {
     "CS.D.EURUSD.CFD.IP": ("EURUSD=X", "EUR/USD"),
     "CS.D.CFPGOLD.CFP.IP": ("GC=F", "Spot Gold"),
     "IX.D.NIKKEI.IFM.IP": ("^N225", "Japan 225"),
+    "CS.D.GBPUSD.CFD.IP": ("GBPUSD=X", "GBP/USD"),
+    "CS.D.CRUDE.CFD.IP": ("CL=F", "US Oil WTI"),
+    "IX.D.DOW.IFM.IP": ("^DJI", "Wall Street"),
 }
 
 DEFAULT_SEED_EPICS = (
     "CS.D.EURUSD.CFD.IP",
     "CS.D.CFPGOLD.CFP.IP",
+    "CS.D.GBPUSD.CFD.IP",
+    "CS.D.CRUDE.CFD.IP",
+    "IX.D.DOW.IFM.IP",
 )
 
 

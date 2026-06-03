@@ -186,6 +186,46 @@ class IgPositionSync:
                 last_closed_summary=self._snapshot.last_closed_summary,
             )
 
+    def _open_mins_for_deal(self, deal_id: str) -> float | None:
+        """Look up opened_at from local store and return minutes since entry."""
+        if not self._store or not deal_id:
+            return None
+        try:
+            row = self._store.find_open_by_deal_id(deal_id)
+            if row is None:
+                return None
+            opened_raw = str(row["opened_at"] or "") if "opened_at" in row.keys() else ""
+            if not opened_raw:
+                return None
+            opened = datetime.fromisoformat(opened_raw.replace("Z", ""))
+            return max(0.0, (datetime.now() - opened).total_seconds() / 60.0)
+        except Exception:
+            return None
+
+    def _position_to_dict(self, p: SyncedPosition) -> dict[str, Any]:
+        return {
+            "deal_id": p.deal_id,
+            "epic": p.epic,
+            "direction": p.direction,
+            "side": p.direction,
+            "size": p.size,
+            "level": p.level,
+            "entry": p.level,
+            "upl": p.upl,
+            "pnl_gbp": p.upl,
+            "market_name": p.market_name,
+            "deal_reference": p.deal_reference,
+            "stop_level": p.stop_level,
+            "limit_level": p.limit_level,
+            "stop": p.stop_level or None,
+            "target": p.limit_level or None,
+            "bid": p.bid,
+            "offer": p.offer,
+            "current": p.bid if p.direction == "BUY" else p.offer,
+            "currency": p.currency,
+            "open_mins": self._open_mins_for_deal(p.deal_id),
+        }
+
     def snapshot_dict(self) -> dict[str, Any]:
         s = self.snapshot()
         return {
@@ -200,27 +240,7 @@ class IgPositionSync:
             "last_ig_event": s.last_ig_event,
             "last_closed_summary": s.last_closed_summary,
             "positions": [
-                {
-                    "deal_id": p.deal_id,
-                    "epic": p.epic,
-                    "direction": p.direction,
-                    "side": p.direction,
-                    "size": p.size,
-                    "level": p.level,
-                    "entry": p.level,
-                    "upl": p.upl,
-                    "pnl_gbp": p.upl,
-                    "market_name": p.market_name,
-                    "deal_reference": p.deal_reference,
-                    "stop_level": p.stop_level,
-                    "limit_level": p.limit_level,
-                    "stop": p.stop_level or None,
-                    "target": p.limit_level or None,
-                    "bid": p.bid,
-                    "offer": p.offer,
-                    "current": p.bid if p.direction == "BUY" else p.offer,
-                    "currency": p.currency,
-                }
+                self._position_to_dict(p)
                 for p in s.positions
             ],
         }

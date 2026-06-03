@@ -322,6 +322,9 @@ class TradeManager:
             if notifier is None or not notifier.enabled:
                 return
             fitness = float(execution.get("fitness_score") or 0)
+            pts_state = "CAUTION"
+            if self._points_engine is not None:
+                pts_state = self._points_engine.get_state()
             notifier.notify_trade_opened(
                 market=market,
                 direction=side,
@@ -331,6 +334,7 @@ class TradeManager:
                 target=target,
                 signal_pct=float(adjusted_confidence),
                 fitness_pct=fitness,
+                points_state=pts_state,
             )
         except Exception as e:
             log_engine(f"telegram trade open notify failed: {type(e).__name__}: {e}")
@@ -389,7 +393,7 @@ class TradeManager:
                 pnl_gbp=pnl_gbp,
                 pnl_pts=float(pnl_pts),
                 duration_mins=duration_mins,
-                points_before=pts_before,
+                points_before=points_before,
                 points_after=pts_after,
                 points_state=state,
             )

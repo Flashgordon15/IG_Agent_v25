@@ -226,8 +226,14 @@ class AgentRuntime:
             stop_market_stream(self._stream_client)
             self._stream_client = None
         try:
-            from system.telegram_notifier import stop_telegram_heartbeat
+            from system.telegram_notifier import (
+                get_telegram_notifier,
+                stop_telegram_heartbeat,
+            )
 
+            notifier = get_telegram_notifier()
+            if notifier is not None and notifier.enabled:
+                notifier.notify_shutdown()
             stop_telegram_heartbeat()
         except Exception:
             pass

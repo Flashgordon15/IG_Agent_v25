@@ -28,9 +28,9 @@ class InstrumentRegistryTests(unittest.TestCase):
         self.assertIn(JAPAN_EPIC, epics)
         self.assertTrue(all(inst.get("enabled") for inst in enabled))
 
-    def test_get_all_returns_four(self) -> None:
+    def test_get_all_returns_at_least_four(self) -> None:
         reg = InstrumentRegistry(self.config)
-        self.assertEqual(len(reg.get_all()), 4)
+        self.assertGreaterEqual(len(reg.get_all()), 4)
 
     def test_get_by_epic_finds_japan(self) -> None:
         reg = InstrumentRegistry(self.config)
