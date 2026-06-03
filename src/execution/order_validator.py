@@ -45,6 +45,7 @@ class OrderValidator:
         signal: TradeSignal,
         *,
         open_position_count: Callable[[str], int] | None = None,
+        open_total_count: Callable[[], int] | None = None,
         has_open_position: Callable[[str], bool] | None = None,
         store_has_position: Callable[[str], bool] | None = None,
         has_pending_open: Callable[[str], bool] | None = None,
@@ -136,6 +137,19 @@ class OrderValidator:
                 f"Max positions reached ({count}/{max_pos})"
             )
         checks["position_limit"] = pos_ok
+
+        max_total = max(1, int(cfg.max_open_positions))
+        total_count = 0
+        if open_total_count is not None:
+            total_raw = open_total_count()
+            if isinstance(total_raw, (int, float)):
+                total_count = int(total_raw)
+        total_ok = total_count < max_total
+        if not total_ok:
+            reasons.append(
+                f"Total open positions reached ({total_count}/{max_total})"
+            )
+        checks["total_position_limit"] = total_ok
 
         # Cooldown: when max_positions > 1, allow stacking up to the cap without
         # waiting between concurrent opens; still enforce cooldown after all slots close.

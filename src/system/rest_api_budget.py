@@ -21,7 +21,7 @@ ESSENTIAL_REST_CATEGORIES = frozenset({"positions", "orders"})
 PREEMPTIVE_CONSECUTIVE_READINGS = 3
 PREEMPTIVE_PAUSE_SEC = 30.0
 PREEMPTIVE_UTILIZATION_RATIO = 0.8
-FRESH_STREAM_TICK_MAX_AGE_SEC = 5.0
+FRESH_STREAM_TICK_MAX_AGE_SEC = 45.0
 
 
 class RestBudgetPausedError(RuntimeError):
@@ -186,7 +186,11 @@ def hub_quote_stream_genuinely_stale(
     return age > max_age
 
 
-def hub_quote_stream_fresh(*, max_age: float = FRESH_STREAM_TICK_MAX_AGE_SEC) -> bool:
+def hub_quote_stream_fresh(
+    *,
+    max_age: float = FRESH_STREAM_TICK_MAX_AGE_SEC,
+    epic: str | None = None,
+) -> bool:
     """
     True when the hub holds recent bid/offer (Lightstreamer or stream poll).
 
@@ -199,10 +203,10 @@ def hub_quote_stream_fresh(*, max_age: float = FRESH_STREAM_TICK_MAX_AGE_SEC) ->
         from system.market_data_hub import get_market_data_hub
         from system.market_watch.japan225_session import is_quote_stream_fresh
 
-        epic = _primary_market_epic()
-        if get_market_data_hub().is_in_maintenance(epic):
+        check_epic = str(epic or "").strip() or _primary_market_epic()
+        if get_market_data_hub().is_in_maintenance(check_epic):
             return False
-        if is_quote_stream_fresh(epic, max_age=max_age):
+        if is_quote_stream_fresh(check_epic, max_age=max_age):
             return True
         hub = get_market_data_hub()
         with hub._lock:
@@ -210,9 +214,13 @@ def hub_quote_stream_fresh(*, max_age: float = FRESH_STREAM_TICK_MAX_AGE_SEC) ->
         if rest is not None:
             activity_age = rest.stream_activity_age_seconds()
             if activity_age is not None and activity_age <= max_age:
-                snap = hub.get_snapshot(epic)
+                snap = hub.get_snapshot(check_epic)
                 if snap is not None and snap.bid > 0 and snap.offer > 0:
                     return True
+        with hub._lock:
+            snap = hub._quotes.get(check_epic)
+        if snap is not None and snap.bid > 0 and snap.offer > 0:
+            return snap.age_seconds() <= max_age
         return False
     except Exception:
         return False
@@ -277,18 +285,37 @@ class RestApiBudget:
 
         get_rate_limit_manager().check_rest_allowed()
 
+        # Order-in-flight guard: allow confirm/position REST through immediately,
+        # but defer market-data fetches while an order is being confirmed.
+        # Hard 30s timeout prevents permanent deadlock when a confirm worker
+        # hangs (e.g. mock orders in tests, lost IG confirm response).
+        _oif_deadline = time.time() + 30.0
         while is_order_in_flight() and cat not in _ORDER_IN_FLIGHT_ALLOWED_CATEGORIES:
+            if time.time() >= _oif_deadline:
+                log_engine(
+                    f"RestApiBudget: order-in-flight wait exceeded 30s "
+                    f"(label={label!r}) — proceeding to prevent trading-loop deadlock"
+                )
+                break
             time.sleep(0.05)
+
+        # Enforce minimum interval without holding the lock during sleep.
+        # Reservation pattern: atomically claim the next slot, then sleep
+        # outside the lock so other threads can proceed to their own slot
+        # computation rather than blocking behind a sleeping holder.
+        while True:
+            with self._lock:
+                now = time.time()
+                elapsed = now - self._last_ts
+                if elapsed >= self._min_interval:
+                    self._last_ts = now  # Reserve this slot
+                    break
+                wait = self._min_interval - elapsed
+            self._total_waits += 1
+            time.sleep(wait)
 
         with self._lock:
             now = time.time()
-            elapsed = now - self._last_ts
-            if elapsed < self._min_interval:
-                wait = self._min_interval - elapsed
-                self._total_waits += 1
-                time.sleep(wait)
-                now = time.time()
-            self._last_ts = now
             self._total_calls += 1
             cat = categorize_rest_label(label)
             exempt_preemptive = ohlc_bootstrap_rest_active()

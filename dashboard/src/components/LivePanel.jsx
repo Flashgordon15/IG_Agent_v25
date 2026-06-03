@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { api } from "../api/client.js";
 import { fmtPrice } from "../utils/fmtPrice.js";
 
 // ---------------------------------------------------------------------------
@@ -506,6 +507,40 @@ export default function LivePanel({
   const mlDisabled = mlProb == null && state?.ml_enabled !== true;
   const mlLog = resolveMlDecisionLog(state);
   const allGatesPass = orderGates(health.gates).every((g) => g.pass);
+  const inTrade =
+    positions.length > 0 &&
+    signal?.direction &&
+    signal.direction !== "WAIT";
+  const riskGate = orderGates(health.gates).find((g) => g.name === "risk_validation");
+  const maxPerEpic = Number(riskGate?.value?.max_per_epic ?? 3);
+  const epicOpenCount = Number(riskGate?.value?.open_count ?? positions.length);
+  const canStackMore = epicOpenCount < maxPerEpic;
+
+  const closablePosition =
+    positions.find((p) => !selectedEpic || p.epic === selectedEpic) ?? positions[0];
+  const [closeStep, setCloseStep] = useState(0);
+  const [closing, setClosing] = useState(false);
+
+  useEffect(() => {
+    setCloseStep(0);
+  }, [closablePosition?.deal_id]);
+
+  const handleClose = async () => {
+    if (!closablePosition?.deal_id) return;
+    if (closeStep < 1) {
+      setCloseStep(1);
+      return;
+    }
+    setClosing(true);
+    try {
+      await api.closeDeal(closablePosition.deal_id);
+      setCloseStep(0);
+    } catch (e) {
+      alert(e.message);
+    } finally {
+      setClosing(false);
+    }
+  };
 
   return (
     <div className="mx-auto max-w-5xl space-y-3 px-1 pb-4">
@@ -644,6 +679,36 @@ export default function LivePanel({
             </tbody>
           </table>
         </div>
+        {closablePosition?.deal_id && (
+          <div className="mt-3 border-t border-border pt-3">
+            <button
+              type="button"
+              disabled={closing}
+              onClick={handleClose}
+              className={[
+                "w-full rounded-md py-2 text-[12px] font-medium transition-colors",
+                closeStep === 1
+                  ? "bg-danger text-white"
+                  : "border border-danger text-danger hover:bg-danger/10",
+              ].join(" ")}
+            >
+              {closeStep === 0
+                ? `Close ${closablePosition.side ?? "position"} (${closablePosition.deal_id})`
+                : closing
+                  ? "Closing…"
+                  : "Confirm close — click again"}
+            </button>
+            {closeStep === 1 && (
+              <button
+                type="button"
+                className="mt-2 w-full text-[11px] text-muted"
+                onClick={() => setCloseStep(0)}
+              >
+                Cancel
+              </button>
+            )}
+          </div>
+        )}
       </Card>
 
       {/* 5. Why No Trade gate card */}
@@ -651,6 +716,16 @@ export default function LivePanel({
         {allGatesPass && !gateReason ? (
           <p className="text-[12px] text-success">
             All gates passing — agent ready when signal fires.
+          </p>
+        ) : inTrade && !allGatesPass ? (
+          <p className="text-[12px] text-amber">
+            In trade — {signal.direction}{" "}
+            {signal.confidence != null ? `${Math.round(signal.confidence)}%` : ""}{" "}
+            signal still active;{" "}
+            {canStackMore
+              ? `add-on available (${epicOpenCount}/${maxPerEpic} on epic).`
+              : `max ${maxPerEpic} position(s) per epic reached.`}{" "}
+            {gateReason ? `Blocked: ${gateReason}` : ""}
           </p>
         ) : (
           <div className="space-y-1.5 text-[12px]">

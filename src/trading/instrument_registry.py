@@ -33,13 +33,17 @@ class InstrumentRegistry:
         return [inst for _iid, inst in self.get_enabled_with_ids()]
 
     def get_enabled_with_ids(self) -> list[tuple[str, dict[str, Any]]]:
-        """Enabled instruments as (instrument_id, config dict) preserving config order."""
+        """Enabled instruments as (instrument_id, config dict), highest priority first."""
         out: list[tuple[str, dict[str, Any]]] = []
         for iid, inst in self._instruments.items():
             if bool(inst.get("enabled")):
                 row = deepcopy(inst)
                 row.setdefault("instrument_id", iid)
                 out.append((iid, row))
+        out.sort(
+            key=lambda pair: int(pair[1].get("execution_priority") or 0),
+            reverse=True,
+        )
         return out
 
     def get_by_id(self, instrument_id: str) -> dict[str, Any] | None:

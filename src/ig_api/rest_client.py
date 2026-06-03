@@ -472,6 +472,13 @@ class IGRestClient:
         if cached and now - float(cached.get("ts", 0)) < max_age_seconds:
             return dict(cached["data"])
 
+        try:
+            get_rate_limit_manager().check_rest_allowed()
+        except Exception:
+            if cached:
+                return dict(cached["data"])
+            return {}
+
         self.ensure_session()
         r = self.request("GET", f"/markets/{epic}", headers=self._auth_headers("3"))
         if r.status_code == 401:
@@ -667,6 +674,10 @@ class IGRestClient:
 
     def refresh_account_summary(self) -> dict[str, float | None]:
         """Refresh balance / P&L from GET /accounts (used by stream heartbeat)."""
+        try:
+            get_rate_limit_manager().check_rest_allowed()
+        except Exception:
+            return self.get_cached_account_summary()
         self.ensure_session()
         r = self.request("GET", "/accounts", headers=self._auth_headers("1"))
         if r.status_code != 200:

@@ -92,11 +92,26 @@ def _make_loop(**overrides) -> TradingLoop:
 
 
 class SessionFlattenStressTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.logs = Path(self.tmp.name) / "logs"
+        self.logs.mkdir()
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    @patch("trading.session_summary.logs_dir")
+    @patch("trading.session_summary.notify_macos")
     @patch("trading.trading_loop.publish_tick")
     @patch("trading.trading_loop.time.sleep")
     def test_mock_open_position_flatten_confirmed_at_t5(
-        self, sleep_mock: MagicMock, _snap: MagicMock
+        self,
+        sleep_mock: MagicMock,
+        _snap: MagicMock,
+        _notify: MagicMock,
+        logs_mock: MagicMock,
     ) -> None:
+        logs_mock.return_value = self.logs
         """Inject open position → T-5 flatten attempt → verify closes and confirms."""
         flatten = MagicMock(return_value=1)
         sync = MagicMock()

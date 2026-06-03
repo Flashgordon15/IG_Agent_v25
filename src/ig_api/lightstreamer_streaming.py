@@ -333,8 +333,11 @@ class IGLightstreamerStreamingClient:
                     if not bid_text or not offer_text:
                         ls_client._handle_blank_tick(resolved_epic)
                         return
-                    log_engine(
-                        f"LS raw tick received: item={item} values={field_values}"
+                    from system.engine_log import log_engine_intermittent
+
+                    log_engine_intermittent(
+                        f"ls_tick:{resolved_epic}",
+                        f"LS raw tick received: item={item} values={field_values}",
                     )
                     bid = float(bid_text)
                     offer = float(offer_text)
@@ -348,9 +351,10 @@ class IGLightstreamerStreamingClient:
                 get_market_data_hub().publish(
                     resolved_epic, bid, offer, source="lightstreamer"
                 )
-                log_engine(
+                log_engine_intermittent(
+                    f"hub_quote:{resolved_epic}",
                     f"Hub quote updated from Lightstreamer: bid={bid} offer={offer} "
-                    f"age=0s epic={resolved_epic}"
+                    f"age=0s epic={resolved_epic}",
                 )
                 ls_client._mark_connected_on_first_tick(bid, offer, resolved_epic)
                 pu = PriceUpdate(

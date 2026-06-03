@@ -78,7 +78,14 @@ class TradingLoop:
             return None
         return None
 
-    def process_tick(self, market: str, epic: str, quote: Quote) -> TickOutcome:
+    def process_tick(
+        self,
+        market: str,
+        epic: str,
+        quote: Quote,
+        *,
+        prefetched_signal: SignalResult | None = None,
+    ) -> TickOutcome:
         from system.market_watch.japan225_session import (
             japan225_strategy_paused,
             log_japan225_session_closed,
@@ -124,6 +131,15 @@ class TradingLoop:
             return outcome
 
         self.tick_count += 1
+        cfg = self.execution_engine.config
+        tracker = self.execution_engine.trade_tracker
+        open_epic = int(tracker.count_open_for_epic(epic))
+        total_raw = tracker.count_open_total()
+        open_total = (
+            max(open_epic, int(total_raw))
+            if isinstance(total_raw, (int, float))
+            else open_epic
+        )
         trace_execution(
             "TICK",
             "TradingLoop.process_tick",
@@ -133,14 +149,33 @@ class TradingLoop:
         )
         self.signal_engine.add_quote(market, quote)
         position_messages = self.execution_engine.update_positions(market, epic, quote)
-        trace_execution(
-            "SIGNAL",
-            "SignalEngine.evaluate",
-            decision="entering",
-            next_fn="SignalEngine.evaluate",
-            params={"market": market},
+        if prefetched_signal is not None:
+            sig = prefetched_signal
+            trace_execution(
+                "SIGNAL",
+                "SignalEngine.evaluate",
+                decision=f"using gate signal={sig.signal} conf={sig.adjusted_confidence:.1f}%",
+                next_fn="OrderValidator.validate" if sig.signal in ("BUY", "SELL") else "end",
+                params={"market": market, "prefetched": True},
+            )
+        else:
+            trace_execution(
+                "SIGNAL",
+                "SignalEngine.evaluate",
+                decision="entering",
+                next_fn="SignalEngine.evaluate",
+                params={"market": market},
+            )
+            sig = self.signal_engine.evaluate(market)
+        log_engine(
+            f"GATE CHECK {epic}: confidence={sig.adjusted_confidence:.1f} "
+            f"threshold={cfg.signal_threshold} fitness=— "
+            f"allow_live={cfg.allow_live_trading} dry_run={cfg.dry_run} "
+            f"size={cfg.trade_size} direction={sig.signal} "
+            f"setup={sig.setup_key or '—'} open_epic={open_epic} "
+            f"open_total={open_total} auto_trade={self.auto_trade} "
+            f"prefetched={prefetched_signal is not None}"
         )
-        sig = self.signal_engine.evaluate(market)
         bus = get_lifecycle_bus()
         trace_execution(
             "SIGNAL",
@@ -208,6 +243,10 @@ class TradingLoop:
         if not validation.allowed:
             update_demo_diagnostics(last_rejection="; ".join(validation.reasons))
             if sig.signal in ("BUY", "SELL"):
+                log_engine(
+                    f"EXEC BLOCKED market={market} epic={epic} validation — "
+                    f"{'; '.join(validation.reasons) or 'failed'}"
+                )
                 log_trade_audit(
                     "validation_fail",
                     market=market,
@@ -282,6 +321,9 @@ class TradingLoop:
                     )
 
         if sig.signal in ("BUY", "SELL") and not self.auto_trade:
+            log_engine(
+                f"EXEC BLOCKED market={market} epic={epic} — auto_trade disabled"
+            )
             trace_execution(
                 "EXECUTION",
                 "TradingLoop.process_tick",
@@ -314,6 +356,9 @@ class TradingLoop:
                 update_demo_diagnostics(last_rejection=block_reason)
 
         if sig.signal in ("BUY", "SELL") and validation.allowed and block_reason:
+            log_engine(
+                f"EXEC BLOCKED market={market} epic={epic} — {block_reason}"
+            )
             trace_execution(
                 "EXECUTION",
                 "TradingLoop.process_tick",
@@ -340,6 +385,18 @@ class TradingLoop:
                 )
 
         if can_execute:
+            cfg = self.execution_engine.config
+            exec_size = float(
+                self.execution_engine.get_execution_settings(trade_signal).get(
+                    "size", cfg.trade_size
+                )
+            )
+            log_engine(
+                f"EXEC SUBMIT market={market} epic={epic} "
+                f"dir={sig.signal} conf={sig.adjusted_confidence:.1f}% "
+                f"size={exec_size} allow_live_trading={cfg.allow_live_trading} "
+                f"dry_run={cfg.dry_run}"
+            )
             trace_execution(
                 "EXECUTION",
                 "ExecutionEngine.execute_trade",

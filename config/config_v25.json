@@ -106,6 +106,7 @@
     },
     "eur_usd": {
       "enabled": true,
+      "execution_priority": 50,
       "epic": "CS.D.EURUSD.CFD.IP",
       "name": "EUR/USD",
       "signal_threshold": 70,
@@ -132,6 +133,7 @@
     },
     "gold": {
       "enabled": true,
+      "execution_priority": 100,
       "epic": "CS.D.CFPGOLD.CFP.IP",
       "name": "Spot Gold",
       "signal_threshold": 70,
@@ -145,12 +147,14 @@
       "risk_cap_gbp": 150,
       "stale_threshold_seconds": 15,
       "best_session": "08:00-21:00 BST",
-      "trading_session_whitelist": ["london_morning", "london_us_overlap"]
+      "trading_session_whitelist": ["london_morning", "london_us_overlap", "us_afternoon"]
     }
   },
+  "engine_log_intermittent": true,
+  "engine_log_intermittent_seconds": 30,
   "allow_live_trading": true,
-  "max_open_positions": 1,
-  "max_positions_per_epic": 1,
+  "max_open_positions": 3,
+  "max_positions_per_epic": 3,
   "max_daily_loss_gbp": 200.0,
   "adaptive_block_bad_setups": true,
   "breakeven_lock_points": 0,

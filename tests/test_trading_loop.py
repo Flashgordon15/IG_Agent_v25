@@ -57,6 +57,7 @@ def _make_loop(**overrides) -> TradingLoop:
     config.refresh_seconds = 0.05
     config.max_spread_points = 35.0
     config.max_positions_per_epic = 1
+    config.max_open_positions = 3
     config.stop_distance_points = 40.0
     config.trade_size = 1.0
     config.adaptive_min_trade_size = 0.5
@@ -101,6 +102,7 @@ def _make_loop(**overrides) -> TradingLoop:
 
     exec_engine = MagicMock()
     exec_engine.trade_tracker.count_open_for_epic.return_value = 0
+    exec_engine.trade_tracker.count_open_total.return_value = 0
     exec_engine.trade_tracker.snapshot.return_value = {"positions": []}
     exec_engine.update_positions = MagicMock()
 
@@ -109,9 +111,10 @@ def _make_loop(**overrides) -> TradingLoop:
     execution_loop.process_tick = MagicMock(
         return_value=TickOutcome(
             quote=_quote(),
-            signal=_wait_signal(),
+            signal=_buy_signal(92.0),
             trade_signal=MagicMock(),
-            validation=MagicMock(allowed=False, reasons=[], checks={}),
+            validation=MagicMock(allowed=True, reasons=[], checks={}),
+            execution=MagicMock(success=True, action="SUBMITTED", rejection_reason=""),
         )
     )
 
@@ -206,7 +209,8 @@ class TradingLoopTests(unittest.TestCase):
         self.assertIn("50%", env_gate.detail)
         self.assertNotIn("scorer unavailable", env_gate.detail)
 
-    def test_process_tick_when_all_gates_pass(self) -> None:
+    @patch("system.market_watch.japan225_session.japan225_strategy_paused", return_value=(False, ""))
+    def test_process_tick_when_all_gates_pass(self, _j225: MagicMock) -> None:
         loop = _make_loop()
         loop._signal_engine.evaluate.return_value = _buy_signal(92.0)
         ctx = loop.run_once()
@@ -258,11 +262,12 @@ class TradingLoopTests(unittest.TestCase):
     def test_snapshot_includes_account_metrics(self, snap_mock: MagicMock) -> None:
         loop = _make_loop()
         rest = MagicMock()
-        rest.maybe_refresh_account_summary.return_value = {
+        rest.get_cached_account_summary.return_value = {
             "balance": 10_000.0,
             "profit_loss": -12.5,
             "available": 9_500.0,
         }
+        rest.maybe_refresh_account_summary.return_value = rest.get_cached_account_summary.return_value
         loop._execution_loop.execution_engine._rest_client = rest
         loop._store.recent_closed_trades.return_value = [
             {"result": "WIN"},

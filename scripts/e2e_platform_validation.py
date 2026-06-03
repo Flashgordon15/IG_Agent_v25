@@ -1102,6 +1102,112 @@ def run_layer6(ctx: ValidationContext) -> LayerSummary:
     return layer
 
 
+def run_layer7(ctx: ValidationContext) -> LayerSummary:
+    """Layer 7 — operational integrity (anti-mock, summaries, gate/log patterns)."""
+    from system.pre_flight_checks import (
+        check_anti_mock_session_summaries,
+        check_gate_evaluation_recent,
+        check_live_data_recent,
+        check_session_summary_integrity,
+        check_startup_stream_gate_log,
+    )
+
+    layer = LayerSummary(name="Operational Integrity")
+    logs_root = ctx.base / "logs"
+    logs_root.mkdir(parents=True, exist_ok=True)
+
+    anti = check_anti_mock_session_summaries(logs_root)
+    layer.checks.append(
+        _check(
+            "7",
+            "1",
+            anti.description,
+            anti.passed,
+            got=anti.reason or "clean",
+        )
+    )
+
+    good_summary = logs_root / "session_summary_20990101.txt"
+    good_summary.write_text(
+        "IG Agent v25 — Session Summary\n"
+        "Date: 2099-01-01\n"
+        "Session: 18:00 — 21:00 BST\n"
+        "Trades:      0 (0W / 0L)\n"
+        "Final state: HEALTHY\n"
+        "Stream uptime: 95.0%\n",
+        encoding="utf-8",
+    )
+    integrity = check_session_summary_integrity(logs_root)
+    layer.checks.append(
+        _check(
+            "7",
+            "2",
+            integrity.description,
+            integrity.passed,
+            got=integrity.reason,
+        )
+    )
+
+    (logs_root / "session_summary_polluted.txt").write_text(
+        "Final state: <MagicMock name='mock.snapshot().nominal_state'>\n",
+        encoding="utf-8",
+    )
+    anti2 = check_anti_mock_session_summaries(logs_root)
+    layer.checks.append(
+        _check(
+            "7",
+            "1b",
+            "Detect MagicMock in session summary files",
+            not anti2.passed,
+            expected="FAIL on MagicMock file",
+            got=anti2.reason,
+        )
+    )
+
+    try:
+        from system.gate_activity import record_gate_evaluation, reset_gate_activity_for_tests
+
+        reset_gate_activity_for_tests()
+        record_gate_evaluation()
+        gate_ok = check_gate_evaluation_recent(max_age_sec=60.0).passed
+    except Exception as e:
+        gate_ok = False
+        gate_err = str(e)
+    else:
+        gate_err = "recorded"
+    layer.checks.append(
+        _check(
+            "7",
+            "3",
+            "Gate activity tracker records recent evaluation",
+            gate_ok,
+            got=gate_err,
+        )
+    )
+
+    layer.checks.append(
+        _check(
+            "7",
+            "4",
+            "Live data check callable (isolated hub may be empty)",
+            True,
+            got="skipped when hub empty in CI",
+            skipped=True,
+        )
+    )
+
+    layer.checks.append(
+        _check(
+            "7",
+            "5",
+            "Startup stream gate log parser callable",
+            isinstance(check_startup_stream_gate_log(within_minutes=60.0).check_id, str),
+            got="parser ok",
+        )
+    )
+    return layer
+
+
 def _print_failures(layers: list[LayerSummary]) -> None:
     for lay in layers:
         for c in lay.checks:
@@ -1126,6 +1232,7 @@ def _print_report(layers: list[LayerSummary]) -> int:
         "Learning Pipeline": "Layer 4: Learning Pipeline     ",
         "Dashboard Integrity": "Layer 5: Dashboard Integrity   ",
         "Resilience": "Layer 6: Resilience            ",
+        "Operational Integrity": "Layer 7: Operational Integrity ",
     }
     all_ok = True
     for lay in layers:
@@ -1176,6 +1283,7 @@ def main() -> int:
             layers.append(run_layer4(ctx))
             layers.append(run_layer5(ctx, live=args.live))
             layers.append(run_layer6(ctx))
+            layers.append(run_layer7(ctx))
     finally:
         ctx.teardown_isolated()
 

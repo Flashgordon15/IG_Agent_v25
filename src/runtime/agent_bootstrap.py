@@ -171,12 +171,14 @@ def _build_single_loop(
 
     interval = float(cfg.refresh_seconds)
 
-    def quote_source(epic_key: str = epic, min_iv: float = interval) -> Callable[[], Quote | None]:
+    def quote_source(epic_key: str = epic) -> Callable[[], Quote | None]:
         def _source() -> Quote | None:
-            if rest_client is not None:
-                snap = hub.fetch_if_stale(epic_key, min_interval=min_iv)
-            else:
-                snap = hub.get_snapshot(epic_key)
+            # Use only the hub's in-memory snapshot from Lightstreamer.
+            # REST fallback via fetch_if_stale() was causing trading-loop deadlocks
+            # because REST calls to IG sometimes hang indefinitely, blocking all three
+            # loop threads. The Lightstreamer stream provides live quotes every ~30s
+            # which is sufficient for gate evaluation and order entry decisions.
+            snap = hub.get_snapshot(epic_key)
             if snap is None or snap.bid <= 0:
                 return None
             return snap.to_quote()

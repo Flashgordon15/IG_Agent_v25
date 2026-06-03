@@ -44,6 +44,19 @@ class StreamReadyTests(unittest.TestCase):
         stream_ready.reset_stream_ready()
         self.assertFalse(stream_ready.is_stream_ready())
 
+    def test_timeout_proceeds_and_signals_ready(self) -> None:
+        stream_ready.reset_stream_ready()
+        ok = stream_ready.wait_stream_ready(timeout=0.05)
+        self.assertFalse(ok)
+        self.assertTrue(stream_ready.is_stream_ready())
+
+    @patch("system.stream_ready._hub_has_live_quotes", return_value=True)
+    def test_hub_live_recovery(self, _hub: MagicMock) -> None:
+        stream_ready.reset_stream_ready()
+        ok = stream_ready.wait_stream_ready(timeout=0.05)
+        self.assertTrue(ok)
+        self.assertTrue(stream_ready.is_stream_ready())
+
 
 class StreamStaleThresholdTests(unittest.TestCase):
     def test_fx_live_when_stream_ready_and_age_under_60s(self) -> None:

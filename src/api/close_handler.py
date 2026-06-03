@@ -38,12 +38,12 @@ def _default_ig_close(deal_id: str) -> dict[str, Any]:
     from system.ig_rest_session import ensure_shared_authenticated
     from system.paths import config_dir
 
-    creds = try_load_credentials()
-    if creds is None:
-        raise RuntimeError("credentials missing — cannot close position")
+    status = try_load_credentials()
+    if not status.ok or status.credentials is None:
+        raise RuntimeError(status.error or "credentials missing — cannot close position")
 
     cfg = ConfigLoader(config_dir() / "config_v25.json").load_config()
-    rest = ensure_shared_authenticated(creds)
+    rest = ensure_shared_authenticated(status.credentials)
     ccy = cfg.currency_code
 
     targets: list[tuple[str, str, float, str]] = []

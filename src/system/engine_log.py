@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from typing import Any
@@ -18,6 +19,10 @@ _file_handler: RotatingFileHandler | None = None
 _alerts_lock = threading.Lock()
 _warning_count = 0
 _warning_last_type: str | None = None
+_intermittent_lock = threading.Lock()
+_intermittent_last: dict[str, float] = {}
+_intermittent_enabled: bool | None = None
+_intermittent_interval_sec: float | None = None
 
 
 def _pytest_isolated() -> bool:
@@ -38,6 +43,63 @@ def _engine_file_handler() -> RotatingFileHandler:
     handler.setFormatter(logging.Formatter("%(message)s"))
     _file_handler = handler
     return handler
+
+
+def _intermittent_settings() -> tuple[bool, float]:
+    global _intermittent_enabled, _intermittent_interval_sec
+    if _intermittent_enabled is not None and _intermittent_interval_sec is not None:
+        return _intermittent_enabled, _intermittent_interval_sec
+    enabled = True
+    interval = 30.0
+    try:
+        from system.config_loader import ConfigLoader
+        from system.paths import project_root
+
+        cfg = ConfigLoader(project_root() / "config" / "config_v25.json").load_config()
+        data = getattr(cfg, "_data", None) or {}
+        if isinstance(data, dict):
+            enabled = bool(data.get("engine_log_intermittent", True))
+            interval = float(data.get("engine_log_intermittent_seconds", 30))
+    except Exception:
+        pass
+    _intermittent_enabled = enabled
+    _intermittent_interval_sec = max(5.0, interval)
+    return _intermittent_enabled, _intermittent_interval_sec
+
+
+def reset_intermittent_log_state_for_tests() -> None:
+    global _intermittent_enabled, _intermittent_interval_sec
+    with _intermittent_lock:
+        _intermittent_last.clear()
+    _intermittent_enabled = None
+    _intermittent_interval_sec = None
+
+
+def log_engine_intermittent(
+    key: str,
+    message: str,
+    *,
+    interval_sec: float | None = None,
+    force: bool = False,
+) -> bool:
+    """
+    Log at most once per key per interval (stream tick noise).
+    Returns True if the line was written.
+    """
+    enabled, default_iv = _intermittent_settings()
+    if not enabled:
+        log_engine(message)
+        return True
+    iv = max(5.0, float(interval_sec if interval_sec is not None else default_iv))
+    now = time.time()
+    k = str(key or "default").strip() or "default"
+    with _intermittent_lock:
+        last = _intermittent_last.get(k, 0.0)
+        if not force and now - last < iv:
+            return False
+        _intermittent_last[k] = now
+    log_engine(message)
+    return True
 
 
 def log_engine(message: str) -> None:

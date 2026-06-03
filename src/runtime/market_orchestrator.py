@@ -65,6 +65,27 @@ class MarketOrchestrator:
     def start(self) -> None:
         if self._running:
             return
+        try:
+            from system.market_data_hub import get_market_data_hub
+            from system.stream_ready import is_stream_ready, signal_stream_ready
+
+            if not is_stream_ready():
+                hub = get_market_data_hub()
+                for epic in self._enabled_epics:
+                    snap = hub.get_snapshot(epic)
+                    if (
+                        snap is not None
+                        and snap.bid > 0
+                        and snap.offer > 0
+                        and snap.age_seconds() <= 30.0
+                    ):
+                        signal_stream_ready(source=f"orchestrator_start:{epic}")
+                        break
+        except Exception as e:
+            log_engine(
+                f"market_orchestrator stream_ready preflight failed: "
+                f"{type(e).__name__}: {e}"
+            )
         self._stop.clear()
         self._running = True
         for loop in self._loops:

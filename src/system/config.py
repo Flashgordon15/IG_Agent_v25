@@ -317,6 +317,12 @@ class Config:
         return bool(self._data.get("one_position_per_epic", True))
 
     @property
+    def max_open_positions(self) -> int:
+        if "max_open_positions" in self._data:
+            return max(1, min(18, int(self._data["max_open_positions"])))
+        return self.max_positions_per_epic
+
+    @property
     def max_positions_per_epic(self) -> int:
         if "max_positions_per_epic" in self._data:
             return max(1, min(6, int(self._data["max_positions_per_epic"])))

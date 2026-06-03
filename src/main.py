@@ -280,6 +280,14 @@ class AgentRuntime:
 
                 start_replay_daily_scheduler()
                 log_engine("orchestrator trading loop started (background)")
+                from system.engine_log import _intermittent_settings
+
+                on, iv = _intermittent_settings()
+                if on:
+                    log_engine(
+                        f"Intermittent engine logging enabled "
+                        f"(stream/hub quotes every {iv:.0f}s per epic)"
+                    )
 
             register_api_startup(_start_live_engines)
 
@@ -310,6 +318,7 @@ def _install_signal_handlers(runtime: AgentRuntime) -> None:
 
 
 def main() -> None:
+    log_engine("=== IG Agent v25 full restart ===")
     runtime = AgentRuntime()
     _install_signal_handlers(runtime)
     try:
