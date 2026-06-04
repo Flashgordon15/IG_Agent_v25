@@ -68,6 +68,16 @@ class Config:
         return float(self._data["signal_threshold"])
 
     @property
+    def confidence_floor(self) -> float:
+        """Minimum blended confidence for CAUTION/HEALTHY entry. Configurable to enable bootstrap."""
+        return float(self._data.get("confidence_floor", 80.0))
+
+    @property
+    def confidence_floor_recovery_per_win(self) -> float:
+        """How much the floor increases per win toward 80.0 during bootstrap."""
+        return float(self._data.get("confidence_floor_recovery_per_win", 1.0))
+
+    @property
     def fast_ema(self) -> int:
         return int(self._data["fast_ema"])
 
@@ -537,6 +547,16 @@ class Config:
         return float(self._data.get("retry_delay_seconds", 2.5))
 
     # --- Risk limits (0 = disabled) ---
+    @property
+    def max_daily_loss_gbp(self) -> float:
+        """Positive GBP daily loss limit from config (max_daily_loss_gbp key)."""
+        v = float(self._data.get("max_daily_loss_gbp", 0) or 0)
+        if v > 0:
+            return v
+        # Fall back to abs(max_daily_loss) if max_daily_loss_gbp not set
+        fallback = abs(float(self._data.get("max_daily_loss", 0) or 0))
+        return fallback if fallback > 0 else 200.0
+
     @property
     def max_daily_loss(self) -> float:
         return float(self._data.get("max_daily_loss", 0))

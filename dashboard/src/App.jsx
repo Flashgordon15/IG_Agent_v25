@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { WS_URL } from "./config.js";
-import { fetchState } from "./api.js";
+import { fetchState, fetchSplash, dismissSplash } from "./api.js";
 import Header from "./components/Header.jsx";
 import LivePanel from "./components/LivePanel.jsx";
 import TradesPanel from "./components/TradesPanel.jsx";
 import PointsPanel from "./components/PointsPanel.jsx";
 import IntelligencePanel from "./components/IntelligencePanel.jsx";
 import SystemPanel from "./components/SystemPanel.jsx";
+import SplashScreen from "./components/SplashScreen.jsx";
 
 const TABS = [
   { id: "live", label: "LIVE" },
@@ -176,6 +177,8 @@ export default function App() {
   const [wsConnected, setWsConnected] = useState(false);
   const [reconnecting, setReconnecting] = useState(true);
   const [selectedEpic, setSelectedEpic] = useState(null);
+  const [splashData, setSplashData] = useState(null);
+  const [splashVisible, setSplashVisible] = useState(false);
   const prevStateRef = useRef(null);
   const soundRef = useRef(null);
 
@@ -189,6 +192,21 @@ export default function App() {
     }
   }, []);
 
+
+  // Splash screen: fetch once on mount, show if new version not yet dismissed
+  useEffect(() => {
+    fetchSplash().then((data) => {
+      if (!data) return;
+      setSplashData(data);
+      const alreadyDismissed = data.shown_for_version === data.version;
+      if (!alreadyDismissed) setSplashVisible(true);
+    });
+  }, []);
+
+  const handleSplashDismiss = useCallback(() => {
+    setSplashVisible(false);
+    dismissSplash();
+  }, []);
 
   useEffect(() => {
     const epics = listMarketEpics(state);
@@ -334,6 +352,9 @@ export default function App() {
   return (
     <div className="flex min-h-screen min-w-0 flex-col bg-bg text-foreground">
       <Header {...headerProps} />
+      {splashVisible && (
+        <SplashScreen versionData={splashData} onDismiss={handleSplashDismiss} />
+      )}
 
       <nav className="sticky top-0 z-10 flex shrink-0 gap-0 overflow-x-auto border-b border-border bg-card px-1 sm:px-2">
         {TABS.map((item) => {

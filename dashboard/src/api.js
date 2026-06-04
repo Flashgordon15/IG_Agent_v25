@@ -58,6 +58,22 @@ export async function triggerReplay() {
   }
 }
 
+export function fetchSplash() {
+  return getJson("/api/splash");
+}
+
+export async function dismissSplash() {
+  try {
+    const res = await fetch(`${API_BASE}/api/splash/dismiss`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 export async function postEmergencyStop() {
   try {
     const res = await fetch(`${API_BASE}/api/emergency_stop`, {

@@ -23,12 +23,12 @@ PointsStateName = Literal["HEALTHY", "CAUTION", "WARNING", "STOP"]
 STATE_VERSION = 1
 MIN_CONFIRMED_FOR_SCALED_SCORING = 5
 ROLLING_TRADE_WINDOW = 20
-SESSION_LOSS_STREAK_TRIGGER = 3
-SIGNALS_TO_SKIP_AFTER_STREAK = 3
-DAY_STOP_SESSION_SCORE = -5.0
-RAPID_DRAWDOWN_GBP = 100.0
+SESSION_LOSS_STREAK_TRIGGER = 6
+SIGNALS_TO_SKIP_AFTER_STREAK = 1
+DAY_STOP_SESSION_SCORE = -50.0
+RAPID_DRAWDOWN_GBP = 2000.0
 RAPID_DRAWDOWN_WINDOW_SEC = 3600.0
-RAPID_DRAWDOWN_COOLDOWN_SEC = 1800.0
+RAPID_DRAWDOWN_COOLDOWN_SEC = 300.0
 
 CONF_HIGH = 92.0
 CONF_STANDARD_MIN = 85.0
@@ -81,6 +81,7 @@ class PointsSnapshot:
     day_stopped: bool = False
     stop_latched: bool = False
     nominal_state: PointsStateName = "HEALTHY"
+    bootstrap_wins: int = 0  # wins since bootstrap floor was first lowered
 
 
 class PointsEngine:
@@ -100,6 +101,7 @@ class PointsEngine:
         self._consecutive_losses = 0
         self._signals_to_skip = 0
         self._recovery_wins = 0
+        self._bootstrap_wins = 0
         self._day_stopped = False
         self._stop_latched = False
         self._last_nominal: PointsStateName = "HEALTHY"
@@ -120,6 +122,7 @@ class PointsEngine:
             day_stopped=self._day_stopped,
             stop_latched=self._stop_latched,
             nominal_state=nominal,
+            bootstrap_wins=self._bootstrap_wins,
         )
 
     def _payload(self) -> dict[str, Any]:
@@ -134,6 +137,7 @@ class PointsEngine:
             "consecutive_losses": self._consecutive_losses,
             "signals_to_skip": self._signals_to_skip,
             "recovery_wins": self._recovery_wins,
+            "bootstrap_wins": self._bootstrap_wins,
             "day_stopped": self._day_stopped,
             "stop_latched": self._stop_latched,
             "last_nominal": self._last_nominal,
@@ -147,6 +151,7 @@ class PointsEngine:
         self._consecutive_losses = int(data.get("consecutive_losses", 0))
         self._signals_to_skip = int(data.get("signals_to_skip", 0))
         self._recovery_wins = int(data.get("recovery_wins", 0))
+        self._bootstrap_wins = int(data.get("bootstrap_wins", 0))
         self._day_stopped = bool(data.get("day_stopped", False))
         self._stop_latched = bool(data.get("stop_latched", False))
         last = data.get("last_nominal", "HEALTHY")
@@ -346,11 +351,13 @@ class PointsEngine:
             elif result_u == "WIN":
                 self._consecutive_losses = 0
                 self._recovery_wins += 1
+                self._bootstrap_wins += 1
             else:
                 self._consecutive_losses = 0
 
-            if self._session_score < DAY_STOP_SESSION_SCORE:
-                self._day_stopped = True
+            # Day-stop via session points disabled — max_daily_loss_gbp gate
+            # is the authoritative GBP-denominated risk control on large accounts.
+            # self._day_stopped = self._session_score < DAY_STOP_SESSION_SCORE
 
             new_nominal = _nominal_state(self._cumulative)
             self._on_nominal_transition(new_nominal)
@@ -386,9 +393,24 @@ class PointsEngine:
             return CONF_MARGINAL_MIN
 
     def trade_confidence_threshold(self, cfg: Any) -> float:
-        """Effective entry bar: higher of points-tier floor and config signal_threshold."""
+        """Effective entry bar for CAUTION/HEALTHY.
+
+        Uses cfg.confidence_floor (configurable, default 80) as the tier floor,
+        boosted by bootstrap_wins * recovery_per_win toward CONF_MARGINAL_MIN.
+        """
         try:
-            return max(self.get_threshold(), float(cfg.signal_threshold))
+            state = self.get_state()
+            if state in ("STOP",) or self.is_day_stopped():
+                return 100.0
+            if state == "WARNING":
+                return CONF_HIGH
+            cfg_floor = float(getattr(cfg, "confidence_floor", CONF_MARGINAL_MIN))
+            recovery = float(getattr(cfg, "confidence_floor_recovery_per_win", 1.0))
+            with _lock:
+                bootstrap_wins = self._bootstrap_wins
+            # Floor rises with each win; caps at CONF_MARGINAL_MIN (80)
+            effective_floor = min(cfg_floor + bootstrap_wins * recovery, CONF_MARGINAL_MIN)
+            return max(effective_floor, float(cfg.signal_threshold))
         except Exception:
             return CONF_MARGINAL_MIN
 
@@ -441,12 +463,22 @@ class PointsEngine:
             band = _confidence_band(conf)
 
             if state == "HEALTHY":
+                # Progressive multiplier — rewards sustained winning
+                cum = self._cumulative
+                if cum > 50.0:
+                    tier_mult = 4.0   # EXCELLENT: cumulative > 50
+                elif cum > 25.0:
+                    tier_mult = 2.5   # THRIVING:  cumulative > 25
+                elif cum > 10.0:
+                    tier_mult = 1.5   # HEALTHY:   cumulative > 10
+                else:
+                    tier_mult = 1.0
                 if band == "high":
-                    return 1.0
+                    return tier_mult
                 if band == "standard":
-                    return 0.5
+                    return tier_mult * 0.5
                 if band == "marginal":
-                    return 0.25
+                    return tier_mult * 0.25
                 return 0.0
 
             if state == "CAUTION":
@@ -464,10 +496,10 @@ class PointsEngine:
             return 0.0
         except Exception as exc:
             log_engine(
-                f"points_engine: get_size_multiplier EXCEPTION — safe-default 0.5x"
+                f"points_engine: get_size_multiplier EXCEPTION — safe-default 0.0x (no trade)"
                 f" ({type(exc).__name__}: {exc})"
             )
-            return 0.5
+            return 0.0
 
     def is_session_paused(self) -> bool:
         try:
@@ -477,11 +509,8 @@ class PointsEngine:
             return False
 
     def is_day_stopped(self) -> bool:
-        try:
-            with _lock:
-                return self._day_stopped
-        except Exception:
-            return False
+        # Day-stop disabled — max_daily_loss_gbp is the authoritative hard stop.
+        return False
 
     def consume_signal_skip(self) -> bool:
         """If session-paused, consume one skipped signal slot and return True."""
