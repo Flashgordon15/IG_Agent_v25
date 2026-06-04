@@ -551,19 +551,28 @@ export default function LivePanel({ state, rawState, selectedEpic, onSelectEpic,
                 positions.map((pos, idx) => {
                   const pnl = pos.pnl_gbp ?? pos.unrealised_pnl_gbp ?? pos.upl;
                   const pnlNum = pnl != null ? Number(pnl) : null;
-                  const pnlColor = pnlNum == null ? "text-foreground" : pnlNum >= 0 ? "text-success" : "text-danger";
+                  const ptsNum = pos.pnl_pts != null ? Number(pos.pnl_pts) : null;
+                  const pnlColor = pnlNum != null ? (pnlNum >= 0 ? "text-success" : "text-danger")
+                                  : ptsNum != null ? (ptsNum >= 0 ? "text-success" : "text-danger")
+                                  : "text-foreground";
                   const side = String(pos.side ?? pos.direction ?? "").toUpperCase();
                   const sideColor = side === "BUY" ? "text-success" : side === "SELL" ? "text-danger" : "text-foreground";
                   const stop = pos.stop ?? pos.stop_level;
                   const trailLabel = stop != null ? `${fmtPrice(stop, pos.epic ?? epic)}${pos.trail_active ? " ↕" : ""}` : "—";
                   const key = pos.deal_id ?? pos.id ?? `${pos.epic ?? "row"}-${idx}`;
+                  const ptsSign = ptsNum != null ? (ptsNum >= 0 ? "+" : "") : "";
                   return (
                     <tr key={key} className="border-b border-border/60 last:border-0 hover:bg-card/60 transition-colors">
                       <td className="px-2 py-2 text-foreground text-[11px]">{pos.market || pos.epic || "—"}</td>
                       <td className={`px-2 py-2 font-semibold ${sideColor}`}>{side || "—"}</td>
                       <td className="px-2 py-2 font-mono tabular-nums">{fmtPrice(pos.entry ?? pos.entry_price ?? pos.level, pos.epic ?? epic)}</td>
                       <td className="px-2 py-2 font-mono tabular-nums">{fmtPrice(pos.current ?? pos.mark, pos.epic ?? epic)}</td>
-                      <td className={`px-2 py-2 font-mono tabular-nums font-semibold ${pnlColor}`}>{fmtGbp(pnlNum)}</td>
+                      <td className={`px-2 py-2 font-mono tabular-nums font-semibold ${pnlColor}`}>
+                        <span>{pnlNum != null ? fmtGbp(pnlNum) : (ptsNum != null ? `${ptsSign}${ptsNum.toFixed(1)}pts` : "—")}</span>
+                        {ptsNum != null && (
+                          <span className="ml-1 text-[10px] font-normal opacity-70">{`${ptsSign}${ptsNum.toFixed(1)}pts`}</span>
+                        )}
+                      </td>
                       <td className="px-2 py-2 font-mono tabular-nums text-muted">{trailLabel}</td>
                       <td className="px-2 py-2 tabular-nums text-muted">{pos.open_mins != null ? `${Math.round(Number(pos.open_mins))}m` : "—"}</td>
                     </tr>
