@@ -176,7 +176,6 @@ export default function App() {
   const [wsConnected, setWsConnected] = useState(false);
   const [reconnecting, setReconnecting] = useState(true);
   const [selectedEpic, setSelectedEpic] = useState(null);
-
   const prevStateRef = useRef(null);
   const soundRef = useRef(null);
 
@@ -189,6 +188,7 @@ export default function App() {
       setState(next);
     }
   }, []);
+
 
   useEffect(() => {
     const epics = listMarketEpics(state);
@@ -327,6 +327,8 @@ export default function App() {
     sentiment: viewState?.sentiment,
     wsConnected,
     reconnecting,
+    openPositions: (state?.positions ?? []).length,
+    maxPositions: state?.max_open_positions ?? 10,
   };
 
   return (

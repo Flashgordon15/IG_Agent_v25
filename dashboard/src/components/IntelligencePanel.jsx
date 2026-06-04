@@ -267,7 +267,7 @@ export default function IntelligencePanel({ state: _state }) {
     setReplayLoading(false);
 
     if (shadowRaw == null) {
-      setShadowError("Failed to load shadow log");
+      setShadowError("Shadow log API unavailable — the agent may need to be restarted to activate the optimised endpoint. Data will appear after restart.");
     } else {
       setShadow(normalizeShadow(shadowRaw));
       setShadowError(null);
@@ -275,7 +275,7 @@ export default function IntelligencePanel({ state: _state }) {
     setShadowLoading(false);
 
     if (learningRaw == null) {
-      setLearningError("Failed to load learning status");
+      setLearningError("Learning status API unavailable — restart the agent to reload the API. SQLite connection may be at capacity.");
     } else {
       setLearning(normalizeLearning(learningRaw));
       setLearningError(null);
@@ -399,7 +399,7 @@ export default function IntelligencePanel({ state: _state }) {
 
       <Card title="Signal quality (shadow)" loading={shadowLoading}>
         {shadowError ? (
-          <p className="py-2 text-[12px] text-danger">{shadowError}</p>
+          <p className="py-2 text-[12px] text-warning leading-snug">{shadowError}</p>
         ) : shadowLoading && !shadow ? (
           <p className="py-4 text-center text-[12px] text-muted">Loading…</p>
         ) : (
@@ -458,7 +458,7 @@ export default function IntelligencePanel({ state: _state }) {
 
       <Card title="Learning status" loading={learningLoading}>
         {learningError ? (
-          <p className="py-2 text-[12px] text-danger">{learningError}</p>
+          <p className="py-2 text-[12px] text-warning leading-snug">{learningError}</p>
         ) : learningLoading && !learning ? (
           <p className="py-4 text-center text-[12px] text-muted">Loading…</p>
         ) : (

@@ -12,13 +12,8 @@ function dash(v, formatter, epic) {
 function fmtPoints(v) {
   const n = Number(v);
   if (!Number.isFinite(n)) return "—";
-  return String(Math.round(n));
-}
-
-function fmtFitness(v) {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return "—";
-  return String(Math.round(n));
+  const sign = n > 0 ? "+" : "";
+  return `${sign}${Math.round(n)}`;
 }
 
 function fmtPnl(v) {
@@ -41,41 +36,17 @@ function agentStateStyle(state) {
   const s = String(state ?? "").toUpperCase();
   switch (s) {
     case "HEALTHY":
-      return {
-        label: "HEALTHY",
-        className: "border-success/40 bg-success/10 text-success",
-        flash: false,
-      };
+      return { label: "HEALTHY", className: "border-success/40 bg-success/10 text-success", flash: false };
     case "CAUTION":
-      return {
-        label: "CAUTION",
-        className: "border-warning/40 bg-warning/10 text-warning",
-        flash: false,
-      };
+      return { label: "CAUTION", className: "border-warning/40 bg-warning/10 text-warning", flash: false };
     case "WARNING":
-      return {
-        label: "WARNING",
-        className: "border-warning/40 bg-warning/10 text-warning",
-        flash: false,
-      };
+      return { label: "WARNING", className: "border-warning/40 bg-warning/10 text-warning", flash: false };
     case "DANGER":
-      return {
-        label: "DANGER",
-        className: "border-danger/40 bg-danger/10 text-danger",
-        flash: false,
-      };
+      return { label: "DANGER", className: "border-danger/40 bg-danger/10 text-danger", flash: false };
     case "STOP":
-      return {
-        label: "STOP",
-        className: "border-danger/40 bg-danger/10 text-danger",
-        flash: true,
-      };
+      return { label: "STOP", className: "border-danger/40 bg-danger/10 text-danger", flash: true };
     default:
-      return {
-        label: isNil(state) ? "—" : s,
-        className: "border-border bg-card text-muted",
-        flash: false,
-      };
+      return { label: isNil(state) ? "—" : s, className: "border-border bg-card text-muted", flash: false };
   }
 }
 
@@ -104,41 +75,26 @@ function resolveStreamStatus(streamStatus, wsConnected, reconnecting) {
 
 function streamStyle(status) {
   switch (status) {
-    case "LIVE":
-      return { dot: "bg-success", text: "text-success", pulse: true };
-    case "STALE":
-      return { dot: "bg-warning", text: "text-warning", pulse: false };
-    case "DISCONNECTED":
-    default:
-      return { dot: "bg-danger", text: "text-danger", pulse: false };
+    case "LIVE":    return { dot: "bg-success", text: "text-success", pulse: true };
+    case "STALE":   return { dot: "bg-warning", text: "text-warning", pulse: false };
+    default:        return { dot: "bg-danger",  text: "text-danger",  pulse: false };
   }
-}
-
-function sentimentBadge(sentiment) {
-  const s = String(sentiment ?? "").toLowerCase();
-  if (s === "crowded_long") return { label: "↑CL", show: true };
-  if (s === "crowded_short") return { label: "↓CS", show: true };
-  return { label: null, show: false };
 }
 
 function Dot({ className, pulse }) {
   return (
     <span
-      className={[
-        "inline-block h-1.5 w-1.5 shrink-0 rounded-full",
-        className,
-        pulse ? "animate-pulse" : "",
-      ].join(" ")}
+      className={["inline-block h-2 w-2 shrink-0 rounded-full", className, pulse ? "animate-pulse" : ""].join(" ")}
       aria-hidden
     />
   );
 }
 
-function Stat({ label, value, valueClassName = "text-foreground" }) {
+function Pill({ label, value, valueClassName = "text-foreground" }) {
   return (
-    <div className="flex flex-col items-center leading-none">
-      <span className="label-caps">{label}</span>
-      <span className={`mt-0.5 text-[11px] font-medium tabular-nums ${valueClassName}`}>
+    <div className="flex flex-col items-center min-w-0">
+      <span className="text-[9px] font-medium uppercase tracking-widest text-muted/70">{label}</span>
+      <span className={`text-[11px] font-semibold tabular-nums leading-none mt-0.5 ${valueClassName}`}>
         {value}
       </span>
     </div>
@@ -162,31 +118,34 @@ export default function Header({
   sentiment,
   wsConnected,
   reconnecting,
+  openPositions,
+  maxPositions,
 }) {
   const agent = agentStateStyle(agentState);
   const stream = resolveStreamStatus(streamStatus, wsConnected, reconnecting);
   const streamUi = streamStyle(stream);
   const spreadRatio =
-    !isNil(spreadCurrent) &&
-    !isNil(spreadNormal) &&
-    Number(spreadNormal) > 0
+    !isNil(spreadCurrent) && !isNil(spreadNormal) && Number(spreadNormal) > 0
       ? Number(spreadCurrent) / Number(spreadNormal)
       : null;
   const spreadColor = spreadTextColor(spreadCurrent, spreadNormal);
   const pnlColor =
     isNil(dailyPnl) || Number.isNaN(Number(dailyPnl))
       ? "text-foreground"
-      : Number(dailyPnl) >= 0
-        ? "text-success"
-        : "text-danger";
-  const sent = sentimentBadge(sentiment);
+      : Number(dailyPnl) >= 0 ? "text-success" : "text-danger";
+
+  const posOpen = openPositions ?? 0;
+  const posMax = maxPositions ?? 10;
+  const posCapacityColor = posOpen >= posMax ? "text-danger" : posOpen >= posMax * 0.8 ? "text-warning" : "text-foreground";
 
   return (
-    <header className="sticky top-0 z-20 shrink-0 border-b border-border bg-bg px-2 py-2 sm:px-3">
-      <div className="flex min-w-0 flex-nowrap items-center gap-x-3 gap-y-2 max-[390px]:flex-wrap">
+    <header className="sticky top-0 z-20 shrink-0 border-b border-border bg-bg/95 backdrop-blur-sm px-3 py-2">
+      <div className="flex min-w-0 items-center gap-x-2 gap-y-1.5 flex-wrap">
+
+        {/* Agent state badge */}
         <span
           className={[
-            "inline-flex shrink-0 items-center rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide",
+            "inline-flex shrink-0 items-center rounded-md border px-2.5 py-1 text-[11px] font-bold uppercase tracking-wider",
             agent.className,
             agent.flash ? "animate-pulse" : "",
           ].join(" ")}
@@ -194,62 +153,66 @@ export default function Header({
           {agent.label}
         </span>
 
-        <div className="flex shrink-0 items-baseline gap-2 font-mono text-price leading-none">
-          <span className="text-muted">
-            <span className="label-caps mr-1 font-sans">Bid</span>
-            <span className="text-foreground">{dash(bid, fmtPrice, epic)}</span>
-          </span>
-          <span className="text-border">|</span>
-          <span className="text-muted">
-            <span className="label-caps mr-1 font-sans">Offer</span>
-            <span className="text-foreground">{dash(offer, fmtPrice, epic)}</span>
-          </span>
-        </div>
+        {/* Divider */}
+        <span className="hidden sm:block h-5 w-px bg-border shrink-0" aria-hidden />
 
-        <div
-          className={`inline-flex shrink-0 items-center gap-1.5 text-[11px] font-medium ${streamUi.text}`}
-        >
+        {/* Stream status */}
+        <div className={`inline-flex shrink-0 items-center gap-1.5 text-[11px] ${streamUi.text}`}>
           <Dot className={streamUi.dot} pulse={streamUi.pulse} />
-          <span className="label-caps text-muted">Stream</span>
-          <span>{stream}</span>
+          <span className="font-medium">{stream}</span>
         </div>
 
-        <div className={`flex shrink-0 items-baseline gap-1 text-[11px] ${spreadColor}`}>
-          <span className="label-caps text-muted">Spread</span>
+        {/* Bid/Offer */}
+        <div className="flex shrink-0 items-center gap-1 font-mono">
+          <span className="label-caps text-muted">B</span>
+          <span className="text-[13px] font-semibold tabular-nums text-foreground">
+            {dash(bid, fmtPrice, epic)}
+          </span>
+          <span className="text-border mx-0.5">/</span>
+          <span className="label-caps text-muted">O</span>
+          <span className="text-[13px] font-semibold tabular-nums text-foreground">
+            {dash(offer, fmtPrice, epic)}
+          </span>
+        </div>
+
+        {/* Spread */}
+        <div className={`flex shrink-0 items-center gap-1 text-[11px] ${spreadColor}`}>
+          <span className="label-caps text-muted">Spd</span>
           <span className="font-medium tabular-nums">{fmtSpread(spreadCurrent)}</span>
           {spreadRatio != null && (
-            <span className="text-[10px] tabular-nums text-muted">
-              ({spreadRatio.toFixed(1)}×)
-            </span>
+            <span className="text-[10px] text-muted">({spreadRatio.toFixed(1)}×)</span>
           )}
         </div>
 
-        {sent.show && (
-          <span className="inline-flex shrink-0 items-center rounded border border-warning/40 bg-warning/10 px-1.5 py-0.5 text-[11px] font-semibold text-warning">
-            {sent.label}
+        {/* Divider */}
+        <span className="hidden sm:block h-5 w-px bg-border shrink-0" aria-hidden />
+
+        {/* Stat pills group */}
+        <div className="flex items-center gap-3 rounded-lg border border-border bg-card/60 px-3 py-1.5">
+          <Pill label="Daily P&L" value={dash(dailyPnl, fmtPnl)} valueClassName={pnlColor} />
+          <span className="h-4 w-px bg-border" aria-hidden />
+          <Pill label="Win Rate" value={dash(winRate, fmtWinRate)} />
+          <span className="h-4 w-px bg-border" aria-hidden />
+          <Pill label="Fit" value={isNil(fitness) ? "—" : String(Math.round(Number(fitness)))} valueClassName={fitnessColor(fitness)} />
+          <span className="h-4 w-px bg-border" aria-hidden />
+          <Pill label="Pos" value={`${posOpen}/${posMax}`} valueClassName={posCapacityColor} />
+        </div>
+
+        {/* Points group */}
+        <div className="flex items-center gap-3 rounded-lg border border-border bg-card/60 px-3 py-1.5">
+          <Pill label="Trade" value={fmtPoints(pointsTrade)} valueClassName={Number(pointsTrade) > 0 ? "text-success" : Number(pointsTrade) < 0 ? "text-danger" : "text-foreground"} />
+          <span className="h-4 w-px bg-border" aria-hidden />
+          <Pill label="Session" value={fmtPoints(pointsSession)} valueClassName={Number(pointsSession) > 0 ? "text-success" : Number(pointsSession) < 0 ? "text-danger" : "text-foreground"} />
+          <span className="h-4 w-px bg-border" aria-hidden />
+          <Pill label="Cumul." value={fmtPoints(pointsCumulative)} valueClassName={Number(pointsCumulative) > 0 ? "text-success" : Number(pointsCumulative) < 0 ? "text-danger" : "text-foreground"} />
+        </div>
+
+        {/* Sentiment badge */}
+        {sentiment && (sentiment === "crowded_long" || sentiment === "crowded_short") && (
+          <span className="inline-flex shrink-0 items-center rounded border border-warning/40 bg-warning/10 px-1.5 py-0.5 text-[10px] font-semibold text-warning">
+            {sentiment === "crowded_long" ? "↑ CROWD LONG" : "↓ CROWD SHORT"}
           </span>
         )}
-
-        <div className={`flex shrink-0 items-baseline gap-1 text-[11px] ${pnlColor}`}>
-          <span className="label-caps text-muted">Daily P&amp;L</span>
-          <span className="font-medium tabular-nums">{dash(dailyPnl, fmtPnl)}</span>
-        </div>
-
-        <div className="flex shrink-0 items-center gap-2 rounded-md border border-border bg-card px-2 py-1">
-          <Stat label="T" value={fmtPoints(pointsTrade)} />
-          <span className="h-4 w-px bg-border" aria-hidden />
-          <Stat label="S" value={fmtPoints(pointsSession)} />
-          <span className="h-4 w-px bg-border" aria-hidden />
-          <Stat label="C" value={fmtPoints(pointsCumulative)} />
-        </div>
-
-        <Stat
-          label="Fit"
-          value={fmtFitness(fitness)}
-          valueClassName={fitnessColor(fitness)}
-        />
-
-        <Stat label="WR" value={dash(winRate, fmtWinRate)} />
       </div>
     </header>
   );

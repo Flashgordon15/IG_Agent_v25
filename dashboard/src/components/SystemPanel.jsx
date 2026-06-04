@@ -328,33 +328,96 @@ export default function SystemPanel({ state, wsConnected, reconnecting }) {
             <span className="tabular-nums">{uptime ?? "—"}</span>
           </StatusRow>
           <StatusRow label="Open Positions">
-            <span className="tabular-nums">{state?.open_positions ?? state?.positions?.length ?? 0}</span>
-          </StatusRow>
-          <StatusRow label="Today P&L">
-            <span className={`tabular-nums font-medium ${(state?.today_pnl ?? 0) >= 0 ? "text-success" : "text-danger"}`}>
-              {state?.today_pnl != null ? `${state.today_pnl >= 0 ? "+" : ""}£${Number(state.today_pnl).toFixed(2)}` : "—"}
+            <span className="tabular-nums">
+              {state?.positions?.length ?? state?.open_positions ?? 0}
+              {" / "}
+              {state?.max_open_positions ?? 10}
             </span>
           </StatusRow>
-          <StatusRow label="Points">
-            <span className="tabular-nums">
-              {state?.points?.cumulative != null
-                ? `${state.points.cumulative}pts ${state.points.state ?? ""}`
+          <StatusRow label="Today P&L">
+            <span className={`tabular-nums font-medium ${(state?.today_pnl ?? state?.daily_pnl_gbp ?? 0) >= 0 ? "text-success" : "text-danger"}`}>
+              {(state?.today_pnl ?? state?.daily_pnl_gbp) != null
+                ? `${Number(state.today_pnl ?? state.daily_pnl_gbp) >= 0 ? "+" : ""}£${Math.abs(Number(state.today_pnl ?? state.daily_pnl_gbp)).toFixed(2)}`
                 : "—"}
             </span>
           </StatusRow>
-          <StatusRow label="Last Gate">
-            <span className="tabular-nums text-muted">
-              {state?.last_gate_eval_ago ?? state?.gate_eval_ago ?? "—"}
+          <StatusRow label="Points (cumul.)">
+            <span className={`tabular-nums font-medium ${(state?.points?.cumulative ?? 0) >= 0 ? "text-success" : "text-danger"}`}>
+              {state?.points?.cumulative != null ? `${state.points.cumulative > 0 ? "+" : ""}${state.points.cumulative}` : "—"}
+              {state?.points?.state ? <span className="ml-1 text-muted font-normal">({state.points.state})</span> : null}
             </span>
           </StatusRow>
-          <StatusRow label="Markets">
+          <StatusRow label="Last Gate">
+            <span className="tabular-nums text-muted">{state?.last_gate_eval_ago ?? state?.gate_eval_ago ?? "—"}</span>
+          </StatusRow>
+          <StatusRow label="Win Rate">
+            <span className="tabular-nums">{state?.win_rate_20 != null ? `${Math.round(state.win_rate_20)}%` : "—"}</span>
+          </StatusRow>
+          {state?.drawdown?.drawdown_pct != null && (
+            <StatusRow label="Drawdown">
+              <span className={`tabular-nums font-medium ${Number(state.drawdown.drawdown_pct) > 3 ? "text-warning" : "text-foreground"}`}>
+                {Number(state.drawdown.drawdown_pct).toFixed(1)}%
+                {state.drawdown.drawdown_gbp > 0 && (
+                  <span className="ml-1 text-muted font-normal">(£{Number(state.drawdown.drawdown_gbp).toFixed(0)} from peak)</span>
+                )}
+              </span>
+            </StatusRow>
+          )}
+          {state?.drawdown?.max_drawdown_pct != null && state.drawdown.max_drawdown_pct > 0 && (
+            <StatusRow label="Max Drawdown">
+              <span className="tabular-nums text-danger">
+                {Number(state.drawdown.max_drawdown_pct).toFixed(1)}% (£{Number(state.drawdown.max_drawdown_gbp).toFixed(0)})
+              </span>
+            </StatusRow>
+          )}
+        </dl>
+      </Card>
+
+      {/* ML status */}
+      <Card title="ML / Learning">
+        <dl className="space-y-3">
+          <StatusRow label="ML Signal">
+            <span className={`font-semibold uppercase ${state?.ml_enabled ? "text-success" : "text-muted"}`}>
+              {state?.ml_enabled ? "Enabled" : "Disabled"}
+            </span>
+          </StatusRow>
+          <StatusRow label="Model">
+            <span className="font-mono text-foreground">{modelVersion ?? "Not trained"}</span>
+          </StatusRow>
+          <StatusRow label="Last Retrain">
+            <span className="tabular-nums text-foreground">{fmtTs(lastRetrain) ?? "Never"}</span>
+          </StatusRow>
+          <StatusRow label="Training Records">
+            <span className={`tabular-nums font-semibold ${(state?.ml_training_records ?? 0) >= 50 ? "text-success" : "text-warning"}`}>
+              {state?.ml_training_records != null ? `${state.ml_training_records} / 50` : "—"}
+            </span>
+          </StatusRow>
+          <StatusRow label="OHLC Cache">
             <span className="text-foreground text-[11px]">
-              {Array.isArray(state?.market_statuses)
-                ? state.market_statuses.map(m => `${m.name}:${m.status}`).join(" | ")
-                : (state?.stream_status ?? "—")}
+              {state?.ohlc_markets_cached != null ? `${state.ohlc_markets_cached} markets` : "—"}
             </span>
           </StatusRow>
         </dl>
+        <div className="mt-3 space-y-1">
+          {(state?.ml_training_records ?? 0) === 0 && (
+            <p className="text-[10px] text-warning leading-snug">
+              No confirmed training records yet. Records are written when a live trade closes with IG confirmation. Keep trading — records accumulate automatically.
+            </p>
+          )}
+          {(state?.ml_training_records ?? 0) > 0 && (state?.ml_training_records ?? 0) < 50 && (
+            <p className="text-[10px] text-muted leading-snug">
+              {50 - (state?.ml_training_records ?? 0)} more confirmed trades needed before ML auto-trains.
+            </p>
+          )}
+          {(state?.ml_training_records ?? 0) >= 50 && (
+            <p className="text-[10px] text-success leading-snug">
+              Ready to train. Run: <code className="font-mono">PYTHONPATH=src python3 scripts/build_training_dataset.py</code>
+            </p>
+          )}
+          <p className="text-[10px] text-muted leading-snug">
+            OHLC history (Yahoo Finance) seeds the signal engine at startup.
+          </p>
+        </div>
       </Card>
 
       {/* Agent controls */}
