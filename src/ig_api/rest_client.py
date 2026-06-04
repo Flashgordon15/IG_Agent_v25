@@ -1113,37 +1113,50 @@ class IGRestClient:
     ) -> bool:
         """
         Attach missing stop and/or limit when IG shows an open deal without full protection.
+
+        PUT /positions/otc/{dealId} requires absolute stopLevel/limitLevel — not stopDistance.
+        We derive the absolute levels from the open position's level and direction.
         """
         row = self.find_open_position(deal_id)
         if not row:
             return False
         pos = row.get("position") or {}
-        has_stop = float(pos.get("stopLevel") or 0) > 0 or float(pos.get("stopDistance") or 0) > 0
+        mkt = row.get("market") or {}
+        has_stop  = float(pos.get("stopLevel") or 0) > 0 or float(pos.get("stopDistance") or 0) > 0
         has_limit = float(pos.get("limitLevel") or 0) > 0 or float(pos.get("limitDistance") or 0) > 0
         if has_stop and has_limit:
             return True
 
-        add_stop = None
-        add_limit = None
+        direction = str(pos.get("direction") or "").upper()
+        entry = float(pos.get("level") or pos.get("openLevel") or 0)
+        if entry <= 0:
+            return False
+
+        # Convert distance to absolute level — PUT endpoint only accepts stopLevel/limitLevel
+        stop_level  = None
+        limit_level = None
         if not has_stop and float(stop_distance) > 0:
-            add_stop = float(stop_distance)
+            stop_level = (entry + float(stop_distance)) if direction == "SELL" else (entry - float(stop_distance))
         if not has_limit and float(limit_distance) > 0:
-            add_limit = float(limit_distance)
-        if add_stop is None and add_limit is None:
+            limit_level = (entry - float(limit_distance)) if direction == "SELL" else (entry + float(limit_distance))
+
+        if stop_level is None and limit_level is None:
             return True
 
         try:
             self.update_position_stops(
                 deal_id,
-                stop_distance=add_stop,
-                limit_distance=add_limit,
+                stop_level=stop_level,
+                limit_level=limit_level,
             )
             log_demo_rest(
-                "PUT /positions/otc — attach stops",
+                "PUT /positions/otc — attach stops (absolute levels)",
                 deal_id=deal_id,
                 epic=epic,
-                stop_distance=add_stop,
-                limit_distance=add_limit,
+                direction=direction,
+                entry=entry,
+                stop_level=stop_level,
+                limit_level=limit_level,
             )
             return True
         except Exception as e:
