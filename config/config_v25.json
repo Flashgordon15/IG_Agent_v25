@@ -41,7 +41,7 @@
   "resolution": "MINUTE_1",
   "refresh_seconds": 5,
   "max_live_quotes": 3000,
-  "signal_threshold": 80,
+  "signal_threshold": 75,
   "confidence_floor": 75,
   "confidence_floor_recovery_per_win": 1.0,
   "confidence_floor_notes": [
@@ -50,10 +50,10 @@
     "Allows initial trades to fire at 75%+; self-tightens toward 80% as wins accumulate."
   ],
   "signal_threshold_notes": [
-    "Effective floor: max(signal_threshold, points_engine_floor=80) in HEALTHY/CAUTION state",
-    "WARNING state requires 92 (CONF_HIGH). STOP state halts all entries.",
-    "Production target once ML trained: 85-90",
-    "Review after 20+ live sessions of data"
+    "Pre-filter floor in signal engine AND minimum for gate. Set equal to confidence_floor during bootstrap.",
+    "Effective floor: max(confidence_floor + bootstrap_wins, CONF_MARGINAL_MIN=80) in HEALTHY/CAUTION",
+    "Bootstrap: starts at 75, rises +1 per win, capped at 80 automatically",
+    "WARNING state requires 92 (CONF_HIGH). STOP state halts all entries."
   ],
   "auto_flatten_on_session_end": true,
   "risk_points": 40,
