@@ -34,7 +34,7 @@ class PositionSyncIntervalTests(unittest.TestCase):
 
     def test_flat_uses_relaxed_interval(self) -> None:
         sync = self._sync(open_n=0)
-        self.assertEqual(sync._effective_interval(), 30.0)
+        self.assertEqual(sync._effective_interval(), 60.0)
 
     def test_open_high_signal_uses_fast_interval(self) -> None:
         sync = self._sync(open_n=1)
@@ -42,7 +42,7 @@ class PositionSyncIntervalTests(unittest.TestCase):
             patch.object(sync, "_snapshot_confidence_pct", return_value=85.0),
             patch.object(sync, "_needs_fast_position_sync", return_value=False),
         ):
-            self.assertEqual(sync._effective_interval(), 15.0)
+            self.assertEqual(sync._effective_interval(), 20.0)
 
     def test_open_low_signal_uses_relaxed_interval(self) -> None:
         sync = self._sync(open_n=1)
@@ -50,13 +50,13 @@ class PositionSyncIntervalTests(unittest.TestCase):
             patch.object(sync, "_snapshot_confidence_pct", return_value=55.0),
             patch.object(sync, "_needs_fast_position_sync", return_value=False),
         ):
-            self.assertEqual(sync._effective_interval(), 30.0)
+            self.assertEqual(sync._effective_interval(), 60.0)
 
     def test_missing_protection_forces_fast_interval(self) -> None:
         sync = self._sync(open_n=1)
         sync._snapshot.positions[0].stop_level = 0.0
         with patch.object(sync, "_snapshot_confidence_pct", return_value=40.0):
-            self.assertEqual(sync._effective_interval(), 15.0)
+            self.assertEqual(sync._effective_interval(), 20.0)
 
 
 if __name__ == "__main__":

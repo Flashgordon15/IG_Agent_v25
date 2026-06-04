@@ -175,7 +175,16 @@ class SignalEngine:
         if not st or int(st.get("trades") or 0) < cfg.learning_min_trades_per_setup:
             return 0.0, "learning neutral: not enough setup history"
 
-        wr = float(st.get("winrate") or 0)
+        wins = int(st.get("wins") or 0)
+        losses = int(st.get("losses") or 0)
+        decisive = wins + losses
+        # Ignore pure-breakeven setups — no real P&L signal to learn from.
+        # These arise from PENDING/imported IG records with entry=exit and are
+        # not representative of signal quality.
+        if decisive == 0:
+            return 0.0, "learning neutral: no decisive trades (breakevens only)"
+
+        wr = wins / decisive
         avg = float(st.get("avg_pnl") or 0)
 
         if avg > 0 and wr >= cfg.adaptive_good_winrate_threshold:
@@ -237,6 +246,15 @@ class SignalEngine:
             }
             path = data_dir() / "shadow_log.jsonl"
             path.parent.mkdir(parents=True, exist_ok=True)
+            # Rotate when file exceeds 50MB — keep last file as .1
+            try:
+                if path.exists() and path.stat().st_size > 50 * 1024 * 1024:
+                    backup = path.with_suffix(".jsonl.1")
+                    if backup.exists():
+                        backup.unlink()
+                    path.rename(backup)
+            except Exception:
+                pass
             with open(path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(row) + "\n")
         except Exception:

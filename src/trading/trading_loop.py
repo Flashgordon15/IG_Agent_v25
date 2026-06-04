@@ -329,11 +329,16 @@ class TradingLoop:
                 notifier = get_telegram_notifier()
                 if notifier is not None:
                     notifier.send_alert(
-                        f"Trading loop silent for >{int(silence_sec)}s — possible deadlock",
+                        f"⚠️ Trading loop deadlock detected — restarting {self._market}",
                         dedupe_key=f"loop_silent:{self._epic}",
                     )
             except Exception:
                 pass
+            # Self-heal: signal the stuck loop to stop so the orchestrator can respawn it.
+            log_engine(
+                f"Watchdog: requesting loop restart for {self._market} ({self._epic})"
+            )
+            self._stop.set()
 
     def _run_tick(self) -> TickContext | None:
         import time
@@ -762,10 +767,19 @@ class TradingLoop:
                             detail = f"Outside allowed trading session (current={sess})"
                 except Exception:
                     pass
+        next_open_iso = ""
+        if not open_now:
+            try:
+                from system.market_watch.calendar import get_market_status
+                ms = get_market_status(self._epic)
+                if ms and ms.next_open_at:
+                    next_open_iso = ms.next_open_at.isoformat()
+            except Exception:
+                pass
         return GateResult(
             name="session_open",
             passed=open_now,
-            value=open_now,
+            value={"open": open_now, "next_open": next_open_iso},
             detail=detail,
         )
 
@@ -933,6 +947,40 @@ class TradingLoop:
         except Exception:
             pass
 
+    def _dynamic_max_per_epic(
+        self, base_cap: int, open_count: int, tracker: Any
+    ) -> tuple[int, str]:
+        """Scale the per-epic position cap above base_cap when conditions are favourable.
+
+        Tiers (all require points state = HEALTHY):
+          base_cap + 1: all open positions on this epic have pnl_gbp > 0
+          base_cap + 2: same AND oldest open position is >= 20 minutes old
+
+        The age guard prevents stacking into a brand-new position that happens
+        to be briefly green. The "all profitable" guard prevents adding to a
+        losing move. Returns (effective_max, reason_string).
+        """
+        if self._points.get_state() != "HEALTHY":
+            return base_cap, f"base ({self._points.get_state()})"
+        if open_count == 0:
+            return base_cap, "base"
+
+        snap = tracker.snapshot()
+        epic_pos = [p for p in snap.get("positions", []) if p.get("epic") == self._epic]
+        if not epic_pos:
+            return base_cap, "base"
+
+        pnl_values = [p.get("pnl_gbp") for p in epic_pos]
+        all_profitable = all(v is not None and float(v) > 0 for v in pnl_values)
+        if not all_profitable:
+            return base_cap, "not all positions profitable"
+
+        open_mins_vals = [float(p.get("open_mins") or 0) for p in epic_pos]
+        oldest_mins = max(open_mins_vals)
+        if oldest_mins >= 20:
+            return base_cap + 2, f"all profitable, oldest {oldest_mins:.0f}m"
+        return base_cap + 1, f"all profitable, oldest {oldest_mins:.0f}m"
+
     def _gate_risk_validation(self, quote: Quote) -> GateResult:
         from execution.market_suspension import gate_detail, is_blocked
         from system.market_data_hub import get_market_data_hub
@@ -956,7 +1004,10 @@ class TradingLoop:
 
         tracker = self._execution_loop.execution_engine.trade_tracker
         open_count = int(tracker.count_open_for_epic(self._epic))
-        max_per_epic = max(1, int(self._config.max_positions_per_epic))
+        base_cap = max(1, int(self._config.max_positions_per_epic))
+        max_per_epic, dynamic_unlock_reason = self._dynamic_max_per_epic(
+            base_cap, open_count, tracker
+        )
         try:
             max_open_total = max(1, int(self._config.max_open_positions))
         except (TypeError, ValueError):
@@ -1012,7 +1063,11 @@ class TradingLoop:
                 f"(1.5× normal {normal:.1f}, cfg {cfg_normal:.1f})"
             )
         elif not epic_slot_ok:
-            detail = f"open positions {open_count} (max {max_per_epic} per epic)"
+            detail = (
+                f"open positions {open_count} (max {max_per_epic} per epic"
+                + (f", unlocked: {dynamic_unlock_reason}" if max_per_epic > base_cap else "")
+                + ")"
+            )
         elif not total_slot_ok:
             detail = f"total open positions {open_total} (max {max_open_total})"
         elif not risk_ok:
@@ -1036,6 +1091,8 @@ class TradingLoop:
                 "open_count": open_count,
                 "open_total": open_total,
                 "max_per_epic": max_per_epic,
+                "max_per_epic_base": base_cap,
+                "dynamic_unlock_reason": dynamic_unlock_reason,
                 "max_open_total": max_open_total,
                 "risk_gbp": round(risk_gbp, 2),
                 "base_size": round(base_size, 3),
@@ -1067,15 +1124,17 @@ class TradingLoop:
                     snap = sig.snapshot or {}
                     last = snap.get("last")
                     _last = last if (last is not None and hasattr(last, "get")) else {}
+                    _atr = float(_last.get("atr", 0) or 0)
+                    # Normalise ATR by configured stop distance so it is dimensionless
+                    # and comparable across instruments (Wall St ~80pt stop vs Gold
+                    # ~10pt stop vs FX sub-pip stop).
+                    _stop = max(1.0, float(self._config.stop_distance_points))
                     # Keys must exactly match the model's training feature names
                     features = {
                         "adjusted_score": rules_conf,
                         "raw_score": float(snap.get("raw_confidence", rules_conf)),
                         "rsi": float(_last.get("rsi", 0) or 0),
-                        "atr": float(_last.get("atr", 0) or 0),
-                        "spread": float(_last.get("spread", 0) or 0),
-                        "fired": 1 if sig.signal in ("BUY", "SELL") else 0,
-                        "stop_pts": float(snap.get("stop_pts", 0) or 0),
+                        "atr_ratio": _atr / _stop,
                     }
                     # Only blend if all model features are present
                     if all(f in features for f in scorer.feature_names):
@@ -1085,11 +1144,21 @@ class TradingLoop:
                             timeout_s=0.5,
                         )
                         if ml_prob > 0.0:
-                            conf = (rules_conf * 0.6) + (ml_prob * 100.0 * 0.4)
-                            conf = max(0.0, min(100.0, conf))
-                            log_engine(
-                                f"ML score {ml_prob:.3f} rules {rules_conf:.1f} blended {conf:.1f}"
-                            )
+                            # Only blend when the model has meaningful conviction
+                            # (≥15% deviation from 50%). Near-50% means the model
+                            # is out-of-distribution or has no signal — don't let it
+                            # veto a strong rules score.
+                            _ML_CONVICTION = 0.15
+                            if abs(ml_prob - 0.5) >= _ML_CONVICTION:
+                                conf = (rules_conf * 0.6) + (ml_prob * 100.0 * 0.4)
+                                conf = max(0.0, min(100.0, conf))
+                                log_engine(
+                                    f"ML score {ml_prob:.3f} rules {rules_conf:.1f} blended {conf:.1f}"
+                                )
+                            else:
+                                log_engine(
+                                    f"ML score {ml_prob:.3f} near-50% (no conviction) — using rules {rules_conf:.1f}"
+                                )
             except Exception as e:
                 log_engine(f"ML gate blend skipped: {type(e).__name__}: {e}")
         passed = sig.signal in ("BUY", "SELL") and conf >= threshold

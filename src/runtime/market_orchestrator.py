@@ -94,6 +94,53 @@ class MarketOrchestrator:
             f"market_orchestrator started ({len(self._loops)} loops) "
             f"primary={self._primary_epic}"
         )
+        self._health_monitor_thread = threading.Thread(
+            target=self._loop_health_monitor,
+            name="ig-orchestrator-health",
+            daemon=True,
+        )
+        self._health_monitor_thread.start()
+
+    def _loop_health_monitor(self) -> None:
+        """Detect and respawn individual trading loops that stopped due to deadlock."""
+        import time
+
+        check_interval = 20.0
+        respawn_cooldown: dict[str, float] = {}
+
+        while not self._stop.wait(check_interval):
+            if not self._running:
+                break
+            for loop in self._loops:
+                if self._stop.is_set():
+                    break
+                if loop.is_running():
+                    continue
+                epic = getattr(loop, "_epic", "?")
+                market = getattr(loop, "_market", epic)
+                last_respawn = respawn_cooldown.get(epic, 0.0)
+                if time.monotonic() - last_respawn < 30.0:
+                    continue
+                respawn_cooldown[epic] = time.monotonic()
+                log_engine(
+                    f"Orchestrator health monitor: respawning stopped loop "
+                    f"market={market} epic={epic}"
+                )
+                try:
+                    from system.telegram_notifier import get_telegram_notifier
+
+                    notifier = get_telegram_notifier()
+                    if notifier is not None:
+                        notifier.send_alert(
+                            f"🔄 Auto-respawning {market} loop after deadlock",
+                            dedupe_key=f"respawn:{epic}",
+                        )
+                except Exception:
+                    pass
+                try:
+                    loop.start()
+                except Exception as e:
+                    log_engine(f"Orchestrator respawn failed for {epic}: {e}")
 
     def stop(self) -> None:
         self._stop.set()

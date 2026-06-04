@@ -941,7 +941,14 @@ class IgPositionSync:
         result = classify_result(banked_pts)
         keys = row.keys()
         conf = float(row["adjusted_confidence"] or 0) if "adjusted_confidence" in keys else 0.0
-        if self._points_engine is not None:
+        # Guard: only score once per partial close using the done-flag
+        already_scored = False
+        if hasattr(self._store, "is_partial_close_done"):
+            try:
+                already_scored = self._store.is_partial_close_done(trade_id)
+            except Exception:
+                pass
+        if self._points_engine is not None and not already_scored:
             try:
                 self._points_engine.record_trade(result, conf, banked_pts)
             except Exception as e:

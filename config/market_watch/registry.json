@@ -1,0 +1,12 @@
+{
+  "funds": [
+    { "fund_id": "japan_225",  "epic": "IX.D.NIKKEI.IFM.IP",     "config": "japan_225.json"  },
+    { "fund_id": "eur_usd",    "epic": "CS.D.EURUSD.CFD.IP",      "config": "eur_usd.json"    },
+    { "fund_id": "gbp_usd",    "epic": "CS.D.GBPUSD.CFD.IP",      "config": "gbp_usd.json"    },
+    { "fund_id": "us_oil",     "epic": "CS.D.CRUDE.CFD.IP",        "config": "us_oil.json"     },
+    { "fund_id": "wall_street","epic": "IX.D.DOW.IFM.IP",          "config": "wall_street.json"},
+    { "fund_id": "gold",       "epic": "CS.D.CFPGOLD.CFP.IP",      "config": "gold.json"       },
+    { "fund_id": "germany_40", "epic": "IX.D.DAX.IFM.IP",          "config": "germany_40.json" },
+    { "fund_id": "nasdaq_100", "epic": "IX.D.NASDAQ.IFM.IP",       "config": "nasdaq_100.json" }
+  ]
+}

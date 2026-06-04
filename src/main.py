@@ -38,6 +38,67 @@ EXIT_LOCK = 2
 EXIT_CONFIG = 3
 EXIT_INSTANCE = 4
 
+_SESSION_REFRESH_INTERVAL_SEC = 45 * 60  # 45 minutes
+_LOG_ROTATE_MAX_BYTES = 20 * 1024 * 1024   # 20 MB — rotate shell-written logs
+_LOG_KEEP_BACKUPS = 3
+
+
+def _rotate_oversized_logs() -> None:
+    """Rotate any shell-written log files that exceed the size cap.
+
+    Python logging uses RotatingFileHandler already; this handles files written
+    by shell redirects (launcher.log, ig_agent.log) that bypass Python's handler.
+    """
+    from pathlib import Path
+    from system.paths import logs_dir
+
+    log_dir = logs_dir()
+    for log_path in log_dir.glob("*.log"):
+        try:
+            if log_path.stat().st_size <= _LOG_ROTATE_MAX_BYTES:
+                continue
+            # Rotate: .log → .log.1 → .log.2 etc., drop oldest
+            for i in range(_LOG_KEEP_BACKUPS - 1, 0, -1):
+                src = Path(f"{log_path}.{i}")
+                dst = Path(f"{log_path}.{i + 1}")
+                if src.exists():
+                    src.rename(dst)
+            log_path.rename(Path(f"{log_path}.1"))
+            log_path.touch()  # create fresh empty file
+        except Exception:
+            pass
+
+
+def _start_session_refresh_watchdog(rest_client: Any) -> None:
+    """Background thread that proactively refreshes the IG session every 45 minutes.
+
+    Without this, a long-running Lightstreamer session (no REST calls) can let
+    the session token expire silently, causing an auth failure on the next trade.
+    """
+    if rest_client is None:
+        return
+
+    def _refresh_loop() -> None:
+        while True:
+            time.sleep(_SESSION_REFRESH_INTERVAL_SEC)
+            try:
+                refreshed = rest_client.proactive_refresh_if_needed()
+                if not refreshed:
+                    # Force a lightweight REST call to keep the session alive
+                    try:
+                        rest_client.ensure_session()
+                        log_engine("IG session keep-alive: session verified")
+                    except Exception as e:
+                        log_engine(f"IG session keep-alive failed: {type(e).__name__}: {e}")
+                else:
+                    log_engine("IG session keep-alive: proactive token refresh completed")
+            except Exception as e:
+                log_engine(f"IG session refresh watchdog error: {type(e).__name__}: {e}")
+
+    t = threading.Thread(target=_refresh_loop, name="ig-session-refresh", daemon=True)
+    t.start()
+    log_engine(f"IG session refresh watchdog started (interval {_SESSION_REFRESH_INTERVAL_SEC//60}m)")
+
 _BROWSER_DELAY_SEC = 3.0
 _API_HOST = "127.0.0.1"
 _API_PORT = 8080
@@ -285,6 +346,7 @@ class AgentRuntime:
                 from system.replay_daily_scheduler import start_replay_daily_scheduler
 
                 start_replay_daily_scheduler()
+                _start_session_refresh_watchdog(rest)
                 log_engine("orchestrator trading loop started (background)")
                 from system.engine_log import _intermittent_settings
 
@@ -324,6 +386,7 @@ def _install_signal_handlers(runtime: AgentRuntime) -> None:
 
 
 def main() -> None:
+    _rotate_oversized_logs()
     log_engine("=== IG Agent v25 full restart ===")
     runtime = AgentRuntime()
     _install_signal_handlers(runtime)

@@ -30,6 +30,7 @@ RATE_LIMIT_ERROR_CODES = frozenset(
 )
 
 _LOG = logs_dir() / "rate_limit.log"
+_STATE = logs_dir() / "rate_limit_state.json"
 _LOCK = threading.RLock()
 _manager: "RateLimitManager | None" = None
 
@@ -82,6 +83,7 @@ class RateLimitManager:
         self._blocked_calls = 0
         self._backoff_stage = 0
         self._on_cleared: list[Callable[[], None]] = []
+        self._load_persisted()
 
     def register_on_cleared(self, callback: Callable[[], None]) -> None:
         self._on_cleared.append(callback)
@@ -153,6 +155,7 @@ class RateLimitManager:
         )
         self._log(msg, source=source, path=path, stage=self._backoff_stage)
         log_engine(msg)
+        self._persist_unlocked()
         self._sync_diagnostics_unlocked()
         return self._rest_until - now
 
@@ -226,7 +229,8 @@ class RateLimitManager:
             return self._try_clear_unlocked()
 
     def reset_for_tests(self) -> None:
-        """Clear local cooldown (unit tests only)."""
+        """Clear local cooldown and persisted state (unit tests only)."""
+        global _manager
         with _LOCK:
             self._active = False
             self._rest_until = 0.0
@@ -235,6 +239,54 @@ class RateLimitManager:
             self._backoff_stage = 0
             self._blocked_calls = 0
             self._sync_diagnostics_unlocked()
+            try:
+                if _STATE.exists():
+                    _STATE.unlink()
+            except Exception:
+                pass
+            # Reset the module singleton so the next call creates a fresh instance
+            # with no persisted state, preventing state leakage between tests.
+            _manager = None
+
+    def _persist_unlocked(self) -> None:
+        """Write backoff stage and block times to disk so restarts inherit them."""
+        try:
+            _STATE.parent.mkdir(parents=True, exist_ok=True)
+            _STATE.write_text(
+                json.dumps({
+                    "backoff_stage": self._backoff_stage,
+                    "rest_until": self._rest_until,
+                    "stream_until": self._stream_until,
+                    "error_code": self._error_code,
+                })
+            )
+        except Exception:
+            pass
+
+    def _load_persisted(self) -> None:
+        """On startup, restore backoff stage and any still-active block from disk."""
+        try:
+            if not _STATE.exists():
+                return
+            data = json.loads(_STATE.read_text())
+            stage = int(data.get("backoff_stage", 0))
+            rest_until = float(data.get("rest_until", 0))
+            stream_until = float(data.get("stream_until", 0))
+            now = time.time()
+            # Always restore stage so backoff escalation persists across restarts.
+            self._backoff_stage = max(0, stage)
+            if rest_until > now or stream_until > now:
+                self._active = True
+                self._rest_until = rest_until
+                self._stream_until = stream_until
+                self._error_code = str(data.get("error_code", ""))
+                remaining = max(0.0, rest_until - now)
+                log_engine(
+                    f"Rate limit state restored from disk — stage {stage}, "
+                    f"REST blocked {remaining / 60:.1f}m remaining"
+                )
+        except Exception:
+            pass
 
     def _try_clear_unlocked(self) -> bool:
         if not self._active:
@@ -247,6 +299,8 @@ class RateLimitManager:
         self._log(msg)
         log_engine(msg)
         log_demo_rest("Rate limit cooldown expired — safe to retry authentication")
+        # Persist cleared state (stage retained so next hit continues escalation)
+        self._persist_unlocked()
         self._sync_diagnostics_unlocked()
         for cb in list(self._on_cleared):
             try:

@@ -1,0 +1,13 @@
+{
+  "fund_id": "gold",
+  "display_name": "Spot Gold",
+  "epic": "CS.D.CFPGOLD.CFP.IP",
+  "timezone": "Europe/London",
+  "closed_weekdays": ["sat"],
+  "weekly_sessions": [
+    { "days": ["sun"], "open": "23:00", "close": "24:00" },
+    { "days": ["mon", "tue", "wed", "thu"], "open": "00:00", "close": "24:00" },
+    { "days": ["fri"], "open": "00:00", "close": "22:00" }
+  ],
+  "daily_breaks": []
+}

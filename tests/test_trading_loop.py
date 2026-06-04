@@ -53,6 +53,12 @@ def _buy_signal(conf: float = 90.0) -> SignalResult:
 
 
 def _make_loop(**overrides) -> TradingLoop:
+    # Ensure persisted rate-limit state from production runs doesn't leak into tests.
+    try:
+        from system.rate_limit_manager import get_rate_limit_manager
+        get_rate_limit_manager().reset_for_tests()
+    except Exception:
+        pass
     config = MagicMock()
     config.refresh_seconds = 0.05
     config.max_spread_points = 35.0
@@ -63,6 +69,7 @@ def _make_loop(**overrides) -> TradingLoop:
     config.adaptive_min_trade_size = 0.5
     config.adaptive_max_trade_size = 5.0
     config.currency_code = "GBP"
+    config.max_daily_loss_gbp = 200.0
     config.get = MagicMock(
         side_effect=lambda key, default=None: {
             "ig_point_value_gbp": 1.0,
@@ -206,7 +213,8 @@ class TradingLoopTests(unittest.TestCase):
         assert ctx is not None
         env_gate = next(g for g in ctx.gates if g.name == "environment_fitness")
         self.assertTrue(env_gate.passed)
-        self.assertIn("50%", env_gate.detail)
+        # SAFE_DEFAULT_SCORE == GATE_PASS_MIN == 55 — gate just passes, detail shows 55%
+        self.assertIn("55%", env_gate.detail)
         self.assertNotIn("scorer unavailable", env_gate.detail)
 
     @patch("system.market_watch.japan225_session.japan225_strategy_paused", return_value=(False, ""))
@@ -381,6 +389,121 @@ class RiskValidationGateTests(unittest.TestCase):
             gate = loop._gate_risk_validation(_quote())
 
         self.assertEqual(gate.value["risk_cap_gbp"], STAGE1_GBP_RISK_CAP)
+
+
+class DynamicMaxPerEpicTests(unittest.TestCase):
+    """Unit tests for TradingLoop._dynamic_max_per_epic."""
+
+    def _tracker(self, positions: list) -> MagicMock:
+        t = MagicMock()
+        t.snapshot.return_value = {"positions": positions}
+        return t
+
+    def _pos(self, epic: str, pnl_gbp: float, open_mins: float) -> dict:
+        return {"epic": epic, "pnl_gbp": pnl_gbp, "open_mins": open_mins}
+
+    def test_base_when_no_open_positions(self) -> None:
+        loop = _make_loop()
+        loop._epic = "IX.D.DOW.IFM.IP"
+        loop._points.get_state.return_value = "HEALTHY"
+        cap, reason = loop._dynamic_max_per_epic(2, 0, self._tracker([]))
+        self.assertEqual(cap, 2)
+
+    def test_base_when_points_not_healthy(self) -> None:
+        loop = _make_loop()
+        loop._epic = "IX.D.DOW.IFM.IP"
+        loop._points.get_state.return_value = "CAUTION"
+        pos = self._pos("IX.D.DOW.IFM.IP", 10.0, 25.0)
+        cap, reason = loop._dynamic_max_per_epic(2, 1, self._tracker([pos]))
+        self.assertEqual(cap, 2)
+        self.assertIn("CAUTION", reason)
+
+    def test_base_when_position_unprofitable(self) -> None:
+        loop = _make_loop()
+        loop._epic = "IX.D.DOW.IFM.IP"
+        loop._points.get_state.return_value = "HEALTHY"
+        pos = self._pos("IX.D.DOW.IFM.IP", -5.0, 25.0)
+        cap, _ = loop._dynamic_max_per_epic(2, 1, self._tracker([pos]))
+        self.assertEqual(cap, 2)
+
+    def test_base_when_one_of_two_unprofitable(self) -> None:
+        loop = _make_loop()
+        loop._epic = "IX.D.DOW.IFM.IP"
+        loop._points.get_state.return_value = "HEALTHY"
+        positions = [
+            self._pos("IX.D.DOW.IFM.IP", 10.0, 25.0),
+            self._pos("IX.D.DOW.IFM.IP", -2.0, 10.0),
+        ]
+        cap, _ = loop._dynamic_max_per_epic(2, 2, self._tracker(positions))
+        self.assertEqual(cap, 2)
+
+    def test_plus1_when_all_profitable_young(self) -> None:
+        """All profitable but oldest < 20 min → +1 only."""
+        loop = _make_loop()
+        loop._epic = "CS.D.CFPGOLD.CFP.IP"
+        loop._points.get_state.return_value = "HEALTHY"
+        pos = self._pos("CS.D.CFPGOLD.CFP.IP", 8.0, 10.0)
+        cap, reason = loop._dynamic_max_per_epic(2, 1, self._tracker([pos]))
+        self.assertEqual(cap, 3)
+        self.assertIn("profitable", reason)
+
+    def test_plus2_when_all_profitable_mature(self) -> None:
+        """All profitable and oldest >= 20 min → +2."""
+        loop = _make_loop()
+        loop._epic = "CS.D.CFPGOLD.CFP.IP"
+        loop._points.get_state.return_value = "HEALTHY"
+        positions = [
+            self._pos("CS.D.CFPGOLD.CFP.IP", 15.0, 25.0),
+            self._pos("CS.D.CFPGOLD.CFP.IP", 5.0, 10.0),
+        ]
+        cap, reason = loop._dynamic_max_per_epic(2, 2, self._tracker(positions))
+        self.assertEqual(cap, 4)
+        self.assertIn("25m", reason)
+
+    def test_filters_other_epics(self) -> None:
+        """Positions on a different epic don't count toward profitable check."""
+        loop = _make_loop()
+        loop._epic = "IX.D.DOW.IFM.IP"
+        loop._points.get_state.return_value = "HEALTHY"
+        positions = [
+            self._pos("CS.D.CFPGOLD.CFP.IP", 50.0, 30.0),  # different epic
+        ]
+        cap, _ = loop._dynamic_max_per_epic(2, 1, self._tracker(positions))
+        self.assertEqual(cap, 2)
+
+    def test_gate_value_exposes_dynamic_fields(self) -> None:
+        """risk_validation gate value includes max_per_epic_base and unlock reason."""
+        loop = _make_loop()
+        loop._epic = "CS.D.CFPGOLD.CFP.IP"
+        loop._config.max_positions_per_epic = 2
+        loop._config.stop_distance_points = 10.0
+        loop._config.trade_size = 1.0
+        loop._config.get = MagicMock(
+            side_effect=lambda key, default=None: {
+                "ig_point_value_gbp": 1.0,
+                "risk_cap_gbp": 500,
+            }.get(key, default)
+        )
+        loop._points.get_state.return_value = "HEALTHY"
+        loop._points.get_size_multiplier.return_value = 1.0
+        # One profitable, mature position → should unlock to 3
+        loop._execution_loop.execution_engine.trade_tracker.count_open_for_epic.return_value = 1
+        loop._execution_loop.execution_engine.trade_tracker.count_open_total.return_value = 1
+        loop._execution_loop.execution_engine.trade_tracker.snapshot.return_value = {
+            "positions": [{"epic": "CS.D.CFPGOLD.CFP.IP", "pnl_gbp": 12.0, "open_mins": 25.0}]
+        }
+        rest = MagicMock()
+        rest.fetch_market_constraints.return_value = {"min_deal_size": 1.0}
+        loop._execution_loop.execution_engine._rest_client = rest
+
+        with patch("system.market_data_hub.get_market_data_hub") as hub_mock:
+            hub_mock.return_value.normal_spread.return_value = 0.5
+            gate = loop._gate_risk_validation(_quote())
+
+        self.assertEqual(gate.value["max_per_epic_base"], 2)
+        self.assertEqual(gate.value["max_per_epic"], 4)
+        self.assertIn("profitable", gate.value["dynamic_unlock_reason"])
+        self.assertTrue(gate.passed)
 
 
 if __name__ == "__main__":

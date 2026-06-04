@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from data.models import Quote
 from signals.signal_engine import SignalEngine
 from trading.environment_scorer import (
+    GATE_PASS_MIN,
     SAFE_DEFAULT_SCORE,
     EnvironmentScorer,
     regime_label,
@@ -68,7 +69,7 @@ class FactorUnitTests(unittest.TestCase):
     def test_regime_labels(self) -> None:
         self.assertEqual(regime_label(85), "Excellent")
         self.assertEqual(regime_label(70), "Good")
-        self.assertEqual(regime_label(45), "Marginal")
+        self.assertEqual(regime_label(57), "Marginal")  # GATE_PASS_MIN=55, so 57 is Marginal
         self.assertEqual(regime_label(30), "WAIT")
 
 
@@ -207,7 +208,7 @@ class EnvironmentScorerIntegrationTests(unittest.TestCase):
         scorer = EnvironmentScorer(engine, normal_spread=7.0)
         scorer.reset_session("Japan 225")
         total = scorer.score("Japan 225")
-        self.assertLessEqual(total, 40.0)
+        self.assertLessEqual(total, GATE_PASS_MIN)  # cold-start cap is at GATE_PASS_MIN
         self.assertTrue(scorer.last_score().capped_cold_start)
 
     def test_gap_open_cap(self) -> None:
@@ -216,7 +217,7 @@ class EnvironmentScorerIntegrationTests(unittest.TestCase):
         scorer.reset_session("Japan 225")
         scorer.register_gap_open("Japan 225")
         total = scorer.score("Japan 225")
-        self.assertLessEqual(total, 40.0)
+        self.assertLessEqual(total, GATE_PASS_MIN)  # gap-open cap is at GATE_PASS_MIN
         self.assertTrue(scorer.last_score().capped_gap_open)
 
     def test_safe_default_on_error(self) -> None:
@@ -256,18 +257,19 @@ class EnvironmentScorerIntegrationTests(unittest.TestCase):
         scorer = EnvironmentScorer(engine, normal_spread=7.0)
         scorer.reset_session("Japan 225")
         scorer._bars_at_session_open["Japan 225"] = 0
+        # Factors sum to 57 — just above GATE_PASS_MIN=55, so regime is "Marginal"
         with patch.object(
             EnvironmentScorer,
             "_compute_factors",
             return_value=(
-                {"atr": 10, "trend": 10, "session": 10, "spread": 12},
+                {"atr": 20, "trend": 15, "session": 10, "spread": 12},
                 {"complete_bars": 20},
             ),
         ):
             total = scorer.score("Japan 225")
-        self.assertEqual(total, 42.0)
+        self.assertEqual(total, 57.0)
         self.assertEqual(scorer.get_regime(), "Marginal")
-        self.assertTrue(total >= 40.0)
+        self.assertTrue(total >= GATE_PASS_MIN)
 
 
 if __name__ == "__main__":

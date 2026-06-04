@@ -339,6 +339,7 @@ export default function App() {
     winRate: state?.win_rate_20,
     dailyPnl: state?.daily_pnl_gbp,
     streamStatus: viewState?.stream_status,
+    marketState: viewState?.market_state,
     epic: viewState?.epic ?? selectedEpic,
     spreadCurrent: viewState?.spread_current ?? viewState?.spread,
     spreadNormal: viewState?.spread_normal,

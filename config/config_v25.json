@@ -22,7 +22,9 @@
   "adaptive_max_risk_points": 90,
   "adaptive_high_confidence": 90,
   "adaptive_high_confidence_reward_multiple": 3.0,
-  "adaptive_min_setup_trades": 3,
+  "adaptive_min_setup_trades": 6,
+  "dynamic_stop_floor_enabled": true,
+  "dynamic_stop_floor_min": 8,
   "adaptive_good_winrate": 0.6,
   "adaptive_bad_winrate": 0.55,
   "adaptive_good_setup_reward_multiple": 2.4,
@@ -33,6 +35,7 @@
   "adaptive_max_trade_size": 50,
   "breakeven_enabled": true,
   "breakeven_trigger_points": 30,
+  "max_position_age_minutes": 480,
   "breakeven_offset_points": 0,
   "breakeven_once_per_position": true,
   "adaptive_trailing_stop_enabled": true,
@@ -98,7 +101,7 @@
       "enabled": true,
       "epic": "IX.D.NIKKEI.IFM.IP",
       "name": "Japan 225",
-      "signal_threshold": 80,
+      "signal_threshold": 70,
       "max_spread_pts": 35,
       "stop_distance_points": 45,
       "adaptive_min_risk_points": 25,
@@ -114,7 +117,7 @@
       ]
     },
     "eur_usd": {
-      "enabled": true,
+      "enabled": false,
       "execution_priority": 50,
       "epic": "CS.D.EURUSD.CFD.IP",
       "name": "EUR/USD",
@@ -135,7 +138,7 @@
       ]
     },
     "gbp_usd": {
-      "enabled": true,
+      "enabled": false,
       "execution_priority": 50,
       "epic": "CS.D.GBPUSD.CFD.IP",
       "name": "GBP/USD",
@@ -156,7 +159,7 @@
       ]
     },
     "us_oil": {
-      "enabled": true,
+      "enabled": false,
       "execution_priority": 60,
       "epic": "CS.D.CRUDE.CFD.IP",
       "name": "US Oil WTI",
@@ -181,7 +184,7 @@
       "execution_priority": 70,
       "epic": "IX.D.DOW.IFM.IP",
       "name": "Wall Street",
-      "signal_threshold": 80,
+      "signal_threshold": 70,
       "max_spread_pts": 12,
       "stop_distance_points": 80,
       "adaptive_min_risk_points": 30,
@@ -218,11 +221,53 @@
         "london_us_overlap",
         "us_afternoon"
       ]
+    },
+    "germany_40": {
+      "enabled": true,
+      "name": "Germany 40",
+      "epic": "IX.D.DAX.IFM.IP",
+      "best_session": "08:00-16:30 BST",
+      "trading_session_whitelist": [
+        "london_morning",
+        "london_us_overlap"
+      ],
+      "stop_distance_points": 50,
+      "max_spread_pts": 4,
+      "signal_threshold": 75,
+      "adaptive_min_risk_points": 20,
+      "adaptive_max_risk_points": 100,
+      "min_atr_points": 15,
+      "ig_point_value_gbp": 1.0,
+      "trade_size": 5,
+      "risk_cap_gbp": 500,
+      "stale_threshold_seconds": 15,
+      "execution_priority": 65
+    },
+    "nasdaq_100": {
+      "enabled": true,
+      "name": "US Tech 100",
+      "epic": "IX.D.NASDAQ.IFM.IP",
+      "best_session": "14:30-21:00 BST",
+      "trading_session_whitelist": [
+        "london_us_overlap",
+        "us_afternoon"
+      ],
+      "stop_distance_points": 100,
+      "max_spread_pts": 5,
+      "signal_threshold": 75,
+      "adaptive_min_risk_points": 40,
+      "adaptive_max_risk_points": 200,
+      "min_atr_points": 30,
+      "ig_point_value_gbp": 1.0,
+      "trade_size": 3,
+      "risk_cap_gbp": 500,
+      "stale_threshold_seconds": 15,
+      "execution_priority": 65
     }
   },
   "engine_log_intermittent": true,
   "engine_log_intermittent_seconds": 30,
-  "allow_live_trading": true,
+  "allow_live_trading": false,
   "max_open_positions": 15,
   "max_positions_per_epic": 2,
   "max_daily_loss_gbp": 500.0,
@@ -266,7 +311,7 @@
   "startup_countdown_warm_session_minutes": 30,
   "rest_min_interval_seconds": 15,
   "transaction_sync_seconds": 300,
-  "transaction_sync_min_gap_seconds": 120,
+  "transaction_sync_min_gap_seconds": 300,
   "closed_trades_verify_hours": 48,
   "max_retries": 2,
   "timeout_seconds": 45,
@@ -281,5 +326,6 @@
     "enabled": true,
     "bot_token": "",
     "chat_id": ""
-  }
+  },
+  "rest_hard_cap_per_minute": 3
 }

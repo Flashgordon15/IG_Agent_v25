@@ -164,11 +164,12 @@ class IgTransactionSync:
                 return False
 
         now = time.time()
+        effective_last = self._last_sync_ts if self._last_sync_ts > 0 else (now - SOFT_MIN_GAP_SEC)
         if not force:
-            if self._last_sync_ts > 0 and now - self._last_sync_ts < SOFT_MIN_GAP_SEC:
+            if now - effective_last < SOFT_MIN_GAP_SEC:
                 self._log_skip(f"soft gap {SOFT_MIN_GAP_SEC:.0f}s")
                 return False
-            if self._last_sync_ts > 0 and now - self._last_sync_ts < self._min_gap_seconds:
+            if now - effective_last < self._min_gap_seconds:
                 if not self.is_display_stale():
                     self._log_skip(f"min gap {self._min_gap_seconds:.0f}s, cache fresh")
                     return False
@@ -243,11 +244,16 @@ class IgTransactionSync:
             return 0
 
         now = time.time()
-        if not force and self._last_sync_ts > 0:
-            if now - self._last_sync_ts < SOFT_MIN_GAP_SEC:
+        # Apply gap check unconditionally — including the first call after startup
+        # or rate-limit recovery. When _last_sync_ts is 0 (never run), treat it as
+        # if a sync ran SOFT_MIN_GAP_SEC ago so the first call must wait only that
+        # gap rather than firing immediately alongside other startup REST traffic.
+        effective_last = self._last_sync_ts if self._last_sync_ts > 0 else (now - SOFT_MIN_GAP_SEC)
+        if not force:
+            if now - effective_last < SOFT_MIN_GAP_SEC:
                 self._log_skip(f"soft gap {SOFT_MIN_GAP_SEC:.0f}s", force=force)
                 return 0
-            if now - self._last_sync_ts < self._min_gap_seconds:
+            if now - effective_last < self._min_gap_seconds:
                 self._log_skip(f"min gap {self._min_gap_seconds:.0f}s", force=force)
                 return 0
 

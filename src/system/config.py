@@ -150,6 +150,16 @@ class Config:
     def adaptive_max_entry_spread(self) -> float:
         return float(self._data.get("adaptive_max_entry_spread", self.max_spread_points))
 
+    @property
+    def adaptive_max_limit_atr_multiple(self) -> float:
+        """Cap limit at this multiple of ATR (0 = disabled). Prevents unreachable targets."""
+        return float(self._data.get("adaptive_max_limit_atr_multiple", 0.0))
+
+    @property
+    def adaptive_min_net_profit_pts(self) -> float:
+        """Min required (limit_distance - spread) before entry. 0 = disabled."""
+        return float(self._data.get("adaptive_min_net_profit_pts", 0.0))
+
     # --- Adaptive execution ---
     @property
     def adaptive_execution_enabled(self) -> bool:
@@ -178,6 +188,19 @@ class Config:
     @property
     def adaptive_max_risk_points(self) -> float:
         return float(self._data["adaptive_max_risk_points"])
+
+    @property
+    def max_position_age_minutes(self) -> float | None:
+        v = self._data.get("max_position_age_minutes")
+        return float(v) if v is not None and float(v) > 0 else None
+
+    @property
+    def dynamic_stop_floor_enabled(self) -> bool:
+        return bool(self._data.get("dynamic_stop_floor_enabled", False))
+
+    @property
+    def dynamic_stop_floor_min(self) -> float:
+        return float(self._data.get("dynamic_stop_floor_min", 8.0))
 
     @property
     def adaptive_high_confidence(self) -> float:
@@ -521,6 +544,16 @@ class Config:
     @property
     def rest_budget_warn_per_minute(self) -> int:
         return max(1, int(self._data.get("rest_budget_warn_per_minute", 6)))
+
+    @property
+    def rest_hard_cap_per_minute(self) -> int:
+        """Hard per-minute cap for non-essential REST calls — blocks unconditionally
+        regardless of stream state. Defaults to warn_per_minute when not set."""
+        default = self.rest_budget_warn_per_minute
+        raw = self._data.get("rest_hard_cap_per_minute")
+        if raw is None:
+            return default
+        return max(1, int(raw))
 
     @property
     def rest_min_interval_seconds(self) -> float:

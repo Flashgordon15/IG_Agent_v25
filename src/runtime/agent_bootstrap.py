@@ -67,6 +67,7 @@ def start_ig_position_sync(
     interval_seconds: float,
     points_engine: Any | None = None,
     managed_epics: set[str] | frozenset[str] | None = None,
+    transaction_sync: Any | None = None,
 ) -> Any | None:
     """Start background IG open-position sync and attach to trade tracker."""
     global _position_sync
@@ -82,6 +83,7 @@ def start_ig_position_sync(
             interval_seconds=float(interval_seconds),
             points_engine=points_engine,
             managed_epics=managed_epics,
+            transaction_sync=transaction_sync,
         )
         tracker.attach_sync(sync)
         sync.start()
@@ -237,6 +239,7 @@ def build_market_orchestrator(
     position_sync = None
     if rest_client is not None:
         from execution.trade_tracker import TradeTracker
+        from runtime.ig_transaction_sync import IgTransactionSync
 
         tracker = TradeTracker(store, prefer_ig=True)
         managed_epics = frozenset(
@@ -244,6 +247,24 @@ def build_market_orchestrator(
             for _iid, inst in enabled
             if str(inst.get("epic") or "").strip()
         )
+
+        # Start transaction sync daemon — populates ig_pnl_currency on closed trades
+        txn_sync: Any | None = None
+        try:
+            txn_sync = IgTransactionSync(
+                rest_client,
+                store,
+                interval_seconds=float(getattr(cfg, "transaction_sync_seconds", 300.0)),
+                min_gap_seconds=float(getattr(cfg, "transaction_sync_min_gap_seconds", 120.0)),
+                history_days=int(getattr(cfg, "transaction_history_days", 2)),
+                display_hours=24.0,
+            )
+            txn_sync.start()
+            log_engine("IG transaction sync started")
+        except Exception as _txn_e:
+            log_engine(f"IG transaction sync start failed: {type(_txn_e).__name__}: {_txn_e}")
+            txn_sync = None
+
         position_sync = start_ig_position_sync(
             rest_client,
             store,
@@ -252,6 +273,7 @@ def build_market_orchestrator(
             interval_seconds=float(cfg.position_sync_seconds),
             points_engine=points_engine,
             managed_epics=managed_epics,
+            transaction_sync=txn_sync,
         )
 
     loops: list[AgentTradingLoop] = []
@@ -326,6 +348,8 @@ def build_market_orchestrator(
                 "positions": len(positions) if isinstance(positions, list) else 0,
                 "cumulative": float(pts.get("cumulative") or 0),
                 "state": str(pts.get("state") or points_engine.get_state()),
+                "balance": tick.get("balance_gbp"),
+                "daily_pnl": tick.get("daily_pnl_gbp"),
             }
 
         set_heartbeat_provider(_heartbeat_snapshot)
@@ -387,8 +411,9 @@ def start_market_stream(cfg: Config, *, rest_client: Any | None) -> Any | None:
     hub = get_market_data_hub()
     hub.attach_rest(rest_client)
     hub.set_min_fetch_interval(float(cfg.refresh_seconds))
-    for epic in epics:
-        hub.fetch_if_stale(epic, min_interval=0.0)
+    # Do NOT pre-fetch via REST at startup — Lightstreamer delivers prices within
+    # seconds. Calling fetch_if_stale(min_interval=0.0) for all 6 epics creates a
+    # burst of 6 simultaneous REST calls that counts against the IG API key allowance.
 
     try:
         from ig_api.streaming_factory import create_streaming_client

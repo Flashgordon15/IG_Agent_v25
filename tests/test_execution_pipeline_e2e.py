@@ -45,6 +45,11 @@ def _buy_signal(conf: float = 92.0) -> SignalResult:
 
 
 def _make_orchestrator(**overrides) -> OrchestratorLoop:
+    try:
+        from system.rate_limit_manager import get_rate_limit_manager
+        get_rate_limit_manager().reset_for_tests()
+    except Exception:
+        pass
     config = MagicMock()
     config.refresh_seconds = 0.05
     config.max_spread_points = 35.0
@@ -53,6 +58,7 @@ def _make_orchestrator(**overrides) -> OrchestratorLoop:
     config.stop_distance_points = 45.0
     config.trade_size = 1.0
     config.currency_code = "GBP"
+    config.max_daily_loss_gbp = 200.0
     config.get = MagicMock(
         side_effect=lambda key, default=None: {
             "ig_point_value_gbp": 1.0,

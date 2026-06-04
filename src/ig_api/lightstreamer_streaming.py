@@ -15,8 +15,9 @@ from ig_api.price_subscribers import CallbackList
 from system.credentials_loader import Credentials
 from system.engine_log import log_engine
 
-_MAX_LS_RECONNECT = 3
+_MAX_LS_RECONNECT = 10
 _LS_RECONNECT_WAIT_SEC = 5.0
+_LS_RECONNECT_MAX_WAIT_SEC = 60.0  # exponential backoff ceiling
 _LS_CONNECTING_GRACE_SEC = 90.0
 _LS_BLANK_TICK_RECONNECT_SEC = 30.0
 _BLANK_TICK_LOG_INTERVAL_SEC = 30.0
@@ -402,8 +403,13 @@ class IGLightstreamerStreamingClient:
             for attempt in range(1, _MAX_LS_RECONNECT + 1):
                 if not self._running or self._using_fallback:
                     return
-                log_engine(f"Lightstreamer reconnect attempt {attempt} of {_MAX_LS_RECONNECT}")
-                time.sleep(_LS_RECONNECT_WAIT_SEC)
+                # Exponential backoff: 5, 10, 20, 40, 60, 60, 60 … seconds
+                wait = min(_LS_RECONNECT_WAIT_SEC * (2 ** (attempt - 1)), _LS_RECONNECT_MAX_WAIT_SEC)
+                log_engine(
+                    f"Lightstreamer reconnect attempt {attempt}/{_MAX_LS_RECONNECT} "
+                    f"(wait {wait:.0f}s)"
+                )
+                time.sleep(wait)
                 try:
                     self._teardown_lightstreamer()
                     self._first_tick_received = False

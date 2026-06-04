@@ -54,6 +54,11 @@ class LiveExecutorConfirmInflightTests(unittest.TestCase):
     def setUp(self) -> None:
         reset_entry_inflight_state_for_tests()
         reset_pending_state_for_tests()
+        try:
+            from system.rate_limit_manager import get_rate_limit_manager
+            get_rate_limit_manager().reset_for_tests()
+        except Exception:
+            pass
 
     def tearDown(self) -> None:
         reset_entry_inflight_state_for_tests()

@@ -66,8 +66,13 @@ function spreadTextColor(current, normal) {
   return "text-foreground";
 }
 
-function resolveStreamStatus(streamStatus, wsConnected, reconnecting) {
+function resolveStreamStatus(streamStatus, wsConnected, reconnecting, marketState) {
   if (!wsConnected || reconnecting) return "DISCONNECTED";
+  const ms = String(marketState ?? "").toUpperCase();
+  // When the market itself is closed or in maintenance, show that state rather
+  // than the Lightstreamer stream health — the boxes are the source of truth.
+  if (ms === "MAINTENANCE") return "MAINTENANCE";
+  if (ms === "CLOSED") return "CLOSED";
   const s = String(streamStatus ?? "").toUpperCase();
   if (s === "LIVE" || s === "STALE" || s === "DISCONNECTED") return s;
   return isNil(streamStatus) ? "DISCONNECTED" : s;
@@ -75,9 +80,11 @@ function resolveStreamStatus(streamStatus, wsConnected, reconnecting) {
 
 function streamStyle(status) {
   switch (status) {
-    case "LIVE":    return { dot: "bg-success", text: "text-success", pulse: true };
-    case "STALE":   return { dot: "bg-warning", text: "text-warning", pulse: false };
-    default:        return { dot: "bg-danger",  text: "text-danger",  pulse: false };
+    case "LIVE":        return { dot: "bg-success",  text: "text-success",  pulse: true,  label: "LIVE" };
+    case "STALE":       return { dot: "bg-warning",  text: "text-warning",  pulse: false, label: "STALE" };
+    case "MAINTENANCE": return { dot: "bg-danger",   text: "text-danger",   pulse: false, label: "MAINT" };
+    case "CLOSED":      return { dot: "bg-muted",    text: "text-muted",    pulse: false, label: "CLOSED" };
+    default:            return { dot: "bg-danger",   text: "text-danger",   pulse: false, label: status };
   }
 }
 
@@ -113,6 +120,7 @@ export default function Header({
   winRate,
   dailyPnl,
   streamStatus,
+  marketState,
   spreadCurrent,
   spreadNormal,
   sentiment,
@@ -122,7 +130,7 @@ export default function Header({
   maxPositions,
 }) {
   const agent = agentStateStyle(agentState);
-  const stream = resolveStreamStatus(streamStatus, wsConnected, reconnecting);
+  const stream = resolveStreamStatus(streamStatus, wsConnected, reconnecting, marketState);
   const streamUi = streamStyle(stream);
   const spreadRatio =
     !isNil(spreadCurrent) && !isNil(spreadNormal) && Number(spreadNormal) > 0
@@ -156,10 +164,10 @@ export default function Header({
         {/* Divider */}
         <span className="hidden sm:block h-5 w-px bg-border shrink-0" aria-hidden />
 
-        {/* Stream status */}
+        {/* Stream / market status */}
         <div className={`inline-flex shrink-0 items-center gap-1.5 text-[11px] ${streamUi.text}`}>
           <Dot className={streamUi.dot} pulse={streamUi.pulse} />
-          <span className="font-medium">{stream}</span>
+          <span className="font-medium">{streamUi.label}</span>
         </div>
 
         {/* Bid/Offer */}

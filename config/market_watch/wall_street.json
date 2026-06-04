@@ -1,0 +1,14 @@
+{
+  "fund_id": "wall_street",
+  "display_name": "Wall Street",
+  "epic": "IX.D.DOW.IFM.IP",
+  "timezone": "Europe/London",
+  "closed_weekdays": ["sat", "sun"],
+  "weekly_sessions": [
+    { "days": ["mon", "tue", "wed", "thu"], "open": "01:00", "close": "24:00" },
+    { "days": ["fri"], "open": "01:00", "close": "22:00" }
+  ],
+  "daily_breaks": [
+    { "days": ["mon", "tue", "wed", "thu", "fri"], "start": "22:00", "end": "23:00", "label": "overnight close" }
+  ]
+}

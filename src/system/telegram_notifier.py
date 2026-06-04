@@ -28,7 +28,7 @@ from zoneinfo import ZoneInfo
 from system.engine_log import log_engine
 
 _LONDON = ZoneInfo("Europe/London")
-_HEARTBEAT_INTERVAL_SEC = 30 * 60
+_HEARTBEAT_INTERVAL_SEC = 60 * 60
 _ALERT_DEDUPE_SEC = 300.0
 
 _lock = threading.RLock()
@@ -282,26 +282,21 @@ class TelegramNotifier:
         points_after: float | None,
         points_state: str,
     ) -> None:
-        win = pnl_pts >= 0
+        win = (pnl_gbp if pnl_gbp is not None else pnl_pts) >= 0
         emoji = "✅ WIN" if win else "❌ LOSS"
-        if pnl_gbp is not None:
-            sign = "+" if win else "-"
-            gbp_str = f"{sign}£{abs(pnl_gbp):,.2f}"
-        else:
-            gbp_str = None
         pts_sign = "+" if pnl_pts >= 0 else ""
         pts_str = f"{pts_sign}{pnl_pts:.1f}pts"
         cumulative = points_after if points_after is not None else 0.0
-        first_line = (
-            f"{emoji} {market} {gbp_str} {pts_str}"
-            if gbp_str
-            else f"{emoji} {market} {pts_str}"
-        )
-        text = (
-            f"{first_line}\n"
-            f"Cumulative: {cumulative:.1f}pts {points_state}"
-        )
-        self._send_async(text)
+        dur = f" ({duration_mins:.0f}m)" if duration_mins is not None else ""
+        lines = [f"{emoji} {market} {direction}{dur}"]
+        if pnl_gbp is not None:
+            gbp_sign = "+" if pnl_gbp >= 0 else ""
+            lines.append(f"P&L: {gbp_sign}£{pnl_gbp:,.2f} | {pts_str}")
+        else:
+            lines.append(f"P&L: {pts_str}")
+        lines.append(f"Entry: {entry:.5f} → Exit: {exit_price:.5f}")
+        lines.append(f"Cumulative: {cumulative:.1f}pts {points_state}")
+        self._send_async("\n".join(lines))
 
     def send_heartbeat(self, snapshot: dict[str, Any]) -> None:
         fitness = float(snapshot.get("fitness") or 0)
@@ -310,10 +305,18 @@ class TelegramNotifier:
         positions = int(snapshot.get("positions") or 0)
         cumulative = float(snapshot.get("cumulative") or 0)
         state = str(snapshot.get("state") or "CAUTION")
+        balance = snapshot.get("balance")
+        daily_pnl = snapshot.get("daily_pnl")
+        balance_line = ""
+        if balance is not None:
+            pnl_sign = "+" if float(daily_pnl or 0) >= 0 else ""
+            pnl_str = f" | Daily P&L: {pnl_sign}£{float(daily_pnl or 0):,.2f}" if daily_pnl is not None else ""
+            balance_line = f"\nBalance: £{float(balance):,.2f}{pnl_str}"
         text = (
-            f"💓 Agent alive {self._now_bst()}\n"
+            f"💓 Hourly update {self._now_bst()}\n"
             f"Fitness: {fitness:.0f}% | Signal: {signal:.0f}%\n"
             f"Stream: {stream} | Positions: {positions}\n"
             f"Points: {cumulative:.1f} {state}"
+            f"{balance_line}"
         )
         self._send_async(text)

@@ -35,24 +35,42 @@ def _build_date() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
+CURRENT_VERSION = "25.2.0"
+
+
 def read_version_state() -> dict[str, Any]:
     path = version_json_path()
+    defaults: dict[str, Any] = {
+        "version": CURRENT_VERSION,
+        "shown": False,
+        "build_date": _build_date(),
+        "changelog": [],
+    }
     if not path.exists():
-        return {"version": "25.1.0", "shown": False, "build_date": _build_date()}
+        return defaults
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(data, dict):
-            if "build_date" not in data:
-                data["build_date"] = _build_date()
+            data.setdefault("build_date", _build_date())
+            data.setdefault("changelog", [])
+            # Auto-show splash when version advances
+            if str(data.get("version") or "") != CURRENT_VERSION:
+                data["version"] = CURRENT_VERSION
+                data["shown"] = False
+                data["shown_for_version"] = str(data.get("shown_for_version") or "")
+            elif str(data.get("shown_for_version") or "") != CURRENT_VERSION:
+                # Shown field is for a different version — force re-show
+                data["shown"] = False
             return data
     except Exception:
         pass
-    return {"version": "25.1.0", "shown": False, "build_date": _build_date()}
+    return defaults
 
 
 def dismiss_splash() -> dict[str, Any]:
     data = read_version_state()
     data["shown"] = True
+    data["shown_for_version"] = CURRENT_VERSION
     data["dismissed_at"] = datetime.now(timezone.utc).strftime(
         "%Y-%m-%dT%H:%M:%S.%f"
     )[:-3] + "Z"
@@ -60,6 +78,99 @@ def dismiss_splash() -> dict[str, Any]:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
     return data
+
+
+_IG_IMPORT_SETUPS = frozenset({"ig|imported", "ig_import", "ig_import", "ig|import"})
+
+
+def _is_ig_import_row(row: dict[str, Any]) -> bool:
+    setup = str(row.get("setup_key") or row.get("setup") or "").lower()
+    src = str(row.get("source") or "").lower()
+    return setup in _IG_IMPORT_SETUPS or setup.startswith("ig|") or src == "ig_import"
+
+
+def _deduplicate_ig_imports(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Remove IG-import rows that are duplicates of agent-placed or other import rows.
+
+    Two rows are duplicates when they share the same direction, same rounded GBP P&L,
+    and close times within 10 minutes. Agent-placed rows are always preferred; among
+    pure IG-import pairs the row with a real market name is kept.
+    """
+    from datetime import timedelta
+
+    def parse_ts(row: dict[str, Any]) -> datetime | None:
+        ts = row.get("closed_at")
+        if not ts:
+            return None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                return datetime.strptime(str(ts)[:19], fmt)
+            except ValueError:
+                continue
+        return None
+
+    def pnl_key(row: dict[str, Any]) -> float | None:
+        v = row.get("ig_pnl_currency")
+        if v is None:
+            return None
+        try:
+            return round(float(v), 2)
+        except (TypeError, ValueError):
+            return None
+
+    def within_window(a: dict[str, Any], b: dict[str, Any], window: timedelta) -> bool:
+        ta, tb = parse_ts(a), parse_ts(b)
+        if ta is None or tb is None:
+            return True  # treat missing timestamp as within window
+        return abs(ta - tb) <= window
+
+    window = timedelta(minutes=10)
+    agent_rows = [r for r in rows if not _is_ig_import_row(r)]
+    import_rows = [r for r in rows if _is_ig_import_row(r)]
+
+    # Pass 1: shadow imports that duplicate an agent row
+    shadowed: set[int] = set()
+    for idx, imp in enumerate(import_rows):
+        imp_pnl = pnl_key(imp)
+        imp_dir = str(imp.get("side") or "")
+        if imp_pnl is None:
+            continue
+        for agent in agent_rows:
+            if str(agent.get("side") or "") != imp_dir:
+                continue
+            if pnl_key(agent) != imp_pnl:
+                continue
+            if not within_window(agent, imp, window):
+                continue
+            shadowed.add(idx)
+            break
+
+    remaining_imports = [r for i, r in enumerate(import_rows) if i not in shadowed]
+
+    # Pass 2: among surviving IG imports, deduplicate import-vs-import pairs
+    kept_imports: list[dict[str, Any]] = []
+    import_shadowed: set[int] = set()
+    for i, row_a in enumerate(remaining_imports):
+        if i in import_shadowed:
+            continue
+        for j, row_b in enumerate(remaining_imports):
+            if j <= i or j in import_shadowed:
+                continue
+            if str(row_a.get("side") or "") != str(row_b.get("side") or ""):
+                continue
+            if pnl_key(row_a) != pnl_key(row_b):
+                continue
+            if not within_window(row_a, row_b, window):
+                continue
+            # Prefer the row with a real market name (IG_IMPORT over IG|imported)
+            if row_b.get("market") and not row_a.get("market"):
+                import_shadowed.add(i)
+            else:
+                import_shadowed.add(j)
+        if i not in import_shadowed:
+            kept_imports.append(row_a)
+
+    return agent_rows + kept_imports
 
 
 def get_closed_trades(limit: int = 10) -> list[dict[str, Any]]:
@@ -72,12 +183,13 @@ def get_closed_trades(limit: int = 10) -> list[dict[str, Any]]:
         cfg = ConfigLoader(config_dir() / "config_v25.json").load_config()
         store = LearningStore(str(cfg.learning_db))
         want = max(1, int(limit))
-        # Over-fetch so SIM/soak exclusions still yield up to *want* rows.
-        rows = store.recent_closed_trades(limit=max(want * 4, want))
+        # Over-fetch so SIM/soak exclusions and deduplication still yield *want* rows.
+        rows = store.recent_closed_trades(limit=max(want * 8, 80))
+        filtered: list[dict[str, Any]] = [r for r in rows if not is_excluded_display_row(r)]
+        deduped = _deduplicate_ig_imports(filtered)
+        deduped.sort(key=lambda r: str(r.get("closed_at") or ""), reverse=True)
         out: list[dict[str, Any]] = []
-        for row in rows:
-            if is_excluded_display_row(row):
-                continue
+        for row in deduped:
             out.append(_format_trade_row(row))
             if len(out) >= want:
                 break

@@ -297,6 +297,17 @@ function signalDot(conf) {
   return "bg-danger/50";
 }
 
+function fmtNextOpen(isoStr) {
+  if (!isoStr) return null;
+  try {
+    return new Date(isoStr).toLocaleTimeString("en-GB", {
+      hour: "2-digit",
+      minute: "2-digit",
+      timeZone: "Europe/London",
+    });
+  } catch { return null; }
+}
+
 function marketStatusMeta(marketState, streamStatus) {
   const ms = String(marketState ?? "").toUpperCase();
   const ss = String(streamStatus ?? "").toUpperCase();
@@ -325,6 +336,9 @@ function MarketGrid({ rawState, selectedEpic, onSelectEpic }) {
         const active = epic === selectedEpic;
         const status = marketStatusMeta(m.market_state, m.stream_status);
         const isOpen = String(m.market_state ?? "").toUpperCase() === "OPEN";
+        const sessionGateVal = (m.health?.gates || []).find((g) => g.name === "session_open")?.value;
+        const nextOpenIso = typeof sessionGateVal === "object" ? sessionGateVal?.next_open : null;
+        const nextOpenTime = fmtNextOpen(nextOpenIso);
 
         return (
           <button
@@ -349,7 +363,7 @@ function MarketGrid({ rawState, selectedEpic, onSelectEpic }) {
             <div className="font-mono text-[11px] tabular-nums text-muted">
               {isOpen && bid != null ? fmtPrice(bid, epic) : "—"}
             </div>
-            {/* Status badge */}
+            {/* Status badge + next open */}
             <div className="mt-1 flex items-center justify-between gap-1">
               <span className={`text-[9px] font-bold uppercase tracking-wider ${status.color}`}>
                 {status.label}
@@ -360,6 +374,11 @@ function MarketGrid({ rawState, selectedEpic, onSelectEpic }) {
                 </span>
               )}
             </div>
+            {!isOpen && nextOpenTime && (
+              <div className="mt-0.5 text-[9px] text-muted/70 tabular-nums">
+                Opens {nextOpenTime}
+              </div>
+            )}
           </button>
         );
       })}

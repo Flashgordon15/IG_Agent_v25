@@ -78,25 +78,51 @@ def record_ml_entry_from_signal(
             if points is not None
             else float(execution_params.get("size", 1.0))
         )
-        entry_px = float(fill_price if fill_price is not None else signal.quote.mid)
+        signal_mid = float(signal.quote.mid)
+        entry_px = float(fill_price if fill_price is not None else signal_mid)
+        # Positive = unfavourable slip (paid more than mid for BUY / received less for SELL)
+        slippage_pts = abs(entry_px - signal_mid)
+        raw_conf = float(snap.get("raw_confidence", conf))
+        # execution_params key for stop distance is "risk" (set by ExecutionEngine.execute_trade)
+        stop_pts = float(execution_params.get("risk", execution_params.get("stop_distance", 0.0)) or 0.0)
+        limit_pts = float(execution_params.get("limit", 0.0) or 0.0)
+        atr_val = float(_snapshot_field(snap, "atr", 0.0))
+        spread_val = float(signal.quote.spread)
+        # daily_range_ratio: spread cost as fraction of ATR (daily range proxy).
+        # High ratio → spread eats a large % of achievable move → poor expectancy.
+        daily_range_ratio = (spread_val / atr_val) if atr_val > 0 else 0.0
+        # limit_to_atr_ratio: how realistic the profit target is vs recent volatility.
+        limit_to_atr_ratio = (limit_pts / atr_val) if atr_val > 0 and limit_pts > 0 else 0.0
         _ml_store.record_entry(
             deal_id,
             {
                 "confidence": conf,
+                # Core model features (must match ml_scorer feature_names)
+                "adjusted_score": conf,
+                "raw_score": raw_conf,
+                "fired": 1,
+                "stop_pts": stop_pts,
                 "confidence_band": band,
                 "setup_name": signal.setup_key,
                 "trend_bias": trend,
                 "rsi": float(_snapshot_field(snap, "rsi", 0.0)),
-                "atr": float(_snapshot_field(snap, "atr", 0.0)),
-                "spread": float(signal.quote.spread),
+                "atr": atr_val,
+                "spread": spread_val,
+                # Range/spread awareness features
+                "daily_range_ratio": daily_range_ratio,
+                "limit_to_atr_ratio": limit_to_atr_ratio,
+                "limit_pts": limit_pts,
+                "net_profit_pts": limit_pts - spread_val,
                 "volume_regime": str(snap.get("vol_regime") or "unknown"),
                 "session_window": session_name(signal.quote.time),
+                "signal_mid": signal_mid,
                 "entry_price": entry_px,
+                "slippage_pts": slippage_pts,
                 "entry_time": MLTrainingStore.iso_now(),
                 "fitness_score": fitness,
                 "points_state": points.get_state() if points is not None else "HEALTHY",
                 "size_multiplier": mult,
-                "instrument": "Japan 225",
+                "instrument": signal.market,
                 "version": ML_VERSION,
             },
         )

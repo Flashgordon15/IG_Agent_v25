@@ -166,8 +166,34 @@ class OrderValidator:
         allowed = all(checks.values()) and not reasons
         return ValidationResult(allowed=allowed, reasons=reasons, checks=checks)
 
+    @staticmethod
+    def _weekend_gate_check() -> tuple[bool, str]:
+        """Block new entries during weekend risk windows.
+
+        - Friday 20:30–23:59 UTC: markets approaching weekly close, gap risk high.
+        - Sunday 22:00–22:15 UTC: first 15 minutes after weekly open, spreads wide.
+        """
+        now = datetime.utcnow()
+        weekday = now.weekday()  # 0=Mon … 4=Fri, 5=Sat, 6=Sun
+        hour, minute = now.hour, now.minute
+        total_mins = hour * 60 + minute
+
+        if weekday == 4 and total_mins >= 20 * 60 + 30:
+            return False, "Friday close blackout — no new entries after 20:30 UTC"
+        if weekday == 5:
+            return False, "Weekend — markets closed Saturday"
+        if weekday == 6 and total_mins < 22 * 60:
+            return False, "Weekend — Sunday markets not yet open"
+        if weekday == 6 and total_mins < 22 * 60 + 15:
+            return False, "Sunday open blackout (22:00–22:15 UTC) — spread stabilising"
+        return True, ""
+
     def check_session(self, epic: str = "") -> tuple[bool, str]:
         cfg = self._cfg
+        # Weekend gap protection applies regardless of session whitelist config.
+        ok, reason = self._weekend_gate_check()
+        if not ok:
+            return False, reason
         if not cfg.trading_hours_enabled:
             return True, ""
         whitelist: list[str] = []

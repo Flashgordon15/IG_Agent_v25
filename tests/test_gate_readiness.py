@@ -113,10 +113,10 @@ class TestComputeTradeReadiness(unittest.TestCase):
                 value={"confidence": 40.0, "threshold": 80.0},
             ),
         )
-        # 1 full + 0.5 fitness + 0.5 signal = 2.0 / 7 ≈ 29%
+        # fitness=20/55=0.364, signal=40/80=0.5, session=1.0 → total=1.864/7 ≈ 27%
         r = compute_trade_readiness(gates, fitness_min=GATE_PASS_MIN)
-        self.assertEqual(r["pct"], 29)
-        self.assertEqual(r["remaining_pct"], 71)
+        self.assertEqual(r["pct"], 27)
+        self.assertEqual(r["remaining_pct"], 73)
 
     def test_dict_gates_from_snapshot(self) -> None:
         gates = [
@@ -128,10 +128,11 @@ class TestComputeTradeReadiness(unittest.TestCase):
             {"name": "signal_confidence", "pass": False, "value": {"confidence": 80, "threshold": 80}},
             {"name": "execution", "pass": False},
         ]
+        # session=1.0, cold(bars=6)=1.0, env(40/55)=0.727, points=0, risk=0, sig(80/80)=1.0, exec=0
+        # total=3.727/7 ≈ 53%
         r = compute_trade_readiness(gates)
-        # 1 + 1 + 1 + 1 + 0 + 0 + 0 = 4/7 ≈ 57%
-        self.assertEqual(r["pct"], 57)
-        self.assertEqual(r["remaining_pct"], 43)
+        self.assertEqual(r["pct"], 53)
+        self.assertEqual(r["remaining_pct"], 47)
 
 
 class TestFormatHealthBadgeText(unittest.TestCase):

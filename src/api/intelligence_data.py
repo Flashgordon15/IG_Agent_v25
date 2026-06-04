@@ -64,10 +64,35 @@ def replay_summary() -> dict[str, Any]:
     }
 
 
+def _tail_jsonl_today(path: Path, today: str, *, tail_bytes: int = 2 * 1024 * 1024) -> list[dict[str, Any]]:
+    """Read only today's records from a large JSONL by tailing the file.
+
+    Shadow logs grow indefinitely. Reading the full file on every request is O(40MB+).
+    Since entries are time-ordered we only need the tail where today's records live.
+    """
+    if not path.is_file():
+        return []
+    size = path.stat().st_size
+    seek_pos = max(0, size - tail_bytes)
+    rows: list[dict[str, Any]] = []
+    with open(path, "rb") as f:
+        f.seek(seek_pos)
+        if seek_pos > 0:
+            f.readline()  # skip partial first line
+        for line in f:
+            try:
+                obj = json.loads(line)
+                if str(obj.get("timestamp", "")).startswith(today):
+                    rows.append(obj)
+            except json.JSONDecodeError:
+                continue
+    return rows
+
+
 def shadow_today() -> dict[str, Any]:
     path = data_dir() / "shadow_log.jsonl"
     today = date.today().isoformat()
-    rows = [r for r in _read_jsonl(path) if str(r.get("timestamp", "")).startswith(today)]
+    rows = _tail_jsonl_today(path, today)
     would = sum(1 for r in rows if r.get("would_have_fired"))
     blocked = Counter(
         str(r.get("setup_key") or "unknown") for r in rows if not r.get("would_have_fired")

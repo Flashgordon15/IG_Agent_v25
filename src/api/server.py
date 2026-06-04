@@ -165,29 +165,21 @@ def api_replay_summary() -> dict[str, Any]:
 
 @router.get("/api/shadow/today")
 def api_shadow_today() -> dict[str, Any]:
-    today = date.today().isoformat()
-    rows = [
-        r
-        for r in _read_jsonl(_data("shadow_log.jsonl"))
-        if str(r.get("timestamp", "")).startswith(today)
-    ]
-    fired = [r for r in rows if r.get("would_have_fired")]
-    fired_rate = round(len(fired) / len(rows), 4) if rows else 0.0
-    top_3 = [
-        {"setup": k, "count": v}
-        for k, v in Counter(
-            str(r.get("setup_key") or "unknown") for r in fired
-        ).most_common(3)
-    ]
-    return {
-        "record_count": len(rows),
-        "would_have_fired_rate": fired_rate,
-        "top_3_setups": top_3,
-    }
+    """Tail-read today's shadow log — avoids reading the full 40MB+ file."""
+    from api.intelligence_data import shadow_today as _shadow_today
+    return _shadow_today()
 
 
 @router.get("/api/learning/status")
 def api_learning_status() -> dict[str, Any]:
+    """Defer to optimised implementation in intelligence_data."""
+    from api.intelligence_data import learning_status as _learning_status
+    return _learning_status()
+
+
+@router.get("/api/learning/status_legacy")
+def api_learning_status_legacy() -> dict[str, Any]:
+    """Legacy full implementation — kept for reference."""
     ml_store_rows = len(_read_jsonl(_data("ml_training_store.jsonl")))
     confirmed_trade_count = 0
     top_setups_by_win_rate: list[dict[str, Any]] = []
@@ -202,23 +194,10 @@ def api_learning_status() -> dict[str, Any]:
             confirmed_trade_count = len(store.recent_confirmed_closed_trades(limit=500))
         rows = store.conn.execute(
             """
-            SELECT setup_key,
-                   COUNT(*) AS n,
-                   ROUND(
-                       SUM(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) * 1.0 / COUNT(*),
-                       3
-                   ) AS win_rate
-            FROM trades
-            WHERE closed_at IS NOT NULL AND setup_key IS NOT NULL
-              AND (source IS NULL
-                   OR (source NOT LIKE '%sim%'
-                       AND source NOT LIKE '%soak%'
-                       AND source NOT LIKE '%proof%'
-                       AND source NOT LIKE '%replay%'
-                       AND source NOT LIKE '%test%'))
-            GROUP BY setup_key
-            ORDER BY win_rate DESC
-            LIMIT 5
+            SELECT setup_key, COUNT(*) AS n,
+                   ROUND(SUM(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) * 1.0 / COUNT(*), 3) AS win_rate
+            FROM trades WHERE closed_at IS NOT NULL AND setup_key IS NOT NULL
+            GROUP BY setup_key ORDER BY win_rate DESC LIMIT 5
             """
         ).fetchall()
         top_setups_by_win_rate = [
@@ -267,6 +246,16 @@ def api_replay_run() -> JSONResponse:
                 log_engine(f"api replay run failed: {type(exc).__name__}: {exc}")
 
         try:
+            # Check live thread count — high thread counts indicate agent needs restart
+            live = threading.active_count()
+            if live > 400:
+                return JSONResponse(
+                    {"ok": False, "error": (
+                        f"thread count high ({live}) — restart agent to free threads, "
+                        "then retry replay"
+                    )},
+                    status_code=503,
+                )
             threading.Thread(target=_run, name="replay-manual", daemon=True).start()
         except Exception as exc:
             return JSONResponse(
@@ -442,9 +431,15 @@ def _mount_dashboard(app: FastAPI, dist: Path) -> None:
         )
     index = dist / "index.html"
 
+    _NO_CACHE = {
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "Pragma": "no-cache",
+        "Expires": "0",
+    }
+
     @app.get("/", include_in_schema=False)
     async def dashboard_root() -> FileResponse:
-        return FileResponse(index)
+        return FileResponse(index, headers=_NO_CACHE)
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def dashboard_static_or_spa(full_path: str) -> FileResponse:
@@ -453,7 +448,8 @@ def _mount_dashboard(app: FastAPI, dist: Path) -> None:
         candidate = dist / full_path
         if candidate.is_file():
             return FileResponse(candidate)
-        return FileResponse(index)
+        # SPA fallback — index.html must never be cached so CSS hashes stay fresh
+        return FileResponse(index, headers=_NO_CACHE)
 
 
 app = create_app()
