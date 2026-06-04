@@ -51,7 +51,7 @@ def set_points_state_path_for_tests(path: Path | str | None) -> None:
 
 
 def _nominal_state(cumulative: float) -> PointsStateName:
-    if cumulative > 10.0:
+    if cumulative > 6.0:
         return "HEALTHY"
     if cumulative >= -5.0:
         return "CAUTION"
@@ -469,8 +469,8 @@ class PointsEngine:
                     tier_mult = 4.0   # EXCELLENT: cumulative > 50
                 elif cum > 25.0:
                     tier_mult = 2.5   # THRIVING:  cumulative > 25
-                elif cum > 10.0:
-                    tier_mult = 1.5   # HEALTHY:   cumulative > 10
+                elif cum > 6.0:
+                    tier_mult = 1.5   # HEALTHY:   cumulative > 6
                 else:
                     tier_mult = 1.0
                 if band == "high":
