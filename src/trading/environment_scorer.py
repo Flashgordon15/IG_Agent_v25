@@ -18,8 +18,8 @@ from signals.signal_engine import SignalEngine
 from system.config import Config
 from system.engine_log import log_engine, record_engine_warning
 
-GATE_PASS_MIN = 40.0
-SAFE_DEFAULT_SCORE = 50.0
+GATE_PASS_MIN = 55.0
+SAFE_DEFAULT_SCORE = 55.0  # Matches GATE_PASS_MIN — scorer errors fail-open so trading continues
 COLD_START_BAR_CAP = 6
 GAP_CAP_MINUTES = 15
 GAP_ATR_MULTIPLE = 1.0
@@ -235,11 +235,23 @@ class EnvironmentScorer:
         self.fetch_sentiment(self._epic or market)
 
     def on_ohlc_bootstrapped(self, market: str) -> None:
-        """After OHLC seed lands in SignalEngine.quote_df — refresh cold-start baseline."""
+        """After OHLC seed lands in SignalEngine.quote_df — refresh cold-start baseline.
+
+        If we loaded substantial history (≥ COLD_START_BAR_CAP bars) we backdate
+        session_open_at so bars_from_clock reflects mature data, clearing the cap
+        immediately on mid-session restarts instead of blocking for 30 minutes.
+        """
         self._primary_market = str(market or self._primary_market or "")
         bars = self._complete_bar_count(market)
         self._bars_at_session_open[market] = bars
-        log_engine(f"environment_scorer: bootstrapped from {bars} bars")
+        if bars >= COLD_START_BAR_CAP and market in self._session_open_at:
+            backdate = datetime.now() - timedelta(minutes=COLD_START_BAR_CAP * 5 + 1)
+            self._session_open_at[market] = backdate
+            log_engine(
+                f"environment_scorer: bootstrapped {bars} bars — cold-start cleared (mid-session restart)"
+            )
+        else:
+            log_engine(f"environment_scorer: bootstrapped from {bars} bars")
 
     def register_gap_open(self, market: str, *, at: datetime | None = None) -> None:
         """Apply 15-minute score cap after gap > 1.0× ATR (caller detects gap)."""
@@ -431,7 +443,7 @@ class EnvironmentScorer:
                     "session": SAFE_DEFAULT_SCORE * 0.2,
                     "spread": SAFE_DEFAULT_SCORE * 0.25,
                 },
-                gate_passes=True,
+                gate_passes=SAFE_DEFAULT_SCORE >= GATE_PASS_MIN,
             )
             return SAFE_DEFAULT_SCORE
 
