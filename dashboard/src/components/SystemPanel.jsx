@@ -343,7 +343,7 @@ export default function SystemPanel({ state, wsConnected, reconnecting }) {
           </StatusRow>
           <StatusRow label="Points (cumul.)">
             <span className={`tabular-nums font-medium ${(state?.points?.cumulative ?? 0) >= 0 ? "text-success" : "text-danger"}`}>
-              {state?.points?.cumulative != null ? `${state.points.cumulative > 0 ? "+" : ""}${state.points.cumulative}` : "—"}
+              {state?.points?.cumulative != null ? `${state.points.cumulative > 0 ? "+" : ""}${Number(state.points.cumulative).toFixed(1)}` : "—"}
               {state?.points?.state ? <span className="ml-1 text-muted font-normal">({state.points.state})</span> : null}
             </span>
           </StatusRow>
@@ -387,9 +387,14 @@ export default function SystemPanel({ state, wsConnected, reconnecting }) {
           <StatusRow label="Last Retrain">
             <span className="tabular-nums text-foreground">{fmtTs(lastRetrain) ?? "Never"}</span>
           </StatusRow>
-          <StatusRow label="Training Records">
+          <StatusRow label="Training Records (JSONL)">
             <span className={`tabular-nums font-semibold ${(state?.ml_training_records ?? 0) >= 50 ? "text-success" : "text-warning"}`}>
               {state?.ml_training_records != null ? `${state.ml_training_records} / 50` : "—"}
+            </span>
+          </StatusRow>
+          <StatusRow label="Confirmed Trades (DB)">
+            <span className="tabular-nums text-foreground">
+              {state?.confirmed_trades != null ? state.confirmed_trades : "—"}
             </span>
           </StatusRow>
           <StatusRow label="OHLC Cache">

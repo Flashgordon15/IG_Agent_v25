@@ -55,6 +55,7 @@ class LearningStore:
         assert self._conn is not None
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._conn.execute("PRAGMA wal_autocheckpoint=500")  # checkpoint every 500 pages (~2MB)
 
     @_locked
     def connect(self) -> None:
@@ -64,8 +65,23 @@ class LearningStore:
         self._init_schema()
 
     @_locked
+    def checkpoint(self) -> None:
+        """Force WAL checkpoint — call on graceful shutdown to keep WAL file small."""
+        if self._conn:
+            try:
+                self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                self._conn.commit()
+            except Exception:
+                pass
+
+    @_locked
     def close(self) -> None:
         if self._conn:
+            try:
+                self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                self._conn.commit()
+            except Exception:
+                pass
             self._conn.close()
             self._conn = None
 
@@ -468,8 +484,20 @@ class LearningStore:
                         (row["id"],),
                     ).fetchone()
                     if detail and not is_excluded_display_row(dict(detail)):
+                        from datetime import date as _date
                         from execution.ml_training_hooks import get_points_engine
                         from system.engine_log import log_engine
+
+                        # Only update points engine for trades closed today.
+                        # Historical reconciliation at startup must NOT corrupt
+                        # the current session score with yesterday's losses.
+                        closed_at_row = self.conn.execute(
+                            "SELECT closed_at FROM trades WHERE id=?", (row["id"],)
+                        ).fetchone()
+                        closed_at_str = str(
+                            (closed_at_row["closed_at"] if closed_at_row else None) or ""
+                        )
+                        closed_today = closed_at_str.startswith(_date.today().isoformat())
 
                         conf = float(
                             detail["adjusted_confidence"]
@@ -478,11 +506,11 @@ class LearningStore:
                         )
                         pts = float(detail["pnl_points"] or 0)
                         pe = get_points_engine()
-                        if pe is not None:
+                        if pe is not None and closed_today:
                             pe.record_trade(
                                 str(result), conf, pts, pnl_gbp=float(ig_pnl)
                             )
-                        else:
+                        elif pe is None:
                             log_engine(
                                 "points_engine full close: live instance not available "
                                 "(configure_ml_training not yet called)"
@@ -499,7 +527,7 @@ class LearningStore:
 
                 closed = self.conn.execute(
                     """
-                    SELECT ig_deal_id, exit_price, pnl_points, result
+                    SELECT ig_deal_id, exit AS exit_price, pnl_points, result
                     FROM trades WHERE id=?
                     """,
                     (row["id"],),
@@ -820,9 +848,35 @@ class LearningStore:
 
     @_locked
     def sum_daily_pnl(self, day: str | None = None) -> float:
-        """Sum realised P&L (currency) for trades closed on day (YYYY-MM-DD); default today."""
+        """Sum realised P&L (currency) for trades closed on day (YYYY-MM-DD); default today.
+
+        Excludes ig_import rows when strategy rows exist for the same day to prevent
+        double-counting when IgTransactionSync inserts duplicate rows alongside
+        existing strategy rows that already have ig_pnl_currency populated.
+        """
         d = day or date.today().strftime("%Y-%m-%d")
         expr = self._realised_pnl_expr()
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(trades)").fetchall()}
+        # Only exclude ig_import rows if the source column exists and strategy rows
+        # with ig_pnl_currency exist for this day (prevents double-counting).
+        if "source" in cols and "ig_pnl_currency" in cols:
+            strategy_count = self.conn.execute(
+                """SELECT COUNT(*) AS n FROM trades
+                   WHERE closed_at IS NOT NULL AND substr(closed_at,1,10)=?
+                   AND source != 'ig_import' AND ig_pnl_currency IS NOT NULL""",
+                (d,),
+            ).fetchone()
+            if strategy_count and (strategy_count["n"] or 0) > 0:
+                row = self.conn.execute(
+                    f"""
+                    SELECT COALESCE(SUM({expr}), 0) AS s
+                    FROM trades
+                    WHERE closed_at IS NOT NULL AND substr(closed_at, 1, 10) = ?
+                      AND (source IS NULL OR source != 'ig_import')
+                    """,
+                    (d,),
+                ).fetchone()
+                return float(row["s"] or 0) if row else 0.0
         row = self.conn.execute(
             f"""
             SELECT COALESCE(SUM({expr}), 0) AS s

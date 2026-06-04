@@ -134,8 +134,9 @@ def enrich_positions_with_quote(
         if mark:
             row["current"] = mark
         row["pnl_pts"] = round(pts, 1)
-        # Prefer broker upl from IgPositionSync; quote math is fallback only.
-        if ig_pnl is None:
+        # Use broker UPL when non-zero; fall back to quote math when UPL is
+        # None or 0 (common on DEMO accounts where IG returns upl=0).
+        if not ig_pnl:
             row["pnl_gbp"] = round(gbp, 2)
         out.append(row)
     return out

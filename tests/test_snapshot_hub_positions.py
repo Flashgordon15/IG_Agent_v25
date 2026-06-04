@@ -63,7 +63,8 @@ class SnapshotHubPositionsTests(unittest.TestCase):
         pos = (get_tick().get("positions") or [{}])[0]
         self.assertEqual(pos["current"], 4455.29)
         self.assertEqual(pos["pnl_pts"], 8.0)
-        self.assertEqual(pos["pnl_gbp"], 0.0)
+        # pnl_gbp=0.0 from IG DEMO → now calculated from quote (not kept at 0)
+        self.assertNotEqual(pos["pnl_gbp"], 0.0)
 
 
 if __name__ == "__main__":

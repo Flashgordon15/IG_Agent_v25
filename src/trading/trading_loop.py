@@ -744,6 +744,24 @@ class TradingLoop:
                     detail = pause_msg or "Japan 225 strategy paused"
             except Exception:
                 pass
+            # Also enforce per-instrument trading session whitelist at gate level
+            if open_now:
+                try:
+                    from signals.indicators import session_name
+                    from trading.instrument_registry import InstrumentRegistry
+
+                    wl = InstrumentRegistry(self._config.as_dict()).session_whitelist_for_epic(
+                        self._epic
+                    )
+                    if not wl:
+                        wl = list(self._config.trading_session_whitelist)
+                    if wl:
+                        sess = session_name()
+                        if sess not in wl:
+                            open_now = False
+                            detail = f"Outside allowed trading session (current={sess})"
+                except Exception:
+                    pass
         return GateResult(
             name="session_open",
             passed=open_now,
@@ -859,26 +877,24 @@ class TradingLoop:
     def _gate_points_state(self) -> GateResult:
         state = self._points.get_state()
         paused = self._points.is_session_paused()
-        day_stopped = self._points.is_day_stopped()
+        day_stopped = False  # disabled: max_daily_loss_gbp is the hard stop
         loss_gbp = self._daily_loss_gbp()
+        daily_limit = self._config.max_daily_loss_gbp
         passed = (
             state != "STOP"
             and not paused
-            and not day_stopped
-            and loss_gbp < DAILY_LOSS_LIMIT_GBP
+            and loss_gbp < daily_limit
         )
         if state == "STOP":
             detail = "points state STOP"
-        elif day_stopped:
-            detail = "day stop active"
         elif paused:
             n = self._points.session_skips_remaining()
             detail = (
                 f"session pause — skip {n} actionable signal(s) "
                 f"(BUY/SELL that would have fired)"
             )
-        elif loss_gbp >= DAILY_LOSS_LIMIT_GBP:
-            detail = f"daily loss £{loss_gbp:.2f} >= £{DAILY_LOSS_LIMIT_GBP:.0f}"
+        elif loss_gbp >= daily_limit:
+            detail = f"daily loss £{loss_gbp:.2f} >= £{daily_limit:.0f}"
         else:
             detail = f"points {state}"
         return GateResult(
@@ -901,13 +917,19 @@ class TradingLoop:
                     open_count_fn=self._ig_open_position_count,
                 )
             refresher = self._balance_refresher
-            # Fire-and-forget in a daemon thread — a hanging REST call to the
-            # account endpoint must not block the trading-loop tick.
-            threading.Thread(
+            # Reuse a single worker thread instead of creating one per tick.
+            # Creating a new thread every 5s × 6 markets = 72 threads/min; at
+            # multi-hour runtimes this hits the OS thread limit.
+            worker = getattr(self, "_balance_refresh_worker", None)
+            if worker is not None and worker.is_alive():
+                return  # previous refresh still in progress — skip
+            t = threading.Thread(
                 target=refresher.maybe_refresh,
                 daemon=True,
-                name="account-balance-refresh",
-            ).start()
+                name=f"account-balance-refresh-{self._epic[-8:]}",
+            )
+            self._balance_refresh_worker = t
+            t.start()
         except Exception:
             pass
 
@@ -1044,21 +1066,30 @@ class TradingLoop:
                 if scorer.is_trained():
                     snap = sig.snapshot or {}
                     last = snap.get("last")
+                    _last = last if (last is not None and hasattr(last, "get")) else {}
+                    # Keys must exactly match the model's training feature names
                     features = {
-                        "confidence": rules_conf,
-                        "rsi": float(last.get("rsi", 0)) if last is not None and hasattr(last, "get") else 0.0,
-                        "atr": float(last.get("atr", 0)) if last is not None and hasattr(last, "get") else 0.0,
-                        "spread": float(last.get("spread", 0)) if last is not None and hasattr(last, "get") else 0.0,
-                        "fitness_score": float(snap.get("fitness_score", 0) or 0),
-                        "session_window": str(snap.get("session") or "unknown"),
-                        "volume_regime": str(snap.get("vol_regime") or "unknown"),
-                        "trend_bias": "mixed",
+                        "adjusted_score": rules_conf,
+                        "raw_score": float(snap.get("raw_confidence", rules_conf)),
+                        "rsi": float(_last.get("rsi", 0) or 0),
+                        "atr": float(_last.get("atr", 0) or 0),
+                        "spread": float(_last.get("spread", 0) or 0),
+                        "fired": 1 if sig.signal in ("BUY", "SELL") else 0,
+                        "stop_pts": float(snap.get("stop_pts", 0) or 0),
                     }
-                    ml_prob = scorer.predict(features)
-                    conf = (rules_conf * 0.6) + (ml_prob * 100.0 * 0.4)
-                    log_engine(
-                        f"ML score {ml_prob:.3f} rules {rules_conf:.1f} blended {conf:.1f}"
-                    )
+                    # Only blend if all model features are present
+                    if all(f in features for f in scorer.feature_names):
+                        ml_prob = scorer.score(
+                            features,
+                            use_ml_signal=True,
+                            timeout_s=0.5,
+                        )
+                        if ml_prob > 0.0:
+                            conf = (rules_conf * 0.6) + (ml_prob * 100.0 * 0.4)
+                            conf = max(0.0, min(100.0, conf))
+                            log_engine(
+                                f"ML score {ml_prob:.3f} rules {rules_conf:.1f} blended {conf:.1f}"
+                            )
             except Exception as e:
                 log_engine(f"ML gate blend skipped: {type(e).__name__}: {e}")
         passed = sig.signal in ("BUY", "SELL") and conf >= threshold
@@ -1228,10 +1259,10 @@ class TradingLoop:
             return 0
         closed = 0
         rows = store.conn.execute(
-            "SELECT id, epic, side, size, deal_id FROM trades WHERE status='OPEN'"
+            "SELECT id, epic, side, size, ig_deal_id FROM trades WHERE closed_at IS NULL"
         ).fetchall()
         for row in rows:
-            deal_id = str(row["deal_id"] or "")
+            deal_id = str(row["ig_deal_id"] or "")
             if not deal_id:
                 continue
             side = str(row["side"] or "BUY").upper()
@@ -1515,6 +1546,15 @@ class TradingLoop:
             "daily_pnl_gbp": self._daily_pnl_signed_gbp(open_positions),
             "balance_gbp": self._balance_gbp(),
             "win_rate_20": self._win_rate_20_pct(),
+            "max_open_positions": int(self._config.max_open_positions),
+            "max_positions_per_epic": int(self._config.max_positions_per_epic),
+            "ml_training_records": self._ml_training_record_count(),
+            "confirmed_trades": int(self._store.count_closed_trades() or 0) if self._store else 0,
+            "ml_enabled": bool(self._config._data.get("USE_ML_SIGNAL", False)),
+            "closed_trades": self._closed_trades_payload(),
+            "recent_trades": self._recent_trades_results(),
+            "pnl_history": self._pnl_history_payload(),
+            "drawdown": self._drawdown_snapshot(),
         }
 
     def _price_trend_payload(self, quote_ts: datetime) -> dict[str, Any] | None:
@@ -1628,6 +1668,110 @@ class TradingLoop:
         except Exception:
             return None
 
+    def _ml_training_record_count(self) -> int | None:
+        try:
+            if self._ml_store is not None:
+                return self._ml_store.record_count()
+            from data.ml_training_store import MLTrainingStore
+            return MLTrainingStore().record_count()
+        except Exception:
+            return None
+
+    def _closed_trades_payload(self) -> list[dict[str, Any]]:
+        try:
+            if self._store is None or not hasattr(self._store, "recent_closed_trades"):
+                return []
+            from system.closed_trades_display import is_excluded_display_row
+            rows = self._store.recent_closed_trades(limit=100)
+            out: list[dict[str, Any]] = []
+            for row in rows:
+                if is_excluded_display_row(row):
+                    continue
+                pnl_gbp = row.get("ig_pnl_currency")
+                pnl_pts = float(row.get("pnl_points") or 0)
+                if pnl_gbp is not None:
+                    pnl_gbp = float(pnl_gbp)
+                if row.get("closed_at") is None:
+                    result = "OPEN"
+                elif pnl_gbp is None:
+                    result = "PENDING"
+                elif pnl_gbp > 0:
+                    result = "WIN"
+                elif pnl_gbp < 0:
+                    result = "LOSS"
+                else:
+                    result = "BREAKEVEN"
+                out.append({
+                    "deal_id": row.get("deal_id") or row.get("ig_deal_id"),
+                    "market": row.get("market") or row.get("epic"),
+                    "epic": row.get("epic"),
+                    "side": row.get("side") or row.get("direction"),
+                    "direction": row.get("side") or row.get("direction"),
+                    "entry_price": row.get("entry_price") or row.get("entry"),
+                    "entry": row.get("entry_price") or row.get("entry"),
+                    "exit_price": row.get("exit_price") or row.get("exit"),
+                    "exit": row.get("exit_price") or row.get("exit"),
+                    "pnl_gbp": pnl_gbp,
+                    "pnl": pnl_gbp,
+                    "pnl_pts": pnl_pts,
+                    "result": result,
+                    "closed_at": row.get("closed_at"),
+                    "time": row.get("closed_at"),
+                    "setup": row.get("setup_key"),
+                    "confidence": row.get("confidence"),
+                    "source": row.get("source"),
+                })
+                if len(out) >= 50:
+                    break
+            return out
+        except Exception:
+            return []
+
+    def _recent_trades_results(self) -> list[dict[str, Any]]:
+        try:
+            if self._store is None or not hasattr(self._store, "recent_closed_trades"):
+                return []
+            from system.closed_trades_display import is_excluded_display_row
+            rows = self._store.recent_closed_trades(50)
+            out: list[dict[str, Any]] = []
+            for row in rows:
+                if is_excluded_display_row(row):
+                    continue
+                pnl_gbp = row.get("ig_pnl_currency")
+                if pnl_gbp is not None:
+                    result = "WIN" if float(pnl_gbp) > 0 else "LOSS"
+                else:
+                    pnl_pts = float(row.get("pnl_points") or 0)
+                    result = "WIN" if pnl_pts > 0 else "LOSS"
+                out.append({"result": result})
+                if len(out) >= 20:
+                    break
+            return out
+        except Exception:
+            return []
+
+    def _pnl_history_payload(self) -> list[dict[str, Any]]:
+        try:
+            if self._store is None or not hasattr(self._store, "recent_closed_trades"):
+                return []
+            from system.closed_trades_display import is_excluded_display_row
+            rows = self._store.recent_closed_trades(100)
+            rows_sorted = sorted(
+                (r for r in rows if r.get("closed_at") and not is_excluded_display_row(r)),
+                key=lambda r: str(r.get("closed_at") or ""),
+            )
+            cumulative = 0.0
+            points: list[dict[str, Any]] = []
+            for row in rows_sorted:
+                pnl = row.get("ig_pnl_currency")
+                if pnl is None:
+                    continue
+                cumulative += float(pnl)
+                points.append({"time": str(row["closed_at"]), "value": round(cumulative, 2)})
+            return points
+        except Exception:
+            return []
+
     def _errors_snapshot(self) -> dict[str, Any]:
         try:
             from system.engine_log import get_engine_alerts_snapshot
@@ -1635,6 +1779,13 @@ class TradingLoop:
             return get_engine_alerts_snapshot()
         except Exception:
             return {"count": 0, "type": None}
+
+    def _drawdown_snapshot(self) -> dict[str, float]:
+        try:
+            from system.drawdown_monitor import snapshot as _dd_snap
+            return _dd_snap()
+        except Exception:
+            return {}
 
     def _daily_pnl_signed_gbp(self, open_positions: list[Any] | None = None) -> float:
         journal = 0.0
@@ -1716,8 +1867,7 @@ def _json_safe(value: Any) -> Any:
 
 
 def _iso_ts(when: datetime) -> str:
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=timezone.utc)
-    else:
-        when = when.astimezone(timezone.utc)
+    # astimezone() on naive datetime assumes local system tz (BST in summer) → converts to UTC.
+    # astimezone() on aware datetime converts from its tz to UTC. Both paths produce correct UTC.
+    when = when.astimezone(timezone.utc)
     return when.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
