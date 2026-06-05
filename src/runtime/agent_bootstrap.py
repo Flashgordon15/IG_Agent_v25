@@ -4,9 +4,7 @@ Build orchestration trading loops and execution stack for v25 main entry.
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
-from datetime import datetime
 from typing import Any, Callable
 
 from data.journal import DecisionJournal
@@ -128,6 +126,7 @@ def _build_single_loop(
     env_scorer = EnvironmentScorer(
         signal_engine, config=loop_cfg, rest_client=rest_client, epic=epic
     )
+    signal_engine._environment_scorer = env_scorer
     prime = InstrumentRegistry(cfg.as_dict()).session_whitelist_for_epic(epic)
     if prime:
         env_scorer.set_prime_sessions(prime)
@@ -234,7 +233,9 @@ def build_market_orchestrator(
 
     exec_mode = mode
     if exec_mode is None:
-        exec_mode = ExecutionMode.DEMO if rest_client is not None else ExecutionMode.TEST
+        exec_mode = (
+            ExecutionMode.DEMO if rest_client is not None else ExecutionMode.TEST
+        )
 
     position_sync = None
     if rest_client is not None:
@@ -255,14 +256,18 @@ def build_market_orchestrator(
                 rest_client,
                 store,
                 interval_seconds=float(getattr(cfg, "transaction_sync_seconds", 300.0)),
-                min_gap_seconds=float(getattr(cfg, "transaction_sync_min_gap_seconds", 120.0)),
+                min_gap_seconds=float(
+                    getattr(cfg, "transaction_sync_min_gap_seconds", 120.0)
+                ),
                 history_days=int(getattr(cfg, "transaction_history_days", 2)),
                 display_hours=24.0,
             )
             txn_sync.start()
             log_engine("IG transaction sync started")
         except Exception as _txn_e:
-            log_engine(f"IG transaction sync start failed: {type(_txn_e).__name__}: {_txn_e}")
+            log_engine(
+                f"IG transaction sync start failed: {type(_txn_e).__name__}: {_txn_e}"
+            )
             txn_sync = None
 
         position_sync = start_ig_position_sync(

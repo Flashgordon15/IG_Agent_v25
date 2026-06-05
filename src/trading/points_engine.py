@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any, Literal
 
 from data.learning_store import LearningStore
-from system.closed_trades_display import is_excluded_display_row
 from system.engine_log import log_engine
 from system.paths import data_dir
 from system.state_manager import atomic_write_json, read_json_file
@@ -141,6 +140,7 @@ class PointsEngine:
             "day_stopped": self._day_stopped,
             "stop_latched": self._stop_latched,
             "last_nominal": self._last_nominal,
+            "rapid_cooldown_until": self._rapid_cooldown_until,
         }
 
     def _apply_payload(self, data: dict[str, Any]) -> None:
@@ -155,7 +155,11 @@ class PointsEngine:
         self._day_stopped = bool(data.get("day_stopped", False))
         self._stop_latched = bool(data.get("stop_latched", False))
         last = data.get("last_nominal", "HEALTHY")
-        self._last_nominal = last if last in ("HEALTHY", "CAUTION", "WARNING", "STOP") else "HEALTHY"
+        self._last_nominal = (
+            last if last in ("HEALTHY", "CAUTION", "WARNING", "STOP") else "HEALTHY"
+        )
+        restored_cooldown = float(data.get("rapid_cooldown_until", 0.0))
+        self._rapid_cooldown_until = max(0.0, restored_cooldown)
 
     def _persist(self) -> None:
         try:
@@ -198,9 +202,7 @@ class PointsEngine:
                 )
             self._telegram_last_effective = new_state
         except Exception as e:
-            log_engine(
-                f"points_engine telegram notify failed: {type(e).__name__}: {e}"
-            )
+            log_engine(f"points_engine telegram notify failed: {type(e).__name__}: {e}")
 
     def _on_nominal_transition(self, new_nominal: PointsStateName) -> None:
         old = self._last_nominal
@@ -218,7 +220,11 @@ class PointsEngine:
         rows = self._fetch_confirmed_rows(ROLLING_TRADE_WINDOW)
         if not rows:
             return 0, 0.0, 0.0
-        wins = [float(r["pnl"]) for r in rows if r["result"] == "WIN" and float(r["pnl"]) > 0]
+        wins = [
+            float(r["pnl"])
+            for r in rows
+            if r["result"] == "WIN" and float(r["pnl"]) > 0
+        ]
         losses = [
             abs(float(r["pnl"]))
             for r in rows
@@ -333,36 +339,37 @@ class PointsEngine:
     ) -> float:
         """Score trade, update cumulative/session state, persist. Returns points scored."""
         try:
-            if pnl_gbp is not None and float(pnl_gbp) < 0:
-                self.note_realised_gbp_loss(float(pnl_gbp))
-            score = self._score_trade(result, confidence, pnl_pts)
-            result_u = str(result or "").upper()
+            with _lock:
+                if pnl_gbp is not None and float(pnl_gbp) < 0:
+                    self.note_realised_gbp_loss(float(pnl_gbp))
+                score = self._score_trade(result, confidence, pnl_pts)
+                result_u = str(result or "").upper()
 
-            self._cumulative += score
-            self._session_score += score
-            self._last_trade_score = score
+                self._cumulative += score
+                self._session_score += score
+                self._last_trade_score = score
 
-            if result_u == "LOSS":
-                self._consecutive_losses += 1
-                if self._consecutive_losses >= SESSION_LOSS_STREAK_TRIGGER:
-                    self._signals_to_skip = max(
-                        self._signals_to_skip, SIGNALS_TO_SKIP_AFTER_STREAK
-                    )
-            elif result_u == "WIN":
-                self._consecutive_losses = 0
-                self._recovery_wins += 1
-                self._bootstrap_wins += 1
-            else:
-                self._consecutive_losses = 0
+                if result_u == "LOSS":
+                    self._consecutive_losses += 1
+                    if self._consecutive_losses >= SESSION_LOSS_STREAK_TRIGGER:
+                        self._signals_to_skip = max(
+                            self._signals_to_skip, SIGNALS_TO_SKIP_AFTER_STREAK
+                        )
+                elif result_u == "WIN":
+                    self._consecutive_losses = 0
+                    self._recovery_wins += 1
+                    self._bootstrap_wins += 1
+                else:
+                    self._consecutive_losses = 0
 
-            # Day-stop via session points disabled — max_daily_loss_gbp gate
-            # is the authoritative GBP-denominated risk control on large accounts.
-            # self._day_stopped = self._session_score < DAY_STOP_SESSION_SCORE
+                # Day-stop via session points disabled — max_daily_loss_gbp gate
+                # is the authoritative GBP-denominated risk control on large accounts.
+                # self._day_stopped = self._session_score < DAY_STOP_SESSION_SCORE
 
-            new_nominal = _nominal_state(self._cumulative)
-            self._on_nominal_transition(new_nominal)
-            self._sync_stop_latch()
-            self._persist()
+                new_nominal = _nominal_state(self._cumulative)
+                self._on_nominal_transition(new_nominal)
+                self._sync_stop_latch()
+                self._persist()
             self._maybe_notify_telegram_state()
             return score
         except Exception as e:
@@ -409,7 +416,9 @@ class PointsEngine:
             with _lock:
                 bootstrap_wins = self._bootstrap_wins
             # Floor rises with each win; caps at CONF_MARGINAL_MIN (80)
-            effective_floor = min(cfg_floor + bootstrap_wins * recovery, CONF_MARGINAL_MIN)
+            effective_floor = min(
+                cfg_floor + bootstrap_wins * recovery, CONF_MARGINAL_MIN
+            )
             return max(effective_floor, float(cfg.signal_threshold))
         except Exception:
             return CONF_MARGINAL_MIN
@@ -466,11 +475,11 @@ class PointsEngine:
                 # Progressive multiplier — rewards sustained winning
                 cum = self._cumulative
                 if cum > 50.0:
-                    tier_mult = 4.0   # EXCELLENT: cumulative > 50
+                    tier_mult = 4.0  # EXCELLENT: cumulative > 50
                 elif cum > 25.0:
-                    tier_mult = 2.5   # THRIVING:  cumulative > 25
+                    tier_mult = 2.5  # THRIVING:  cumulative > 25
                 elif cum > 6.0:
-                    tier_mult = 1.5   # HEALTHY:   cumulative > 6
+                    tier_mult = 1.5  # HEALTHY:   cumulative > 6
                 else:
                     tier_mult = 1.0
                 if band == "high":
