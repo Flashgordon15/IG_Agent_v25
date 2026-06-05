@@ -77,14 +77,16 @@ class ConfigValidatorTests(unittest.TestCase):
         cfg = _full_config()
         del cfg["signal_threshold"]
         del cfg["trade_size"]
-        valid, messages = cv.validate_config(cfg)
+        with patch.object(cv, "emergency_stop_lock_present", return_value=False):
+            valid, messages = cv.validate_config(cfg)
         self.assertTrue(valid)
         warnings = [m for m in messages if m.startswith("WARNING:")]
         self.assertGreaterEqual(len(warnings), 2)
         log_mock.assert_called()
 
     def test_all_keys_present_passes(self) -> None:
-        valid, messages = cv.validate_config(_full_config())
+        with patch.object(cv, "emergency_stop_lock_present", return_value=False):
+            valid, messages = cv.validate_config(_full_config())
         self.assertTrue(valid)
         self.assertFalse(any(m.startswith("ERROR:") for m in messages))
 
@@ -97,7 +99,8 @@ class ConfigValidatorTests(unittest.TestCase):
             "epic": "IX.D.NIKKEI.IFM.IP",
             "instruments": _instruments(),
         }
-        valid, _ = cv.validate_config(cfg)
+        with patch.object(cv, "emergency_stop_lock_present", return_value=False):
+            valid, _ = cv.validate_config(cfg)
         self.assertTrue(valid)
 
     def test_missing_instruments_block_fails(self) -> None:

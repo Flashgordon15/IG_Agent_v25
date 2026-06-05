@@ -77,11 +77,13 @@ class IgPositionSync:
         on_changed: Callable[[], None] | None = None,
         transaction_sync: Any | None = None,
         points_engine: Any | None = None,
+        managed_epics: set[str] | frozenset[str] | None = None,
     ) -> None:
         self._rest = rest_client
         self._store = store
         self._txn_sync = transaction_sync
         self._points_engine = points_engine
+        self._managed_epics = frozenset(managed_epics or ())
         self._epic = epic
         self._interval = interval_seconds
         self._on_alert = on_alert
@@ -104,6 +106,34 @@ class IgPositionSync:
 
     def register_on_changed(self, callback: Callable[[], None]) -> None:
         self._on_changed = callback
+
+    def _configured_account_id(self) -> str:
+        return str(getattr(self._rest, "account_id", "") or "").strip().upper()
+
+    def _session_account_id(self) -> str:
+        auth = getattr(self._rest, "_auth", None)
+        tokens = getattr(auth, "tokens", None) if auth is not None else None
+        return str(getattr(tokens, "account_id", "") or "").strip().upper()
+
+    def _is_managed_epic(self, epic: str) -> bool:
+        if not self._managed_epics:
+            return True
+        return str(epic or "").strip() in self._managed_epics
+
+    def _positions_for_sync(self, positions: list[SyncedPosition]) -> list[SyncedPosition]:
+        """Keep only agent-managed epics; IG positions are already session/account scoped."""
+        if not self._managed_epics:
+            return positions
+        kept = [p for p in positions if self._is_managed_epic(p.epic)]
+        skipped = len(positions) - len(kept)
+        if skipped:
+            sample = next((p for p in positions if not self._is_managed_epic(p.epic)), None)
+            epic_hint = sample.epic if sample else "?"
+            log_engine(
+                f"IG position sync ignored {skipped} non-managed position(s) "
+                f"(example epic={epic_hint}, managed={sorted(self._managed_epics)})"
+            )
+        return kept
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -156,6 +186,46 @@ class IgPositionSync:
                 last_closed_summary=self._snapshot.last_closed_summary,
             )
 
+    def _open_mins_for_deal(self, deal_id: str) -> float | None:
+        """Look up opened_at from local store and return minutes since entry."""
+        if not self._store or not deal_id:
+            return None
+        try:
+            row = self._store.find_open_by_deal_id(deal_id)
+            if row is None:
+                return None
+            opened_raw = str(row["opened_at"] or "") if "opened_at" in row.keys() else ""
+            if not opened_raw:
+                return None
+            opened = datetime.fromisoformat(opened_raw.replace("Z", ""))
+            return max(0.0, (datetime.now() - opened).total_seconds() / 60.0)
+        except Exception:
+            return None
+
+    def _position_to_dict(self, p: SyncedPosition) -> dict[str, Any]:
+        return {
+            "deal_id": p.deal_id,
+            "epic": p.epic,
+            "direction": p.direction,
+            "side": p.direction,
+            "size": p.size,
+            "level": p.level,
+            "entry": p.level,
+            "upl": p.upl,
+            "pnl_gbp": p.upl,
+            "market_name": p.market_name,
+            "deal_reference": p.deal_reference,
+            "stop_level": p.stop_level,
+            "limit_level": p.limit_level,
+            "stop": p.stop_level or None,
+            "target": p.limit_level or None,
+            "bid": p.bid,
+            "offer": p.offer,
+            "current": p.bid if p.direction == "BUY" else p.offer,
+            "currency": p.currency,
+            "open_mins": self._open_mins_for_deal(p.deal_id),
+        }
+
     def snapshot_dict(self) -> dict[str, Any]:
         s = self.snapshot()
         return {
@@ -170,48 +240,77 @@ class IgPositionSync:
             "last_ig_event": s.last_ig_event,
             "last_closed_summary": s.last_closed_summary,
             "positions": [
-                {
-                    "deal_id": p.deal_id,
-                    "epic": p.epic,
-                    "direction": p.direction,
-                    "side": p.direction,
-                    "size": p.size,
-                    "level": p.level,
-                    "entry": p.level,
-                    "upl": p.upl,
-                    "pnl_gbp": p.upl,
-                    "market_name": p.market_name,
-                    "deal_reference": p.deal_reference,
-                    "stop_level": p.stop_level,
-                    "limit_level": p.limit_level,
-                    "stop": p.stop_level or None,
-                    "target": p.limit_level or None,
-                    "bid": p.bid,
-                    "offer": p.offer,
-                    "current": p.bid if p.direction == "BUY" else p.offer,
-                    "currency": p.currency,
-                }
+                self._position_to_dict(p)
                 for p in s.positions
             ],
         }
 
+    def _snapshot_confidence_pct(self) -> float | None:
+        """Latest dashboard/trading-loop signal confidence (0–100), if published."""
+        try:
+            from api.snapshot_store import get_tick
+
+            tick = get_tick()
+            sig = tick.get("signal") if isinstance(tick, dict) else None
+            if isinstance(sig, dict) and sig.get("confidence") is not None:
+                return float(sig["confidence"])
+        except Exception:
+            pass
+        return None
+
+    def _needs_fast_position_sync(self) -> bool:
+        """True when broker state or in-flight orders need frequent GET /positions."""
+        from system.rest_api_budget import is_order_in_flight
+
+        if is_order_in_flight():
+            return True
+        with self._lock:
+            for p in self._snapshot.positions:
+                if p.stop_level <= 0 or p.limit_level <= 0:
+                    return True
+        return False
+
     def _effective_interval(self) -> float:
-        """Adaptive poll: faster with open positions, slower when flat."""
+        """
+        Adaptive poll: 15s when managing open risk, 30s when flat or low signal.
+
+        ``position_sync_seconds`` from config is not the loop wait — it only feeds
+        account refresh spacing on successful sync (``max(60, interval * 4)``).
+        """
+        from system.config_loader import get_config
+
+        cfg = get_config(reload=False)
+        fast = float(getattr(cfg, "position_sync_open_fast_seconds", 15.0))
+        relaxed = float(getattr(cfg, "position_sync_open_relaxed_seconds", 30.0))
+        conf_floor = float(getattr(cfg, "position_sync_relaxed_below_confidence", 70.0))
+
         with self._lock:
             open_positions = int(self._snapshot.total_open)
-        if open_positions > 0:
-            interval = 15.0
-            if getattr(self, "_last_logged_interval", None) != interval:
-                self._last_logged_interval = interval
-                noun = "position" if open_positions == 1 else "positions"
-                log_engine(
-                    f"Position sync interval: 15s ({open_positions} {noun} open)"
-                )
+        if open_positions <= 0:
+            interval = relaxed
+            reason = "flat — no positions"
+        elif self._needs_fast_position_sync():
+            interval = fast
+            noun = "position" if open_positions == 1 else "positions"
+            reason = f"{open_positions} {noun} open (protection or order in flight)"
         else:
-            interval = 30.0
-            if getattr(self, "_last_logged_interval", None) != interval:
-                self._last_logged_interval = interval
-                log_engine("Position sync interval: 30s (flat — no positions)")
+            conf = self._snapshot_confidence_pct()
+            if conf is not None and conf < conf_floor:
+                interval = relaxed
+                noun = "position" if open_positions == 1 else "positions"
+                reason = (
+                    f"{open_positions} {noun} open, signal {conf:.0f}% "
+                    f"< {conf_floor:.0f}%"
+                )
+            else:
+                interval = fast
+                noun = "position" if open_positions == 1 else "positions"
+                conf_s = f"{conf:.0f}%" if conf is not None else "n/a"
+                reason = f"{open_positions} {noun} open (signal {conf_s})"
+
+        if getattr(self, "_last_logged_interval", None) != interval:
+            self._last_logged_interval = interval
+            log_engine(f"Position sync interval: {interval:.0f}s ({reason})")
         return interval
 
     def sync_once(self) -> IgSyncSnapshot:
@@ -250,8 +349,15 @@ class IgPositionSync:
         try:
             with ig_rest_sync_lock():
                 mgr.check_rest_allowed()
+                configured = self._configured_account_id()
+                session_acct = self._session_account_id()
+                if configured and session_acct and configured != session_acct:
+                    log_engine(
+                        f"IG position sync session/account mismatch: "
+                        f"configured={configured} session={session_acct}"
+                    )
                 raw = self._rest.open_positions()
-                ig_positions = self._parse_positions(raw)
+                ig_positions = self._positions_for_sync(self._parse_positions(raw))
                 for p in ig_positions:
                     self._seen_on_ig.add(p.deal_id)
                 changed = self._reconcile(ig_positions)
@@ -771,6 +877,9 @@ class IgPositionSync:
         for row in self._deduped_open_rows():
             keys = row.keys()
             deal_id = str(row["ig_deal_id"] or "") if "ig_deal_id" in keys else ""
+            row_epic = str(row["epic"] or "") if "epic" in keys else ""
+            if not self._is_managed_epic(row_epic):
+                continue
             if not deal_id or deal_id in ig_by_deal:
                 continue
             trade_id = int(row["id"])
@@ -832,7 +941,14 @@ class IgPositionSync:
         result = classify_result(banked_pts)
         keys = row.keys()
         conf = float(row["adjusted_confidence"] or 0) if "adjusted_confidence" in keys else 0.0
-        if self._points_engine is not None:
+        # Guard: only score once per partial close using the done-flag
+        already_scored = False
+        if hasattr(self._store, "is_partial_close_done"):
+            try:
+                already_scored = self._store.is_partial_close_done(trade_id)
+            except Exception:
+                pass
+        if self._points_engine is not None and not already_scored:
             try:
                 self._points_engine.record_trade(result, conf, banked_pts)
             except Exception as e:

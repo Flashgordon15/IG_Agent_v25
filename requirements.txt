@@ -6,3 +6,4 @@ lightstreamer-client-lib>=1.0.0; python_version >= "3.9"
 jsonschema>=4.20.0
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
+yfinance>=0.2.40

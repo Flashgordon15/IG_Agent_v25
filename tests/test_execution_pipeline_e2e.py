@@ -45,13 +45,26 @@ def _buy_signal(conf: float = 92.0) -> SignalResult:
 
 
 def _make_orchestrator(**overrides) -> OrchestratorLoop:
+    try:
+        from system.rate_limit_manager import get_rate_limit_manager
+        get_rate_limit_manager().reset_for_tests()
+    except Exception:
+        pass
     config = MagicMock()
     config.refresh_seconds = 0.05
     config.max_spread_points = 35.0
+    config.max_positions_per_epic = 1
+    config.max_open_positions = 3
     config.stop_distance_points = 45.0
     config.trade_size = 1.0
     config.currency_code = "GBP"
-    config.get = MagicMock(return_value=1.0)
+    config.max_daily_loss_gbp = 200.0
+    config.get = MagicMock(
+        side_effect=lambda key, default=None: {
+            "ig_point_value_gbp": 1.0,
+            "risk_cap_gbp": 150,
+        }.get(key, default)
+    )
 
     session = MagicMock()
     session.is_session_open.return_value = True
@@ -85,6 +98,7 @@ def _make_orchestrator(**overrides) -> OrchestratorLoop:
 
     exec_engine = MagicMock()
     exec_engine.trade_tracker.count_open_for_epic.return_value = 0
+    exec_engine.trade_tracker.count_open_total.return_value = 0
     exec_engine.trade_tracker.snapshot.return_value = {"positions": []}
     exec_engine.update_positions = MagicMock()
 
@@ -121,16 +135,18 @@ def _make_orchestrator(**overrides) -> OrchestratorLoop:
 
 
 class OrchestratorPipelineTests(unittest.TestCase):
-    def test_all_seven_gates_pass_then_process_tick(self) -> None:
+    @patch("system.market_watch.japan225_session.japan225_strategy_paused", return_value=(False, ""))
+    def test_all_seven_gates_pass_then_process_tick(self, _j225: MagicMock) -> None:
         loop = _make_orchestrator()
         ctx = loop.run_once()
         assert ctx is not None
         self.assertTrue(ctx.all_passed)
         self.assertEqual(len(ctx.gates), 7)
         self.assertTrue(all(g.passed for g in ctx.gates))
-        loop._execution_loop.process_tick.assert_called_once_with(
-            "Japan 225", "IX.D.NIKKEI.IFM.IP", _quote()
-        )
+        loop._execution_loop.process_tick.assert_called_once()
+        call = loop._execution_loop.process_tick.call_args
+        self.assertEqual(call.args[:3], ("Japan 225", "IX.D.NIKKEI.IFM.IP", _quote()))
+        self.assertIn("prefetched_signal", call.kwargs)
 
 
 class ExecutionTickPipelineTests(unittest.TestCase):

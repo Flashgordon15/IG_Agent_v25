@@ -11,10 +11,13 @@ import asyncio
 import json
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from api.snapshot import _iso_now, build_default_tick, normalize_tick
+from api.snapshot import _iso_now, build_default_tick, enrich_signal_thresholds, normalize_tick
+from data.models import Quote
+from trading.open_position_view import enrich_positions_with_quote
 from system.paths import data_dir
 from system.state_manager import atomic_write_json, read_json_file
 
@@ -99,6 +102,7 @@ def write_tick_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def push_hub_quote_to_dashboard(
+    epic: str,
     bid: float,
     offer: float,
     *,
@@ -109,23 +113,91 @@ def push_hub_quote_to_dashboard(
     global _last_hub_push_ts
     if bid <= 0 or offer <= 0:
         return
+    epic_key = str(epic or "").strip()
+    if not epic_key:
+        return
     now = time.time()
     if now - _last_hub_push_ts < _hub_push_min_interval:
         return
     _last_hub_push_ts = now
 
     tick = dict(get_tick())
-    tick["bid"] = float(bid)
-    tick["offer"] = float(offer)
-    tick["spread"] = round(float(offer) - float(bid), 2)
-    tick["tick_age_s"] = (
-        round(float(tick_age_s), 1) if tick_age_s is not None else 0.0
-    )
-    tick["stream_status"] = stream_status
-    tick["ts"] = _iso_now()
-    if tick.get("market_state") == "OFFLINE" and bid > 0:
-        tick["market_state"] = "OPEN"
+    sig = tick.get("signal")
+    if isinstance(sig, dict):
+        tick["signal"] = dict(sig)
+
+    spread = round(float(offer) - float(bid), 5)
+    age = round(float(tick_age_s), 1) if tick_age_s is not None else 0.0
+    ts = _iso_now()
+
+    markets = tick.get("markets")
+    if isinstance(markets, dict):
+        next_markets = {k: dict(v) if isinstance(v, dict) else v for k, v in markets.items()}
+        slice_tick = dict(next_markets.get(epic_key) or {})
+        slice_tick["epic"] = epic_key
+        slice_tick["bid"] = float(bid)
+        slice_tick["offer"] = float(offer)
+        slice_tick["spread"] = spread
+        slice_tick["tick_age_s"] = age
+        slice_tick["stream_status"] = stream_status
+        slice_tick["ts"] = ts
+        if slice_tick.get("market_state") == "OFFLINE":
+            slice_tick["market_state"] = "OPEN"
+        next_markets[epic_key] = slice_tick
+        tick["markets"] = next_markets
+
+    top_epic = str(tick.get("selected_epic") or tick.get("epic") or "")
+    if not top_epic or top_epic == epic_key:
+        tick["bid"] = float(bid)
+        tick["offer"] = float(offer)
+        tick["spread"] = spread
+        tick["tick_age_s"] = age
+        tick["stream_status"] = stream_status
+        tick["ts"] = ts
+        if tick.get("market_state") == "OFFLINE" and bid > 0:
+            tick["market_state"] = "OPEN"
+
+    _refresh_positions_from_hub_quote(tick, epic_key, float(bid), float(offer))
     publish_tick(tick, notify=True)
+
+
+def _point_value_gbp_for_epic(tick: dict[str, Any], epic: str) -> float:
+    markets = tick.get("markets")
+    if isinstance(markets, dict):
+        slice_tick = markets.get(epic)
+        if isinstance(slice_tick, dict):
+            raw = slice_tick.get("ig_point_value_gbp")
+            if raw is not None:
+                try:
+                    return float(raw)
+                except (TypeError, ValueError):
+                    pass
+    raw = tick.get("ig_point_value_gbp")
+    if raw is not None:
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            pass
+    return 1.0
+
+
+def _refresh_positions_from_hub_quote(
+    tick: dict[str, Any],
+    epic: str,
+    bid: float,
+    offer: float,
+) -> None:
+    """Update open-position mark/pnl_pts from streaming quote between loop snapshots."""
+    positions = tick.get("positions")
+    if not isinstance(positions, list) or not positions:
+        return
+    quote = Quote(datetime.now(timezone.utc), bid, offer)
+    tick["positions"] = enrich_positions_with_quote(
+        positions,
+        quote,
+        point_value_gbp=_point_value_gbp_for_epic(tick, epic),
+        epic=epic,
+    )
 
 
 def wire_hub_quotes_to_dashboard(*, min_interval: float = 0.25) -> Callable[[], None]:
@@ -137,6 +209,7 @@ def wire_hub_quotes_to_dashboard(*, min_interval: float = 0.25) -> Callable[[], 
 
     def _on_hub(snap: Any) -> None:
         push_hub_quote_to_dashboard(
+            str(getattr(snap, "epic", "") or ""),
             float(snap.bid),
             float(snap.offer),
             tick_age_s=float(snap.age_seconds()),
@@ -159,27 +232,37 @@ def publish_tick(payload: dict[str, Any], *, notify: bool = True) -> dict[str, A
     return tick
 
 
+def _tick_for_readers(tick: dict[str, Any]) -> dict[str, Any]:
+    """Copy + enrich so WebSocket/poll always expose threshold fields."""
+    out = dict(tick)
+    sig = out.get("signal")
+    if isinstance(sig, dict):
+        out["signal"] = dict(sig)
+    enrich_signal_thresholds(out)
+    return out
+
+
 def get_tick() -> dict[str, Any]:
     """Return latest snapshot (memory cache, refreshed from disk if newer)."""
     global _cached, _cached_mtime
     path = snapshot_path()
     with _lock:
         if not path.exists():
-            return dict(_cached)
+            return _tick_for_readers(_cached)
         try:
             mtime = path.stat().st_mtime
         except OSError:
-            return dict(_cached)
+            return _tick_for_readers(_cached)
         if mtime <= _cached_mtime:
-            return dict(_cached)
+            return _tick_for_readers(_cached)
     data = read_json_file(path)
     if not isinstance(data, dict):
-        return dict(_cached)
+        return _tick_for_readers(_cached)
     tick = normalize_tick(data)
     with _lock:
         _cached = tick
         _cached_mtime = mtime
-    return dict(tick)
+    return _tick_for_readers(tick)
 
 
 def snapshot_age_s() -> float | None:

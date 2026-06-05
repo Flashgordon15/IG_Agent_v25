@@ -42,6 +42,73 @@ def _parse_bar_time(raw: str) -> datetime:
     return dt
 
 
+def _bootstrap_from_cache(
+    epic: str,
+    market: str,
+    signal_engine: SignalEngine,
+    environment_scorer: Any | None,
+    num_points: int,
+) -> int:
+    """Seed SignalEngine from local JSONL cache when IG REST is unavailable."""
+    import json
+
+    from trading.ohlc_cache_paths import ohlc_cache_path
+
+    cache_path = ohlc_cache_path(epic, market=market)
+    if not cache_path.is_file():
+        log_engine(f"OHLC bootstrap: no local cache at {cache_path}")
+        return 0
+    try:
+        lines = cache_path.read_text(encoding="utf-8").splitlines()
+        # Take the last num_points bars
+        tail = lines[-num_points:] if len(lines) >= num_points else lines
+        if not tail:
+            log_engine("OHLC bootstrap: local cache is empty")
+            return 0
+        seeded: list[Quote] = []
+        for line in tail:
+            line = line.strip()
+            if not line:
+                continue
+            bar = json.loads(line)
+            # Cache schema: t, o, h, l, c, v, spread
+            high = float(bar.get("h") or 0)
+            low = float(bar.get("l") or 0)
+            close = float(bar.get("c") or 0)
+            spread = float(bar.get("spread") or 15.0)
+            if high <= 0 or low <= 0:
+                continue
+            bid = close - spread / 2.0
+            offer = close + spread / 2.0
+            seeded.append(
+                Quote(
+                    time=_parse_bar_time(bar.get("t", "")),
+                    bid=bid,
+                    offer=offer,
+                )
+            )
+        if not seeded:
+            log_engine("OHLC bootstrap: no valid bars parsed from local cache")
+            return 0
+        count = signal_engine.seed_ohlc_history(market, seeded, aliases=[epic])
+        if count <= 0:
+            log_engine("OHLC bootstrap: seed_ohlc_history rejected cache bars")
+            return 0
+        if environment_scorer is not None:
+            environment_scorer.on_ohlc_bootstrapped(market)
+        log_engine(
+            f"OHLC bootstrap: injected {count} bars from local cache for {epic} "
+            f"(market={market}, source={cache_path.name})"
+        )
+        return count
+    except Exception as e:
+        log_engine(f"OHLC bootstrap cache fallback failed: {type(e).__name__}: {e}")
+        return 0
+
+
+MIN_CACHE_BARS_FOR_BOOTSTRAP = 100
+
+
 def bootstrap_ohlc_for_session(
     rest_client: Any,
     signal_engine: SignalEngine,
@@ -51,11 +118,22 @@ def bootstrap_ohlc_for_session(
     num_points: int = 100,
     resolution: str = "MINUTE_5",
     environment_scorer: EnvironmentScorer | None = None,
+    prefer_cache: bool = True,
 ) -> int:
     """Inject historical bars into SignalEngine; returns count injected (0 on failure)."""
     try:
-        if rest_client is None or signal_engine is None:
+        if signal_engine is None:
             return 0
+        if prefer_cache:
+            cached = _bootstrap_from_cache(
+                epic, market, signal_engine, environment_scorer, num_points
+            )
+            if cached >= MIN_CACHE_BARS_FOR_BOOTSTRAP:
+                return cached
+        if rest_client is None:
+            return _bootstrap_from_cache(
+                epic, market, signal_engine, environment_scorer, num_points
+            )
         fetch = getattr(rest_client, "fetch_price_history", None)
         if not callable(fetch):
             log_engine("OHLC bootstrap: fetch_price_history unavailable")
@@ -65,8 +143,10 @@ def bootstrap_ohlc_for_session(
         with ohlc_bootstrap_rest_window():
             bars = fetch(epic, resolution=resolution, num_points=num_points)
         if not bars:
-            log_engine(f"OHLC bootstrap: no bars returned for {epic}")
-            return 0
+            log_engine(f"OHLC bootstrap: no bars from IG REST for {epic} — trying local cache")
+            return _bootstrap_from_cache(
+                epic, market, signal_engine, environment_scorer, num_points
+            )
         seeded: list[Quote] = []
         for bar in bars:
             high = float(bar.get("high") or 0)
@@ -101,3 +181,44 @@ def bootstrap_ohlc_for_session(
     except Exception as e:
         log_engine(f"OHLC bootstrap warning: {type(e).__name__}: {e}")
         return 0
+
+
+def bootstrap_ohlc_parallel(
+    rest_client: Any,
+    loops: list[Any],
+    *,
+    max_workers: int = 3,
+) -> None:
+    """Bootstrap OHLC for all trading loops in parallel (cache-first per epic)."""
+    if not loops:
+        return
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _bootstrap_loop(loop: Any) -> int:
+        if rest_client is None:
+            return 0
+        try:
+            if not loop._session.is_session_open():
+                return 0
+        except Exception:
+            return 0
+        return bootstrap_ohlc_for_session(
+            rest_client,
+            loop._signal_engine,
+            loop._epic,
+            loop._market,
+            environment_scorer=loop._env,
+            prefer_cache=True,
+        )
+
+    workers = min(max(1, int(max_workers)), len(loops))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_bootstrap_loop, loop) for loop in loops]
+        for fut in as_completed(futures):
+            try:
+                fut.result()
+            except Exception as e:
+                log_engine(
+                    f"OHLC parallel bootstrap error: {type(e).__name__}: {e}"
+                )

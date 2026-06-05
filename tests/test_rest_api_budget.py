@@ -118,5 +118,118 @@ class PreemptiveThrottleTests(unittest.TestCase):
             self.assertFalse(hub_quote_stream_fresh())
 
 
+class HardCapTests(unittest.TestCase):
+    """Hard per-minute cap — blocks non-essential unconditionally regardless of stream state."""
+
+    def _mgr_patch(self):
+        """Return a patch for get_rate_limit_manager that is not blocked."""
+        from unittest.mock import MagicMock
+        mgr = MagicMock()
+        mgr.check_rest_allowed.return_value = None
+        mgr.is_rest_blocked.return_value = False
+        return mgr
+
+    def test_hard_cap_blocks_non_essential_when_reached(self) -> None:
+        """Non-essential call at or beyond cap raises RestBudgetPausedError."""
+        budget = RestApiBudget(min_interval_seconds=0.001, warn_per_minute=6, hard_cap_per_minute=3)
+        with (
+            patch.object(budget, "_maybe_warn_locked"),
+            patch.object(budget, "_maybe_periodic_log_locked"),
+            patch("system.rest_api_budget.hub_quote_stream_genuinely_stale", return_value=False),
+            patch("system.rest_api_budget._hub_in_maintenance", return_value=False),
+            patch("system.rate_limit_manager.get_rate_limit_manager") as mgr_mock,
+        ):
+            mgr_mock.return_value = self._mgr_patch()
+            # Make 3 non-essential calls (fills cap)
+            for _ in range(3):
+                budget.acquire(label="GET /accounts")
+        # 4th non-essential must be blocked even with fresh stream
+        with (
+            patch("system.rest_api_budget.hub_quote_stream_genuinely_stale", return_value=False),
+            patch("system.rate_limit_manager.get_rate_limit_manager") as mgr_mock,
+        ):
+            mgr_mock.return_value = self._mgr_patch()
+            with self.assertRaises(RestBudgetPausedError) as ctx:
+                budget.acquire(label="GET /accounts")
+        self.assertIn("hard_rate_cap", str(ctx.exception))
+
+    def test_hard_cap_allows_essential_through_regardless(self) -> None:
+        """Positions/orders calls always pass even when cap is exceeded."""
+        budget = RestApiBudget(min_interval_seconds=0.001, warn_per_minute=6, hard_cap_per_minute=1)
+        with (
+            patch.object(budget, "_maybe_warn_locked"),
+            patch.object(budget, "_maybe_periodic_log_locked"),
+            patch("system.rest_api_budget.hub_quote_stream_genuinely_stale", return_value=False),
+            patch("system.rest_api_budget._hub_in_maintenance", return_value=False),
+            patch("system.rate_limit_manager.get_rate_limit_manager") as mgr_mock,
+        ):
+            mgr_mock.return_value = self._mgr_patch()
+            # One non-essential call fills the cap
+            budget.acquire(label="GET /accounts")
+            # Essential calls still go through
+            budget.acquire(label="POST /positions/otc")
+            budget.acquire(label="GET /confirms/DEAL123")
+
+    def test_hard_cap_applies_with_fresh_stream(self) -> None:
+        """Cap fires even when Lightstreamer is fully healthy — this is the key gap fixed."""
+        budget = RestApiBudget(min_interval_seconds=0.001, warn_per_minute=6, hard_cap_per_minute=2)
+        with (
+            patch.object(budget, "_maybe_warn_locked"),
+            patch.object(budget, "_maybe_periodic_log_locked"),
+            patch("system.rest_api_budget.hub_quote_stream_genuinely_stale", return_value=False),
+            patch("system.rest_api_budget._hub_in_maintenance", return_value=False),
+            patch("system.rate_limit_manager.get_rate_limit_manager") as mgr_mock,
+        ):
+            mgr_mock.return_value = self._mgr_patch()
+            budget.acquire(label="GET /markets/EPIC")
+            budget.acquire(label="GET /accounts")
+            with self.assertRaises(RestBudgetPausedError):
+                budget.acquire(label="GET /history/transactions")
+
+    def test_ohlc_bootstrap_exempt_from_hard_cap(self) -> None:
+        """ohlc_bootstrap calls don't count toward the hard cap."""
+        budget = RestApiBudget(min_interval_seconds=0.001, warn_per_minute=6, hard_cap_per_minute=2)
+        with (
+            patch.object(budget, "_maybe_warn_locked"),
+            patch.object(budget, "_maybe_periodic_log_locked"),
+            patch("system.rest_api_budget.hub_quote_stream_genuinely_stale", return_value=False),
+            patch("system.rest_api_budget._hub_in_maintenance", return_value=False),
+            patch("system.rate_limit_manager.get_rate_limit_manager") as mgr_mock,
+        ):
+            mgr_mock.return_value = self._mgr_patch()
+            # 5 OHLC bootstrap calls — must not count toward cap
+            with ohlc_bootstrap_rest_window():
+                for _ in range(5):
+                    budget.acquire(label="GET /prices/EPIC/MINUTE_5/100")
+            # Non-essential call still allowed (cap not consumed by ohlc)
+            budget.acquire(label="GET /accounts")
+
+    def test_e2e_diagnostics_bypasses_hard_cap(self) -> None:
+        """E2E diagnostic window bypasses the hard cap."""
+        budget = RestApiBudget(min_interval_seconds=0.001, warn_per_minute=6, hard_cap_per_minute=1)
+        with (
+            patch.object(budget, "_maybe_warn_locked"),
+            patch.object(budget, "_maybe_periodic_log_locked"),
+            patch("system.rest_api_budget.hub_quote_stream_genuinely_stale", return_value=False),
+            patch("system.rest_api_budget._hub_in_maintenance", return_value=False),
+            patch("system.rate_limit_manager.get_rate_limit_manager") as mgr_mock,
+        ):
+            mgr_mock.return_value = self._mgr_patch()
+            budget.acquire(label="GET /accounts")  # fills cap
+            with e2e_diagnostics_rest_window():
+                budget.acquire(label="GET /markets/EPIC")  # must not raise
+
+    def test_metrics_exposes_hard_cap_fields(self) -> None:
+        """metrics() includes hard_cap_per_minute and utilization."""
+        budget = RestApiBudget(min_interval_seconds=0.001, warn_per_minute=6, hard_cap_per_minute=4)
+        m = budget.metrics()
+        self.assertIn("hard_cap_per_minute", m)
+        self.assertIn("hard_cap_calls_last_minute", m)
+        self.assertIn("hard_cap_utilization_pct", m)
+        self.assertEqual(m["hard_cap_per_minute"], 4)
+        self.assertEqual(m["hard_cap_calls_last_minute"], 0)
+        self.assertEqual(m["hard_cap_utilization_pct"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

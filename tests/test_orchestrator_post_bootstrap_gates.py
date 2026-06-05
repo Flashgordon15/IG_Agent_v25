@@ -55,6 +55,11 @@ class OrchestratorPostBootstrapGatesTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         set_points_state_path_for_tests(Path(self._tmp.name) / "points.json")
+        try:
+            from system.rate_limit_manager import get_rate_limit_manager
+            get_rate_limit_manager().reset_for_tests()
+        except Exception:
+            pass
 
     def tearDown(self) -> None:
         set_points_state_path_for_tests(None)
@@ -90,7 +95,7 @@ class OrchestratorPostBootstrapGatesTests(unittest.TestCase):
         rest = MagicMock()
         rest.fetch_price_history.return_value = _ohlc_bars(100)
         injected = bootstrap_ohlc_for_session(
-            rest, signal_engine, epic, market, environment_scorer=env_scorer
+            rest, signal_engine, epic, market, environment_scorer=env_scorer, prefer_cache=False
         )
         self.assertEqual(injected, 100)
 

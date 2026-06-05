@@ -4,15 +4,16 @@ export default {
   theme: {
     extend: {
       colors: {
-        bg: "#0d1117",
-        surface: "#161b22",
-        border: "#30363d",
-        green: "#3fb950",
-        red: "#f85149",
-        amber: "#d29922",
-        orange: "#db6d28",
-        blue: "#388bfd",
-        muted: "#8b949e",
+        bg: "#0f1117",
+        card: "#1e2432",
+        accent: "#2e75b6",
+        foreground: "#e2e8f0",
+        success: "#22c55e",
+        warning: "#f59e0b",
+        danger: "#ef4444",
+        surface: "#1e2432",
+        border: "#2a3344",
+        muted: "#94a3b8",
       },
       fontFamily: {
         sans: [

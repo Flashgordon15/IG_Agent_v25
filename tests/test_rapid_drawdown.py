@@ -17,9 +17,12 @@ class RapidDrawdownTests(unittest.TestCase):
         set_points_state_path_for_tests(None)
         self.tmp.cleanup()
 
-    def test_forces_warning_after_100_gbp_loss_in_hour(self) -> None:
-        self.engine.note_realised_gbp_loss(-60.0)
-        self.engine.note_realised_gbp_loss(-50.0)
+    def test_forces_warning_after_rapid_drawdown_threshold(self) -> None:
+        # RAPID_DRAWDOWN_GBP = 2000; cumulative must exceed that in one hour
+        from trading.points_engine import RAPID_DRAWDOWN_GBP
+        loss_per_event = (RAPID_DRAWDOWN_GBP / 5) + 1.0
+        for _ in range(6):
+            self.engine.note_realised_gbp_loss(-loss_per_event)
         self.assertEqual(self.engine.get_state(), "WARNING")
 
 

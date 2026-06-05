@@ -64,6 +64,14 @@ class AccountBalanceRefresher:
                 )
             except Exception:
                 pass
+
+        if bal is not None:
+            try:
+                from system.drawdown_monitor import update as _dd_update
+                _dd_update(float(bal))
+            except Exception:
+                pass
+
         with self._lock:
             self._last_summary = dict(summary)
         return summary

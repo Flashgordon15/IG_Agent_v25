@@ -18,8 +18,8 @@ from signals.signal_engine import SignalEngine
 from system.config import Config
 from system.engine_log import log_engine, record_engine_warning
 
-GATE_PASS_MIN = 40.0
-SAFE_DEFAULT_SCORE = 50.0
+GATE_PASS_MIN = 55.0
+SAFE_DEFAULT_SCORE = 55.0  # Matches GATE_PASS_MIN — scorer errors fail-open so trading continues
 COLD_START_BAR_CAP = 6
 GAP_CAP_MINUTES = 15
 GAP_ATR_MULTIPLE = 1.0
@@ -64,21 +64,36 @@ def score_trend_factor(row_15m: pd.Series) -> float:
     return 0.0
 
 
-def score_session_timing_factor(now: datetime | None = None) -> float:
-    """Tokyo-session timing using BST session_name() windows (asia_early = Tokyo night)."""
+def score_session_timing_factor(
+    now: datetime | None = None,
+    *,
+    prime_sessions: list[str] | None = None,
+) -> float:
+    """
+  Score session timing from config prime windows (session_name buckets).
+
+  When prime_sessions is omitted, defaults to asia_early (Japan 225 legacy behaviour).
+    """
     now = now or datetime.now()
     name = session_name(now)
-    if name != "asia_early":
+    primes = (
+        [str(s) for s in prime_sessions]
+        if prime_sessions is not None
+        else ["asia_early"]
+    )
+    if name not in primes:
         return 0.0
-    hour = now.hour
-    minute = now.minute
-    if hour < 2:
-        return FACTOR_SESSION_MAX
-    if hour == 6 and minute >= 30:
-        return 5.0
-    if hour < 7:
-        return 15.0
-    return 0.0
+    if name == "asia_early" and "asia_early" in primes:
+        hour = now.hour
+        minute = now.minute
+        if hour < 2:
+            return FACTOR_SESSION_MAX
+        if hour == 6 and minute >= 30:
+            return 5.0
+        if hour < 7:
+            return 15.0
+        return 0.0
+    return FACTOR_SESSION_MAX
 
 
 def score_spread_factor(current_spread: float, normal_spread: float) -> float:
@@ -137,6 +152,11 @@ class EnvironmentScorer:
         self._sentiment_detail: dict[str, dict[str, Any]] = {}
         self._primary_market: str = ""
         self._fallback_warned_for_market: set[str] = set()
+        self._prime_sessions: list[str] = []
+
+    def set_prime_sessions(self, sessions: list[str]) -> None:
+        """Per-instrument prime session buckets for score_session_timing_factor."""
+        self._prime_sessions = [str(s) for s in sessions if s]
 
     def _quote_df(self, market: str, quote_df: pd.DataFrame | None = None) -> pd.DataFrame:
         """Candle source of truth — SignalEngine seed + live quotes (Option A override)."""
@@ -215,9 +235,23 @@ class EnvironmentScorer:
         self.fetch_sentiment(self._epic or market)
 
     def on_ohlc_bootstrapped(self, market: str) -> None:
-        """After OHLC seed lands in SignalEngine.quote_df — refresh cold-start baseline."""
+        """After OHLC seed lands in SignalEngine.quote_df — refresh cold-start baseline.
+
+        If we loaded substantial history (≥ COLD_START_BAR_CAP bars) we backdate
+        session_open_at so bars_from_clock reflects mature data, clearing the cap
+        immediately on mid-session restarts instead of blocking for 30 minutes.
+        """
         self._primary_market = str(market or self._primary_market or "")
-        self._bars_at_session_open[market] = self._complete_bar_count(market)
+        bars = self._complete_bar_count(market)
+        self._bars_at_session_open[market] = bars
+        if bars >= COLD_START_BAR_CAP and market in self._session_open_at:
+            backdate = datetime.now() - timedelta(minutes=COLD_START_BAR_CAP * 5 + 1)
+            self._session_open_at[market] = backdate
+            log_engine(
+                f"environment_scorer: bootstrapped {bars} bars — cold-start cleared (mid-session restart)"
+            )
+        else:
+            log_engine(f"environment_scorer: bootstrapped from {bars} bars")
 
     def register_gap_open(self, market: str, *, at: datetime | None = None) -> None:
         """Apply 15-minute score cap after gap > 1.0× ATR (caller detects gap)."""
@@ -303,7 +337,9 @@ class EnvironmentScorer:
         factors = {
             "atr": score_atr_factor(current_atr, avg_atr_20),
             "trend": score_trend_factor(trend_15m),
-            "session": score_session_timing_factor(now),
+            "session": score_session_timing_factor(
+                now, prime_sessions=self._prime_sessions or None
+            ),
             "spread": score_spread_factor(current_spread, normal_spread),
         }
         meta = {
@@ -407,7 +443,7 @@ class EnvironmentScorer:
                     "session": SAFE_DEFAULT_SCORE * 0.2,
                     "spread": SAFE_DEFAULT_SCORE * 0.25,
                 },
-                gate_passes=True,
+                gate_passes=SAFE_DEFAULT_SCORE >= GATE_PASS_MIN,
             )
             return SAFE_DEFAULT_SCORE
 

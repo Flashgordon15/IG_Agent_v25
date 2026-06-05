@@ -146,11 +146,26 @@ def _make_loop(**overrides) -> TradingLoop:
 
 
 class TradingLoopFlattenVerificationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.logs = Path(self.tmp.name) / "logs"
+        self.logs.mkdir()
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    @patch("trading.session_summary.logs_dir")
+    @patch("trading.session_summary.notify_macos")
     @patch("trading.trading_loop.publish_tick")
     @patch("trading.trading_loop.time.sleep")
     def test_flatten_at_t5_with_confirmation(
-        self, sleep_mock: MagicMock, _snap: MagicMock
+        self,
+        sleep_mock: MagicMock,
+        _snap: MagicMock,
+        _notify: MagicMock,
+        logs_mock: MagicMock,
     ) -> None:
+        logs_mock.return_value = self.logs
         flatten = MagicMock(return_value=1)
         sync = MagicMock()
         sync.count_for_epic.return_value = 0

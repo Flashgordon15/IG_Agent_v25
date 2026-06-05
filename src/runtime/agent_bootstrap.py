@@ -1,9 +1,11 @@
 """
-Build orchestration trading loop and execution stack for v25 main entry.
+Build orchestration trading loops and execution stack for v25 main entry.
 """
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from copy import deepcopy
 from datetime import datetime
 from typing import Any, Callable
 
@@ -13,8 +15,10 @@ from data.models import Quote
 from execution.execution_engine import ExecutionEngine
 from execution.trading_loop import TradingLoop as ExecutionTickLoop
 from execution.types import ExecutionMode
+from runtime.market_orchestrator import MarketOrchestrator, attach_snapshot_handlers
 from signals.signal_engine import SignalEngine
 from system.config import Config
+from system.config_validator import apply_config_defaults
 from system.engine_log import log_engine
 from system.market_data_hub import get_market_data_hub
 from trading.environment_scorer import EnvironmentScorer
@@ -27,15 +31,31 @@ _stream_client: Any | None = None
 _position_sync: Any | None = None
 
 
-def _resolve_instrument(cfg: Config) -> tuple[str, str]:
-    reg = InstrumentRegistry(cfg.as_dict())
-    enabled = reg.get_enabled()
-    if enabled:
-        inst = enabled[0]
-        return str(inst.get("name") or cfg.market_search or "Market"), str(
-            inst.get("epic") or cfg.epic
-        )
-    return str(cfg.market_search or "Market"), str(cfg.epic)
+_INSTRUMENT_CFG_KEYS = (
+    "signal_threshold",
+    "max_spread_pts",
+    "stop_distance_points",
+    "default_stop_distance_points",
+    "adaptive_min_risk_points",
+    "adaptive_max_risk_points",
+    "min_atr_points",
+    "ig_point_value_gbp",
+    "trade_size",
+    "risk_cap_gbp",
+    "stale_threshold_seconds",
+)
+
+
+def _config_for_instrument(cfg: Config, inst: dict[str, Any]) -> Config:
+    data = deepcopy(cfg.as_dict())
+    for key in _INSTRUMENT_CFG_KEYS:
+        if inst.get(key) is not None:
+            if key == "max_spread_pts":
+                data["max_spread_points"] = float(inst[key])
+            else:
+                data[key] = inst[key]
+    merged = apply_config_defaults(data)
+    return Config(_data=merged)
 
 
 def start_ig_position_sync(
@@ -43,9 +63,11 @@ def start_ig_position_sync(
     store: Any,
     tracker: Any,
     *,
-    epic: str,
+    epic: str = "",
     interval_seconds: float,
     points_engine: Any | None = None,
+    managed_epics: set[str] | frozenset[str] | None = None,
+    transaction_sync: Any | None = None,
 ) -> Any | None:
     """Start background IG open-position sync and attach to trade tracker."""
     global _position_sync
@@ -60,11 +82,14 @@ def start_ig_position_sync(
             epic=epic,
             interval_seconds=float(interval_seconds),
             points_engine=points_engine,
+            managed_epics=managed_epics,
+            transaction_sync=transaction_sync,
         )
         tracker.attach_sync(sync)
         sync.start()
         _position_sync = sync
-        log_engine(f"IG position sync attached epic={epic}")
+        label = epic or "all"
+        log_engine(f"IG position sync attached epic={label}")
         return sync
     except Exception as e:
         log_engine(f"IG position sync start failed: {type(e).__name__}: {e}")
@@ -85,20 +110,27 @@ def stop_ig_position_sync(sync: Any | None = None) -> None:
         _position_sync = None
 
 
-def build_trading_loop(
+def _build_single_loop(
     cfg: Config,
     *,
-    rest_client: Any | None = None,
-    mode: ExecutionMode | None = None,
+    instrument_id: str,
+    inst: dict[str, Any],
+    rest_client: Any | None,
+    mode: ExecutionMode,
+    store: LearningStore,
+    points_engine: PointsEngine,
+    position_sync: Any | None,
 ) -> AgentTradingLoop:
-    """Wire orchestrator loop with execution process_tick (enabled Japan 225 only)."""
-    market, epic = _resolve_instrument(cfg)
-    store = LearningStore(str(cfg.learning_db))
-    signal_engine = SignalEngine(cfg, store)
-    points_engine = PointsEngine(store)
+    market = str(inst.get("name") or instrument_id)
+    epic = str(inst.get("epic") or cfg.epic)
+    loop_cfg = _config_for_instrument(cfg, inst)
+    signal_engine = SignalEngine(loop_cfg, store)
     env_scorer = EnvironmentScorer(
-        signal_engine, config=cfg, rest_client=rest_client, epic=epic
+        signal_engine, config=loop_cfg, rest_client=rest_client, epic=epic
     )
+    prime = InstrumentRegistry(cfg.as_dict()).session_whitelist_for_epic(epic)
+    if prime:
+        env_scorer.set_prime_sessions(prime)
     session_manager = SessionManager(
         epic,
         market=market,
@@ -108,27 +140,15 @@ def build_trading_loop(
         rest_client=rest_client,
     )
 
-    exec_mode = mode
-    if exec_mode is None:
-        exec_mode = ExecutionMode.DEMO if rest_client is not None else ExecutionMode.TEST
-
-    trade_tracker_store = store
     from execution.trade_tracker import TradeTracker
 
-    tracker = TradeTracker(trade_tracker_store, prefer_ig=rest_client is not None)
-    position_sync = None
-    if rest_client is not None:
-        position_sync = start_ig_position_sync(
-            rest_client,
-            store,
-            tracker,
-            epic=epic,
-            interval_seconds=float(cfg.position_sync_seconds),
-            points_engine=points_engine,
-        )
+    tracker = TradeTracker(store, prefer_ig=rest_client is not None)
+    if position_sync is not None:
+        tracker.attach_sync(position_sync)
+
     exec_engine = ExecutionEngine(
-        mode=exec_mode,
-        config=cfg,
+        mode=mode,
+        config=loop_cfg,
         store=store,
         rest_client=rest_client,
         trade_tracker=tracker,
@@ -137,6 +157,7 @@ def build_trading_loop(
     )
     if position_sync is not None:
         exec_engine.attach_position_sync(position_sync)
+
     journal_path = str(cfg.get("decision_log_file", "") or "")
     journal = DecisionJournal(journal_path) if journal_path else None
     execution_loop = ExecutionTickLoop(
@@ -152,17 +173,22 @@ def build_trading_loop(
 
     interval = float(cfg.refresh_seconds)
 
-    def quote_source() -> Quote | None:
-        if rest_client is not None:
-            snap = hub.fetch_if_stale(epic, min_interval=interval)
-        else:
-            snap = hub.get_snapshot(epic)
-        if snap is None or snap.bid <= 0:
-            return None
-        return snap.to_quote()
+    def quote_source(epic_key: str = epic) -> Callable[[], Quote | None]:
+        def _source() -> Quote | None:
+            # Use only the hub's in-memory snapshot from Lightstreamer.
+            # REST fallback via fetch_if_stale() was causing trading-loop deadlocks
+            # because REST calls to IG sometimes hang indefinitely, blocking all three
+            # loop threads. The Lightstreamer stream provides live quotes every ~30s
+            # which is sufficient for gate evaluation and order entry decisions.
+            snap = hub.get_snapshot(epic_key)
+            if snap is None or snap.bid <= 0:
+                return None
+            return snap.to_quote()
+
+        return _source
 
     loop = AgentTradingLoop(
-        cfg,
+        loop_cfg,
         market=market,
         epic=epic,
         session_manager=session_manager,
@@ -170,21 +196,196 @@ def build_trading_loop(
         points_engine=points_engine,
         signal_engine=signal_engine,
         execution_loop=execution_loop,
-        quote_source=quote_source,
+        quote_source=quote_source(),
         learning_store=store,
         position_sync=position_sync,
+        publish_snapshots=True,
+        instrument_id=instrument_id,
     )
-    if rest_client is not None and session_manager.is_session_open():
-        from trading.ohlc_bootstrap import bootstrap_ohlc_for_session
 
-        bootstrap_ohlc_for_session(
-            rest_client, signal_engine, epic, market, environment_scorer=env_scorer
+    return loop
+
+
+def build_market_orchestrator(
+    cfg: Config,
+    *,
+    rest_client: Any | None = None,
+    mode: ExecutionMode | None = None,
+) -> MarketOrchestrator:
+    """Phase A — one loop per enabled instrument, shared PointsEngine."""
+    reg = InstrumentRegistry(cfg.as_dict())
+    enabled = reg.get_enabled_with_ids()
+    if not enabled:
+        raise ValueError("No enabled instruments in config")
+
+    store = LearningStore(str(cfg.learning_db))
+    points_engine = PointsEngine(store)
+
+    try:
+        from system.telegram_notifier import (
+            configure_telegram,
+            set_heartbeat_provider,
+            start_telegram_heartbeat,
         )
+
+        configure_telegram(cfg)
+    except Exception as e:
+        log_engine(f"telegram configure failed: {type(e).__name__}: {e}")
+
+    exec_mode = mode
+    if exec_mode is None:
+        exec_mode = ExecutionMode.DEMO if rest_client is not None else ExecutionMode.TEST
+
+    position_sync = None
+    if rest_client is not None:
+        from execution.trade_tracker import TradeTracker
+        from runtime.ig_transaction_sync import IgTransactionSync
+
+        tracker = TradeTracker(store, prefer_ig=True)
+        managed_epics = frozenset(
+            str(inst.get("epic") or "").strip()
+            for _iid, inst in enabled
+            if str(inst.get("epic") or "").strip()
+        )
+
+        # Start transaction sync daemon — populates ig_pnl_currency on closed trades
+        txn_sync: Any | None = None
+        try:
+            txn_sync = IgTransactionSync(
+                rest_client,
+                store,
+                interval_seconds=float(getattr(cfg, "transaction_sync_seconds", 300.0)),
+                min_gap_seconds=float(getattr(cfg, "transaction_sync_min_gap_seconds", 120.0)),
+                history_days=int(getattr(cfg, "transaction_history_days", 2)),
+                display_hours=24.0,
+            )
+            txn_sync.start()
+            log_engine("IG transaction sync started")
+        except Exception as _txn_e:
+            log_engine(f"IG transaction sync start failed: {type(_txn_e).__name__}: {_txn_e}")
+            txn_sync = None
+
+        position_sync = start_ig_position_sync(
+            rest_client,
+            store,
+            tracker,
+            epic="",
+            interval_seconds=float(cfg.position_sync_seconds),
+            points_engine=points_engine,
+            managed_epics=managed_epics,
+            transaction_sync=txn_sync,
+        )
+
+    loops: list[AgentTradingLoop] = []
+    for iid, inst in enabled:
+        loops.append(
+            _build_single_loop(
+                cfg,
+                instrument_id=iid,
+                inst=inst,
+                rest_client=rest_client,
+                mode=exec_mode,
+                store=store,
+                points_engine=points_engine,
+                position_sync=position_sync,
+            )
+        )
+
+    from trading.ohlc_bootstrap import bootstrap_ohlc_parallel
+
+    bootstrap_ohlc_parallel(rest_client, loops)
+
+    if rest_client is None:
+        from system.stream_ready import signal_stream_ready
+
+        signal_stream_ready(source="test_mode_no_stream")
+
+    primary_epic = str(enabled[0][1].get("epic") or cfg.epic)
+    enabled_epics = [
+        str(inst.get("epic") or "").strip()
+        for _iid, inst in enabled
+        if str(inst.get("epic") or "").strip()
+    ]
+    instrument_meta = {
+        str(inst.get("epic") or "").strip(): {
+            "name": str(inst.get("name") or iid),
+            "instrument_id": iid,
+        }
+        for iid, inst in enabled
+        if str(inst.get("epic") or "").strip()
+    }
+    orch = MarketOrchestrator(
+        cfg,
+        loops,
+        primary_epic=primary_epic,
+        enabled_epics=enabled_epics,
+        instrument_meta=instrument_meta,
+    )
+    if len(loops) > 1:
+        attach_snapshot_handlers(orch)
+    log_engine(
+        f"market_orchestrator built: {len(loops)} markets "
+        f"({', '.join(l._epic for l in loops)})"
+    )
+
+    try:
+        from api.snapshot_store import get_tick
+        from system.telegram_notifier import (
+            get_telegram_notifier,
+            set_heartbeat_provider,
+            start_telegram_heartbeat,
+        )
+
+        def _heartbeat_snapshot() -> dict[str, Any]:
+            tick = get_tick()
+            sig = tick.get("signal") or {}
+            pts = tick.get("points") or {}
+            positions = tick.get("positions") or []
+            return {
+                "fitness": float(sig.get("fitness") or tick.get("fitness_score") or 0),
+                "signal": float(sig.get("confidence") or 0),
+                "stream": str(tick.get("stream_status") or "DISCONNECTED"),
+                "positions": len(positions) if isinstance(positions, list) else 0,
+                "cumulative": float(pts.get("cumulative") or 0),
+                "state": str(pts.get("state") or points_engine.get_state()),
+                "balance": tick.get("balance_gbp"),
+                "daily_pnl": tick.get("daily_pnl_gbp"),
+            }
+
+        set_heartbeat_provider(_heartbeat_snapshot)
+        start_telegram_heartbeat()
+        notifier = get_telegram_notifier()
+        if notifier is not None and notifier.enabled:
+            notifier.notify_startup(
+                state_restored=True,
+                market_count=len(loops),
+                points_state=points_engine.get_state(),
+            )
+    except Exception as e:
+        log_engine(f"telegram heartbeat setup failed: {type(e).__name__}: {e}")
+
+    return orch
+
+
+def build_trading_loop(
+    cfg: Config,
+    *,
+    rest_client: Any | None = None,
+    mode: ExecutionMode | None = None,
+) -> AgentTradingLoop | MarketOrchestrator:
+    """Backward-compatible entry — orchestrator when multiple markets enabled."""
+    reg = InstrumentRegistry(cfg.as_dict())
+    if len(reg.get_enabled()) > 1:
+        return build_market_orchestrator(cfg, rest_client=rest_client, mode=mode)
+    orch = build_market_orchestrator(cfg, rest_client=rest_client, mode=mode)
+    loop = orch.primary
+    if loop is None:
+        raise ValueError("No trading loop built")
     return loop
 
 
 def start_market_stream(cfg: Config, *, rest_client: Any | None) -> Any | None:
-    """Connect IG price stream (Lightstreamer or REST poll) into MarketDataHub."""
+    """Connect IG price stream and subscribe all enabled epics."""
     global _stream_client
     if rest_client is None:
         return None
@@ -197,11 +398,22 @@ def start_market_stream(cfg: Config, *, rest_client: Any | None) -> Any | None:
         log_engine("market stream skipped — no valid IG session")
         return None
 
-    _market, epic = _resolve_instrument(cfg)
+    reg = InstrumentRegistry(cfg.as_dict())
+    epics = [str(inst.get("epic") or "") for _iid, inst in reg.get_enabled_with_ids()]
+    epics = [e for e in epics if e]
+    if not epics:
+        epics = [str(cfg.epic)]
+
+    from system.stream_ready import reset_stream_ready
+
+    reset_stream_ready()
+
     hub = get_market_data_hub()
     hub.attach_rest(rest_client)
     hub.set_min_fetch_interval(float(cfg.refresh_seconds))
-    hub.fetch_if_stale(epic, min_interval=0.0)
+    # Do NOT pre-fetch via REST at startup — Lightstreamer delivers prices within
+    # seconds. Calling fetch_if_stale(min_interval=0.0) for all 6 epics creates a
+    # burst of 6 simultaneous REST calls that counts against the IG API key allowance.
 
     try:
         from ig_api.streaming_factory import create_streaming_client
@@ -227,7 +439,8 @@ def start_market_stream(cfg: Config, *, rest_client: Any | None) -> Any | None:
 
     if hasattr(client, "on_price"):
         client.on_price(on_price)
-    client.subscribe_market(epic)
+    for epic in epics:
+        client.subscribe_market(epic)
     try:
         client.connect()
     except Exception as e:
@@ -238,7 +451,7 @@ def start_market_stream(cfg: Config, *, rest_client: Any | None) -> Any | None:
     label = getattr(client, "transport_label", "stream")
     if callable(label):
         label = label()
-    log_engine(f"market stream started epic={epic} transport={label}")
+    log_engine(f"market stream started epics={epics} transport={label}")
     return client
 
 

@@ -1,0 +1,14 @@
+{
+  "fund_id": "germany_40",
+  "display_name": "Germany 40",
+  "epic": "IX.D.DAX.IFM.IP",
+  "timezone": "Europe/London",
+  "closed_weekdays": ["sat", "sun"],
+  "weekly_sessions": [
+    { "days": ["mon", "tue", "wed", "thu"], "open": "01:00", "close": "22:30" },
+    { "days": ["fri"], "open": "01:00", "close": "21:30" }
+  ],
+  "daily_breaks": [
+    { "days": ["mon", "tue", "wed", "thu", "fri"], "start": "22:00", "end": "23:00", "label": "overnight close" }
+  ]
+}

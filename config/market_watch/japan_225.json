@@ -1,0 +1,15 @@
+{
+  "fund_id": "japan_225",
+  "display_name": "Japan 225",
+  "epic": "IX.D.NIKKEI.IFM.IP",
+  "timezone": "Asia/Tokyo",
+  "closed_weekdays": ["sat"],
+  "weekly_sessions": [
+    { "days": ["sun"], "open": "22:05", "close": "24:00" },
+    { "days": ["mon", "tue", "wed", "thu"], "open": "00:00", "close": "24:00" },
+    { "days": ["fri"], "open": "00:00", "close": "15:30" }
+  ],
+  "daily_breaks": [
+    { "days": ["mon", "tue", "wed", "thu", "fri"], "start": "16:30", "end": "17:00", "label": "daily close" }
+  ]
+}

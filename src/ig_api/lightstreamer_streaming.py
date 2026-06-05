@@ -15,8 +15,9 @@ from ig_api.price_subscribers import CallbackList
 from system.credentials_loader import Credentials
 from system.engine_log import log_engine
 
-_MAX_LS_RECONNECT = 3
+_MAX_LS_RECONNECT = 10
 _LS_RECONNECT_WAIT_SEC = 5.0
+_LS_RECONNECT_MAX_WAIT_SEC = 60.0  # exponential backoff ceiling
 _LS_CONNECTING_GRACE_SEC = 90.0
 _LS_BLANK_TICK_RECONNECT_SEC = 30.0
 _BLANK_TICK_LOG_INTERVAL_SEC = 30.0
@@ -65,6 +66,46 @@ class IGLightstreamerStreamingClient:
     def connecting_grace_seconds(self) -> float:
         return _LS_CONNECTING_GRACE_SEC
 
+    def _handle_blank_tick(self, epic: str) -> None:
+        from system.market_data_hub import get_market_data_hub
+
+        get_market_data_hub().enter_maintenance(epic)
+        now = time.time()
+        if now - self._last_blank_tick_log_ts >= _BLANK_TICK_LOG_INTERVAL_SEC:
+            self._last_blank_tick_log_ts = now
+            remaining = max(0.0, self._first_valid_tick_deadline_ts - now)
+            log_engine(
+                f"LS blank BID/OFFER — maintenance epic={epic} "
+                f"(recovery in {remaining:.0f}s if no valid tick)"
+            )
+        self._maybe_schedule_blank_tick_recovery(epic)
+
+    def _maybe_schedule_blank_tick_recovery(self, epic: str) -> None:
+        if self._using_fallback or not self._running or self._first_tick_received:
+            return
+        deadline = self._first_valid_tick_deadline_ts
+        if deadline <= 0 or time.time() < deadline:
+            return
+        if self._blank_tick_resubscribe_scheduled:
+            return
+        self._blank_tick_resubscribe_scheduled = True
+        log_engine(
+            f"LS no valid tick within {_LS_BLANK_TICK_RECONNECT_SEC}s — "
+            f"starting blank-tick recovery epic={epic}"
+        )
+        self._schedule_blank_tick_recovery(epic)
+
+    def _arm_blank_tick_deadline_timer(self, epic: str) -> None:
+        wait = _LS_BLANK_TICK_RECONNECT_SEC
+        outer = self
+
+        def _fire() -> None:
+            if not outer._running or outer._using_fallback:
+                return
+            outer._maybe_schedule_blank_tick_recovery(epic)
+
+        threading.Timer(wait, _fire).start()
+
     def _mark_connected_on_first_tick(self, bid: float, offer: float, epic: str) -> None:
         if self._first_tick_received:
             return
@@ -75,6 +116,12 @@ class IGLightstreamerStreamingClient:
         log_engine(
             f"Lightstreamer CONNECTED — first tick received bid={bid} offer={offer} epic={epic}"
         )
+        try:
+            from system.stream_ready import signal_stream_ready
+
+            signal_stream_ready(source=f"lightstreamer:{epic}")
+        except Exception:
+            pass
 
     @property
     def transport_label(self) -> str:
@@ -233,70 +280,90 @@ class IGLightstreamerStreamingClient:
                 f"adapter_set=default data_adapter=default"
             )
             sub = Subscription(mode, [item_name], fields)
-            price_subs = self._price_subs
-            epic_name = epic
-            ls_client = self
-
-            class _Listener:
-                def onSubscription(self) -> None:
-                    log_engine(f"LS subscription confirmed: item={item_name}")
-                    ls_client._first_valid_tick_deadline_ts = (
-                        time.time() + _LS_BLANK_TICK_RECONNECT_SEC
-                    )
-
-                def onUnsubscription(self) -> None:
-                    log_engine(f"LS unsubscribed: item={item_name}")
-
-                def onSubscriptionError(self, code: int, message: str) -> None:
-                    log_engine(
-                        f"LS subscription ERROR: item={item_name} code={code} message={message}"
-                    )
-
-                def onItemUpdate(self, update: Any) -> None:
-                    try:
-                        item = update.getItemName() if hasattr(update, "getItemName") else item_name
-                        field_values = {}
-                        if hasattr(update, "getFields"):
-                            field_values = dict(update.getFields())
-                        raw_bid = update.getValue("BID") if hasattr(update, "getValue") else None
-                        raw_offer = update.getValue("OFFER") if hasattr(update, "getValue") else None
-                        bid_text = str(raw_bid or "").strip()
-                        offer_text = str(raw_offer or "").strip()
-                        if not bid_text or not offer_text:
-                            from system.market_data_hub import get_market_data_hub
-
-                            get_market_data_hub().enter_maintenance(epic_name)
-                            return
-                        log_engine(
-                            f"LS raw tick received: item={item} values={field_values}"
-                        )
-                        bid = float(bid_text)
-                        offer = float(offer_text)
-                    except (TypeError, ValueError):
-                        return
-                    if bid <= 0 or offer <= 0:
-                        from system.market_data_hub import get_market_data_hub
-
-                        get_market_data_hub().enter_maintenance(epic_name)
-                        return
-                    from system.market_data_hub import get_market_data_hub
-
-                    get_market_data_hub().publish(
-                        epic_name, bid, offer, source="lightstreamer"
-                    )
-                    log_engine(
-                        f"Hub quote updated from Lightstreamer: bid={bid} offer={offer} "
-                        f"age=0s epic={epic_name}"
-                    )
-                    ls_client._mark_connected_on_first_tick(bid, offer, epic_name)
-                    pu = PriceUpdate(
-                        epic=epic_name, bid=bid, offer=offer, timestamp=time.time()
-                    )
-                    price_subs.emit(pu)
-
-            sub.addListener(_Listener())
+            sub.addListener(self._build_market_listener(epic, item_name))
             client.subscribe(sub)
             self._subscriptions.append(sub)
+
+    @staticmethod
+    def _epic_from_item_name(item_name: str, fallback: str) -> str:
+        raw = str(item_name or "").strip()
+        if raw.startswith("MARKET:"):
+            return raw.split(":", 1)[1]
+        return fallback
+
+    def _build_market_listener(self, epic: str, item_name: str) -> Any:
+        """Build LS listener with epic bound per subscription (avoid loop closure bug)."""
+        epic_name = str(epic)
+        bound_item = str(item_name)
+        price_subs = self._price_subs
+        ls_client = self
+
+        class _Listener:
+            def onSubscription(self) -> None:
+                log_engine(f"LS subscription confirmed: item={bound_item}")
+                ls_client._first_valid_tick_deadline_ts = (
+                    time.time() + _LS_BLANK_TICK_RECONNECT_SEC
+                )
+                ls_client._arm_blank_tick_deadline_timer(epic_name)
+
+            def onUnsubscription(self) -> None:
+                log_engine(f"LS unsubscribed: item={bound_item}")
+
+            def onSubscriptionError(self, code: int, message: str) -> None:
+                log_engine(
+                    f"LS subscription ERROR: item={bound_item} code={code} message={message}"
+                )
+
+            def onItemUpdate(self, update: Any) -> None:
+                try:
+                    item = (
+                        update.getItemName()
+                        if hasattr(update, "getItemName")
+                        else bound_item
+                    )
+                    resolved_epic = IGLightstreamerStreamingClient._epic_from_item_name(
+                        str(item), epic_name
+                    )
+                    field_values = {}
+                    if hasattr(update, "getFields"):
+                        field_values = dict(update.getFields())
+                    raw_bid = update.getValue("BID") if hasattr(update, "getValue") else None
+                    raw_offer = update.getValue("OFFER") if hasattr(update, "getValue") else None
+                    bid_text = str(raw_bid or "").strip()
+                    offer_text = str(raw_offer or "").strip()
+                    if not bid_text or not offer_text:
+                        ls_client._handle_blank_tick(resolved_epic)
+                        return
+                    from system.engine_log import log_engine_intermittent
+
+                    log_engine_intermittent(
+                        f"ls_tick:{resolved_epic}",
+                        f"LS raw tick received: item={item} values={field_values}",
+                    )
+                    bid = float(bid_text)
+                    offer = float(offer_text)
+                except (TypeError, ValueError):
+                    return
+                if bid <= 0 or offer <= 0:
+                    ls_client._handle_blank_tick(resolved_epic)
+                    return
+                from system.market_data_hub import get_market_data_hub
+
+                get_market_data_hub().publish(
+                    resolved_epic, bid, offer, source="lightstreamer"
+                )
+                log_engine_intermittent(
+                    f"hub_quote:{resolved_epic}",
+                    f"Hub quote updated from Lightstreamer: bid={bid} offer={offer} "
+                    f"age=0s epic={resolved_epic}",
+                )
+                ls_client._mark_connected_on_first_tick(bid, offer, resolved_epic)
+                pu = PriceUpdate(
+                    epic=resolved_epic, bid=bid, offer=offer, timestamp=time.time()
+                )
+                price_subs.emit(pu)
+
+        return _Listener()
 
     def _schedule_blank_tick_recovery(self, epic: str) -> None:
         if self._using_fallback or not self._running:
@@ -309,6 +376,7 @@ class IGLightstreamerStreamingClient:
             try:
                 self._connect_attempt_ts = time.time()
                 self._first_tick_received = False
+                self._blank_tick_resubscribe_scheduled = False
                 self._teardown_lightstreamer()
                 self._connect_lightstreamer()
                 log_engine(f"LS blank-tick recovery complete — awaiting first tick epic={epic}")
@@ -335,8 +403,13 @@ class IGLightstreamerStreamingClient:
             for attempt in range(1, _MAX_LS_RECONNECT + 1):
                 if not self._running or self._using_fallback:
                     return
-                log_engine(f"Lightstreamer reconnect attempt {attempt} of {_MAX_LS_RECONNECT}")
-                time.sleep(_LS_RECONNECT_WAIT_SEC)
+                # Exponential backoff: 5, 10, 20, 40, 60, 60, 60 … seconds
+                wait = min(_LS_RECONNECT_WAIT_SEC * (2 ** (attempt - 1)), _LS_RECONNECT_MAX_WAIT_SEC)
+                log_engine(
+                    f"Lightstreamer reconnect attempt {attempt}/{_MAX_LS_RECONNECT} "
+                    f"(wait {wait:.0f}s)"
+                )
+                time.sleep(wait)
                 try:
                     self._teardown_lightstreamer()
                     self._first_tick_received = False
@@ -375,6 +448,14 @@ class IGLightstreamerStreamingClient:
         if self._using_fallback:
             return
         self._using_fallback = True
+        try:
+            from system.telegram_notifier import get_telegram_notifier
+
+            notifier = get_telegram_notifier()
+            if notifier is not None:
+                notifier.notify_rest_fallback()
+        except Exception:
+            pass
         self._teardown_lightstreamer()
         self._fallback = IGStreamingClient(
             self._credentials,

@@ -44,9 +44,8 @@ class ApiServerTests(unittest.TestCase):
         r = self.client.get("/health")
         self.assertEqual(r.status_code, 200)
         body = r.json()
-        self.assertTrue(body["ok"])
-        self.assertEqual(body["api"], "up")
-        self.assertIn("ts", body)
+        self.assertEqual(body["status"], "ok")
+        self.assertEqual(body["version"], "v25")
 
     def test_state_default_tick_schema(self) -> None:
         r = self.client.get("/state")

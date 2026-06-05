@@ -472,6 +472,13 @@ class IGRestClient:
         if cached and now - float(cached.get("ts", 0)) < max_age_seconds:
             return dict(cached["data"])
 
+        try:
+            get_rate_limit_manager().check_rest_allowed()
+        except Exception:
+            if cached:
+                return dict(cached["data"])
+            return {}
+
         self.ensure_session()
         r = self.request("GET", f"/markets/{epic}", headers=self._auth_headers("3"))
         if r.status_code == 401:
@@ -565,15 +572,30 @@ class IGRestClient:
         epic: str,
         *,
         max_age_seconds: float = 5.0,
+        constraints_fallback_seconds: float = 60.0,
     ) -> tuple[float, float]:
         """
-        Fresh bid/offer for streaming/UI — short cache (default 1s).
-        Dealing rules use the separate 300s constraints cache.
+        Fresh bid/offer for streaming/UI — short live cache (default 5s).
+
+        When constraints were fetched recently, reuse snapshot bid/offer instead
+        of a second GET /markets/{epic} (same payload, separate cache keys).
         """
         now = time.time()
         cached = self._live_price_cache.get(epic)
         if cached and now - float(cached.get("ts", 0)) < max_age_seconds:
             return float(cached["bid"]), float(cached["offer"])
+
+        constraints_entry = self._market_constraints_cache.get(epic)
+        if constraints_entry:
+            age = now - float(constraints_entry.get("ts", 0))
+            if age < max(float(constraints_fallback_seconds), max_age_seconds):
+                data = constraints_entry.get("data") or {}
+                bid = float(data.get("bid", 0))
+                offer = float(data.get("offer", 0))
+                if bid > 0 and offer > 0:
+                    self._live_price_cache[epic] = {"ts": now, "bid": bid, "offer": offer}
+                    self._bid, self._offer = bid, offer
+                    return bid, offer
 
         self.ensure_session()
         r = self.request("GET", f"/markets/{epic}", headers=self._auth_headers("3"))
@@ -652,6 +674,10 @@ class IGRestClient:
 
     def refresh_account_summary(self) -> dict[str, float | None]:
         """Refresh balance / P&L from GET /accounts (used by stream heartbeat)."""
+        try:
+            get_rate_limit_manager().check_rest_allowed()
+        except Exception:
+            return self.get_cached_account_summary()
         self.ensure_session()
         r = self.request("GET", "/accounts", headers=self._auth_headers("1"))
         if r.status_code != 200:
@@ -1087,37 +1113,50 @@ class IGRestClient:
     ) -> bool:
         """
         Attach missing stop and/or limit when IG shows an open deal without full protection.
+
+        PUT /positions/otc/{dealId} requires absolute stopLevel/limitLevel — not stopDistance.
+        We derive the absolute levels from the open position's level and direction.
         """
         row = self.find_open_position(deal_id)
         if not row:
             return False
         pos = row.get("position") or {}
-        has_stop = float(pos.get("stopLevel") or 0) > 0 or float(pos.get("stopDistance") or 0) > 0
+        mkt = row.get("market") or {}
+        has_stop  = float(pos.get("stopLevel") or 0) > 0 or float(pos.get("stopDistance") or 0) > 0
         has_limit = float(pos.get("limitLevel") or 0) > 0 or float(pos.get("limitDistance") or 0) > 0
         if has_stop and has_limit:
             return True
 
-        add_stop = None
-        add_limit = None
+        direction = str(pos.get("direction") or "").upper()
+        entry = float(pos.get("level") or pos.get("openLevel") or 0)
+        if entry <= 0:
+            return False
+
+        # Convert distance to absolute level — PUT endpoint only accepts stopLevel/limitLevel
+        stop_level  = None
+        limit_level = None
         if not has_stop and float(stop_distance) > 0:
-            add_stop = float(stop_distance)
+            stop_level = (entry + float(stop_distance)) if direction == "SELL" else (entry - float(stop_distance))
         if not has_limit and float(limit_distance) > 0:
-            add_limit = float(limit_distance)
-        if add_stop is None and add_limit is None:
+            limit_level = (entry - float(limit_distance)) if direction == "SELL" else (entry + float(limit_distance))
+
+        if stop_level is None and limit_level is None:
             return True
 
         try:
             self.update_position_stops(
                 deal_id,
-                stop_distance=add_stop,
-                limit_distance=add_limit,
+                stop_level=stop_level,
+                limit_level=limit_level,
             )
             log_demo_rest(
-                "PUT /positions/otc — attach stops",
+                "PUT /positions/otc — attach stops (absolute levels)",
                 deal_id=deal_id,
                 epic=epic,
-                stop_distance=add_stop,
-                limit_distance=add_limit,
+                direction=direction,
+                entry=entry,
+                stop_level=stop_level,
+                limit_level=limit_level,
             )
             return True
         except Exception as e:

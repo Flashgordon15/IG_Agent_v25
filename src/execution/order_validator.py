@@ -45,6 +45,7 @@ class OrderValidator:
         signal: TradeSignal,
         *,
         open_position_count: Callable[[str], int] | None = None,
+        open_total_count: Callable[[], int] | None = None,
         has_open_position: Callable[[str], bool] | None = None,
         store_has_position: Callable[[str], bool] | None = None,
         has_pending_open: Callable[[str], bool] | None = None,
@@ -59,7 +60,7 @@ class OrderValidator:
             return ValidationResult(allowed=False, reasons=reasons, checks=checks)
         checks["signal"] = True
 
-        session_ok, session_msg = self.check_session()
+        session_ok, session_msg = self.check_session(signal.epic)
         checks["session"] = session_ok
         if not session_ok:
             reasons.append(session_msg)
@@ -137,6 +138,19 @@ class OrderValidator:
             )
         checks["position_limit"] = pos_ok
 
+        max_total = max(1, int(cfg.max_open_positions))
+        total_count = 0
+        if open_total_count is not None:
+            total_raw = open_total_count()
+            if isinstance(total_raw, (int, float)):
+                total_count = int(total_raw)
+        total_ok = total_count < max_total
+        if not total_ok:
+            reasons.append(
+                f"Total open positions reached ({total_count}/{max_total})"
+            )
+        checks["total_position_limit"] = total_ok
+
         # Cooldown: when max_positions > 1, allow stacking up to the cap without
         # waiting between concurrent opens; still enforce cooldown after all slots close.
         if count > 0 and count < max_pos:
@@ -152,11 +166,51 @@ class OrderValidator:
         allowed = all(checks.values()) and not reasons
         return ValidationResult(allowed=allowed, reasons=reasons, checks=checks)
 
-    def check_session(self) -> tuple[bool, str]:
+    @staticmethod
+    def _weekend_gate_check() -> tuple[bool, str]:
+        """Block new entries during weekend risk windows.
+
+        - Friday 20:30–23:59 UTC: markets approaching weekly close, gap risk high.
+        - Sunday 22:00–22:15 UTC: first 15 minutes after weekly open, spreads wide.
+        """
+        now = datetime.utcnow()
+        weekday = now.weekday()  # 0=Mon … 4=Fri, 5=Sat, 6=Sun
+        hour, minute = now.hour, now.minute
+        total_mins = hour * 60 + minute
+
+        if weekday == 4 and total_mins >= 20 * 60 + 30:
+            return False, "Friday close blackout — no new entries after 20:30 UTC"
+        if weekday == 5:
+            return False, "Weekend — markets closed Saturday"
+        if weekday == 6 and total_mins < 22 * 60:
+            return False, "Weekend — Sunday markets not yet open"
+        if weekday == 6 and total_mins < 22 * 60 + 15:
+            return False, "Sunday open blackout (22:00–22:15 UTC) — spread stabilising"
+        return True, ""
+
+    def check_session(self, epic: str = "") -> tuple[bool, str]:
         cfg = self._cfg
+        # Weekend gap protection applies regardless of session whitelist config.
+        ok, reason = self._weekend_gate_check()
+        if not ok:
+            return False, reason
         if not cfg.trading_hours_enabled:
             return True, ""
-        whitelist = cfg.trading_session_whitelist
+        whitelist: list[str] = []
+        target_epic = str(epic or cfg.epic or "").strip()
+        if target_epic:
+            try:
+                from trading.instrument_registry import InstrumentRegistry
+
+                wl = InstrumentRegistry(cfg.as_dict()).session_whitelist_for_epic(
+                    target_epic
+                )
+                if wl:
+                    whitelist = wl
+            except Exception:
+                whitelist = []
+        if not whitelist:
+            whitelist = list(cfg.trading_session_whitelist)
         if not whitelist:
             return True, ""
         sess = session_name()

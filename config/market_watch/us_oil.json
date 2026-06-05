@@ -1,0 +1,15 @@
+{
+  "fund_id": "us_oil",
+  "display_name": "US Oil WTI",
+  "epic": "CS.D.CRUDE.CFD.IP",
+  "timezone": "Europe/London",
+  "closed_weekdays": ["sat"],
+  "weekly_sessions": [
+    { "days": ["sun"], "open": "23:00", "close": "24:00" },
+    { "days": ["mon", "tue", "wed", "thu"], "open": "00:00", "close": "24:00" },
+    { "days": ["fri"], "open": "00:00", "close": "22:00" }
+  ],
+  "daily_breaks": [
+    { "days": ["mon", "tue", "wed", "thu", "fri"], "start": "23:00", "end": "23:05", "label": "daily settlement" }
+  ]
+}

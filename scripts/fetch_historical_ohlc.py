@@ -9,6 +9,7 @@ Allowed only 07:00–22:30 Europe/London (quiet 22:30–07:00 for live REST budg
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -25,17 +26,19 @@ from system.credentials_loader import try_load_credentials
 from system.engine_log import log_engine
 from system.ig_rest_session import ensure_shared_authenticated
 from system.paths import data_dir
-from system.ohlc_fetch_window import in_ohlc_fetch_quiet_window
+from system.ohlc_fetch_window import is_fetch_window_open
 from system.rest_api_budget import RestBudgetPausedError, ohlc_bootstrap_rest_window
 from trading.ohlc_bootstrap import _parse_bar_time
+from trading.ohlc_cache_paths import ohlc_cache_path
 
-EPIC = "IX.D.NIKKEI.IFM.IP"
+DEFAULT_EPIC = "IX.D.NIKKEI.IFM.IP"
+EPIC = DEFAULT_EPIC
+DEFAULT_MARKET = "Japan 225"
 RESOLUTION = "MINUTE_5"
 DATE_FROM_DEFAULT = "2024-01-01T00:00:00"
 PAGE_SIZE = 1000
 REST_SLEEP_SEC = 12.0
 PROGRESS_EVERY = 500
-CACHE_PATH = data_dir() / "ohlc_cache" / "nikkei_5m.jsonl"
 STATUS_PATH = data_dir() / "state" / "ohlc_pull_status.json"
 LONDON = ZoneInfo("Europe/London")
 ALLOWANCE_ERR = "error.public-api.exceeded-account-historical-data-allowance"
@@ -296,14 +299,61 @@ def _append_bars(path: Path, bars: list[dict], seen: set[str], last_written: str
     return added, max_written
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Fetch IG MINUTE_5 OHLC into JSONL cache")
+    parser.add_argument(
+        "--epic",
+        default=DEFAULT_EPIC,
+        help=f"IG epic (default {DEFAULT_EPIC})",
+    )
+    parser.add_argument(
+        "--market",
+        default="",
+        help="Display name for cache slug when epic is not predefined",
+    )
+    parser.add_argument(
+        "--from",
+        dest="date_from",
+        default="",
+        help="ISO start date (default: resume cache or 2024-01-01; new epics try last 90d)",
+    )
+    parser.add_argument(
+        "--source",
+        choices=("ig", "yahoo"),
+        default="ig",
+        help="Data source: ig (default) or yahoo (5m, max ~60d). IG allowance blocks auto-fallback to yahoo.",
+    )
+    return parser.parse_args()
+
+
+def _run_yahoo_seed(epic: str, market: str) -> int:
+    from data.ohlc_yahoo_seeder import EPIC_YAHOO_MAP, fetch_yahoo_ohlc_for_epic
+
+    if epic not in EPIC_YAHOO_MAP:
+        print(f"FAIL: no Yahoo mapping for epic {epic}", file=sys.stderr)
+        return 1
+    try:
+        count = fetch_yahoo_ohlc_for_epic(epic, market=market)
+    except Exception as e:
+        print(f"FAIL: Yahoo fetch — {e}", file=sys.stderr)
+        log_engine(f"Yahoo OHLC fallback failed: {type(e).__name__}: {e}")
+        return 1
+    cache_path = ohlc_cache_path(epic, market=market)
+    print(f"Yahoo seed OK: {count} bars → {cache_path}")
+    log_engine(f"Yahoo OHLC fallback OK: {count} bars epic={epic}")
+    return 0
+
+
 def main() -> int:
-    if in_ohlc_fetch_quiet_window():
-        msg = (
-            "OHLC fetch skipped: quiet window 22:30–07:00 Europe/London "
-            "(allowed 07:00–22:30). Re-run during the allowed window."
-        )
-        print(msg)
-        log_engine(msg)
+    args = _parse_args()
+    epic = str(args.epic or DEFAULT_EPIC).strip()
+    market = str(args.market or "").strip()
+    source = str(args.source or "ig").strip().lower()
+
+    if source == "yahoo":
+        return _run_yahoo_seed(epic, market or DEFAULT_MARKET)
+
+    if not is_fetch_window_open():
         return 0
 
     status = try_load_credentials()
@@ -312,7 +362,8 @@ def main() -> int:
         return 1
 
     rest = ensure_shared_authenticated(status.credentials)
-    cache_path = CACHE_PATH
+    cache_path = ohlc_cache_path(epic, market=market or DEFAULT_MARKET)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
     status_path = STATUS_PATH
     pull_status = _load_status(status_path)
     now_iso = _iso_bar_time(datetime.now(LONDON))
@@ -330,6 +381,7 @@ def main() -> int:
                 pull_status.update(
                     {
                         "status": "blocked_waiting_retry",
+                        "run_status": "blocked_waiting_retry",
                         "last_run_time": now_iso,
                     }
                 )
@@ -338,7 +390,14 @@ def main() -> int:
         except ValueError:
             pass
     last_ts = _read_last_timestamp(cache_path)
-    date_from = _resume_from(last_ts, DATE_FROM_DEFAULT)
+    if args.date_from:
+        date_from = str(args.date_from).strip()
+    elif last_ts:
+        date_from = _resume_from(last_ts, DATE_FROM_DEFAULT)
+    elif epic != DEFAULT_EPIC:
+        date_from = _iso_bar_time(datetime.now(LONDON) - timedelta(days=90))
+    else:
+        date_from = _resume_from(last_ts, DATE_FROM_DEFAULT)
     date_to = _iso_bar_time(datetime.now(LONDON))
 
     if last_ts:
@@ -374,6 +433,7 @@ def main() -> int:
     pull_status.update(
         {
             "status": "running",
+            "run_status": "running",
             "last_run_time": now_iso,
             "last_attempted_range": {"from": date_from, "to": date_to},
             "block_reason": None,
@@ -393,7 +453,7 @@ def main() -> int:
             try:
                 raw_rows, page_data, blocked = _fetch_page(
                     rest,
-                    epic=EPIC,
+                    epic=epic,
                     page_number=page,
                     date_from=chunk_from,
                     date_to=chunk_to,
@@ -481,16 +541,37 @@ def main() -> int:
                         pass
 
     print("=== FETCH SUMMARY ===")
-    print(f"Epic: {EPIC} resolution: {RESOLUTION}")
+    print(f"Epic: {epic} resolution: {RESOLUTION}")
     print(f"Bars added this run: {total_added}")
     print(f"Total bars in cache: {len(seen)}")
     print(f"Date range: {first_ts or 'n/a'} to {last_out or 'n/a'}")
     print(f"File: {cache_path}")
     print(f"File size: {file_size:,} bytes")
+    yahoo_fallback = 0
+    if blocked and str(blocked.get("block_reason") or "") in ("allowance", "rate_limit"):
+        print("IG historical blocked — retrying with Yahoo Finance fallback...")
+        log_engine("OHLC fetch: IG blocked, attempting Yahoo fallback")
+        yahoo_fallback = _run_yahoo_seed(epic, market or DEFAULT_MARKET)
+        if yahoo_fallback == 0:
+            blocked = None
+            allowance_blocked = False
+            last_out = _read_last_timestamp(cache_path) or last_out
+            if cache_path.is_file():
+                with cache_path.open("r", encoding="utf-8") as handle:
+                    for line in handle:
+                        if line.strip():
+                            try:
+                                ts = str(json.loads(line).get("t") or "")
+                                if ts:
+                                    seen.add(ts)
+                            except json.JSONDecodeError:
+                                pass
+
     if blocked:
         pull_status.update(
             {
                 "status": "blocked",
+                "run_status": "blocked",
                 "block_reason": blocked.get("block_reason"),
                 "next_retry_time": blocked.get("next_retry_time"),
                 "last_run_time": _iso_bar_time(datetime.now(LONDON)),
@@ -502,6 +583,7 @@ def main() -> int:
         pull_status.update(
             {
                 "status": "ok",
+                "run_status": "complete",
                 "block_reason": None,
                 "next_retry_time": None,
                 "last_run_time": _iso_bar_time(datetime.now(LONDON)),
@@ -509,7 +591,9 @@ def main() -> int:
             }
         )
         _save_status(status_path, pull_status)
-    if allowance_blocked:
+    if yahoo_fallback == 0 and not blocked:
+        print("Status: OK (Yahoo Finance fallback)")
+    elif allowance_blocked:
         print("Status: partial (historical allowance gate hit)")
     elif blocked:
         print(f"Status: partial ({blocked.get('block_reason')})")

@@ -28,9 +28,15 @@ class SignalResult:
 
 
 class SignalEngine:
-    def __init__(self, config: Config, memory: Any | None = None) -> None:
+    def __init__(
+        self,
+        config: Config,
+        memory: Any | None = None,
+        environment_scorer: Any | None = None,
+    ) -> None:
         self._cfg = config
         self.memory = memory
+        self._environment_scorer = environment_scorer
         self.quotes_by_market: dict[str, list[Quote]] = {}
         # REST OHLC seed — not trimmed by max_live_quotes (stream ticks evict live buffer only).
         self._ohlc_seed: dict[str, list[Quote]] = {}
@@ -169,7 +175,16 @@ class SignalEngine:
         if not st or int(st.get("trades") or 0) < cfg.learning_min_trades_per_setup:
             return 0.0, "learning neutral: not enough setup history"
 
-        wr = float(st.get("winrate") or 0)
+        wins = int(st.get("wins") or 0)
+        losses = int(st.get("losses") or 0)
+        decisive = wins + losses
+        # Ignore pure-breakeven setups — no real P&L signal to learn from.
+        # These arise from PENDING/imported IG records with entry=exit and are
+        # not representative of signal quality.
+        if decisive == 0:
+            return 0.0, "learning neutral: no decisive trades (breakevens only)"
+
+        wr = wins / decisive
         avg = float(st.get("avg_pnl") or 0)
 
         if avg > 0 and wr >= cfg.adaptive_good_winrate_threshold:
@@ -202,9 +217,24 @@ class SignalEngine:
             if last is not None and hasattr(last, "get"):
                 rsi = float(last.get("rsi", 0) or 0)
                 atr = float(last.get("atr", 0) or 0)
+            fitness = 0.0
+            if self._environment_scorer is not None:
+                try:
+                    fitness = float(self._environment_scorer.last_score().total)
+                except Exception:
+                    pass
+            gate_blocked_at: str | None = None
+            if not would_have_fired:
+                if not snapshot:
+                    gate_blocked_at = "collecting"
+                elif float(adjusted_score) < float(self._cfg.signal_threshold):
+                    gate_blocked_at = "signal_confidence"
             row = {
                 "timestamp": datetime.now().isoformat(timespec="seconds"),
                 "market": market,
+                "confidence": round(float(adjusted_score), 2),
+                "fitness": round(fitness, 2),
+                "gate_blocked_at": gate_blocked_at,
                 "direction": direction,
                 "raw_score": round(float(raw_score), 2),
                 "adjusted_score": round(float(adjusted_score), 2),
@@ -216,6 +246,15 @@ class SignalEngine:
             }
             path = data_dir() / "shadow_log.jsonl"
             path.parent.mkdir(parents=True, exist_ok=True)
+            # Rotate when file exceeds 50MB — keep last file as .1
+            try:
+                if path.exists() and path.stat().st_size > 50 * 1024 * 1024:
+                    backup = path.with_suffix(".jsonl.1")
+                    if backup.exists():
+                        backup.unlink()
+                    path.rename(backup)
+            except Exception:
+                pass
             with open(path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(row) + "\n")
         except Exception:

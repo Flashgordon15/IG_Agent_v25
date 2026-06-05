@@ -174,6 +174,22 @@ class LiveExecutor:
             )
 
         size = float(execution_params.get("size", cfg.trade_size))
+
+        try:
+            from execution.correlation_guard import check_and_record as _cg_check
+            cg_ok, cg_reason = _cg_check(signal.direction)
+            if not cg_ok:
+                update_demo_diagnostics(last_rejection=cg_reason)
+                trace_execution("ORDER", "LiveExecutor.execute", decision=f"REJECTED: {cg_reason}")
+                return ExecutionResult(
+                    success=False,
+                    action="REJECTED",
+                    rejection_reason=cg_reason,
+                    execution_params=execution_params,
+                )
+        except Exception:
+            pass  # guard failure must never block execution
+
         if not try_begin_entry(signal.epic, signal.direction, size):
             reason = f"Entry already in flight for {signal.epic} — skipped duplicate"
             update_demo_diagnostics(last_rejection=reason)
@@ -279,6 +295,11 @@ class LiveExecutor:
                 )
             else:
                 log_engine(f"Order failed: reason={result.rejection_reason or result.action}")
+                try:
+                    from execution.correlation_guard import undo as _cg_undo
+                    _cg_undo(signal.direction)
+                except Exception:
+                    pass
         except Exception as e:
             mark_pending(
                 signal.epic,
@@ -286,6 +307,11 @@ class LiveExecutor:
                 order_type=ORDER_TYPE_ENTRY,
             )
             log_engine(f"Order failed: reason={type(e).__name__}: {e}")
+            try:
+                from execution.correlation_guard import undo as _cg_undo
+                _cg_undo(signal.direction)
+            except Exception:
+                pass
         finally:
             clear_entry(signal.epic)
             end_order_in_flight()

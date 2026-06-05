@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Callable
 
 from data.learning_store import LearningStore
@@ -15,6 +16,7 @@ if TYPE_CHECKING:
 
 HARD_CAP_ATR_MULTIPLE = 3.0
 PARTIAL_CLOSE_ATR_MULTIPLE = 1.5
+_MAX_AGE_WARNED: set[int] = set()  # trade IDs already warned to avoid repeat Telegram spam
 PARTIAL_CLOSE_FRACTION = 0.5
 
 
@@ -48,7 +50,7 @@ class TradeManager:
             return "standard"
         if confidence >= 80.0:
             return "marginal"
-        return "marginal"
+        return "low"
 
     @staticmethod
     def get_trail_distance(confidence: float, atr: float) -> float:
@@ -166,6 +168,16 @@ class TradeManager:
                 record_trade_opened(epic)
             except Exception:
                 pass
+        self._telegram_trade_opened(
+            market=market,
+            side=side,
+            entry=entry,
+            size=size,
+            stop=stop,
+            target=target,
+            adjusted_confidence=adjusted_confidence,
+            execution=execution,
+        )
         return trade_id
 
     def update_from_quote(self, market: str, epic: str, quote: Quote) -> list[str]:
@@ -194,6 +206,20 @@ class TradeManager:
             )
             if hard_msg:
                 messages.extend(hard_msg)
+                continue
+
+            age_msg = self._check_max_position_age(
+                market, side, trade_id, entry, px, ig_deal, epic, tr
+            )
+            if age_msg:
+                messages.extend(age_msg)
+                continue
+
+            friday_msg = self._check_friday_close(
+                market, side, trade_id, entry, px, ig_deal, epic, tr
+            )
+            if friday_msg:
+                messages.extend(friday_msg)
                 continue
 
             prev_stop = stop
@@ -260,6 +286,11 @@ class TradeManager:
 
                 pnl = realised_pnl_points(side, entry, exit_price)
                 hit = classify_result(pnl)
+                pts_before = (
+                    float(self._points_engine._cumulative)
+                    if self._points_engine is not None
+                    else None
+                )
                 self.store.close_trade(
                     trade_id, exit_price, pnl, hit,
                     f"Closed on {hit} at {exit_price:.1f}; target was {target:.1f}",
@@ -270,6 +301,13 @@ class TradeManager:
                     pnl=pnl,
                     source="bot",
                 )
+                self._telegram_trade_closed(
+                    trade_id,
+                    exit_price=exit_price,
+                    pnl_pts=pnl,
+                    result=hit,
+                    points_before=pts_before,
+                )
                 msg = (
                     f"TRADE CLOSED {hit} | {market} {side} | entry {entry:.1f} "
                     f"exit {exit_price:.1f} | {pnl:.1f} pts"
@@ -279,6 +317,103 @@ class TradeManager:
                     self.on_alert(msg)
 
         return messages
+
+    def _telegram_trade_opened(
+        self,
+        *,
+        market: str,
+        side: str,
+        entry: float,
+        size: float,
+        stop: float,
+        target: float,
+        adjusted_confidence: float,
+        execution: dict[str, Any],
+    ) -> None:
+        try:
+            from system.telegram_notifier import get_telegram_notifier
+
+            notifier = get_telegram_notifier()
+            if notifier is None or not notifier.enabled:
+                return
+            fitness = float(execution.get("fitness_score") or 0)
+            pts_state = "CAUTION"
+            if self._points_engine is not None:
+                pts_state = self._points_engine.get_state()
+            notifier.notify_trade_opened(
+                market=market,
+                direction=side,
+                entry=entry,
+                size=size,
+                stop=stop,
+                target=target,
+                signal_pct=float(adjusted_confidence),
+                fitness_pct=fitness,
+                points_state=pts_state,
+            )
+        except Exception as e:
+            log_engine(f"telegram trade open notify failed: {type(e).__name__}: {e}")
+
+    def _telegram_trade_closed(
+        self,
+        trade_id: int,
+        *,
+        exit_price: float,
+        pnl_pts: float,
+        result: str,
+        points_before: float | None = None,
+    ) -> None:
+        try:
+            from system.telegram_notifier import get_telegram_notifier
+
+            notifier = get_telegram_notifier()
+            if notifier is None or not notifier.enabled:
+                return
+            row = self.store.conn.execute(
+                "SELECT market, side, entry, opened_at, ig_pnl_currency, "
+                "adjusted_confidence FROM trades WHERE id=?",
+                (trade_id,),
+            ).fetchone()
+            if row is None:
+                return
+            market = str(row["market"] or "")
+            side = str(row["side"] or "")
+            entry = float(row["entry"] or 0)
+            opened_at = row["opened_at"]
+            duration_mins: float | None = None
+            if opened_at:
+                try:
+                    opened = datetime.fromisoformat(
+                        str(opened_at).replace("Z", "+00:00")
+                    )
+                    if opened.tzinfo is not None:
+                        opened = opened.replace(tzinfo=None)
+                    duration_mins = max(
+                        0.0, (datetime.now() - opened).total_seconds() / 60.0
+                    )
+                except (TypeError, ValueError):
+                    duration_mins = None
+            ig_pnl = row["ig_pnl_currency"]
+            pnl_gbp = float(ig_pnl) if ig_pnl is not None else None
+            pts_after: float | None = None
+            state = "CAUTION"
+            if self._points_engine is not None:
+                pts_after = float(self._points_engine._cumulative)
+                state = self._points_engine.get_state()
+            notifier.notify_trade_closed(
+                market=market,
+                direction=side,
+                entry=entry,
+                exit_price=exit_price,
+                pnl_gbp=pnl_gbp,
+                pnl_pts=float(pnl_pts),
+                duration_mins=duration_mins,
+                points_before=points_before,
+                points_after=pts_after,
+                points_state=state,
+            )
+        except Exception as e:
+            log_engine(f"telegram trade close notify failed: {type(e).__name__}: {e}")
 
     def _current_stop(self, trade_id: int, fallback: float) -> float:
         stop = self.store.get_stop(trade_id)
@@ -310,6 +445,142 @@ class TradeManager:
     def _profit_points(self, side: str, entry: float, px: float) -> float:
         return (px - entry) if side == "BUY" else (entry - px)
 
+    def _check_max_position_age(
+        self,
+        market: str,
+        side: str,
+        trade_id: int,
+        entry: float,
+        px: float,
+        ig_deal: str,
+        epic: str,
+        tr: Any,
+    ) -> list[str]:
+        """Force-close a position that has been open longer than max_position_age_minutes."""
+        max_age = getattr(self._cfg, "max_position_age_minutes", None)
+        if not max_age or max_age <= 0:
+            return []
+        opened_at_raw = tr["opened_at"] if "opened_at" in tr.keys() else None
+        if not opened_at_raw:
+            return []
+        try:
+            opened_dt = datetime.fromisoformat(str(opened_at_raw).replace("Z", ""))
+            age_mins = (datetime.utcnow() - opened_dt).total_seconds() / 60.0
+        except Exception:
+            return []
+        if age_mins < float(max_age):
+            if trade_id in _MAX_AGE_WARNED:
+                _MAX_AGE_WARNED.discard(trade_id)
+            return []
+        # Warn once at 80% of max age
+        warn_threshold = float(max_age) * 0.8
+        if age_mins >= warn_threshold and trade_id not in _MAX_AGE_WARNED:
+            _MAX_AGE_WARNED.add(trade_id)
+            warn_msg = (
+                f"⏰ Position age warning: {market} {side} open {age_mins:.0f}m "
+                f"(limit {max_age}m) — will auto-close at {max_age}m"
+            )
+            log_engine(warn_msg)
+            self._telegram_alert(warn_msg)
+        if age_mins < float(max_age):
+            return []
+        from system.pnl_math import classify_result, realised_pnl_points
+        exit_price = px
+        pnl = realised_pnl_points(side, entry, exit_price)
+        hit = classify_result(pnl)
+        pts_before = (
+            float(self._points_engine._cumulative)
+            if self._points_engine is not None
+            else None
+        )
+        self.store.close_trade(
+            trade_id,
+            exit_price,
+            pnl,
+            hit,
+            f"Max age {max_age}m exceeded ({age_mins:.0f}m open)",
+        )
+        self._telegram_trade_closed(
+            trade_id,
+            exit_price=exit_price,
+            pnl_pts=pnl,
+            result=hit,
+            points_before=pts_before,
+        )
+        if ig_deal and self._rest is not None and hasattr(self._rest, "close_position"):
+            try:
+                self._rest.close_position(ig_deal, side=side, size=float(tr["size"]))
+            except Exception as e:
+                log_engine(f"Max-age IG close failed for {ig_deal}: {e}")
+        msg = (
+            f"MAX AGE CLOSE {hit} | {market} {side} | entry {entry:.1f} "
+            f"exit {exit_price:.1f} | {pnl:.1f} pts | open {age_mins:.0f}m"
+        )
+        log_engine(msg)
+        if self.on_alert:
+            self.on_alert(msg)
+        _MAX_AGE_WARNED.discard(trade_id)
+        return [msg]
+
+    @staticmethod
+    def _is_friday_close_window() -> bool:
+        """True from Friday 20:30 UTC — all open positions must be closed before weekly gap."""
+        now = datetime.utcnow()
+        return now.weekday() == 4 and (now.hour * 60 + now.minute) >= 20 * 60 + 30
+
+    def _check_friday_close(
+        self,
+        market: str,
+        side: str,
+        trade_id: int,
+        entry: float,
+        px: float,
+        ig_deal: str,
+        epic: str,
+        tr: Any,
+    ) -> list[str]:
+        """Force-close all positions at Friday 20:30 UTC to avoid weekend gap risk."""
+        if not self._is_friday_close_window():
+            return []
+        from system.pnl_math import classify_result, realised_pnl_points
+        exit_price = px
+        pnl = realised_pnl_points(side, entry, exit_price)
+        hit = classify_result(pnl)
+        pts_before = (
+            float(self._points_engine._cumulative)
+            if self._points_engine is not None
+            else None
+        )
+        self.store.close_trade(
+            trade_id, exit_price, pnl, hit, "Friday 20:30 UTC auto-close (weekend gap protection)"
+        )
+        self._telegram_trade_closed(
+            trade_id, exit_price=exit_price, pnl_pts=pnl, result=hit, points_before=pts_before
+        )
+        if ig_deal and self._rest is not None and hasattr(self._rest, "close_position"):
+            try:
+                self._rest.close_position(ig_deal, side=side, size=float(tr["size"]))
+            except Exception as e:
+                log_engine(f"Friday auto-close IG REST failed for {ig_deal}: {e}")
+        msg = (
+            f"FRIDAY AUTO-CLOSE {hit} | {market} {side} | entry {entry:.1f} "
+            f"exit {exit_price:.1f} | {pnl:.1f} pts | weekend gap protection"
+        )
+        log_engine(msg)
+        self._telegram_alert(f"📅 {msg}")
+        if self.on_alert:
+            self.on_alert(msg)
+        return [msg]
+
+    def _telegram_alert(self, msg: str) -> None:
+        try:
+            from system.telegram_notifier import get_telegram_notifier
+            n = get_telegram_notifier()
+            if n:
+                n.send_alert(msg)
+        except Exception:
+            pass
+
     def _check_hard_cap(
         self,
         market: str,
@@ -332,12 +603,24 @@ class TradeManager:
         exit_price = px
         pnl = realised_pnl_points(side, entry, exit_price)
         hit = classify_result(pnl)
+        pts_before = (
+            float(self._points_engine._cumulative)
+            if self._points_engine is not None
+            else None
+        )
         self.store.close_trade(
             trade_id,
             exit_price,
             pnl,
             hit,
             f"Hard cap +{HARD_CAP_ATR_MULTIPLE:.1f}x ATR at {exit_price:.1f}",
+        )
+        self._telegram_trade_closed(
+            trade_id,
+            exit_price=exit_price,
+            pnl_pts=pnl,
+            result=hit,
+            points_before=pts_before,
         )
         msg = (
             f"HARD CAP EXIT {hit} | {market} {side} | entry {entry:.1f} "
@@ -440,10 +723,11 @@ class TradeManager:
             profit = px - entry
             trail_stop = px - distance
             if trail_stop < stop:
-                log_engine(
-                    f"ERROR: Trail would move stop backwards — rejected. "
-                    f"current={stop} proposed={trail_stop}"
-                )
+                if profit >= trigger:
+                    log_engine(
+                        f"ERROR: Trail would move stop backwards — rejected. "
+                        f"current={stop} proposed={trail_stop}"
+                    )
                 return []
             if profit >= trigger and trail_stop > stop and trail_stop < target:
                 self.store.update_stop(trade_id, trail_stop, f" | Trailing stop raised to {trail_stop:.1f}")
@@ -452,7 +736,8 @@ class TradeManager:
             profit = entry - px
             trail_stop = px + distance
             if trail_stop > stop:
-                log_engine("ERROR: Trail would move stop backwards — rejected.")
+                if profit >= trigger:
+                    log_engine("ERROR: Trail would move stop backwards — rejected.")
                 return []
             if profit >= trigger and trail_stop < stop and trail_stop > target:
                 self.store.update_stop(trade_id, trail_stop, f" | Trailing stop lowered to {trail_stop:.1f}")

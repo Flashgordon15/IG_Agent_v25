@@ -44,7 +44,7 @@ class OhlcBootstrapTests(unittest.TestCase):
                 "close": 97.0,
             },
         ]
-        n = bootstrap_ohlc_for_session(rest, engine, "IX.D.NIKKEI.IFM.IP", "japan_225")
+        n = bootstrap_ohlc_for_session(rest, engine, "IX.D.NIKKEI.IFM.IP", "japan_225", prefer_cache=False)
         self.assertEqual(n, 2)
         self.assertEqual(engine.ohlc_seed_count("japan_225"), 2)
         df = engine.quote_df("japan_225")
@@ -114,7 +114,7 @@ class OhlcBootstrapTests(unittest.TestCase):
             },
         ]
         bootstrap_ohlc_for_session(
-            rest, engine, "IX.D.NIKKEI.IFM.IP", "Japan 225"
+            rest, engine, "IX.D.NIKKEI.IFM.IP", "Japan 225", prefer_cache=False
         )
         self.assertEqual(engine.ohlc_seed_count("IX.D.NIKKEI.IFM.IP"), 2)
         c5 = engine.candles(engine.quote_df("IX.D.NIKKEI.IFM.IP"), 5)

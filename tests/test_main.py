@@ -166,7 +166,7 @@ class PortConflictTests(unittest.TestCase):
     @patch("main.create_app")
     @patch("main.register_api_startup")
     @patch("main.register_trading_loop")
-    @patch("runtime.agent_bootstrap.build_trading_loop")
+    @patch("runtime.agent_bootstrap.build_market_orchestrator")
     @patch("main._rest_client_if_ready", return_value=None)
     @patch("main.apply_config_defaults", side_effect=lambda d: d)
     @patch("main._load_config")

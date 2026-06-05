@@ -38,9 +38,72 @@ EXIT_LOCK = 2
 EXIT_CONFIG = 3
 EXIT_INSTANCE = 4
 
+_SESSION_REFRESH_INTERVAL_SEC = 45 * 60  # 45 minutes
+_LOG_ROTATE_MAX_BYTES = 20 * 1024 * 1024   # 20 MB — rotate shell-written logs
+_LOG_KEEP_BACKUPS = 3
+
+
+def _rotate_oversized_logs() -> None:
+    """Rotate any shell-written log files that exceed the size cap.
+
+    Python logging uses RotatingFileHandler already; this handles files written
+    by shell redirects (launcher.log, ig_agent.log) that bypass Python's handler.
+    """
+    from pathlib import Path
+
+    from system.paths import logs_dir
+
+    log_dir = logs_dir()
+    for log_path in log_dir.glob("*.log"):
+        try:
+            if log_path.stat().st_size <= _LOG_ROTATE_MAX_BYTES:
+                continue
+            # Rotate: .log → .log.1 → .log.2 etc., drop oldest
+            for i in range(_LOG_KEEP_BACKUPS - 1, 0, -1):
+                src = Path(f"{log_path}.{i}")
+                dst = Path(f"{log_path}.{i + 1}")
+                if src.exists():
+                    src.rename(dst)
+            log_path.rename(Path(f"{log_path}.1"))
+            log_path.touch()  # create fresh empty file
+        except Exception:
+            pass
+
+
+def _start_session_refresh_watchdog(rest_client: Any) -> None:
+    """Background thread that proactively refreshes the IG session every 45 minutes.
+
+    Without this, a long-running Lightstreamer session (no REST calls) can let
+    the session token expire silently, causing an auth failure on the next trade.
+    """
+    if rest_client is None:
+        return
+
+    def _refresh_loop() -> None:
+        while True:
+            time.sleep(_SESSION_REFRESH_INTERVAL_SEC)
+            try:
+                refreshed = rest_client.proactive_refresh_if_needed()
+                if not refreshed:
+                    # Force a lightweight REST call to keep the session alive
+                    try:
+                        rest_client.ensure_session()
+                        log_engine("IG session keep-alive: session verified")
+                    except Exception as e:
+                        log_engine(f"IG session keep-alive failed: {type(e).__name__}: {e}")
+                else:
+                    log_engine("IG session keep-alive: proactive token refresh completed")
+            except Exception as e:
+                log_engine(f"IG session refresh watchdog error: {type(e).__name__}: {e}")
+
+    t = threading.Thread(target=_refresh_loop, name="ig-session-refresh", daemon=True)
+    t.start()
+    log_engine(f"IG session refresh watchdog started (interval {_SESSION_REFRESH_INTERVAL_SEC//60}m)")
+
 _BROWSER_DELAY_SEC = 3.0
 _API_HOST = "127.0.0.1"
 _API_PORT = 8080
+_DASHBOARD_URL = "http://localhost:8080/"
 
 
 def _is_benign_startup_lock_failure(message: str) -> bool:
@@ -224,6 +287,18 @@ class AgentRuntime:
 
             stop_market_stream(self._stream_client)
             self._stream_client = None
+        try:
+            from system.telegram_notifier import (
+                get_telegram_notifier,
+                stop_telegram_heartbeat,
+            )
+
+            notifier = get_telegram_notifier()
+            if notifier is not None and notifier.enabled:
+                notifier.notify_shutdown()
+            stop_telegram_heartbeat()
+        except Exception:
+            pass
         release_instance_lock()
         log_engine("shutdown complete")
 
@@ -249,27 +324,48 @@ class AgentRuntime:
             cfg = Config(_data=merged)
 
             rest = _rest_client_if_ready()
-            from runtime.agent_bootstrap import build_trading_loop, start_market_stream
-
             from api.snapshot_store import wire_hub_quotes_to_dashboard
+            from runtime.agent_bootstrap import (
+                build_market_orchestrator,
+                start_market_stream,
+            )
+            from runtime.ig_account_verify import verify_account_on_broker
+            from system.credentials_loader import try_load_credentials
 
-            self.trading_loop = build_trading_loop(cfg, rest_client=rest)
+            cred_status = try_load_credentials()
+            if rest is not None and cred_status.ok and cred_status.credentials:
+                verify_account_on_broker(rest, cred_status.credentials)
+
+            self.trading_loop = build_market_orchestrator(cfg, rest_client=rest)
             register_trading_loop(self.trading_loop)
 
             def _start_live_engines() -> None:
                 wire_hub_quotes_to_dashboard(min_interval=0.25)
-                self.trading_loop.start()
                 self._stream_client = start_market_stream(cfg, rest_client=rest)
+                self.trading_loop.start()
+                from system.replay_daily_scheduler import start_replay_daily_scheduler
+
+                start_replay_daily_scheduler()
+                _start_session_refresh_watchdog(rest)
                 log_engine("orchestrator trading loop started (background)")
+                from system.engine_log import _intermittent_settings
+
+                on, iv = _intermittent_settings()
+                if on:
+                    log_engine(
+                        f"Intermittent engine logging enabled "
+                        f"(stream/hub quotes every {iv:.0f}s per epic)"
+                    )
 
             register_api_startup(_start_live_engines)
 
             app = create_app(watch_snapshot=True)
-            url = f"http://{_API_HOST}:{_API_PORT}/"
-            _open_browser_delayed(url)
+            if not os.environ.get("IG_AGENT_FROM_LAUNCHER"):
+                _open_browser_delayed(_DASHBOARD_URL)
 
             import uvicorn
 
+            log_engine(f"API server: started on port {_API_PORT}")
             uvicorn.run(app, host=_API_HOST, port=_API_PORT, log_level="info")
             return EXIT_OK
         finally:
@@ -290,6 +386,8 @@ def _install_signal_handlers(runtime: AgentRuntime) -> None:
 
 
 def main() -> None:
+    _rotate_oversized_logs()
+    log_engine("=== IG Agent v25 full restart ===")
     runtime = AgentRuntime()
     _install_signal_handlers(runtime)
     try:
@@ -300,6 +398,14 @@ def main() -> None:
         raise
     except Exception as e:
         log_engine(f"CRITICAL: {type(e).__name__}: {e}")
+        try:
+            from system.telegram_notifier import get_telegram_notifier
+
+            notifier = get_telegram_notifier()
+            if notifier is not None and notifier.enabled:
+                notifier.notify_crash(f"{type(e).__name__}: {e}")
+        except Exception:
+            pass
         runtime.shutdown()
         raise SystemExit(1) from e
 

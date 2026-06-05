@@ -158,6 +158,7 @@ class ExecutionEngine:
         result = self._validator.validate(
             signal,
             open_position_count=self._tracker.count_open_for_epic,
+            open_total_count=self._tracker.count_open_total,
             has_open_position=self._has_broker_position,
             store_has_position=self.store.has_open_trade,
         )
@@ -197,6 +198,13 @@ class ExecutionEngine:
                 if notes
                 else f"points {self._points.get_state()} ×{mult:.2f}"
             )
+        if self._env_scorer is not None:
+            try:
+                settings["fitness_score"] = float(
+                    self._env_scorer.score(signal.market, quote=signal.quote)
+                )
+            except Exception:
+                settings["fitness_score"] = 0.0
         trace_execution(
             "ADAPTIVE",
             "AdaptiveEngine.settings",
@@ -396,14 +404,26 @@ class ExecutionEngine:
         if sync is None:
             return False, ""
         try:
+            max_pos = max(1, int(self.config.max_positions_per_epic))
+            if self.config.one_position_per_epic:
+                max_pos = 1
+            max_total = max(1, int(self.config.max_open_positions))
             ig = int(sync.count_for_epic(signal.epic))
             local = int(self._tracker.count_open_for_epic(signal.epic))
+            total = int(self._tracker.count_open_total())
             if ig != local and hasattr(sync, "sync_once"):
                 sync.sync_once()
                 ig = int(sync.count_for_epic(signal.epic))
                 local = int(self._tracker.count_open_for_epic(signal.epic))
-            if ig > 0:
-                return True, f"IG confirms {ig} open position(s) on {signal.epic}"
+                total = int(self._tracker.count_open_total())
+            if ig >= max_pos:
+                return True, (
+                    f"IG confirms {ig} open on {signal.epic} (max {max_pos} per epic)"
+                )
+            if total >= max_total:
+                return True, (
+                    f"Total open positions {total} (max {max_total})"
+                )
         except Exception:
             pass
         return False, ""

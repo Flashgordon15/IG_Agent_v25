@@ -75,23 +75,46 @@ def set_mode(mode: str) -> None:
 
 def _sync_operating_mode_from_credentials(cfg: dict[str, Any]) -> None:
     """
-    When IG credentials specify DEMO, default operating_mode to DEMO (broker) not TEST (simulator).
-    Explicit operating_mode=TEST in config is preserved for internal simulation only.
+    Merge credentials file into config:
+    - Sets account_type from credentials (DEMO / LIVE).
+    - Promotes operating_mode from TEST when broker type is known.
+    - Fills telegram.bot_token / chat_id from credentials when config leaves them blank.
     """
+    raw_creds: dict[str, Any] = {}
     try:
         from system.credentials_holder import get_credentials_holder
 
         creds = get_credentials_holder().credentials
     except Exception:
         creds = None
-    if not creds:
-        return
-    cfg["account_type"] = creds.account_type
-    op = str(cfg.get("operating_mode", "TEST")).upper()
-    if creds.account_type == "DEMO" and op == "TEST":
-        cfg["operating_mode"] = "DEMO"
-    elif creds.account_type == "LIVE" and op == "TEST" and cfg.get("allow_live_trading"):
-        cfg["operating_mode"] = "LIVE"
+    try:
+        from system.credentials_loader import CREDENTIALS_PATH
+        import json as _json
+
+        if CREDENTIALS_PATH.is_file():
+            raw_creds = _json.loads(CREDENTIALS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        raw_creds = {}
+
+    if creds:
+        cfg["account_type"] = creds.account_type
+        op = str(cfg.get("operating_mode", "TEST")).upper()
+        if creds.account_type == "DEMO" and op == "TEST":
+            cfg["operating_mode"] = "DEMO"
+        elif creds.account_type == "LIVE" and op == "TEST" and cfg.get("allow_live_trading"):
+            cfg["operating_mode"] = "LIVE"
+
+    # Fill telegram credentials from credentials file when config leaves them blank.
+    tg = cfg.get("telegram")
+    if isinstance(tg, dict) and raw_creds:
+        if not str(tg.get("bot_token") or "").strip():
+            token = str(raw_creds.get("telegram_bot_token") or "").strip()
+            if token:
+                tg["bot_token"] = token
+        if not str(tg.get("chat_id") or "").strip():
+            chat = str(raw_creds.get("telegram_chat_id") or "").strip()
+            if chat:
+                tg["chat_id"] = chat
 
 
 def get_config(*, reload: bool = False) -> Config:

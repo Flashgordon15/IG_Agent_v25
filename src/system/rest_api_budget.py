@@ -18,10 +18,16 @@ from typing import Any, Iterator
 from system.engine_log import log_engine
 
 ESSENTIAL_REST_CATEGORIES = frozenset({"positions", "orders"})
+# Hard cap: non-essential calls at or above this value are blocked unconditionally,
+# regardless of stream state. Essential (positions/orders) and ohlc_bootstrap calls
+# are exempt and do not count toward the cap. This prevents IG rate-limit hits even
+# when Lightstreamer is healthy (preemptive throttle is stream-stale-only).
+HARD_CAP_DEFAULT = 3
 PREEMPTIVE_CONSECUTIVE_READINGS = 3
 PREEMPTIVE_PAUSE_SEC = 30.0
+PREEMPTIVE_PAUSE_MAX_SEC = 120.0  # progressive backoff ceiling when stream is persistently stale
 PREEMPTIVE_UTILIZATION_RATIO = 0.8
-FRESH_STREAM_TICK_MAX_AGE_SEC = 5.0
+FRESH_STREAM_TICK_MAX_AGE_SEC = 45.0
 
 
 class RestBudgetPausedError(RuntimeError):
@@ -186,7 +192,11 @@ def hub_quote_stream_genuinely_stale(
     return age > max_age
 
 
-def hub_quote_stream_fresh(*, max_age: float = FRESH_STREAM_TICK_MAX_AGE_SEC) -> bool:
+def hub_quote_stream_fresh(
+    *,
+    max_age: float = FRESH_STREAM_TICK_MAX_AGE_SEC,
+    epic: str | None = None,
+) -> bool:
     """
     True when the hub holds recent bid/offer (Lightstreamer or stream poll).
 
@@ -199,10 +209,10 @@ def hub_quote_stream_fresh(*, max_age: float = FRESH_STREAM_TICK_MAX_AGE_SEC) ->
         from system.market_data_hub import get_market_data_hub
         from system.market_watch.japan225_session import is_quote_stream_fresh
 
-        epic = _primary_market_epic()
-        if get_market_data_hub().is_in_maintenance(epic):
+        check_epic = str(epic or "").strip() or _primary_market_epic()
+        if get_market_data_hub().is_in_maintenance(check_epic):
             return False
-        if is_quote_stream_fresh(epic, max_age=max_age):
+        if is_quote_stream_fresh(check_epic, max_age=max_age):
             return True
         hub = get_market_data_hub()
         with hub._lock:
@@ -210,9 +220,13 @@ def hub_quote_stream_fresh(*, max_age: float = FRESH_STREAM_TICK_MAX_AGE_SEC) ->
         if rest is not None:
             activity_age = rest.stream_activity_age_seconds()
             if activity_age is not None and activity_age <= max_age:
-                snap = hub.get_snapshot(epic)
+                snap = hub.get_snapshot(check_epic)
                 if snap is not None and snap.bid > 0 and snap.offer > 0:
                     return True
+        with hub._lock:
+            snap = hub._quotes.get(check_epic)
+        if snap is not None and snap.bid > 0 and snap.offer > 0:
+            return snap.age_seconds() <= max_age
         return False
     except Exception:
         return False
@@ -242,11 +256,21 @@ def order_in_flight_paused(activity: str) -> bool:
 class RestApiBudget:
     """Minimum interval between REST calls (process-wide) + rolling rate metrics."""
 
-    def __init__(self, *, min_interval_seconds: float = 10.0, warn_per_minute: int = 6) -> None:
+    def __init__(
+        self,
+        *,
+        min_interval_seconds: float = 10.0,
+        warn_per_minute: int = 6,
+        hard_cap_per_minute: int = HARD_CAP_DEFAULT,
+    ) -> None:
         self._min_interval = max(0.5, float(min_interval_seconds))
         self._warn_per_minute = max(1, int(warn_per_minute))
+        self._hard_cap = max(1, int(hard_cap_per_minute))
         self._lock = threading.RLock()
-        self._last_ts = 0.0
+        # Initialise to now so the very first call must wait min_interval.
+        # Starting at 0 caused startup bursts where all threads got through
+        # simultaneously before any call was recorded.
+        self._last_ts = time.time()
         self._total_waits = 0
         self._total_calls = 0
         self._recent: deque[RestCallRecord] = deque(maxlen=600)
@@ -267,6 +291,10 @@ class RestApiBudget:
         with self._lock:
             self._warn_per_minute = max(1, int(value))
 
+    def set_hard_cap_per_minute(self, value: int) -> None:
+        with self._lock:
+            self._hard_cap = max(1, int(value))
+
     def acquire(self, *, label: str = "") -> None:
         """Block until the next REST slot is available."""
         from system.rate_limit_manager import get_rate_limit_manager
@@ -277,18 +305,44 @@ class RestApiBudget:
 
         get_rate_limit_manager().check_rest_allowed()
 
+        # Order-in-flight guard: allow confirm/position REST through immediately,
+        # but defer market-data fetches while an order is being confirmed.
+        # Hard 30s timeout prevents permanent deadlock when a confirm worker
+        # hangs (e.g. mock orders in tests, lost IG confirm response).
+        _oif_deadline = time.time() + 30.0
         while is_order_in_flight() and cat not in _ORDER_IN_FLIGHT_ALLOWED_CATEGORIES:
+            if time.time() >= _oif_deadline:
+                log_engine(
+                    f"RestApiBudget: order-in-flight wait exceeded 30s "
+                    f"(label={label!r}) — proceeding to prevent trading-loop deadlock"
+                )
+                break
             time.sleep(0.05)
+
+        # Enforce minimum interval without holding the lock during sleep.
+        # Reservation pattern: atomically claim the next slot, then sleep
+        # outside the lock so other threads can proceed to their own slot
+        # computation rather than blocking behind a sleeping holder.
+        # The hard cap is also re-checked here atomically at reservation time —
+        # the early check in _raise_if_non_essential_paused is approximate (reads
+        # completed calls before any lock); this check is definitive and prevents
+        # concurrent threads from all passing the cap simultaneously.
+        _exempt_cap = cat in ESSENTIAL_REST_CATEGORIES or e2e_diagnostics_rest_active()
+        while True:
+            with self._lock:
+                now = time.time()
+                elapsed = now - self._last_ts
+                if elapsed >= self._min_interval:
+                    if not _exempt_cap and self._hard_cap_exceeded_locked(now):
+                        raise RestBudgetPausedError("hard_rate_cap")
+                    self._last_ts = now  # Reserve this slot
+                    break
+                wait = self._min_interval - elapsed
+            self._total_waits += 1
+            time.sleep(wait)
 
         with self._lock:
             now = time.time()
-            elapsed = now - self._last_ts
-            if elapsed < self._min_interval:
-                wait = self._min_interval - elapsed
-                self._total_waits += 1
-                time.sleep(wait)
-                now = time.time()
-            self._last_ts = now
             self._total_calls += 1
             cat = categorize_rest_label(label)
             exempt_preemptive = ohlc_bootstrap_rest_active()
@@ -314,6 +368,16 @@ class RestApiBudget:
             return False
         return self._preemptive_pause_active()
 
+    def _hard_cap_calls_locked(self, now: float) -> list[RestCallRecord]:
+        """Non-essential, non-ohlc-bootstrap calls in the last minute — counted toward hard cap."""
+        return [
+            r for r in self._prune_locked(now)
+            if r.category not in ESSENTIAL_REST_CATEGORIES and not r.exempt_preemptive
+        ]
+
+    def _hard_cap_exceeded_locked(self, now: float) -> bool:
+        return len(self._hard_cap_calls_locked(now)) >= self._hard_cap
+
     def _preemptive_calls_locked(self, now: float) -> list[RestCallRecord]:
         return [r for r in self._prune_locked(now) if not r.exempt_preemptive]
 
@@ -332,6 +396,19 @@ class RestApiBudget:
                 self._rate_limit_skip_logged = True
                 log_engine("Rate limit active — non-essential REST skipped")
             raise RestBudgetPausedError("rate_limit_active")
+        # Hard per-minute cap: block non-essential calls unconditionally when the
+        # rolling 60s count reaches the cap. Applies regardless of stream state —
+        # this is the primary guard against hitting IG's API rate limit.
+        # Essential (positions/orders) and ohlc_bootstrap calls are never counted
+        # or blocked here, so trade execution always gets through.
+        with self._lock:
+            now = time.time()
+            if self._hard_cap_exceeded_locked(now):
+                log_engine(
+                    f"REST hard cap reached ({self._hard_cap}/min) — "
+                    f"non-essential call deferred (label={label!r})"
+                )
+                raise RestBudgetPausedError("hard_rate_cap")
         history_reconcile = bool(label) and "history/transactions" in label.lower()
         connecting_rescue = self._consume_connecting_market_rescue(label)
         if (
@@ -373,6 +450,7 @@ class RestApiBudget:
 
         if not stream_stale:
             self._consecutive_high_readings = 0
+            self._stale_pause_count = 0  # reset backoff when stream recovers
             if self._preemptive_pause_active():
                 self._preemptive_pause_until = 0.0
                 log_engine(
@@ -395,13 +473,18 @@ class RestApiBudget:
         if self._consecutive_high_readings >= PREEMPTIVE_CONSECUTIVE_READINGS:
             tick_age = hub_quote_stream_tick_age()
             age_s = f"{tick_age:.1f}s" if tick_age is not None else "n/a"
-            self._preemptive_pause_until = now + PREEMPTIVE_PAUSE_SEC
+            # Progressive backoff: 30s → 60s → 120s as stream stays stale.
+            stale_pauses = getattr(self, "_stale_pause_count", 0) + 1
+            self._stale_pause_count = stale_pauses
+            pause_sec = min(PREEMPTIVE_PAUSE_SEC * stale_pauses, PREEMPTIVE_PAUSE_MAX_SEC)
+            self._preemptive_pause_until = now + pause_sec
             self._consecutive_high_readings = 0
             self._preemptive_skip_logged = False
             log_engine(
-                "REST approaching limit — throttling 30s "
+                f"REST approaching limit — throttling {pause_sec:.0f}s "
                 f"(stream stale tick_age={age_s}, "
-                f">={int(PREEMPTIVE_UTILIZATION_RATIO * 100)}% budget)"
+                f">={int(PREEMPTIVE_UTILIZATION_RATIO * 100)}% budget, "
+                f"stale_count={stale_pauses})"
             )
 
     def _prune_locked(self, now: float) -> list[RestCallRecord]:
@@ -459,9 +542,13 @@ class RestApiBudget:
             now = time.time()
             recent = self._prune_locked(now)
             by_cat = self._by_category_locked()
+            hard_cap_calls = len(self._hard_cap_calls_locked(now))
             return {
                 "min_interval_sec": self._min_interval,
                 "warn_per_minute": self._warn_per_minute,
+                "hard_cap_per_minute": self._hard_cap,
+                "hard_cap_calls_last_minute": hard_cap_calls,
+                "hard_cap_utilization_pct": round(hard_cap_calls / self._hard_cap * 100),
                 "total_calls": self._total_calls,
                 "throttled_waits": self._total_waits,
                 "calls_last_minute": len(recent),
@@ -503,8 +590,15 @@ def configure_rest_api_budget(*, min_interval_seconds: float | None = None) -> R
     try:
         from system.config_loader import get_config
 
-        warn = int(getattr(get_config(reload=False), "rest_budget_warn_per_minute", 6))
+        cfg = get_config(reload=False)
+        warn = int(getattr(cfg, "rest_budget_warn_per_minute", 6))
         budget.set_warn_per_minute(warn)
+        hard_cap = int(getattr(cfg, "rest_hard_cap_per_minute", warn))
+        budget.set_hard_cap_per_minute(hard_cap)
+        log_engine(
+            f"REST API budget: warn={warn}/min hard_cap={hard_cap}/min "
+            f"interval={budget._min_interval:.0f}s"
+        )
     except Exception:
         pass
     return budget

@@ -140,11 +140,21 @@ class PointsEngineThresholdTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_trade_confidence_threshold_is_max_of_points_and_config(self) -> None:
-        cfg = type("Cfg", (), {"signal_threshold": 85.0})()
-        with patch.object(self.engine, "get_threshold", return_value=80.0):
+        # cfg.confidence_floor=80, signal_threshold=85 → max(80, 85) = 85
+        cfg = type("Cfg", (), {"signal_threshold": 85.0, "confidence_floor": 80.0, "confidence_floor_recovery_per_win": 1.0})()
+        with patch.object(self.engine, "get_state", return_value="HEALTHY"):
             self.assertEqual(self.engine.trade_confidence_threshold(cfg), 85.0)
-        with patch.object(self.engine, "get_threshold", return_value=92.0):
+        # WARNING state always returns CONF_HIGH (92) regardless of config floor
+        with patch.object(self.engine, "get_state", return_value="WARNING"):
             self.assertEqual(self.engine.trade_confidence_threshold(cfg), 92.0)
+        # cfg.confidence_floor=75 (bootstrap mode), signal_threshold=75 → 75
+        cfg2 = type("Cfg", (), {"signal_threshold": 75.0, "confidence_floor": 75.0, "confidence_floor_recovery_per_win": 1.0})()
+        with patch.object(self.engine, "get_state", return_value="CAUTION"):
+            self.assertEqual(self.engine.trade_confidence_threshold(cfg2), 75.0)
+
+    def test_min_size_confidence_threshold_caution_is_88(self) -> None:
+        with patch.object(self.engine, "get_state", return_value="CAUTION"):
+            self.assertEqual(self.engine.min_size_confidence_threshold(), 88.0)
 
 
 class PointsEngineSessionTests(unittest.TestCase):
@@ -157,21 +167,19 @@ class PointsEngineSessionTests(unittest.TestCase):
         set_points_state_path_for_tests(None)
         self.tmp.cleanup()
 
-    def test_session_pause_after_three_consecutive_losses(self) -> None:
-        for _ in range(3):
+    def test_session_pause_after_consecutive_losses(self) -> None:
+        # SESSION_LOSS_STREAK_TRIGGER=6, SIGNALS_TO_SKIP_AFTER_STREAK=1
+        for _ in range(6):
             self.engine.record_trade("LOSS", 90.0, -5.0)
         self.assertTrue(self.engine.is_session_paused())
         self.assertTrue(self.engine.consume_signal_skip())
-        self.assertTrue(self.engine.consume_signal_skip())
-        self.assertTrue(self.engine.consume_signal_skip())
         self.assertFalse(self.engine.is_session_paused())
 
-    def test_day_stop_when_session_score_below_minus_five(self) -> None:
-        for _ in range(6):
+    def test_day_stop_always_false_when_disabled(self) -> None:
+        # Day-stop is disabled — max_daily_loss_gbp gate is the hard stop instead.
+        for _ in range(10):
             self.engine.record_trade("LOSS", 90.0, -1.0)
-        self.assertTrue(self.engine.is_day_stopped())
-        self.assertEqual(self.engine.get_threshold(), 100.0)
-        self.assertEqual(self.engine.get_size_multiplier(95.0), 0.0)
+        self.assertFalse(self.engine.is_day_stopped())
 
     def test_reset_session_clears_day_stop_and_pause(self) -> None:
         for _ in range(3):
@@ -207,10 +215,12 @@ class PointsEngineThresholdSizeTests(unittest.TestCase):
         self.assertEqual(self.engine.get_threshold(), 100.0)
 
     def test_size_multiplier_healthy_bands(self) -> None:
+        # Progressive multiplier: cum=15 → tier_mult=1.5 (HEALTHY: cum > 10)
+        # high (>=92) → 1.5, standard (>=85) → 0.75, marginal (>=80) → 0.375
         self._set_state(15.0)
-        self.assertEqual(self.engine.get_size_multiplier(93.0), 1.0)
-        self.assertEqual(self.engine.get_size_multiplier(88.0), 0.5)
-        self.assertEqual(self.engine.get_size_multiplier(82.0), 0.25)
+        self.assertEqual(self.engine.get_size_multiplier(93.0), 1.5)
+        self.assertEqual(self.engine.get_size_multiplier(88.0), 0.75)
+        self.assertEqual(self.engine.get_size_multiplier(82.0), 0.375)
         self.assertEqual(self.engine.get_size_multiplier(75.0), 0.0)
 
     def test_size_multiplier_caution_bands(self) -> None:
@@ -220,12 +230,15 @@ class PointsEngineThresholdSizeTests(unittest.TestCase):
         self.assertEqual(self.engine.get_size_multiplier(79.0), 0.0)
 
     def test_size_multiplier_spec_matrix(self) -> None:
+        # CAUTION (cum=0.0 → -5 <= cum <= 10): flat 0.25/0.5
         self._set_state(0.0)
         self.assertEqual(self.engine.get_size_multiplier(82.0), 0.25)
         self.assertEqual(self.engine.get_size_multiplier(89.0), 0.5)
+        # HEALTHY (cum=15.0 > 10): tier_mult=1.5 → standard=0.75, high=1.5
         self._set_state(15.0)
-        self.assertEqual(self.engine.get_size_multiplier(86.0), 0.5)
-        self.assertEqual(self.engine.get_size_multiplier(93.0), 1.0)
+        self.assertEqual(self.engine.get_size_multiplier(86.0), 0.75)
+        self.assertEqual(self.engine.get_size_multiplier(93.0), 1.5)
+        # STOP: always 0
         self._set_state(-20.0, stop=True)
         self.assertEqual(self.engine.get_size_multiplier(99.0), 0.0)
 
