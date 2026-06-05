@@ -337,37 +337,55 @@ def build_market_orchestrator(
         )
     _startup_mark("loops", note=f"{len(loops)} markets ready")
 
-    # Pre-populate any missing OHLC caches from Yahoo before REST bootstrap
-    # so the REST fetches are skipped (cache-first) for markets already seeded.
-    try:
-        from data.ohlc_yahoo_seeder import EPIC_YAHOO_MAP, fetch_yahoo_ohlc_for_epic
-        from system.paths import data_dir
-
-        _ohlc_dir = data_dir() / "ohlc_cache"
-        _ohlc_dir.mkdir(parents=True, exist_ok=True)
-        for loop in loops:
-            _epic = loop._epic
-            if _epic not in EPIC_YAHOO_MAP:
-                continue
-            _slug = _epic.replace(".", "_").replace("/", "_")
-            _cache = _ohlc_dir / f"{_slug}_5m.jsonl"
-            if _cache.exists() and _cache.stat().st_size > 1024:
-                continue  # cache warm — skip Yahoo fetch
-            try:
-                _symbol, _market_name = EPIC_YAHOO_MAP[_epic]
-                log_engine(
-                    f"OHLC startup seed: fetching {_market_name} from Yahoo ({_symbol})"
-                )
-                fetch_yahoo_ohlc_for_epic(_epic, market=_market_name)
-                log_engine(f"OHLC startup seed: {_market_name} cache populated")
-            except Exception as _ye:
-                log_engine(
-                    f"OHLC startup seed skipped {_epic}: {type(_ye).__name__}: {_ye}"
-                )
-    except Exception as _e:
-        log_engine(f"OHLC pre-seed step skipped: {type(_e).__name__}: {_e}")
-
+    # Run OHLC bootstrap (cache-first) synchronously so indicators are warm before
+    # the first tick. Yahoo pre-seeding for any cold caches runs in a background
+    # thread so it does NOT delay the API server startup.
     from trading.ohlc_bootstrap import bootstrap_ohlc_parallel
+
+    def _background_yahoo_seed(loops_ref: list) -> None:
+        """Fetch missing OHLC caches from Yahoo in the background after startup."""
+        try:
+            from data.ohlc_yahoo_seeder import EPIC_YAHOO_MAP, fetch_yahoo_ohlc_for_epic
+            from system.paths import data_dir as _data_dir
+
+            _ohlc_dir = _data_dir() / "ohlc_cache"
+            _ohlc_dir.mkdir(parents=True, exist_ok=True)
+            for loop in loops_ref:
+                _epic = loop._epic
+                if _epic not in EPIC_YAHOO_MAP:
+                    continue
+                _slug = _epic.replace(".", "_").replace("/", "_")
+                _cache = _ohlc_dir / f"{_slug}_5m.jsonl"
+                if _cache.exists() and _cache.stat().st_size > 1024:
+                    continue
+                try:
+                    _symbol, _market_name = EPIC_YAHOO_MAP[_epic]
+                    log_engine(
+                        f"OHLC background seed: fetching {_market_name} from Yahoo ({_symbol})"
+                    )
+                    fetch_yahoo_ohlc_for_epic(_epic, market=_market_name)
+                    log_engine(f"OHLC background seed: {_market_name} cache populated")
+                    # Inject newly seeded bars into the running signal engine
+                    try:
+                        bootstrap_ohlc_parallel(rest_client, [loop])
+                    except Exception:
+                        pass
+                except Exception as _ye:
+                    log_engine(
+                        f"OHLC background seed skipped {_epic}: {type(_ye).__name__}: {_ye}"
+                    )
+        except Exception as _e:
+            log_engine(f"OHLC background seed error: {type(_e).__name__}: {_e}")
+
+    import threading as _threading
+
+    _seed_thread = _threading.Thread(
+        target=_background_yahoo_seed,
+        args=(loops,),
+        name="ohlc-yahoo-seed",
+        daemon=True,
+    )
+    _seed_thread.start()
 
     bootstrap_ohlc_parallel(rest_client, loops)
     _startup_mark("ohlc", note=f"{len(loops)} markets loaded")

@@ -60,16 +60,17 @@ lock_holder_alive() {
 
 wait_for_dashboard() {
   local mode="$1"
-  # Cold start can take ~30–40s (preflight + trading/stream hooks before /health).
-  for _ in $(seq 1 240); do
+  # Startup can take up to 3 minutes: Yahoo OHLC seeding + 22s REST stagger per market
+  # + self-test suite. Poll every 0.5s for up to 360s (720 attempts).
+  for _ in $(seq 1 720); do
     if dashboard_healthy; then
       open_dashboard
       log "dashboard ready (${mode})"
       exit 0
     fi
-    sleep 0.25
+    sleep 0.5
   done
-  log "WARN: dashboard did not become healthy within 60s (${mode})"
+  log "WARN: dashboard did not become healthy within 360s (${mode})"
   notify_failure "IG Agent did not start. Check src/data/logs/launcher.log"
   exit 1
 }
