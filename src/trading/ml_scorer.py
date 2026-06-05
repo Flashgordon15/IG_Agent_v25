@@ -54,18 +54,27 @@ class MLScorer:
 
         df = pd.read_csv(path)
 
-        # Select the correct label column — prefer label_3bar over last column
+        # Restrict to fired signals only — non-fired rows are analysis-only
+        # and should not be used to train the model (they lack a real entry decision).
+        if "fired" in df.columns:
+            df = df[df["fired"].astype(str).str.lower().isin(["true", "1"])].copy()
+
+        # Select the correct label column — prefer label_3bar / label_3 over last column
         if "label" in df.columns:
             label_col = "label"
         elif "label_3bar" in df.columns:
             label_col = "label_3bar"
+        elif "label_3" in df.columns:
+            label_col = "label_3"
         elif "label_6bar" in df.columns:
             label_col = "label_6bar"
+        elif "label_6" in df.columns:
+            label_col = "label_6"
         else:
             label_col = df.columns[-1]
 
         # Map string labels to binary, dropping BREAKEVEN rows
-        label_map = {"WIN": 1, "LOSS": 0, 1: 1, 0: 0, 1.0: 1, 0.0: 0}
+        label_map = {"WIN": 1, "LOSS": 0, 1: 1, 0: 0}
         df["_y"] = df[label_col].map(label_map)
         df = df[df["_y"].notna()].copy()
         y = df["_y"].astype(int)
@@ -77,7 +86,9 @@ class MLScorer:
         if "atr" in df.columns and "stop_pts" in df.columns:
             safe_stop = df["stop_pts"].clip(lower=1.0)
             df["atr_ratio"] = df["atr"] / safe_stop
-            df["spread_ratio"] = df["spread"] / safe_stop if "spread" in df.columns else 0.0
+            df["spread_ratio"] = (
+                df["spread"] / safe_stop if "spread" in df.columns else 0.0
+            )
         elif "atr" in df.columns:
             df["atr_ratio"] = df["atr"]
             df["spread_ratio"] = df["spread"] if "spread" in df.columns else 0.0
@@ -87,7 +98,10 @@ class MLScorer:
         # in training data (constant spread/stop) and fired=1 for all trained rows,
         # so both are uninformative and cause out-of-distribution issues at inference.
         inference_features = [
-            "adjusted_score", "raw_score", "rsi", "atr_ratio",
+            "adjusted_score",
+            "raw_score",
+            "rsi",
+            "atr_ratio",
         ]
         keep = [c for c in inference_features if c in df.columns]
         X = df[keep].copy()
@@ -112,7 +126,9 @@ class MLScorer:
             encoding="utf-8",
         )
         self._model = model
-        log_engine(f"ml_scorer trained on {len(df)} rows ({int(y.sum())} wins), {len(self._feature_names)} features")
+        log_engine(
+            f"ml_scorer trained on {len(df)} rows ({int(y.sum())} wins), {len(self._feature_names)} features"
+        )
 
     def predict(self, features: dict[str, float]) -> float:
         if self._model is None:

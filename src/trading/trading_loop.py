@@ -17,7 +17,8 @@ from typing import Any, Callable
 from api.snapshot import GATE_NAMES
 from api.snapshot_store import publish_tick
 from data.models import Quote
-from execution.trading_loop import TickOutcome, TradingLoop as ExecutionTickLoop
+from execution.trading_loop import TickOutcome
+from execution.trading_loop import TradingLoop as ExecutionTickLoop
 from signals.signal_engine import SignalResult
 from system.config import Config
 from system.engine_log import log_engine
@@ -31,15 +32,15 @@ from trading.environment_scorer import (
     SAFE_DEFAULT_SCORE,
     EnvironmentScorer,
 )
+from trading.gate_readiness import compute_trade_readiness, format_health_badge_text
 from trading.open_position_view import (
     enrich_positions_with_quote,
     normalize_sync_position,
     positions_from_store_rows,
 )
 from trading.points_engine import PointsEngine
-from trading.session_manager import SessionManager
 from trading.price_trend import compute_price_trend_30m
-from trading.gate_readiness import compute_trade_readiness, format_health_badge_text
+from trading.session_manager import SessionManager
 from trading.session_summary import SessionTickTracker, write_session_end_summary
 from trading.trade_eligibility import build_trade_eligibility
 
@@ -279,8 +280,7 @@ class TradingLoop:
                 except Exception as e:
                     self._session_tracker.record_error()
                     log_engine(
-                        f"trading_loop tick error (continuing): "
-                        f"{type(e).__name__}: {e}"
+                        f"trading_loop tick error (continuing): {type(e).__name__}: {e}"
                     )
                 if self._stop.wait(self._tick_interval):
                     break
@@ -464,9 +464,7 @@ class TradingLoop:
                     self._mark_execution_gate_blocked(gates, exec_wait)
                     log_engine(f"WAIT — {wait_reason}")
             except Exception as e:
-                log_engine(
-                    f"gate 7 execution failed: {type(e).__name__}: {e}"
-                )
+                log_engine(f"gate 7 execution failed: {type(e).__name__}: {e}")
                 wait_reason = f"execution: {type(e).__name__}"
                 all_passed = False
         else:
@@ -495,9 +493,7 @@ class TradingLoop:
                 return True, ""
             rem = int(mgr.seconds_until_rest_reset())
             mins, secs = divmod(max(0, rem), 60)
-            detail = (
-                f"IG API rate limit — REST blocked for {mins}m {secs}s"
-            )
+            detail = f"IG API rate limit — REST blocked for {mins}m {secs}s"
             return False, detail
         except Exception:
             return True, ""
@@ -564,7 +560,9 @@ class TradingLoop:
         action = str(getattr(execution, "action", "") or "")
         if success or action == "SUBMITTED":
             return ""
-        rejection = str(getattr(execution, "rejection_reason", "") or action or "rejected")
+        rejection = str(
+            getattr(execution, "rejection_reason", "") or action or "rejected"
+        )
         return f"execution: {rejection}"
 
     def _mark_execution_gate_blocked(
@@ -637,9 +635,7 @@ class TradingLoop:
         success = bool(getattr(execution, "success", False))
         rejection = str(getattr(execution, "rejection_reason", "") or "")
         if success or action == "SUBMITTED":
-            log_engine(
-                f"EXEC OK epic={self._epic} signal={direction} action={action}"
-            )
+            log_engine(f"EXEC OK epic={self._epic} signal={direction} action={action}")
         else:
             log_engine(
                 f"EXEC REJECTED epic={self._epic} signal={direction} "
@@ -649,9 +645,7 @@ class TradingLoop:
     def _offline_gates(self, reason: str) -> list[GateResult]:
         gates: list[GateResult] = []
         for name in GATE_NAMES:
-            gates.append(
-                GateResult(name=name, passed=False, value=None, detail=reason)
-            )
+            gates.append(GateResult(name=name, passed=False, value=None, detail=reason))
         return gates
 
     def _evaluate_gates(self, quote: Quote) -> list[GateResult]:
@@ -682,9 +676,7 @@ class TradingLoop:
                         value = "armed"
                     else:
                         blockers = [
-                            r.name.replace("_", " ")
-                            for r in results
-                            if not r.passed
+                            r.name.replace("_", " ") for r in results if not r.passed
                         ]
                         blocker_txt = ", ".join(blockers[:3])
                         if len(blockers) > 3:
@@ -741,7 +733,9 @@ class TradingLoop:
         elif open_now:
             detail = "market open"
             try:
-                from system.market_watch.japan225_session import japan225_strategy_paused
+                from system.market_watch.japan225_session import (
+                    japan225_strategy_paused,
+                )
 
                 paused, pause_msg = japan225_strategy_paused(self._epic)
                 if paused:
@@ -755,9 +749,9 @@ class TradingLoop:
                     from signals.indicators import session_name
                     from trading.instrument_registry import InstrumentRegistry
 
-                    wl = InstrumentRegistry(self._config.as_dict()).session_whitelist_for_epic(
-                        self._epic
-                    )
+                    wl = InstrumentRegistry(
+                        self._config.as_dict()
+                    ).session_whitelist_for_epic(self._epic)
                     if not wl:
                         wl = list(self._config.trading_session_whitelist)
                     if wl:
@@ -771,9 +765,33 @@ class TradingLoop:
         if not open_now:
             try:
                 from system.market_watch.calendar import get_market_status
+
                 ms = get_market_status(self._epic)
                 if ms and ms.next_open_at:
+                    # Market physically closed — use calendar next open
                     next_open_iso = ms.next_open_at.isoformat()
+                elif ms and ms.open:
+                    # Market is physically open but blocked by session whitelist.
+                    # Find when the next whitelisted strategy session starts.
+                    from datetime import timedelta
+
+                    from signals.indicators import session_name as _sess_name
+                    from trading.instrument_registry import InstrumentRegistry
+
+                    wl = InstrumentRegistry(
+                        self._config.as_dict()
+                    ).session_whitelist_for_epic(self._epic)
+                    if not wl:
+                        wl = list(self._config.trading_session_whitelist)
+                    if wl:
+                        now_local = datetime.now()
+                        for offset_min in range(15, 25 * 60, 15):
+                            probe = now_local + timedelta(minutes=offset_min)
+                            if _sess_name(probe) in wl:
+                                next_open_iso = probe.replace(
+                                    minute=0, second=0, microsecond=0
+                                ).isoformat()
+                                break
             except Exception:
                 pass
         return GateResult(
@@ -786,9 +804,7 @@ class TradingLoop:
     def _gate_cold_start_gap(self, quote: Quote) -> GateResult:
         cold = bool(self._session.is_cold_start())
         atr = self._atr_estimate(quote)
-        gap = bool(
-            self._session.check_gap_open(atr, open_price=float(quote.mid))
-        )
+        gap = bool(self._session.check_gap_open(atr, open_price=float(quote.mid)))
         passed = (not cold) and (not gap)
         if cold:
             detail = f"cold start — {self._session.bars_since_open()}/6 bars"
@@ -835,9 +851,7 @@ class TradingLoop:
     def _gate_environment_fitness(self, quote: Quote) -> GateResult:
         try:
             quote_df = self._signal_engine.quote_df(self._market)
-            score = float(
-                self._env.score(self._market, quote=quote, quote_df=quote_df)
-            )
+            score = float(self._env.score(self._market, quote=quote, quote_df=quote_df))
         except Exception as e:
             log_engine(
                 f"environment_fitness gate: score failed for {self._market}: "
@@ -884,8 +898,7 @@ class TradingLoop:
         if self._points.consume_signal_skip():
             remaining = self._points.session_skips_remaining()
             log_engine(
-                "points session pause: consumed skip slot "
-                f"({remaining} remaining)"
+                f"points session pause: consumed skip slot ({remaining} remaining)"
             )
 
     def _gate_points_state(self) -> GateResult:
@@ -894,11 +907,7 @@ class TradingLoop:
         day_stopped = False  # disabled: max_daily_loss_gbp is the hard stop
         loss_gbp = self._daily_loss_gbp()
         daily_limit = self._config.max_daily_loss_gbp
-        passed = (
-            state != "STOP"
-            and not paused
-            and loss_gbp < daily_limit
-        )
+        passed = state != "STOP" and not paused and loss_gbp < daily_limit
         if state == "STOP":
             detail = "points state STOP"
         elif paused:
@@ -996,9 +1005,7 @@ class TradingLoop:
 
         spread = max(0.0, float(quote.offer) - float(quote.bid))
         cfg_normal = float(self._config.max_spread_points)
-        normal = get_market_data_hub().normal_spread(
-            self._epic, fallback=cfg_normal
-        )
+        normal = get_market_data_hub().normal_spread(self._epic, fallback=cfg_normal)
         spread_cap = normal * SPREAD_NORMAL_MULTIPLIER
         spread_ok = spread <= spread_cap if normal > 0 else True
 
@@ -1049,9 +1056,7 @@ class TradingLoop:
         risk_gbp = stop * actual_size * point_value
         cap_raw = self._config.get("risk_cap_gbp")
         try:
-            risk_cap = (
-                float(cap_raw) if cap_raw is not None else STAGE1_GBP_RISK_CAP
-            )
+            risk_cap = float(cap_raw) if cap_raw is not None else STAGE1_GBP_RISK_CAP
         except (TypeError, ValueError):
             risk_cap = STAGE1_GBP_RISK_CAP
         risk_ok = risk_gbp <= risk_cap
@@ -1065,7 +1070,11 @@ class TradingLoop:
         elif not epic_slot_ok:
             detail = (
                 f"open positions {open_count} (max {max_per_epic} per epic"
-                + (f", unlocked: {dynamic_unlock_reason}" if max_per_epic > base_cap else "")
+                + (
+                    f", unlocked: {dynamic_unlock_reason}"
+                    if max_per_epic > base_cap
+                    else ""
+                )
                 + ")"
             )
         elif not total_slot_ok:
@@ -1220,8 +1229,7 @@ class TradingLoop:
             return
         threshold = self._session.mark_flatten_attempt(at=at)
         log_engine(
-            f"session flatten — closing all open positions "
-            f"(T-{int(threshold or 0)}min)"
+            f"session flatten — closing all open positions (T-{int(threshold or 0)}min)"
         )
         try:
             n = self._execute_flatten_close()
@@ -1293,9 +1301,7 @@ class TradingLoop:
             )
             log_engine("emergency_stop.sh triggered")
         except Exception as e:
-            log_engine(
-                f"emergency_stop.sh launch failed: {type(e).__name__}: {e}"
-            )
+            log_engine(f"emergency_stop.sh launch failed: {type(e).__name__}: {e}")
 
     def _ig_open_position_count(self) -> int:
         sync = getattr(self, "_position_sync", None)
@@ -1406,7 +1412,9 @@ class TradingLoop:
                 if g.name == "signal_confidence" and isinstance(g.value, dict):
                     block_reason = str(g.value.get("block_reason") or "")
                     raw_direction = str(g.value.get("raw_direction") or "")
-                    signal_threshold = float(g.value.get("threshold") or signal_threshold)
+                    signal_threshold = float(
+                        g.value.get("threshold") or signal_threshold
+                    )
                     break
 
         points_state = self._points.get_state()
@@ -1582,8 +1590,12 @@ class TradingLoop:
                 "raw_direction": raw_direction or None,
                 "confidence": int(round(confidence)),
                 "threshold": int(round(signal_threshold)),
-                "config_signal_threshold": int(round(float(self._config.signal_threshold))),
-                "points_confidence_floor": int(round(float(self._points.get_threshold()))),
+                "config_signal_threshold": int(
+                    round(float(self._config.signal_threshold))
+                ),
+                "points_confidence_floor": int(
+                    round(float(self._points.get_threshold()))
+                ),
                 "min_size_threshold": int(
                     round(float(self._points.min_size_confidence_threshold()))
                 ),
@@ -1618,7 +1630,9 @@ class TradingLoop:
             "max_open_positions": int(self._config.max_open_positions),
             "max_positions_per_epic": int(self._config.max_positions_per_epic),
             "ml_training_records": self._ml_training_record_count(),
-            "confirmed_trades": int(self._store.count_closed_trades() or 0) if self._store else 0,
+            "confirmed_trades": int(self._store.count_closed_trades() or 0)
+            if self._store
+            else 0,
             "ml_enabled": bool(self._config._data.get("USE_ML_SIGNAL", False)),
             "closed_trades": self._closed_trades_payload(),
             "recent_trades": self._recent_trades_results(),
@@ -1669,8 +1683,12 @@ class TradingLoop:
             except Exception:
                 pass
 
-        threading.Thread(target=_bg_fetch, daemon=True, name=f"market-constraints-{self._epic[-8:]}").start()
-        return self._market_constraints_cache  # returns {} until background fetch completes
+        threading.Thread(
+            target=_bg_fetch, daemon=True, name=f"market-constraints-{self._epic[-8:]}"
+        ).start()
+        return (
+            self._market_constraints_cache
+        )  # returns {} until background fetch completes
 
     def _account_summary(self) -> dict[str, float | None]:
         client = self._rest_client()
@@ -1728,7 +1746,9 @@ class TradingLoop:
                         pnl = row.get("pnl_points")
                     try:
                         pnl_f = float(pnl)
-                        result = "WIN" if pnl_f > 0 else "LOSS" if pnl_f < 0 else "BREAKEVEN"
+                        result = (
+                            "WIN" if pnl_f > 0 else "LOSS" if pnl_f < 0 else "BREAKEVEN"
+                        )
                     except (TypeError, ValueError):
                         result = ""
                 if result == "WIN":
@@ -1742,6 +1762,7 @@ class TradingLoop:
             if self._ml_store is not None:
                 return self._ml_store.record_count()
             from data.ml_training_store import MLTrainingStore
+
             return MLTrainingStore().record_count()
         except Exception:
             return None
@@ -1751,6 +1772,7 @@ class TradingLoop:
             if self._store is None or not hasattr(self._store, "recent_closed_trades"):
                 return []
             from system.closed_trades_display import is_excluded_display_row
+
             rows = self._store.recent_closed_trades(limit=100)
             out: list[dict[str, Any]] = []
             for row in rows:
@@ -1770,26 +1792,28 @@ class TradingLoop:
                     result = "LOSS"
                 else:
                     result = "BREAKEVEN"
-                out.append({
-                    "deal_id": row.get("deal_id") or row.get("ig_deal_id"),
-                    "market": row.get("market") or row.get("epic"),
-                    "epic": row.get("epic"),
-                    "side": row.get("side") or row.get("direction"),
-                    "direction": row.get("side") or row.get("direction"),
-                    "entry_price": row.get("entry_price") or row.get("entry"),
-                    "entry": row.get("entry_price") or row.get("entry"),
-                    "exit_price": row.get("exit_price") or row.get("exit"),
-                    "exit": row.get("exit_price") or row.get("exit"),
-                    "pnl_gbp": pnl_gbp,
-                    "pnl": pnl_gbp,
-                    "pnl_pts": pnl_pts,
-                    "result": result,
-                    "closed_at": row.get("closed_at"),
-                    "time": row.get("closed_at"),
-                    "setup": row.get("setup_key"),
-                    "confidence": row.get("confidence"),
-                    "source": row.get("source"),
-                })
+                out.append(
+                    {
+                        "deal_id": row.get("deal_id") or row.get("ig_deal_id"),
+                        "market": row.get("market") or row.get("epic"),
+                        "epic": row.get("epic"),
+                        "side": row.get("side") or row.get("direction"),
+                        "direction": row.get("side") or row.get("direction"),
+                        "entry_price": row.get("entry_price") or row.get("entry"),
+                        "entry": row.get("entry_price") or row.get("entry"),
+                        "exit_price": row.get("exit_price") or row.get("exit"),
+                        "exit": row.get("exit_price") or row.get("exit"),
+                        "pnl_gbp": pnl_gbp,
+                        "pnl": pnl_gbp,
+                        "pnl_pts": pnl_pts,
+                        "result": result,
+                        "closed_at": row.get("closed_at"),
+                        "time": row.get("closed_at"),
+                        "setup": row.get("setup_key"),
+                        "confidence": row.get("confidence"),
+                        "source": row.get("source"),
+                    }
+                )
                 if len(out) >= 50:
                     break
             return out
@@ -1801,6 +1825,7 @@ class TradingLoop:
             if self._store is None or not hasattr(self._store, "recent_closed_trades"):
                 return []
             from system.closed_trades_display import is_excluded_display_row
+
             rows = self._store.recent_closed_trades(50)
             out: list[dict[str, Any]] = []
             for row in rows:
@@ -1824,9 +1849,14 @@ class TradingLoop:
             if self._store is None or not hasattr(self._store, "recent_closed_trades"):
                 return []
             from system.closed_trades_display import is_excluded_display_row
+
             rows = self._store.recent_closed_trades(100)
             rows_sorted = sorted(
-                (r for r in rows if r.get("closed_at") and not is_excluded_display_row(r)),
+                (
+                    r
+                    for r in rows
+                    if r.get("closed_at") and not is_excluded_display_row(r)
+                ),
                 key=lambda r: str(r.get("closed_at") or ""),
             )
             cumulative = 0.0
@@ -1836,7 +1866,9 @@ class TradingLoop:
                 if pnl is None:
                     continue
                 cumulative += float(pnl)
-                points.append({"time": str(row["closed_at"]), "value": round(cumulative, 2)})
+                points.append(
+                    {"time": str(row["closed_at"]), "value": round(cumulative, 2)}
+                )
             return points
         except Exception:
             return []
@@ -1852,6 +1884,7 @@ class TradingLoop:
     def _drawdown_snapshot(self) -> dict[str, float]:
         try:
             from system.drawdown_monitor import snapshot as _dd_snap
+
             return _dd_snap()
         except Exception:
             return {}
