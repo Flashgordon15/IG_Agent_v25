@@ -4,7 +4,7 @@ import React from "react";
 // Helpers
 // ---------------------------------------------------------------------------
 
-const EXCLUDED_SOURCE_TAGS = ["sim", "soak", "proof", "replay", "test"];
+const TEST_SOURCE_TAGS = ["sim", "soak", "proof", "replay", "test"];
 const VALID_RESULTS = new Set(["WIN", "LOSS", "PENDING"]);
 
 function resolvePositions(state) {
@@ -28,9 +28,10 @@ function resolvePositions(state) {
   return [];
 }
 
-function isExcludedSource(trade) {
+function isTestTrade(trade) {
+  if (trade?.dry_run === 1 || trade?.dry_run === true || trade?.dry_run === "1" || trade?.dry_run === "true") return true;
   const src = String(trade?.source ?? trade?.setup ?? trade?.setup_key ?? "").toLowerCase();
-  return EXCLUDED_SOURCE_TAGS.some((tag) => src.includes(tag));
+  return TEST_SOURCE_TAGS.some((tag) => src.includes(tag));
 }
 
 function tradeTimeMs(trade) {
@@ -44,12 +45,7 @@ function resolveClosedTrades(state) {
   const raw = state?.closed_trades;
   if (!Array.isArray(raw)) return [];
   return raw
-    .filter((trade) => {
-      const result = String(trade?.result ?? "").toUpperCase();
-      if (!VALID_RESULTS.has(result)) return false;
-      if (isExcludedSource(trade)) return false;
-      return true;
-    })
+    .filter((trade) => VALID_RESULTS.has(String(trade?.result ?? "").toUpperCase()))
     .sort((a, b) => tradeTimeMs(b) - tradeTimeMs(a))
     .slice(0, 100);
 }
@@ -152,6 +148,15 @@ function ResultBadge({ result }) {
   );
 }
 
+function TestBadge({ trade }) {
+  const label = trade?.dry_run === 1 || trade?.dry_run === true || trade?.dry_run === "1" ? "DRY RUN" : "TEST";
+  return (
+    <span className="ml-1.5 inline-flex rounded border border-warning/40 bg-warning/10 px-1 py-0.5 text-[9px] font-bold uppercase tracking-wide text-warning">
+      {label}
+    </span>
+  );
+}
+
 function StatBox({ label, value, valueClassName = "text-foreground" }) {
   return (
     <div className="flex flex-col items-center rounded-lg border border-border bg-surface p-3">
@@ -204,8 +209,13 @@ export default function TradesPanel({ state }) {
     );
   }
 
-  const positions    = resolvePositions(state);
-  const closedTrades = resolveClosedTrades(state);
+  const [showTestTrades, setShowTestTrades] = React.useState(false);
+
+  const positions       = resolvePositions(state);
+  const allClosedTrades = resolveClosedTrades(state);
+  const closedTrades    = showTestTrades ? allClosedTrades : allClosedTrades.filter((t) => !isTestTrade(t));
+  const testTradeCount  = allClosedTrades.filter((t) => isTestTrade(t)).length;
+
   const { wins, losses, total, winRate, totalPnl, openPnl } = buildPerformanceSummary(closedTrades, positions);
   const marketBreakdown = buildMarketBreakdown(closedTrades);
 
@@ -311,6 +321,31 @@ export default function TradesPanel({ state }) {
 
       {/* 4. Closed trades */}
       <Card title="Closed trades">
+        {/* Test trades toggle */}
+        <div className="mb-2 flex items-center gap-2">
+          <label className="flex cursor-pointer items-center gap-1.5 select-none text-[11px] text-muted">
+            <span
+              role="checkbox"
+              aria-checked={showTestTrades}
+              tabIndex={0}
+              onClick={() => setShowTestTrades((v) => !v)}
+              onKeyDown={(e) => (e.key === " " || e.key === "Enter") && setShowTestTrades((v) => !v)}
+              className={[
+                "relative inline-flex h-4 w-7 items-center rounded-full border transition-colors focus:outline-none focus:ring-1 focus:ring-warning/60",
+                showTestTrades ? "border-warning/60 bg-warning/20" : "border-border bg-surface",
+              ].join(" ")}
+            >
+              <span className={["absolute h-2.5 w-2.5 rounded-full transition-transform", showTestTrades ? "translate-x-3.5 bg-warning" : "translate-x-0.5 bg-muted"].join(" ")} />
+            </span>
+            Show test / dry-run trades
+            {testTradeCount > 0 && (
+              <span className="rounded border border-warning/30 bg-warning/10 px-1 py-0.5 text-[9px] font-bold text-warning">
+                {testTradeCount}
+              </span>
+            )}
+          </label>
+        </div>
+
         <div className="-mx-1 overflow-x-auto">
           <table className="w-full min-w-[620px] text-left text-[11px] sm:text-[12px]">
             <thead>
@@ -333,10 +368,17 @@ export default function TradesPanel({ state }) {
                   const pnl = trade.pnl_gbp ?? trade.pnl;
                   const pnlNum = pnl != null ? Number(pnl) : null;
                   const time = trade.closed_at ?? trade.closed_time ?? trade.time ?? trade.ts ?? trade.timestamp;
+                  const isTest = isTestTrade(trade);
                   return (
-                    <tr key={tradeKey(trade, idx)} className="border-b border-border/60 last:border-0 hover:bg-card/50 transition-colors">
+                    <tr
+                      key={tradeKey(trade, idx)}
+                      className={["border-b border-border/60 last:border-0 hover:bg-card/50 transition-colors", isTest ? "opacity-60 italic" : ""].join(" ")}
+                    >
                       <td className="px-2 py-2 tabular-nums text-muted">{fmtTs(time)}</td>
-                      <td className="px-2 py-2 font-medium text-foreground">{trade.epic ?? trade.market ?? "—"}</td>
+                      <td className="px-2 py-2 font-medium text-foreground not-italic">
+                        <span className={isTest ? "italic" : ""}>{trade.epic ?? trade.market ?? "—"}</span>
+                        {isTest && <TestBadge trade={trade} />}
+                      </td>
                       <td className={`px-2 py-2 font-bold ${sideColor}`}>{side || "—"}</td>
                       <td className="px-2 py-2 font-mono tabular-nums">{fmtPrice(trade.entry ?? trade.entry_price)}</td>
                       <td className="px-2 py-2 font-mono tabular-nums">{fmtPrice(trade.exit ?? trade.exit_price)}</td>
