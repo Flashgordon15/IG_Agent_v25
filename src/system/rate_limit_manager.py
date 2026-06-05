@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable
 
@@ -33,6 +33,7 @@ _LOG = logs_dir() / "rate_limit.log"
 _STATE = logs_dir() / "rate_limit_state.json"
 _LOCK = threading.RLock()
 _manager: "RateLimitManager | None" = None
+_manager_init_lock = threading.Lock()  # guards singleton creation only
 
 
 @dataclass
@@ -50,9 +51,12 @@ class RateLimitSnapshot:
 
 def get_rate_limit_manager() -> "RateLimitManager":
     global _manager
-    if _manager is None:
-        _manager = RateLimitManager()
-    return _manager
+    if _manager is not None:
+        return _manager
+    with _manager_init_lock:
+        if _manager is None:
+            _manager = RateLimitManager()
+        return _manager
 
 
 def parse_rate_limit_error(status_code: int, body: str | None) -> str | None:
@@ -132,23 +136,44 @@ class RateLimitManager:
             remaining = self._stream_until - time.time()
             raise self._make_error(remaining, stream=True)
 
-    def activate(self, error_code: str, *, source: str = "REST", path: str = "") -> float:
+    def activate(
+        self, error_code: str, *, source: str = "REST", path: str = ""
+    ) -> float:
         with _LOCK:
             return self._activate_unlocked(error_code, source=source, path=path)
 
     def _activate_unlocked(
         self, error_code: str, *, source: str = "REST", path: str = ""
     ) -> float:
-        self._backoff_stage += 1
+        now = time.time()
+        # Guard: if already active (another thread beat us here with the same burst
+        # of 403s), do NOT increment the stage again.  Multiple concurrent in-flight
+        # requests can all return 403 simultaneously; only the first one should advance
+        # the backoff stage.  Subsequent ones just extend the cooldown window to the
+        # new pause duration without stacking the penalty.
+        already_active = self._active and now < self._rest_until
+        if not already_active:
+            self._backoff_stage += 1
         mult = 2 ** min(self._backoff_stage - 1, 2)
         rest_pause = min(REST_COOLDOWN_BASE_SEC * mult, MAX_REST_COOLDOWN_SEC)
-        now = time.time()
         self._active = True
         self._error_code = error_code
         self._last_403_ts = now
-        self._rest_until = now + rest_pause
-        self._stream_until = now + STREAM_COOLDOWN_SEC
+        # Never shorten an existing cooldown window — extend it if the new pause
+        # would be longer (e.g. stage escalation between concurrent activations).
+        new_rest_until = now + rest_pause
+        self._rest_until = max(self._rest_until, new_rest_until)
+        self._stream_until = max(self._stream_until, now + STREAM_COOLDOWN_SEC)
         self._blocked_calls += 1
+        if already_active:
+            # Only log at DEBUG level for duplicates — avoids alarm fatigue
+            log_engine(
+                f"IG rate limit ({error_code}) — duplicate 403 while already active "
+                f"(stage {self._backoff_stage}, path={path!r})"
+            )
+            self._persist_unlocked()
+            self._sync_diagnostics_unlocked()
+            return self._rest_until - now
         msg = (
             f"IG rate limit ({error_code}) — REST paused {rest_pause // 60}m, "
             f"streaming paused {STREAM_COOLDOWN_SEC // 60}m (stage {self._backoff_stage})"
@@ -253,12 +278,14 @@ class RateLimitManager:
         try:
             _STATE.parent.mkdir(parents=True, exist_ok=True)
             _STATE.write_text(
-                json.dumps({
-                    "backoff_stage": self._backoff_stage,
-                    "rest_until": self._rest_until,
-                    "stream_until": self._stream_until,
-                    "error_code": self._error_code,
-                })
+                json.dumps(
+                    {
+                        "backoff_stage": self._backoff_stage,
+                        "rest_until": self._rest_until,
+                        "stream_until": self._stream_until,
+                        "error_code": self._error_code,
+                    }
+                )
             )
         except Exception:
             pass
@@ -333,9 +360,7 @@ class RateLimitManager:
                 backoff_stage=snap.backoff_stage,
                 rest_status="rate limited" if snap.active else "",
                 fallback_reason=(
-                    "IG API rate limit — no simulator fallback"
-                    if snap.active
-                    else ""
+                    "IG API rate limit — no simulator fallback" if snap.active else ""
                 ),
             )
         except Exception:

@@ -12,11 +12,11 @@ import requests
 
 from ig_api.auth import AuthManager, SessionTokens
 from ig_api.exceptions import IGAPIError, IGAuthError, IGOrderError, RateLimitError
-from system.rate_limit_manager import get_rate_limit_manager, parse_rate_limit_error
 from system.credentials_loader import Credentials
 from system.demo_execution_trace import trace_execution, update_demo_diagnostics
 from system.demo_rest_log import log_demo_rest, mask_token
 from system.engine_log import log_engine
+from system.rate_limit_manager import get_rate_limit_manager, parse_rate_limit_error
 
 
 class IGRestClient:
@@ -242,7 +242,9 @@ class IGRestClient:
             self._last_auth_error = r.text or f"HTTP {r.status_code}"
             code = parse_rate_limit_error(r.status_code, r.text)
             if code:
-                get_rate_limit_manager().handle_http_response(r, source="login", path="/session")
+                get_rate_limit_manager().handle_http_response(
+                    r, source="login", path="/session"
+                )
             update_demo_diagnostics(rest_status=f"login failed HTTP {r.status_code}")
             raise IGAuthError(
                 f"IG login failed: HTTP {r.status_code} — {(r.text or '')[:300]}",
@@ -268,12 +270,18 @@ class IGRestClient:
         self._switch_to_configured_account(tokens)
         info = resp_body.get("accountInfo") or {}
         try:
-            self._account_balance = float(info.get("balance")) if info.get("balance") is not None else None
+            self._account_balance = (
+                float(info.get("balance")) if info.get("balance") is not None else None
+            )
             self._account_profit_loss = (
-                float(info.get("profitLoss")) if info.get("profitLoss") is not None else None
+                float(info.get("profitLoss"))
+                if info.get("profitLoss") is not None
+                else None
             )
             self._account_available = (
-                float(info.get("available")) if info.get("available") is not None else None
+                float(info.get("available"))
+                if info.get("available") is not None
+                else None
             )
         except (TypeError, ValueError):
             pass
@@ -400,7 +408,10 @@ class IGRestClient:
         if not self.account_id:
             return
         if tokens.account_id == self.account_id:
-            log_demo_rest("Account switch skipped — already on target account", account_id=self.account_id)
+            log_demo_rest(
+                "Account switch skipped — already on target account",
+                account_id=self.account_id,
+            )
             return
         try:
             r = self._session.request(
@@ -487,7 +498,9 @@ class IGRestClient:
         if r.status_code == 403:
             code = parse_rate_limit_error(r.status_code, r.text)
             if code:
-                get_rate_limit_manager().handle_http_response(r, source="markets", path=epic)
+                get_rate_limit_manager().handle_http_response(
+                    r, source="markets", path=epic
+                )
             self._raise_auth_or_api(r, "Market constraints")
         if r.status_code != 200:
             raise IGAPIError(
@@ -503,7 +516,9 @@ class IGRestClient:
             "epic": epic,
             "market_status": str(snap.get("marketStatus", "")),
             "min_deal_size": self._dealing_rule_value(rules, "minDealSize"),
-            "min_stop_distance": self._dealing_rule_value(rules, "minNormalStopOrLimitDistance"),
+            "min_stop_distance": self._dealing_rule_value(
+                rules, "minNormalStopOrLimitDistance"
+            ),
             "min_controlled_stop_distance": self._dealing_rule_value(
                 rules, "minControlledRiskStopDistance"
             ),
@@ -554,7 +569,11 @@ class IGRestClient:
                 using=instr_ccy,
             )
 
-        if norm_size != size or norm_stop != stop_distance or norm_ccy != currency_code.upper():
+        if (
+            norm_size != size
+            or norm_stop != stop_distance
+            or norm_ccy != currency_code.upper()
+        ):
             log_demo_rest(
                 "Order params adjusted for IG dealing rules",
                 epic=epic,
@@ -593,7 +612,11 @@ class IGRestClient:
                 bid = float(data.get("bid", 0))
                 offer = float(data.get("offer", 0))
                 if bid > 0 and offer > 0:
-                    self._live_price_cache[epic] = {"ts": now, "bid": bid, "offer": offer}
+                    self._live_price_cache[epic] = {
+                        "ts": now,
+                        "bid": bid,
+                        "offer": offer,
+                    }
                     self._bid, self._offer = bid, offer
                     return bid, offer
 
@@ -634,7 +657,11 @@ class IGRestClient:
             "epic": epic,
             "bid": bid,
             "offer": offer,
-            "snapshot": {"bid": bid, "offer": offer, "marketStatus": c["market_status"]},
+            "snapshot": {
+                "bid": bid,
+                "offer": offer,
+                "marketStatus": c["market_status"],
+            },
             "constraints": c,
         }
 
@@ -688,7 +715,9 @@ class IGRestClient:
             bal = acc.get("balance") or {}
             try:
                 self._account_balance = (
-                    float(bal.get("balance")) if bal.get("balance") is not None else self._account_balance
+                    float(bal.get("balance"))
+                    if bal.get("balance") is not None
+                    else self._account_balance
                 )
                 self._account_profit_loss = (
                     float(bal.get("profitLoss"))
@@ -732,55 +761,33 @@ class IGRestClient:
         end = quote(end_raw, safe="")
         path = f"/history/transactions/{txn_type}/{start}/{end}"
 
-        def _fetch(version: str, psize: int) -> requests.Response:
+        def _fetch(version: str) -> requests.Response:
             return self.request(
                 "GET",
                 path,
                 headers=self._auth_headers(version),
-                params={"pageSize": max(1, min(int(psize), 500))},
+                params={"pageSize": max(1, min(int(page_size), 500))},
             )
 
+        # Two attempts only: API version 2 (preferred), then version 1 fallback.
+        # The previous nested loop (2 versions × 3 page_sizes + short-window retry)
+        # could fire 8 REST calls per invocation, rapidly exhausting the hard cap.
         last_preview = ""
         for version in ("2", "1"):
-            for psize in (page_size, min(page_size, 100), 50):
-                r = _fetch(version, psize)
-                if r.status_code == 401:
-                    self.login()
-                    r = _fetch(version, psize)
-                if r.status_code == 200:
-                    txns = list(r.json().get("transactions") or [])
-                    if txns or version == "1":
-                        log_demo_rest(
-                            "GET history/transactions OK",
-                            version=version,
-                            count=len(txns),
-                            path=path,
-                        )
-                        return txns
-                last_preview = (r.text or "")[:200]
-
-        # Shorter window retry (IG DEMO sometimes 500 on wide ranges)
-        from datetime import datetime, timedelta
-
-        from system.ig_transactions import ig_date_range_dd_mm_yyyy
-
-        short_start, short_end = ig_date_range_dd_mm_yyyy(days_back=1)
-        path2 = f"/history/transactions/{txn_type}/{quote(short_start, safe='')}/{quote(short_end, safe='')}"
-        for version in ("2", "1"):
-            r = self.request(
-                "GET",
-                path2,
-                headers=self._auth_headers(version),
-                params={"pageSize": 50},
-            )
+            r = _fetch(version)
+            if r.status_code == 401:
+                self.login()
+                r = _fetch(version)
             if r.status_code == 200:
                 txns = list(r.json().get("transactions") or [])
                 log_demo_rest(
-                    "GET history/transactions OK (1d window)",
+                    "GET history/transactions OK",
                     version=version,
                     count=len(txns),
+                    path=path,
                 )
                 return txns
+            last_preview = (r.text or "")[:200]
 
         log_demo_rest(
             "GET history/transactions failed",
@@ -828,7 +835,10 @@ class IGRestClient:
         self.ensure_session()
         r = self.request("GET", "/accounts", headers=self._auth_headers("1"))
         if r.status_code != 200:
-            raise IGAPIError(f"Accounts request failed: HTTP {r.status_code}", status_code=r.status_code)
+            raise IGAPIError(
+                f"Accounts request failed: HTTP {r.status_code}",
+                status_code=r.status_code,
+            )
         accounts = r.json().get("accounts", [])
         for acc in accounts:
             if str(acc.get("accountId")) == self.account_id:
@@ -893,15 +903,19 @@ class IGRestClient:
                 hi = p.get("highPrice", {}) or {}
                 lo = p.get("lowPrice", {}) or {}
                 cl = p.get("closePrice", {}) or {}
-                out.append({
-                    "time": snap,
-                    "open": float(op.get("mid") or op.get("bid") or 0),
-                    "high": float(hi.get("mid") or hi.get("ask") or hi.get("offer") or 0),
-                    "low": float(lo.get("mid") or lo.get("bid") or 0),
-                    "close": float(cl.get("mid") or cl.get("bid") or 0),
-                    "bid_close": float(cl.get("bid") or 0),
-                    "offer_close": float(cl.get("ask") or cl.get("offer") or 0),
-                })
+                out.append(
+                    {
+                        "time": snap,
+                        "open": float(op.get("mid") or op.get("bid") or 0),
+                        "high": float(
+                            hi.get("mid") or hi.get("ask") or hi.get("offer") or 0
+                        ),
+                        "low": float(lo.get("mid") or lo.get("bid") or 0),
+                        "close": float(cl.get("mid") or cl.get("bid") or 0),
+                        "bid_close": float(cl.get("bid") or 0),
+                        "offer_close": float(cl.get("ask") or cl.get("offer") or 0),
+                    }
+                )
             return [b for b in out if b["close"] > 0]
         except Exception:
             return []
@@ -936,13 +950,22 @@ class IGRestClient:
             }
 
         self.ensure_session()
-        if market_bid is not None and market_offer is not None and market_bid > 0 and market_offer > 0:
+        if (
+            market_bid is not None
+            and market_offer is not None
+            and market_bid > 0
+            and market_offer > 0
+        ):
             bid, offer = float(market_bid), float(market_offer)
         else:
             snap = self.fetch_market_snapshot(epic)
             bid, offer = float(snap["bid"]), float(snap["offer"])
         if bid <= 0 or offer <= 0:
-            return {"ok": False, "error": "Invalid market snapshot prices", "is_mock": False}
+            return {
+                "ok": False,
+                "error": "Invalid market snapshot prices",
+                "is_mock": False,
+            }
 
         balance = 0.0
         account_found = bool(self.account_id)
@@ -986,7 +1009,10 @@ class IGRestClient:
             self.login()
             r = self.request("GET", "/positions", headers=self._auth_headers("2"))
         if r.status_code != 200:
-            raise IGAPIError(f"Positions request failed: HTTP {r.status_code}", status_code=r.status_code)
+            raise IGAPIError(
+                f"Positions request failed: HTTP {r.status_code}",
+                status_code=r.status_code,
+            )
         return r.json().get("positions", [])
 
     def fetch_open_positions(self, epic: str | None = None) -> list[dict[str, Any]]:
@@ -1021,12 +1047,14 @@ class IGRestClient:
         currency_code: str = "GBP",
     ) -> dict[str, Any]:
         self.ensure_session()
-        size, stop_distance, limit_distance, currency_code = self.normalize_order_params(
-            epic,
-            size=size,
-            stop_distance=stop_distance,
-            limit_distance=limit_distance,
-            currency_code=currency_code,
+        size, stop_distance, limit_distance, currency_code = (
+            self.normalize_order_params(
+                epic,
+                size=size,
+                stop_distance=stop_distance,
+                limit_distance=limit_distance,
+                currency_code=currency_code,
+            )
         )
         payload: dict[str, Any] = {
             "epic": epic,
@@ -1122,8 +1150,14 @@ class IGRestClient:
             return False
         pos = row.get("position") or {}
         mkt = row.get("market") or {}
-        has_stop  = float(pos.get("stopLevel") or 0) > 0 or float(pos.get("stopDistance") or 0) > 0
-        has_limit = float(pos.get("limitLevel") or 0) > 0 or float(pos.get("limitDistance") or 0) > 0
+        has_stop = (
+            float(pos.get("stopLevel") or 0) > 0
+            or float(pos.get("stopDistance") or 0) > 0
+        )
+        has_limit = (
+            float(pos.get("limitLevel") or 0) > 0
+            or float(pos.get("limitDistance") or 0) > 0
+        )
         if has_stop and has_limit:
             return True
 
@@ -1133,12 +1167,20 @@ class IGRestClient:
             return False
 
         # Convert distance to absolute level — PUT endpoint only accepts stopLevel/limitLevel
-        stop_level  = None
+        stop_level = None
         limit_level = None
         if not has_stop and float(stop_distance) > 0:
-            stop_level = (entry + float(stop_distance)) if direction == "SELL" else (entry - float(stop_distance))
+            stop_level = (
+                (entry + float(stop_distance))
+                if direction == "SELL"
+                else (entry - float(stop_distance))
+            )
         if not has_limit and float(limit_distance) > 0:
-            limit_level = (entry - float(limit_distance)) if direction == "SELL" else (entry + float(limit_distance))
+            limit_level = (
+                (entry - float(limit_distance))
+                if direction == "SELL"
+                else (entry + float(limit_distance))
+            )
 
         if stop_level is None and limit_level is None:
             return True
@@ -1256,9 +1298,7 @@ class IGRestClient:
                 epic=epic,
                 currency_code=currency_code,
                 verify=verify,
-                set_deal_reference=(
-                    set_exit_deal_reference if guarded else None
-                ),
+                set_deal_reference=(set_exit_deal_reference if guarded else None),
                 guarded_epic=epic_key if guarded else "",
             )
             if guarded and bool(data.get("verified_closed")):
@@ -1403,7 +1443,9 @@ class IGRestClient:
                         self.flatten_epic_positions(
                             epic_use, currency_code=ccy_n, max_rounds=3
                         )
-                        data["verified_closed"] = self.count_open_positions(epic_use) == 0
+                        data["verified_closed"] = (
+                            self.count_open_positions(epic_use) == 0
+                        )
                 return data
             self._raise_auth_or_api(r2, "Net close position")
 
@@ -1436,9 +1478,7 @@ class IGRestClient:
                 affected_reason = ""
                 if affected and isinstance(affected[0], dict):
                     affected_reason = str(
-                        affected[0].get("reason")
-                        or affected[0].get("status")
-                        or ""
+                        affected[0].get("reason") or affected[0].get("status") or ""
                     )
                 reason = (
                     body.get("reason")
@@ -1509,7 +1549,9 @@ class IGRestClient:
             json=payload,
         )
         if r.status_code not in (200, 201):
-            raise IGAPIError(f"Update stops failed: HTTP {r.status_code}", status_code=r.status_code)
+            raise IGAPIError(
+                f"Update stops failed: HTTP {r.status_code}", status_code=r.status_code
+            )
         return r.json()
 
     def _auth_headers(self, version: str = "3") -> dict[str, str]:
@@ -1523,8 +1565,12 @@ class IGRestClient:
         if code:
             get_rate_limit_manager().handle_http_response(r, source=context)
         if r.status_code in (401, 403):
-            raise IGAuthError(f"{context}: HTTP {r.status_code} — {body}", status_code=r.status_code)
-        raise IGAPIError(f"{context}: HTTP {r.status_code} — {body}", status_code=r.status_code)
+            raise IGAuthError(
+                f"{context}: HTTP {r.status_code} — {body}", status_code=r.status_code
+            )
+        raise IGAPIError(
+            f"{context}: HTTP {r.status_code} — {body}", status_code=r.status_code
+        )
 
     def request(
         self,
@@ -1570,7 +1616,10 @@ class IGRestClient:
                         self._log_auth_failure_critical()
                         return self._auth_failure_response(path)
                     return self._auth_failure_response(path)
-                if r.status_code in (429, 500, 502, 503, 504) and attempt < self.max_retries:
+                if (
+                    r.status_code in (429, 500, 502, 503, 504)
+                    and attempt < self.max_retries
+                ):
                     time.sleep(self.retry_delay_seconds * attempt)
                     continue
                 if 200 <= r.status_code < 300:
@@ -1578,7 +1627,10 @@ class IGRestClient:
                 return r
             except RateLimitError:
                 raise
-            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            except (
+                requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError,
+            ) as e:
                 last_exc = e
                 if attempt < self.max_retries:
                     time.sleep(self.retry_delay_seconds * attempt)
