@@ -129,14 +129,22 @@ class TestSession2GapExpiry:
 
 
 class TestSession2RsiBuyMax:
-    """Global rsi_buy_max must be 80 (raised from 78)."""
+    """RSI filters must be relaxed to allow ML-led trading decisions."""
 
-    def test_rsi_buy_max_is_80(self):
+    def test_rsi_buy_max_relaxed(self):
         cfg = json.loads(CONFIG.read_text())
         val = cfg.get("rsi_buy_max")
-        assert val == 80, (
-            f"rsi_buy_max={val}, expected 80. "
-            "At 78, high-confidence signals (e.g. Nikkei 96%) are incorrectly filtered."
+        assert val >= 85, (
+            f"rsi_buy_max={val}, expected >=85. "
+            "Tightening RSI filters blocks high-confidence ML-blended signals."
+        )
+
+    def test_rsi_sell_min_relaxed(self):
+        cfg = json.loads(CONFIG.read_text())
+        val = cfg.get("rsi_sell_min")
+        assert val <= 15, (
+            f"rsi_sell_min={val}, expected <=15. "
+            "At 20, oversold SELL signals (e.g. Gold RSI 15) are incorrectly blocked."
         )
 
 
