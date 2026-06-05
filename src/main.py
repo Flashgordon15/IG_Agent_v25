@@ -289,7 +289,26 @@ def _pre_startup_cleanup() -> None:
             "pre-startup: port 8080 still in use after cleanup — proceeding anyway"
         )
 
-    # 5. Mark startup phase (visible in splash screen)
+    # 5. Clear any stale in-flight / pending-order state left by the previous
+    #    session.  These are in-memory-only dicts that survive process death via
+    #    runtime_state.json.  Clearing them here means a fresh session always
+    #    starts from a clean state; broker reconciliation re-establishes the
+    #    correct view within seconds of the first position-sync tick.
+    try:
+        from execution.entry_inflight import recover_startup_inflight_state
+        from execution.pending_order_reconcile import recover_pending_state_for_startup
+
+        cleared_pending = recover_pending_state_for_startup()
+        cleared_inflight = recover_startup_inflight_state()
+        if cleared_pending or cleared_inflight:
+            log_engine(
+                f"pre-startup: cleared {cleared_pending} stale pending order(s) "
+                f"and {cleared_inflight} in-flight entry/ies from previous session"
+            )
+    except Exception as e:
+        log_engine(f"pre-startup: inflight/pending clear failed (ignored): {e}")
+
+    # 6. Mark startup phase (visible in splash screen)
     note = (
         f"killed {len(killed_pids)} previous session(s)"
         if killed_pids

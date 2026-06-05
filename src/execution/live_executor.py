@@ -6,25 +6,6 @@ import threading
 from typing import Any
 
 from execution.cooldown_tracker import CooldownTracker
-from execution.trade_manager import TradeManager
-from execution.types import ExecutionMode, ExecutionResult, TradeSignal
-from ig_api.exceptions import IGAPIError, IGOrderError
-from system.config import Config
-from system.config_loader import get_config as _get_live_config
-from ig_api.exceptions import RateLimitError
-from ig_api.mock_clients import MockIGRest
-from system.engine_log import log_engine
-from system.rate_limit_manager import get_rate_limit_manager
-from system.demo_execution_trace import log_simulator_fallback_warning, trace_execution, update_demo_diagnostics
-from system.trade_lifecycle_bus import (
-    STAGE_EXECUTION_REQUEST,
-    STAGE_IG_RESPONSE,
-    STAGE_POSITION_OPENED,
-    STATUS_FAIL,
-    STATUS_OK,
-    get_lifecycle_bus,
-)
-
 from execution.entry_inflight import (
     clear_entry,
     has_entry_in_flight,
@@ -33,6 +14,8 @@ from execution.entry_inflight import (
 )
 from execution.japan225_daily_risk import (
     is_paused as japan225_daily_risk_paused,
+)
+from execution.japan225_daily_risk import (
     pause_reason as japan225_daily_risk_reason,
 )
 from execution.pending_order_reconcile import (
@@ -41,6 +24,27 @@ from execution.pending_order_reconcile import (
     log_unresolved_if_due,
     mark_pending,
     resolve_pending,
+)
+from execution.trade_manager import TradeManager
+from execution.types import ExecutionMode, ExecutionResult, TradeSignal
+from ig_api.exceptions import IGAPIError, IGOrderError, RateLimitError
+from ig_api.mock_clients import MockIGRest
+from system.config import Config
+from system.config_loader import get_config as _get_live_config
+from system.demo_execution_trace import (
+    log_simulator_fallback_warning,
+    trace_execution,
+    update_demo_diagnostics,
+)
+from system.engine_log import log_engine
+from system.rate_limit_manager import get_rate_limit_manager
+from system.trade_lifecycle_bus import (
+    STAGE_EXECUTION_REQUEST,
+    STAGE_IG_RESPONSE,
+    STAGE_POSITION_OPENED,
+    STATUS_FAIL,
+    STATUS_OK,
+    get_lifecycle_bus,
 )
 
 
@@ -107,7 +111,9 @@ class LiveExecutor:
             )
 
         if isinstance(self._client, MockIGRest):
-            log_simulator_fallback_warning("MockIGRest detected in LiveExecutor — blocked")
+            log_simulator_fallback_warning(
+                "MockIGRest detected in LiveExecutor — blocked"
+            )
             return ExecutionResult(
                 success=False,
                 action="REJECTED",
@@ -118,7 +124,9 @@ class LiveExecutor:
         if not cfg.allow_live_trading and not is_demo:
             reason = "Live trading not armed in config"
             update_demo_diagnostics(last_rejection=reason)
-            trace_execution("ORDER", "LiveExecutor.execute", decision=f"REJECTED: {reason}")
+            trace_execution(
+                "ORDER", "LiveExecutor.execute", decision=f"REJECTED: {reason}"
+            )
             return ExecutionResult(
                 success=False,
                 action="REJECTED",
@@ -136,7 +144,9 @@ class LiveExecutor:
                 f"trading paused until reconciliation"
             )
             update_demo_diagnostics(last_rejection=reason)
-            trace_execution("ORDER", "LiveExecutor.execute", decision=f"REJECTED: {reason}")
+            trace_execution(
+                "ORDER", "LiveExecutor.execute", decision=f"REJECTED: {reason}"
+            )
             return ExecutionResult(
                 success=False,
                 action="REJECTED",
@@ -150,7 +160,9 @@ class LiveExecutor:
         if is_blocked():
             reason = suspend_detail() or "Market suspended — orders blocked 5 min"
             update_demo_diagnostics(last_rejection=reason)
-            trace_execution("ORDER", "LiveExecutor.execute", decision=f"REJECTED: {reason}")
+            trace_execution(
+                "ORDER", "LiveExecutor.execute", decision=f"REJECTED: {reason}"
+            )
             return ExecutionResult(
                 success=False,
                 action="REJECTED",
@@ -160,12 +172,13 @@ class LiveExecutor:
 
         if japan225_daily_risk_paused(signal.epic):
             detail = japan225_daily_risk_reason(signal.epic)
-            reason = (
-                "Daily risk limit hit — entries paused until next JST session"
-                + (f" ({detail})" if detail else "")
+            reason = "Daily risk limit hit — entries paused until next JST session" + (
+                f" ({detail})" if detail else ""
             )
             update_demo_diagnostics(last_rejection=reason)
-            trace_execution("ORDER", "LiveExecutor.execute", decision=f"REJECTED: {reason}")
+            trace_execution(
+                "ORDER", "LiveExecutor.execute", decision=f"REJECTED: {reason}"
+            )
             return ExecutionResult(
                 success=False,
                 action="REJECTED",
@@ -177,10 +190,13 @@ class LiveExecutor:
 
         try:
             from execution.correlation_guard import check_and_record as _cg_check
+
             cg_ok, cg_reason = _cg_check(signal.direction)
             if not cg_ok:
                 update_demo_diagnostics(last_rejection=cg_reason)
-                trace_execution("ORDER", "LiveExecutor.execute", decision=f"REJECTED: {cg_reason}")
+                trace_execution(
+                    "ORDER", "LiveExecutor.execute", decision=f"REJECTED: {cg_reason}"
+                )
                 return ExecutionResult(
                     success=False,
                     action="REJECTED",
@@ -193,7 +209,9 @@ class LiveExecutor:
         if not try_begin_entry(signal.epic, signal.direction, size):
             reason = f"Entry already in flight for {signal.epic} — skipped duplicate"
             update_demo_diagnostics(last_rejection=reason)
-            trace_execution("ORDER", "LiveExecutor.execute", decision=f"REJECTED: {reason}")
+            trace_execution(
+                "ORDER", "LiveExecutor.execute", decision=f"REJECTED: {reason}"
+            )
             return ExecutionResult(
                 success=False,
                 action="REJECTED",
@@ -294,9 +312,12 @@ class LiveExecutor:
                     f"ref={result.deal_reference or '—'}"
                 )
             else:
-                log_engine(f"Order failed: reason={result.rejection_reason or result.action}")
+                log_engine(
+                    f"Order failed: reason={result.rejection_reason or result.action}"
+                )
                 try:
                     from execution.correlation_guard import undo as _cg_undo
+
                     _cg_undo(signal.direction)
                 except Exception:
                     pass
@@ -309,6 +330,7 @@ class LiveExecutor:
             log_engine(f"Order failed: reason={type(e).__name__}: {e}")
             try:
                 from execution.correlation_guard import undo as _cg_undo
+
                 _cg_undo(signal.direction)
             except Exception:
                 pass
@@ -356,12 +378,14 @@ class LiveExecutor:
         limit_distance = float(execution_params.get("limit", cfg.limit_distance_points))
 
         if hasattr(self._client, "normalize_order_params"):
-            size, stop_distance, limit_distance, currency_code = self._client.normalize_order_params(
-                signal.epic,
-                size=size,
-                stop_distance=stop_distance,
-                limit_distance=limit_distance,
-                currency_code=cfg.currency_code,
+            size, stop_distance, limit_distance, currency_code = (
+                self._client.normalize_order_params(
+                    signal.epic,
+                    size=size,
+                    stop_distance=stop_distance,
+                    limit_distance=limit_distance,
+                    currency_code=cfg.currency_code,
+                )
             )
             execution_params = {
                 **execution_params,
@@ -385,7 +409,11 @@ class LiveExecutor:
 
         bus = get_lifecycle_bus()
         max_retries = int(cfg.max_retries) if hasattr(cfg, "max_retries") else 2
-        retry_delay = float(cfg.retry_delay_seconds) if hasattr(cfg, "retry_delay_seconds") else 2.5
+        retry_delay = (
+            float(cfg.retry_delay_seconds)
+            if hasattr(cfg, "retry_delay_seconds")
+            else 2.5
+        )
 
         result: dict | None = None
         ref = ""
@@ -397,7 +425,11 @@ class LiveExecutor:
                 confirm = (
                     self._client.confirm_deal(ref)
                     if hasattr(self._client, "confirm_deal")
-                    else {"accepted": False, "rejected": True, "reason": "no confirm_deal"}
+                    else {
+                        "accepted": False,
+                        "rejected": True,
+                        "reason": "no confirm_deal",
+                    }
                 )
                 update_demo_diagnostics(last_ig_response={"confirm": confirm})
                 trace_execution(
@@ -415,7 +447,9 @@ class LiveExecutor:
                     reason = str(confirm.get("reason") or "Order rejected by IG")
                     bus.emit(STAGE_IG_RESPONSE, STATUS_FAIL, reason, confirm=confirm)
                     bus.finalize_failure(reason=reason)
-                    update_demo_diagnostics(last_rejection=reason, rest_status="confirm rejected")
+                    update_demo_diagnostics(
+                        last_rejection=reason, rest_status="confirm rejected"
+                    )
                     resolve_pending(signal.epic, reason="entry rejected by broker")
                     return ExecutionResult(
                         success=False,
@@ -481,7 +515,11 @@ class LiveExecutor:
                     rest_status="rate limited",
                     fallback_reason="none — broker path only",
                 )
-                trace_execution("REST", "IGRestClient.place_market_order", decision=f"RATE LIMIT: {e}")
+                trace_execution(
+                    "REST",
+                    "IGRestClient.place_market_order",
+                    decision=f"RATE LIMIT: {e}",
+                )
                 return ExecutionResult(
                     success=False,
                     action="REJECTED",
@@ -496,7 +534,9 @@ class LiveExecutor:
                 last_error = str(e)
                 update_demo_diagnostics(
                     last_rejection=last_error,
-                    rest_status=f"order failed HTTP {status_code}" if status_code else "order failed",
+                    rest_status=f"order failed HTTP {status_code}"
+                    if status_code
+                    else "order failed",
                     fallback_reason="none — broker path only",
                 )
                 trace_execution(
@@ -514,12 +554,17 @@ class LiveExecutor:
                     continue
                 bus.emit(STAGE_IG_RESPONSE, STATUS_FAIL, last_error)
                 bus.finalize_failure(reason=last_error)
-                mark_pending(
-                    signal.epic,
-                    side=signal.direction,
-                    order_type=ORDER_TYPE_ENTRY,
-                    deal_reference=ref,
-                )
+                # Only mark pending when the order actually reached IG (ref
+                # non-empty).  A rate-cap-deferred error with ref="" means the
+                # order was never transmitted, so there is no uncertainty to
+                # reconcile — marking it pending would ghost-block the market.
+                if ref:
+                    mark_pending(
+                        signal.epic,
+                        side=signal.direction,
+                        order_type=ORDER_TYPE_ENTRY,
+                        deal_reference=ref,
+                    )
                 return ExecutionResult(
                     success=False,
                     action="REJECTED",
@@ -543,7 +588,9 @@ class LiveExecutor:
                 if ref
                 else {"accepted": False, "rejected": True, "reason": "no dealReference"}
             )
-            update_demo_diagnostics(last_ig_response={"place": result, "confirm": confirm})
+            update_demo_diagnostics(
+                last_ig_response={"place": result, "confirm": confirm}
+            )
             trace_execution(
                 "REST",
                 "IGRestClient.confirm_deal",
@@ -551,7 +598,10 @@ class LiveExecutor:
                     f"accepted={confirm.get('accepted')} rejected={confirm.get('rejected')} "
                     f"status={confirm.get('status')}"
                 ),
-                params={"reason": confirm.get("reason"), "deal_id": confirm.get("deal_id")},
+                params={
+                    "reason": confirm.get("reason"),
+                    "deal_id": confirm.get("deal_id"),
+                },
             )
 
             if confirm.get("accepted"):
@@ -571,7 +621,11 @@ class LiveExecutor:
                 )
                 _time_exec.sleep(retry_delay)
 
-        if not confirm.get("accepted") and ref and hasattr(self._client, "has_open_position"):
+        if (
+            not confirm.get("accepted")
+            and ref
+            and hasattr(self._client, "has_open_position")
+        ):
             try:
                 if self._client.has_open_position(signal.epic):
                     retry_confirm = self._client.confirm_deal(ref)
@@ -581,10 +635,17 @@ class LiveExecutor:
                 pass
 
         if not confirm.get("accepted"):
-            reason = str(confirm.get("reason") or confirm.get("error") or last_error or "Order rejected")
+            reason = str(
+                confirm.get("reason")
+                or confirm.get("error")
+                or last_error
+                or "Order rejected"
+            )
             bus.emit(STAGE_IG_RESPONSE, STATUS_FAIL, reason, confirm=confirm)
             bus.finalize_failure(reason=reason)
-            update_demo_diagnostics(last_rejection=reason, rest_status="confirm rejected")
+            update_demo_diagnostics(
+                last_rejection=reason, rest_status="confirm rejected"
+            )
             if confirm.get("rejected"):
                 resolve_pending(signal.epic, reason="entry rejected by broker")
             else:

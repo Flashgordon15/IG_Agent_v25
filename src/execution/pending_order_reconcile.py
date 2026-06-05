@@ -29,8 +29,18 @@ def _request_save() -> None:
     except Exception:
         pass
 
+
 DEFAULT_PENDING_TIMEOUT_SEC = 30.0
 _UNRESOLVED_LOG_INTERVAL_SEC = 60.0
+# Ghost-order defence: auto-expire pending entries that are older than this,
+# regardless of whether reconciliation was ever called.  Set to 5 minutes —
+# long enough to survive a slow broker confirm cycle, short enough that a
+# rate-cap-deferred order with ref="-" can never block a market indefinitely.
+PENDING_HARD_EXPIRY_SEC = 300.0
+# On startup, skip loading any pending entry that is older than this (seconds).
+# Orders from a previous session are stale; broker reconciliation will rebuild
+# the correct state within seconds of the first position-sync tick.
+_PENDING_LOAD_MAX_AGE_SEC = 120.0
 
 ORDER_TYPE_ENTRY = "entry"
 ORDER_TYPE_EXIT = "exit"
@@ -100,12 +110,33 @@ def set_pending_deal_reference(epic: str, deal_reference: str) -> None:
     _request_save()
 
 
-def has_pending(epic: str) -> bool:
+def has_pending(epic: str, *, expiry_sec: float = PENDING_HARD_EXPIRY_SEC) -> bool:
+    """Return True only if there is a live (non-expired) pending order for this epic.
+
+    Entries older than *expiry_sec* are silently removed so a rate-cap-deferred
+    order with ref="-" (that never reached IG) can never permanently block a
+    market.  The 5-minute default is far longer than any legitimate broker
+    confirm cycle, so genuine uncertain orders are not cleared prematurely.
+    """
     key = _epic_key(epic)
     if not key:
         return False
+    now = time.time()
     with _lock:
-        return key in _pending
+        rec = _pending.get(key)
+        if rec is None:
+            return False
+        age = now - rec.local_created_at
+        if age > max(1.0, float(expiry_sec)):
+            _pending.pop(key, None)
+            _last_unresolved_log_ts.pop(key, None)
+            log_engine(
+                f"Pending order for {key} auto-expired after {age:.0f}s "
+                f"(ref={rec.broker_deal_reference or '-'}) — cleared"
+            )
+            _request_save()
+            return False
+        return True
 
 
 def get_pending(epic: str) -> PendingOrder | None:
@@ -160,9 +191,7 @@ def log_unresolved_if_due(
     )
 
 
-def reconcile_pending_via_position_state(
-    epic: str, *, position_present: bool
-) -> None:
+def reconcile_pending_via_position_state(epic: str, *, position_present: bool) -> None:
     """Clear pending entry when broker shows a position; clear pending exit when absent."""
     rec = get_pending(epic)
     if rec is None:
@@ -210,6 +239,7 @@ def load_pending_state(data: dict[str, Any]) -> None:
     items = data.get("orders") or []
     if not isinstance(items, list):
         return
+    now = time.time()
     with _lock:
         _pending.clear()
         for item in items:
@@ -226,6 +256,14 @@ def load_pending_state(data: dict[str, Any]) -> None:
             except (TypeError, ValueError):
                 continue
             if ts <= 0:
+                continue
+            # Skip stale entries from previous sessions — broker reconciliation
+            # rebuilds accurate state within seconds of the first position-sync tick.
+            if (now - ts) > _PENDING_LOAD_MAX_AGE_SEC:
+                log_engine(
+                    f"pending_order_reconcile: skipped stale pending for {epic} "
+                    f"(age={(now - ts):.0f}s > {_PENDING_LOAD_MAX_AGE_SEC:.0f}s limit)"
+                )
                 continue
             _pending[epic] = PendingOrder(
                 epic=epic,

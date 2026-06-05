@@ -394,6 +394,49 @@ def _trigger_shutdown(source: str = "api") -> None:
     threading.Thread(target=_exit, name="shutdown-trigger", daemon=True).start()
 
 
+@router.post("/api/clear_inflight/{epic}")
+def api_clear_inflight(epic: str) -> JSONResponse:
+    """Clear any stale in-flight / pending-confirmation state for one epic.
+
+    Use when an epic is stuck with 'Order confirmation unresolved' and no
+    matching IG position exists.  Safe to call while the agent is running —
+    the next gate-pass for the epic will attempt a fresh order.
+    """
+    from system.engine_log import log_engine
+
+    try:
+        from execution.entry_inflight import clear_entry
+        from execution.pending_order_reconcile import get_pending, resolve_pending
+
+        had_entry = False
+        had_pending = False
+
+        pending = get_pending(epic)
+        if pending is not None:
+            had_pending = True
+            resolve_pending(epic, reason="manually cleared via API")
+
+        # Also clear the entry-inflight tracker in case it's set
+        clear_entry(epic)
+        had_entry = True  # clear_entry is idempotent
+
+        log_engine(
+            f"clear_inflight API: {epic} — "
+            f"pending={'yes' if had_pending else 'no'} cleared"
+        )
+        return JSONResponse(
+            {
+                "ok": True,
+                "epic": epic,
+                "pending_cleared": had_pending,
+                "entry_inflight_cleared": had_entry,
+            }
+        )
+    except Exception as e:
+        log_engine(f"clear_inflight API failed for {epic}: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
 @router.post("/api/heartbeat")
 def api_heartbeat() -> JSONResponse:
     """Browser keep-alive ping (every 30 s). Starts the idle-shutdown monitor on first call."""

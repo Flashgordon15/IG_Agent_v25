@@ -771,3 +771,148 @@ class TestSession6DynamicSizing:
         assert "partial_close_fraction" in ts, (
             "trailing_stop missing partial_close_fraction"
         )
+
+
+# ---------------------------------------------------------------------------
+# SESSION 7 FIXES — ghost in-flight order auto-expiry (v25.4.0)
+# ---------------------------------------------------------------------------
+
+
+class TestSession7InFlightAutoExpiry:
+    """Pending orders must not block markets indefinitely when ref='-'."""
+
+    def test_has_pending_auto_expires(self):
+        """has_pending() must auto-clear entries older than PENDING_HARD_EXPIRY_SEC."""
+        import sys
+        import time
+
+        sys.path.insert(0, str(SRC))
+        import importlib
+
+        mod = importlib.import_module("execution.pending_order_reconcile")
+        mod.reset_pending_state_for_tests()
+
+        epic = "CS.D.CFPGOLD.CFP.IP"
+        # Inject a stale entry directly (created 400s ago, past 300s expiry)
+        stale_ts = time.time() - 400.0
+        with mod._lock:
+            mod._pending[mod._epic_key(epic)] = mod.PendingOrder(
+                epic=epic,
+                side="SELL",
+                order_type=mod.ORDER_TYPE_ENTRY,
+                local_created_at=stale_ts,
+                broker_deal_reference="",
+            )
+
+        assert mod.has_pending(epic) is False, (
+            "has_pending() must return False for an entry older than "
+            f"PENDING_HARD_EXPIRY_SEC={mod.PENDING_HARD_EXPIRY_SEC}s"
+        )
+        # Entry must have been removed from the dict
+        with mod._lock:
+            assert epic not in mod._pending, (
+                "Expired pending entry must be removed from _pending dict"
+            )
+
+    def test_has_pending_live_entry_not_expired(self):
+        """has_pending() must return True for a recent pending entry."""
+        import sys
+        import time
+
+        sys.path.insert(0, str(SRC))
+        import importlib
+
+        mod = importlib.import_module("execution.pending_order_reconcile")
+        mod.reset_pending_state_for_tests()
+
+        epic = "CS.D.CFPGOLD.CFP.IP"
+        mod.mark_pending(epic, side="SELL", order_type=mod.ORDER_TYPE_ENTRY)
+        assert mod.has_pending(epic) is True, (
+            "has_pending() must return True for a freshly-marked pending entry"
+        )
+        mod.reset_pending_state_for_tests()
+
+    def test_load_pending_state_skips_stale_entries(self):
+        """load_pending_state() must skip entries older than _PENDING_LOAD_MAX_AGE_SEC."""
+        import sys
+        import time
+
+        sys.path.insert(0, str(SRC))
+        import importlib
+
+        mod = importlib.import_module("execution.pending_order_reconcile")
+        mod.reset_pending_state_for_tests()
+
+        epic = "CS.D.CFPGOLD.CFP.IP"
+        stale_ts = time.time() - (mod._PENDING_LOAD_MAX_AGE_SEC + 60.0)
+        mod.load_pending_state(
+            {
+                "orders": [
+                    {
+                        "epic": epic,
+                        "side": "SELL",
+                        "order_type": mod.ORDER_TYPE_ENTRY,
+                        "local_created_at": stale_ts,
+                        "broker_deal_reference": "",
+                    }
+                ]
+            }
+        )
+        assert not mod.has_pending(epic), (
+            "load_pending_state() must discard entries older than "
+            f"_PENDING_LOAD_MAX_AGE_SEC={mod._PENDING_LOAD_MAX_AGE_SEC}s"
+        )
+        mod.reset_pending_state_for_tests()
+
+    def test_mark_pending_skipped_when_no_ref_in_executor(self):
+        """live_executor must NOT call mark_pending when ref='' (order never reached IG)."""
+        import sys
+
+        sys.path.insert(0, str(SRC))
+        src_text = (SRC / "execution" / "live_executor.py").read_text()
+        assert "if ref:" in src_text and "mark_pending(" in src_text, (
+            "live_executor.py must guard mark_pending() with 'if ref:' to skip "
+            "rate-cap-deferred orders that never reached IG"
+        )
+        # The guard must appear BEFORE the mark_pending call in the IGAPIError handler
+        guard_idx = src_text.index("if ref:")
+        mark_idx = src_text.index("mark_pending(", guard_idx)
+        assert mark_idx > guard_idx, (
+            "The 'if ref:' guard must appear before the mark_pending() call "
+            "in the IGAPIError handler"
+        )
+
+    def test_position_sync_reconciles_all_managed_epics(self):
+        """ig_position_sync must call reconcile_pending for all managed epics, not just self._epic."""
+        import sys
+
+        sys.path.insert(0, str(SRC))
+        src_text = (SRC / "runtime" / "ig_position_sync.py").read_text()
+        assert "reconcile_targets" in src_text, (
+            "ig_position_sync.py must iterate reconcile_targets (all managed epics) "
+            "not just self._epic to clear stale pending entries"
+        )
+        assert "self._managed_epics" in src_text, (
+            "ig_position_sync.py must use self._managed_epics for reconciliation"
+        )
+
+    def test_clear_inflight_api_endpoint_present(self):
+        """routes.py must expose POST /api/clear_inflight/{epic}."""
+        import sys
+
+        sys.path.insert(0, str(SRC))
+        src_text = (SRC / "api" / "routes.py").read_text()
+        assert "/api/clear_inflight/{epic}" in src_text, (
+            "routes.py must expose /api/clear_inflight/{epic} endpoint"
+        )
+
+    def test_startup_clears_pending_state(self):
+        """main.py _pre_startup_cleanup must call recover_pending_state_for_startup."""
+        import sys
+
+        sys.path.insert(0, str(SRC))
+        src_text = (SRC / "main.py").read_text()
+        assert "recover_pending_state_for_startup" in src_text, (
+            "main.py must call recover_pending_state_for_startup() in "
+            "_pre_startup_cleanup() so stale pending orders don't survive restarts"
+        )

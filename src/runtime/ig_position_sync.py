@@ -12,14 +12,13 @@ from typing import Any, Callable
 
 from system.demo_execution_trace import trace_execution, update_demo_diagnostics
 from system.engine_log import log_engine
+from system.ig_rest_sync_lock import ig_rest_sync_lock
 from system.market_display import format_market_display_name
 from system.pnl_math import classify_result, close_from_ig_position
-from system.trade_audit import log_trade_audit
-from system.ig_rest_sync_lock import ig_rest_sync_lock
 from system.rate_limit_manager import get_rate_limit_manager
 from system.sync_task_guard import SyncTaskGuard
+from system.trade_audit import log_trade_audit
 from system.trade_lifecycle_bus import (
-    STAGE_POSITION_CLOSED,
     STAGE_POSITION_TRACKING,
     STATUS_OK,
     get_lifecycle_bus,
@@ -120,14 +119,18 @@ class IgPositionSync:
             return True
         return str(epic or "").strip() in self._managed_epics
 
-    def _positions_for_sync(self, positions: list[SyncedPosition]) -> list[SyncedPosition]:
+    def _positions_for_sync(
+        self, positions: list[SyncedPosition]
+    ) -> list[SyncedPosition]:
         """Keep only agent-managed epics; IG positions are already session/account scoped."""
         if not self._managed_epics:
             return positions
         kept = [p for p in positions if self._is_managed_epic(p.epic)]
         skipped = len(positions) - len(kept)
         if skipped:
-            sample = next((p for p in positions if not self._is_managed_epic(p.epic)), None)
+            sample = next(
+                (p for p in positions if not self._is_managed_epic(p.epic)), None
+            )
             epic_hint = sample.epic if sample else "?"
             log_engine(
                 f"IG position sync ignored {skipped} non-managed position(s) "
@@ -139,10 +142,14 @@ class IgPositionSync:
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
-        self._thread = threading.Thread(target=self._loop, daemon=True, name="IgPositionSync")
+        self._thread = threading.Thread(
+            target=self._loop, daemon=True, name="IgPositionSync"
+        )
         self._thread.start()
         log_engine("IG position sync started")
-        trace_execution("SYNC", "IgPositionSync.start", decision="background loop started")
+        trace_execution(
+            "SYNC", "IgPositionSync.start", decision="background loop started"
+        )
 
     def stop(self) -> None:
         self._stop.set()
@@ -194,7 +201,9 @@ class IgPositionSync:
             row = self._store.find_open_by_deal_id(deal_id)
             if row is None:
                 return None
-            opened_raw = str(row["opened_at"] or "") if "opened_at" in row.keys() else ""
+            opened_raw = (
+                str(row["opened_at"] or "") if "opened_at" in row.keys() else ""
+            )
             if not opened_raw:
                 return None
             opened = datetime.fromisoformat(opened_raw.replace("Z", ""))
@@ -239,10 +248,7 @@ class IgPositionSync:
             "last_error": s.last_error,
             "last_ig_event": s.last_ig_event,
             "last_closed_summary": s.last_closed_summary,
-            "positions": [
-                self._position_to_dict(p)
-                for p in s.positions
-            ],
+            "positions": [self._position_to_dict(p) for p in s.positions],
         }
 
     def _snapshot_confidence_pct(self) -> float | None:
@@ -381,14 +387,21 @@ class IgPositionSync:
                         reconcile_pending_via_position_state(
                             epic_name, position_present=True
                         )
-                if self._epic:
-                    epic_open = int(self._snapshot.by_epic.get(self._epic, 0))
+                # Reconcile ALL managed epics that have no open position.
+                # Previously only self._epic (which is "" when monitoring all
+                # markets) was checked, so pending entries for epics like Gold
+                # with no open position were never cleared automatically.
+                reconcile_targets = self._managed_epics or (
+                    frozenset([self._epic]) if self._epic else frozenset()
+                )
+                for epic_name in reconcile_targets:
+                    epic_open = int(self._snapshot.by_epic.get(epic_name, 0))
                     if epic_open <= 0:
-                        clear_exit_on_reconciled_close(self._epic)
+                        clear_exit_on_reconciled_close(epic_name)
                         reconcile_pending_via_position_state(
-                            self._epic, position_present=False
+                            epic_name, position_present=False
                         )
-                    log_unresolved_if_due(self._epic)
+                    log_unresolved_if_due(epic_name)
                 prev_ids = {p.deal_id for p in prev.positions}
                 new_ids = {p.deal_id for p in ig_positions}
                 if (
@@ -409,7 +422,10 @@ class IgPositionSync:
                     "SYNC",
                     "IgPositionSync.sync_once",
                     decision=f"ok open={len(ig_positions)} changed={changed}",
-                    params={"by_epic": self._snapshot.by_epic, "upl": self._snapshot.account_upl},
+                    params={
+                        "by_epic": self._snapshot.by_epic,
+                        "upl": self._snapshot.account_upl,
+                    },
                 )
                 if hasattr(self._rest, "maybe_refresh_account_summary"):
                     try:
@@ -428,14 +444,18 @@ class IgPositionSync:
                     self._snapshot.sync_status = "paused (403 rate limit)"
                     self._snapshot.last_ig_event = "rate limit — sync paused 60s"
                 log_engine(f"IG position sync paused 60s: {err}")
-                trace_execution("SYNC", "IgPositionSync.sync_once", decision=f"rate limit: {err}")
+                trace_execution(
+                    "SYNC", "IgPositionSync.sync_once", decision=f"rate limit: {err}"
+                )
             else:
                 with self._lock:
                     self._snapshot.sync_status = f"error: {type(e).__name__}"
                     self._snapshot.last_error = err
                     self._snapshot.last_ig_event = f"sync error: {type(e).__name__}"
                 log_engine(f"IG position sync error: {err}")
-                trace_execution("SYNC", "IgPositionSync.sync_once", decision=f"error: {err}")
+                trace_execution(
+                    "SYNC", "IgPositionSync.sync_once", decision=f"error: {err}"
+                )
         self._update_diagnostics()
         if (changed or ui_refresh) and self._on_changed:
             try:
@@ -473,7 +493,9 @@ class IgPositionSync:
                     size=size,
                     level=float(pos.get("level") or 0),
                     upl=float(pos.get("upl") or 0),
-                    market_name=str(mkt.get("instrumentName") or mkt.get("instrumentType") or ""),
+                    market_name=str(
+                        mkt.get("instrumentName") or mkt.get("instrumentType") or ""
+                    ),
                     deal_reference=str(pos.get("dealReference") or ""),
                     stop_level=float(pos.get("stopLevel") or 0),
                     limit_level=float(pos.get("limitLevel") or 0),
@@ -514,7 +536,9 @@ class IgPositionSync:
                         f"limit={'yes' if p.limit_level > 0 else 'added'}"
                     )
             except Exception as e:
-                log_engine(f"IG protection repair failed deal={p.deal_id}: {type(e).__name__}: {e}")
+                log_engine(
+                    f"IG protection repair failed deal={p.deal_id}: {type(e).__name__}: {e}"
+                )
 
     def _build_snapshot(self, positions: list[SyncedPosition]) -> None:
         by_epic: dict[str, int] = {}
@@ -561,9 +585,12 @@ class IgPositionSync:
                 ig_pnl_currency = ig_row.get("ig_pnl_currency")
                 if ig_pnl_currency is not None:
                     ig_pnl_currency = float(ig_pnl_currency)
-                ig_close_deal_id = str(
-                    ig_row.get("ig_deal_id") or ig_row.get("deal_reference") or ""
-                ).strip() or None
+                ig_close_deal_id = (
+                    str(
+                        ig_row.get("ig_deal_id") or ig_row.get("deal_reference") or ""
+                    ).strip()
+                    or None
+                )
             if ig_pnl_currency is None:
                 try:
                     self._txn_sync.sync_once(force=True, fetch_activity=True)
@@ -575,9 +602,14 @@ class IgPositionSync:
                         ig_pnl_currency = ig_row.get("ig_pnl_currency")
                         if ig_pnl_currency is not None:
                             ig_pnl_currency = float(ig_pnl_currency)
-                        ig_close_deal_id = str(
-                            ig_row.get("ig_deal_id") or ig_row.get("deal_reference") or ""
-                        ).strip() or None
+                        ig_close_deal_id = (
+                            str(
+                                ig_row.get("ig_deal_id")
+                                or ig_row.get("deal_reference")
+                                or ""
+                            ).strip()
+                            or None
+                        )
                 if ig_pnl_currency is None:
                     ig_pnl_currency = self._txn_sync.lookup_pnl(deal_id, deal_ref)
 
@@ -652,10 +684,14 @@ class IgPositionSync:
             ref = str(row["deal_reference"] or "")
             if deal_id:
                 prev = by_deal.get(deal_id)
-                by_deal[deal_id] = row if prev is None else self._prefer_store_row([prev, row])
+                by_deal[deal_id] = (
+                    row if prev is None else self._prefer_store_row([prev, row])
+                )
             elif ref:
                 prev = by_ref.get(ref)
-                by_ref[ref] = row if prev is None else self._prefer_store_row([prev, row])
+                by_ref[ref] = (
+                    row if prev is None else self._prefer_store_row([prev, row])
+                )
             else:
                 orphans.append(row)
         out = list(by_deal.values()) + list(by_ref.values()) + orphans
@@ -709,7 +745,11 @@ class IgPositionSync:
                 matched = ig_by_deal[deal_id]
             elif ref:
                 matched = next(
-                    (p for p in ig_positions if p.deal_reference and p.deal_reference == ref),
+                    (
+                        p
+                        for p in ig_positions
+                        if p.deal_reference and p.deal_reference == ref
+                    ),
                     None,
                 )
                 if matched and not deal_id:
@@ -728,13 +768,15 @@ class IgPositionSync:
                 ):
                     continue
                 last = self._last_known.get(deal_id) if deal_id else None
-                exit_px, pnl, result, ig_pnl_currency, ig_close_deal_id = self._resolve_close_pnl(
-                    deal_id=deal_id,
-                    deal_ref=ref,
-                    side=side,
-                    entry=entry,
-                    size=size,
-                    last=last,
+                exit_px, pnl, result, ig_pnl_currency, ig_close_deal_id = (
+                    self._resolve_close_pnl(
+                        deal_id=deal_id,
+                        deal_ref=ref,
+                        side=side,
+                        entry=entry,
+                        size=size,
+                        last=last,
+                    )
                 )
                 ig_level = last.level if last else entry
                 ig_upl = last.upl if last else 0.0
@@ -750,7 +792,9 @@ class IgPositionSync:
                     ig_pnl_currency=ig_pnl_currency,
                     ig_close_deal_id=ig_close_deal_id,
                 )
-                for dup in self._open_rows_for_broker_deal(deal_id=deal_id, deal_ref=ref):
+                for dup in self._open_rows_for_broker_deal(
+                    deal_id=deal_id, deal_ref=ref
+                ):
                     dup_id = int(dup["id"])
                     if dup_id == trade_id:
                         continue
@@ -779,13 +823,19 @@ class IgPositionSync:
                 )
                 market_label = format_market_display_name("", epic=epic)
                 with self._lock:
-                    self._snapshot.last_ig_event = f"{close_type} deal={deal_id or ref} epic={epic}"
-                    pnl_label = f"{pnl:+.2f}" if ig_pnl_currency is not None else f"{pnl:+.1f} pts"
-                    self._snapshot.last_closed_summary = (
-                        f"{market_label} {side} {result} {pnl_label} @ {datetime.now().strftime('%H:%M:%S')}"
+                    self._snapshot.last_ig_event = (
+                        f"{close_type} deal={deal_id or ref} epic={epic}"
                     )
+                    pnl_label = (
+                        f"{pnl:+.2f}"
+                        if ig_pnl_currency is not None
+                        else f"{pnl:+.1f} pts"
+                    )
+                    self._snapshot.last_closed_summary = f"{market_label} {side} {result} {pnl_label} @ {datetime.now().strftime('%H:%M:%S')}"
                 msg = f"IG sync closed trade id={trade_id} epic={epic} {result} {pnl_label}"
-                log_key = self._close_log_key(deal_id=deal_id, deal_ref=ref, trade_id=trade_id)
+                log_key = self._close_log_key(
+                    deal_id=deal_id, deal_ref=ref, trade_id=trade_id
+                )
                 if self._should_log_close(log_key):
                     get_lifecycle_bus().mark_position_closed(
                         message=msg,
@@ -845,7 +895,9 @@ class IgPositionSync:
         for deal_id, ig_pos in ig_by_deal.items():
             if self._store.find_open_by_deal_id(deal_id):
                 continue
-            if ig_pos.deal_reference and self._store.find_open_by_deal_reference(ig_pos.deal_reference):
+            if ig_pos.deal_reference and self._store.find_open_by_deal_reference(
+                ig_pos.deal_reference
+            ):
                 continue
             tid = self._store.import_ig_position(
                 epic=ig_pos.epic,
@@ -860,7 +912,9 @@ class IgPositionSync:
                 limit_level=ig_pos.limit_level,
             )
             with self._lock:
-                self._snapshot.last_ig_event = f"imported position deal={deal_id} epic={ig_pos.epic}"
+                self._snapshot.last_ig_event = (
+                    f"imported position deal={deal_id} epic={ig_pos.epic}"
+                )
             log_engine(f"IG sync imported IG position dealId={deal_id} trade_id={tid}")
             trace_execution(
                 "SYNC",
@@ -893,11 +947,21 @@ class IgPositionSync:
             entry = float(row["entry"] or 0)
             size = float(row["size"] or 0)
             last = self._last_known.get(deal_id)
-            exit_px, pnl, result, ig_pnl_currency, ig_close_deal_id = self._resolve_close_pnl(
-                deal_id=deal_id, deal_ref=ref, side=side, entry=entry, size=size, last=last,
+            exit_px, pnl, result, ig_pnl_currency, ig_close_deal_id = (
+                self._resolve_close_pnl(
+                    deal_id=deal_id,
+                    deal_ref=ref,
+                    side=side,
+                    entry=entry,
+                    size=size,
+                    last=last,
+                )
             )
             self._store.close_trade(
-                trade_id, exit_px, pnl, result,
+                trade_id,
+                exit_px,
+                pnl,
+                result,
                 notes=f"IG sync: ghost cleanup — position not on IG (deal={deal_id})",
                 ig_pnl_currency=ig_pnl_currency,
                 ig_close_deal_id=ig_close_deal_id,
@@ -940,7 +1004,11 @@ class IgPositionSync:
         banked_pts = unit_pnl * closed_frac
         result = classify_result(banked_pts)
         keys = row.keys()
-        conf = float(row["adjusted_confidence"] or 0) if "adjusted_confidence" in keys else 0.0
+        conf = (
+            float(row["adjusted_confidence"] or 0)
+            if "adjusted_confidence" in keys
+            else 0.0
+        )
         # Guard: only score once per partial close using the done-flag
         already_scored = False
         if hasattr(self._store, "is_partial_close_done"):
@@ -952,7 +1020,9 @@ class IgPositionSync:
             try:
                 self._points_engine.record_trade(result, conf, banked_pts)
             except Exception as e:
-                log_engine(f"points_engine partial close score failed: {type(e).__name__}: {e}")
+                log_engine(
+                    f"points_engine partial close score failed: {type(e).__name__}: {e}"
+                )
         if hasattr(self._store, "mark_partial_close_done"):
             try:
                 self._store.mark_partial_close_done(trade_id)
