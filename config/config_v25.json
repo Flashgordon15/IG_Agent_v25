@@ -267,7 +267,7 @@
   },
   "engine_log_intermittent": true,
   "engine_log_intermittent_seconds": 30,
-  "allow_live_trading": false,
+  "allow_live_trading": true,
   "max_open_positions": 15,
   "max_positions_per_epic": 2,
   "max_daily_loss_gbp": 500.0,
