@@ -11,9 +11,10 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -97,8 +98,334 @@ def _label_direction(
     return "BREAKEVEN"
 
 
+def _replay_batch(
+    *,
+    epic: str,
+    market: str,
+    bars: list[dict],
+    cfg: Any,
+    stop_pts: float,
+    threshold: float,
+) -> tuple[list[dict], dict]:
+    """Vectorised batch replay — precomputes all indicators once over the full
+    OHLC series rather than rebuilding DataFrames bar-by-bar.
+
+    Replicates the exact signal_engine.evaluate() scoring formula so that
+    'fired' counts match live engine behaviour.
+    """
+    empty_summary = {
+        "epic": epic,
+        "market": market,
+        "cache": "",
+        "bars": len(bars),
+        "records": 0,
+        "fired": 0,
+        "labels_3": {},
+        "threshold": threshold,
+        "stop_pts": stop_pts,
+    }
+    if not bars:
+        return [], empty_summary
+
+    # ── Build tidy 5m DataFrame ──────────────────────────────────────────────
+    rows = []
+    for b in bars:
+        try:
+            t = _parse_bar_time(str(b.get("t") or ""))
+            c = float(b.get("c") or 0)
+            h = float(b.get("h") or c)
+            lo = float(b.get("l") or c)
+            sp = float(b.get("spread") or max(1.0, h - lo))
+            if c <= 0:
+                continue
+            rows.append(
+                {
+                    "time": t,
+                    "open": float(b.get("o") or c),
+                    "high": h,
+                    "low": lo,
+                    "close": c,
+                    "spread": sp,
+                }
+            )
+        except (TypeError, ValueError):
+            continue
+    if not rows:
+        return [], empty_summary
+
+    df5 = pd.DataFrame(rows).sort_values("time").reset_index(drop=True)
+
+    # ── Config parameters ────────────────────────────────────────────────────
+    fast_span = int(getattr(cfg, "fast_ema", 9))
+    slow_span = int(getattr(cfg, "slow_ema", 21))
+    rsi_period = int(getattr(cfg, "rsi_period", 14))
+    atr_period = int(getattr(cfg, "atr_period", 14))
+    min_atr = float(getattr(cfg, "min_atr_points", 0))
+    max_atr = float(getattr(cfg, "max_atr_points", 0))
+    momentum_gap = max(float(getattr(cfg, "momentum_gap_points", 1)), 1)
+    max_spread = float(getattr(cfg, "max_spread_points", 0))
+    rsi_buy_min = float(getattr(cfg, "rsi_buy_min", 45))
+    rsi_buy_max = float(getattr(cfg, "rsi_buy_max", 75))
+    rsi_sell_min = float(getattr(cfg, "rsi_sell_min", 25))
+    rsi_sell_max = float(getattr(cfg, "rsi_sell_max", 55))
+    vol_filter = bool(getattr(cfg, "vol_regime_filter_enabled", False))
+
+    # ── Add indicators (vectorised, one pass) ───────────────────────────────
+    def _add_ind(d: pd.DataFrame) -> pd.DataFrame:
+        d = d.copy()
+        p = d["close"]
+        d["fast_ema"] = p.ewm(span=fast_span, adjust=False).mean()
+        d["slow_ema"] = p.ewm(span=slow_span, adjust=False).mean()
+        delta = p.diff()
+        gain = delta.clip(lower=0).ewm(alpha=1 / rsi_period, adjust=False).mean()
+        loss = (-delta.clip(upper=0)).ewm(alpha=1 / rsi_period, adjust=False).mean()
+        rs = gain / loss.replace(0, float("nan"))
+        d["rsi"] = (100 - 100 / (1 + rs)).fillna(50)
+        pc = d["close"].shift(1)
+        tr = pd.concat(
+            [
+                (d["high"] - d["low"]).abs(),
+                (d["high"] - pc).abs(),
+                (d["low"] - pc).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+        d["atr"] = tr.ewm(alpha=1 / atr_period, adjust=False).mean().fillna(0)
+        return d
+
+    df5 = _add_ind(df5)
+
+    # Precompute 15m candles + indicators, then merge onto 5m with asof join.
+    df5_ts = df5.set_index("time")
+    df15_ts = (
+        df5_ts.resample("15min")
+        .agg(
+            open=("open", "first"),
+            high=("high", "max"),
+            low=("low", "min"),
+            close=("close", "last"),
+            spread=("spread", "last"),
+        )
+        .dropna(subset=["close"])
+    )
+    df15 = _add_ind(df15_ts.reset_index())
+    # Shift 15m indicators by 1 bar to get "last closed 15m bar" at each 5m time.
+    df15_shifted = df15.copy()
+    for col in ("fast_ema", "slow_ema", "rsi", "atr"):
+        df15_shifted[col] = df15[col].shift(1)
+    df15_shifted = df15_shifted.rename(
+        columns={
+            "fast_ema": "fast15",
+            "slow_ema": "slow15",
+            "rsi": "rsi15",
+            "atr": "atr15",
+        }
+    )[["time", "fast15", "slow15", "rsi15"]]
+
+    # merge_asof: for each 5m bar, attach the most recent preceding 15m indicator row.
+    df5_ts_col = df5[["time"]].copy()
+    merged = pd.merge_asof(
+        df5_ts_col.sort_values("time"),
+        df15_shifted.sort_values("time"),
+        on="time",
+        direction="backward",
+    )
+    df5 = df5.merge(merged, on="time", how="left")
+
+    # Pre-compute rolling vol_regime (vectorised percentile approach).
+    atr_s = df5["atr"]
+    roll_lo = atr_s.rolling(100, min_periods=10).quantile(0.25)
+    roll_hi = atr_s.rolling(100, min_periods=10).quantile(0.75)
+    regime_arr = pd.Series("unknown", index=df5.index)
+    valid = atr_s.notna() & roll_lo.notna()
+    regime_arr[valid & (atr_s <= roll_lo)] = "low"
+    regime_arr[valid & (atr_s >= roll_hi)] = "high"
+    regime_arr[valid & (atr_s > roll_lo) & (atr_s < roll_hi)] = "normal"
+
+    # ── Exact scoring formula from signal_engine.evaluate() ─────────────────
+    # Use signal_engine indexing: bar i is "current open bar"; last closed = i-1.
+    records: list[dict] = []
+    fired_count = 0
+    labels_3: dict[str, int] = {"WIN": 0, "LOSS": 0, "BREAKEVEN": 0}
+    WARMUP = max(slow_span + 4, rsi_period + 4, 6)
+
+    for i in range(WARMUP, len(df5) - 1):
+        last = df5.iloc[i - 1]  # last closed 5m bar
+        prev = df5.iloc[i - 2]
+        prev2 = df5.iloc[i - 3]
+
+        atr_val = float(last["atr"])
+        rsi_val = float(last["rsi"])
+        spread = float(last["spread"])
+        fast = float(last["fast_ema"])
+        slow_val = float(last["slow_ema"])
+        fast15 = float(last.get("fast15") or fast)
+        slow15 = float(last.get("slow15") or slow_val)
+        rsi15 = float(last.get("rsi15") or rsi_val)
+
+        # ATR / vol gates (same as evaluate()).
+        atr_ok = not (max_atr > 0 and atr_val > max_atr)
+        vol_blocked = False
+        current_regime = str(regime_arr.iloc[i - 1])
+        if max_atr > 0 and atr_val > max_atr:
+            vol_blocked = True
+        if vol_filter and current_regime == "low":
+            vol_blocked = True
+
+        trend_gap = abs(fast - slow_val)
+        momentum_bonus = min(10.0, trend_gap / momentum_gap * 10)
+        bull_momentum = momentum_bonus if fast > slow_val else 0.0
+        bear_momentum = momentum_bonus if fast < slow_val else 0.0
+
+        rsi_buy_cap = rsi_buy_max if rsi_buy_max > rsi_buy_min else 99.0
+        rsi_sell_cap = rsi_sell_min if rsi_sell_min < rsi_sell_max else 0.0
+
+        spread_score = (
+            max(0, min(20, 20 * (1 - spread / max(max_spread, 0.01))))
+            if max_spread > 0
+            else 0.0
+        )
+
+        two_bull = float(last["close"]) >= float(last["open"]) and float(
+            prev["close"]
+        ) >= float(prev["open"])
+        two_bear = float(last["close"]) <= float(last["open"]) and float(
+            prev["close"]
+        ) <= float(prev["open"])
+        price_up = float(last["close"]) >= float(prev["close"]) >= float(prev2["close"])
+        price_down = (
+            float(last["close"]) <= float(prev["close"]) <= float(prev2["close"])
+        )
+
+        buy = (
+            (30 if fast15 >= slow15 and rsi15 >= 50 else 0)
+            + (20 if fast > slow_val else 0)
+            + (
+                min(20, max(0, min(rsi_val, rsi_buy_cap) - rsi_buy_min))
+                if rsi_val >= rsi_buy_min
+                else 0
+            )
+            + (10 if price_up else 0)
+            + spread_score
+            + (10 if two_bull else 0)
+            + bull_momentum
+        )
+        sell = (
+            (30 if fast15 <= slow15 and rsi15 <= 50 else 0)
+            + (20 if fast < slow_val else 0)
+            + (
+                min(20, max(0, rsi_sell_max - max(rsi_val, rsi_sell_cap)))
+                if rsi_val <= rsi_sell_max
+                else 0
+            )
+            + (10 if price_down else 0)
+            + spread_score
+            + (10 if two_bear else 0)
+            + bear_momentum
+        )
+
+        if vol_blocked:
+            buy *= 0.5
+            sell *= 0.5
+        if not atr_ok:
+            buy *= 0.65
+            sell *= 0.65
+        if max_spread > 0 and spread > max_spread:
+            buy *= 0.50
+            sell *= 0.50
+
+        raw_conf = max(buy, sell)
+        raw_sig = "BUY" if buy > sell else "SELL" if sell > buy else "WAIT"
+
+        buy_ok = buy >= threshold
+        sell_ok = sell >= threshold
+        if buy_ok and sell_ok:
+            direction = "BUY" if buy >= sell else "SELL"
+        elif buy_ok:
+            direction = "BUY"
+        elif sell_ok:
+            direction = "SELL"
+        else:
+            direction = "WAIT"
+
+        # RSI block (same as evaluate()).
+        rsi_block = False
+        if direction == "BUY" and rsi_buy_max > 0 and rsi_val > rsi_buy_max:
+            rsi_block = True
+        if direction == "SELL" and rsi_sell_min > 0 and rsi_val < rsi_sell_min:
+            rsi_block = True
+
+        meets_threshold = direction in ("BUY", "SELL") and not rsi_block
+        meets_analysis = raw_conf >= 50.0
+
+        if not (meets_threshold or meets_analysis):
+            continue
+
+        entry = float(last["close"])
+        fh3, fl3, _ = _forward_extremes(bars, i - 1, 3)
+        fh6, fl6, _ = _forward_extremes(bars, i - 1, 6)
+        if fh3 <= 0:
+            continue
+
+        fired = bool(meets_threshold)
+        if fired:
+            fired_count += 1
+
+        label_3 = _label_direction(
+            direction, entry, fwd_high=fh3, fwd_low=fl3, stop_pts=stop_pts
+        )
+        label_6 = _label_direction(
+            direction, entry, fwd_high=fh6, fwd_low=fl6, stop_pts=stop_pts
+        )
+        if fired:
+            labels_3[label_3] = labels_3.get(label_3, 0) + 1
+
+        ts = str(
+            last["time"].isoformat()
+            if hasattr(last["time"], "isoformat")
+            else last["time"]
+        )
+        records.append(
+            {
+                "timestamp": ts,
+                "epic": epic,
+                "market": market,
+                "direction": direction,
+                "raw_score": round(raw_conf, 1),
+                "adjusted_score": round(raw_conf, 1),
+                "rsi": round(rsi_val, 1),
+                "atr": round(atr_val, 4),
+                "spread": round(spread, 4),
+                "vol_regime": current_regime,
+                "setup_key": f"{direction}|{'bull' if fast > slow_val else 'bear'}|vol{current_regime}",
+                "fired": fired,
+                "label_3": label_3,
+                "label_6": label_6,
+                "atr_ratio": round(atr_val / stop_pts, 4) if stop_pts > 0 else 0.0,
+                "rsi_block": rsi_block,
+                "entry": entry,
+                "fwd_high_3": fh3,
+                "fwd_low_3": fl3,
+                "fwd_high_6": fh6,
+                "fwd_low_6": fl6,
+            }
+        )
+
+    summary = {
+        "epic": epic,
+        "market": market,
+        "cache": "",
+        "bars": len(bars),
+        "records": len(records),
+        "fired": fired_count,
+        "labels_3": labels_3,
+        "threshold": threshold,
+        "stop_pts": stop_pts,
+    }
+    return records, summary
+
+
 def _config_for_instrument(base_cfg: Any, inst: dict[str, Any]) -> Any:
-    from copy import deepcopy
 
     from runtime.agent_bootstrap import _config_for_instrument as _overlay
 
@@ -112,6 +439,7 @@ def replay_one(
     cache_path: Path,
     base_cfg: Any,
     inst: dict[str, Any],
+    window: int = 300,
 ) -> tuple[list[dict], dict[str, Any]]:
     bars = _load_bars(cache_path)
     summary: dict[str, Any] = {
@@ -127,6 +455,10 @@ def replay_one(
         return [], summary
 
     cfg = _config_for_instrument(base_cfg, inst)
+    # Override max_live_quotes with the replay window to keep DataFrame small.
+    # The live value (3000) is designed for streaming; 300 bars is plenty for
+    # EMA/RSI/ATR (longest period is ~26 bars).
+    cfg._data["max_live_quotes"] = max(window, 50)
     engine = SignalEngine(cfg)
     threshold = float(cfg.signal_threshold)
     stop_pts = float(getattr(cfg, "stop_distance_points", 45) or 45)
@@ -233,11 +565,20 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Walk-forward signal replay")
     parser.add_argument("--epic", default="", help="IG epic")
     parser.add_argument("--market", default="", help="Market display name")
-    parser.add_argument("--all", action="store_true", help="Replay all enabled instruments")
+    parser.add_argument(
+        "--all", action="store_true", help="Replay all enabled instruments"
+    )
     parser.add_argument(
         "--append",
         action="store_true",
         help="Append to replay_results.jsonl (default: overwrite on first, append on --all after first)",
+    )
+    parser.add_argument(
+        "--window",
+        type=int,
+        default=300,
+        help="Sliding quote window size for replay (default: 300, overrides max_live_quotes). "
+        "Smaller = faster; 300 is enough for EMA/RSI/ATR calculations.",
     )
     return parser.parse_args()
 
@@ -279,21 +620,33 @@ def main() -> int:
     all_summaries: list[dict[str, Any]] = []
     for epic, market, inst in jobs:
         cache_path = ohlc_cache_path(epic, market=market)
-        records, summary = replay_one(
+        bars = _load_bars(cache_path)
+        print(f"Replaying {market} ({epic})  bars={len(bars)} …", flush=True)
+
+        cfg = _config_for_instrument(base_cfg, inst)
+        threshold = float(cfg.signal_threshold)
+        stop_pts = float(getattr(cfg, "stop_distance_points", 45) or 45)
+
+        records, summary = _replay_batch(
             epic=epic,
             market=market,
-            cache_path=cache_path,
-            base_cfg=base_cfg,
-            inst=inst,
+            bars=bars,
+            cfg=cfg,
+            stop_pts=stop_pts,
+            threshold=threshold,
         )
+        summary["cache"] = str(cache_path)
+
         mode = "a" if OUTPUT_PATH.stat().st_size > 0 else "w"
         with OUTPUT_PATH.open(mode, encoding="utf-8") as handle:
             for row in records:
                 handle.write(json.dumps(row) + "\n")
         all_summaries.append(summary)
-        print(f"--- {market} ({epic}) ---")
-        print(f"Cache: {cache_path} bars={summary['bars']}")
-        print(f"Signals recorded: {summary['records']} fired: {summary['fired']}")
+        print(
+            f"  -> signals={summary['records']}  fired={summary['fired']}  "
+            f"labels={summary['labels_3']}",
+            flush=True,
+        )
         if summary["bars"] == 0:
             print("  (no bars — run fetch_historical_ohlc.py for this epic)")
 

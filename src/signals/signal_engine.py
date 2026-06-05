@@ -10,7 +10,14 @@ from typing import Any
 import pandas as pd
 
 from data.models import Quote
-from signals.indicators import atr, bucket, ema, floor_time, rsi, session_name, vol_regime
+from signals.indicators import (
+    atr,
+    bucket,
+    ema,
+    rsi,
+    session_name,
+    vol_regime,
+)
 from system.config import Config
 from system.config_loader import get_config
 from system.paths import data_dir
@@ -99,13 +106,21 @@ class SignalEngine:
 
     def add_quote(self, market: str, quote: Quote) -> None:
         self.quotes_by_market.setdefault(market, []).append(quote)
-        self.quotes_by_market[market] = self.quotes_by_market[market][-self._cfg.max_live_quotes:]
+        self.quotes_by_market[market] = self.quotes_by_market[market][
+            -self._cfg.max_live_quotes :
+        ]
 
     def quote_df(self, market: str) -> pd.DataFrame:
         key = self._resolve_market_key(market)
         return pd.DataFrame(
             [
-                {"time": q.time, "bid": q.bid, "offer": q.offer, "mid": q.mid, "spread": q.spread}
+                {
+                    "time": q.time,
+                    "bid": q.bid,
+                    "offer": q.offer,
+                    "mid": q.mid,
+                    "spread": q.spread,
+                }
                 for q in self._quotes_for_market(key)
             ]
         )
@@ -120,19 +135,35 @@ class SignalEngine:
     def candles(self, df: pd.DataFrame, minutes: int) -> pd.DataFrame:
         if df.empty:
             return pd.DataFrame(
-                columns=["time", "open", "high", "low", "close", "price", "bid", "offer", "spread"]
+                columns=[
+                    "time",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "price",
+                    "bid",
+                    "offer",
+                    "spread",
+                ]
             )
-        t = df.copy()
-        t["bucket"] = t["time"].apply(lambda d: floor_time(d, minutes))
-        return (
-            t.groupby("bucket")
-            .agg(
-                time=("bucket", "first"), open=("mid", "first"), high=("mid", "max"),
-                low=("mid", "min"), close=("mid", "last"), price=("mid", "last"),
-                bid=("bid", "last"), offer=("offer", "last"), spread=("spread", "last"),
-            )
-            .reset_index(drop=True)
+        # Vectorised bucket floor — avoids a Python-level apply() loop.
+        bucket = pd.to_datetime(df["time"]).dt.floor(f"{minutes}min")
+        grp = df.groupby(bucket, sort=True)
+        result = pd.DataFrame(
+            {
+                "time": grp["time"].first(),
+                "open": grp["mid"].first(),
+                "high": grp["mid"].max(),
+                "low": grp["mid"].min(),
+                "close": grp["mid"].last(),
+                "price": grp["mid"].last(),
+                "bid": grp["bid"].last(),
+                "offer": grp["offer"].last(),
+                "spread": grp["spread"].last(),
+            }
         )
+        return result.reset_index(drop=True)
 
     def add_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         cfg = self._cfg
@@ -146,11 +177,22 @@ class SignalEngine:
             out["atr"] = 0.0
         return out
 
-    def setup_key(self, signal: str, row_5m: pd.Series, row_15m: pd.Series,
-                  atr_series: pd.Series | None = None) -> str:
-        if row_5m["fast_ema"] > row_5m["slow_ema"] and row_15m["fast_ema"] >= row_15m["slow_ema"]:
+    def setup_key(
+        self,
+        signal: str,
+        row_5m: pd.Series,
+        row_15m: pd.Series,
+        atr_series: pd.Series | None = None,
+    ) -> str:
+        if (
+            row_5m["fast_ema"] > row_5m["slow_ema"]
+            and row_15m["fast_ema"] >= row_15m["slow_ema"]
+        ):
             trend = "bull"
-        elif row_5m["fast_ema"] < row_5m["slow_ema"] and row_15m["fast_ema"] <= row_15m["slow_ema"]:
+        elif (
+            row_5m["fast_ema"] < row_5m["slow_ema"]
+            and row_15m["fast_ema"] <= row_15m["slow_ema"]
+        ):
             trend = "bear"
         else:
             trend = "mixed"
@@ -159,7 +201,9 @@ class SignalEngine:
         regime = vol_regime(atr_series) if atr_series is not None else "unknown"
         return "|".join(
             [
-                signal, trend, session_name(),
+                signal,
+                trend,
+                session_name(),
                 "atr" + bucket(float(row_5m.get("atr", 0)), 30, 200),
                 "rsi" + rsi_label,
                 "vol" + regime,
@@ -192,7 +236,9 @@ class SignalEngine:
             return delta, f"learning bonus: winrate {wr:.0%}, avg {avg:.1f} pts"
 
         if avg < 0 or wr < cfg.adaptive_bad_winrate_threshold:
-            delta = -min(cfg.learning_max_penalty, (0.50 - wr) * 30 + min(abs(avg) / 10, 6))
+            delta = -min(
+                cfg.learning_max_penalty, (0.50 - wr) * 30 + min(abs(avg) / 10, 6)
+            )
             return delta, f"learning penalty: winrate {wr:.0%}, avg {avg:.1f} pts"
 
         return 0.0, f"learning neutral: winrate {wr:.0%}, avg {avg:.1f} pts"
@@ -270,7 +316,9 @@ class SignalEngine:
         # plus one currently-open bar (iloc[-1]) that is excluded from signal logic.
         if len(c5) < 4 or len(c15) < 3:
             self.last_snapshot[market] = {}
-            empty = SignalResult("WAIT", 0.0, 0.0, 0.0, "WAIT|collecting", "Collecting live data", {})
+            empty = SignalResult(
+                "WAIT", 0.0, 0.0, 0.0, "WAIT|collecting", "Collecting live data", {}
+            )
             self._append_shadow_log(
                 market,
                 direction="WAIT",
@@ -312,7 +360,9 @@ class SignalEngine:
                 snap,
             )
 
-        atr_ok = cfg.min_atr_points <= 0 or float(last.get("atr", 0)) >= cfg.min_atr_points
+        atr_ok = (
+            cfg.min_atr_points <= 0 or float(last.get("atr", 0)) >= cfg.min_atr_points
+        )
 
         # Volatility regime — classify current ATR as low/normal/high for learning context.
         # The regime label is included in setup_key so the adaptive engine naturally
@@ -334,34 +384,61 @@ class SignalEngine:
 
         trend_gap = abs(float(last["fast_ema"]) - float(last["slow_ema"]))
         momentum_bonus = min(10, trend_gap / max(cfg.momentum_gap_points, 1) * 10)
-        bull_momentum = momentum_bonus if float(last["fast_ema"]) > float(last["slow_ema"]) else 0.0
-        bear_momentum = momentum_bonus if float(last["fast_ema"]) < float(last["slow_ema"]) else 0.0
+        bull_momentum = (
+            momentum_bonus if float(last["fast_ema"]) > float(last["slow_ema"]) else 0.0
+        )
+        bear_momentum = (
+            momentum_bonus if float(last["fast_ema"]) < float(last["slow_ema"]) else 0.0
+        )
         spread_score = (
-            max(0, min(20, 20 * (1 - float(last["spread"]) / max(cfg.max_spread_points, 0.01))))
-            if cfg.max_spread_points > 0 else 0
+            max(
+                0,
+                min(
+                    20,
+                    20 * (1 - float(last["spread"]) / max(cfg.max_spread_points, 0.01)),
+                ),
+            )
+            if cfg.max_spread_points > 0
+            else 0
         )
 
         rsi_buy_cap = cfg.rsi_buy_max if cfg.rsi_buy_max > cfg.rsi_buy_min else 99.0
         rsi_sell_cap = cfg.rsi_sell_min if cfg.rsi_sell_min < cfg.rsi_sell_max else 0.0
         buy = (
-            (30 if trend15["fast_ema"] >= trend15["slow_ema"] and trend15["rsi"] >= 50 else 0)
+            (
+                30
+                if trend15["fast_ema"] >= trend15["slow_ema"] and trend15["rsi"] >= 50
+                else 0
+            )
             + (20 if last["fast_ema"] > last["slow_ema"] else 0)
             + (
                 min(20, max(0, min(float(last["rsi"]), rsi_buy_cap) - cfg.rsi_buy_min))
-                if last["rsi"] >= cfg.rsi_buy_min else 0
+                if last["rsi"] >= cfg.rsi_buy_min
+                else 0
             )
             + (10 if last["price"] >= prev["price"] >= prev2["price"] else 0)
-            + spread_score + (10 if two_bull else 0) + bull_momentum
+            + spread_score
+            + (10 if two_bull else 0)
+            + bull_momentum
         )
         sell = (
-            (30 if trend15["fast_ema"] <= trend15["slow_ema"] and trend15["rsi"] <= 50 else 0)
+            (
+                30
+                if trend15["fast_ema"] <= trend15["slow_ema"] and trend15["rsi"] <= 50
+                else 0
+            )
             + (20 if last["fast_ema"] < last["slow_ema"] else 0)
             + (
-                min(20, max(0, cfg.rsi_sell_max - max(float(last["rsi"]), rsi_sell_cap)))
-                if last["rsi"] <= cfg.rsi_sell_max else 0
+                min(
+                    20, max(0, cfg.rsi_sell_max - max(float(last["rsi"]), rsi_sell_cap))
+                )
+                if last["rsi"] <= cfg.rsi_sell_max
+                else 0
             )
             + (10 if last["price"] <= prev["price"] <= prev2["price"] else 0)
-            + spread_score + (10 if two_bear else 0) + bear_momentum
+            + spread_score
+            + (10 if two_bear else 0)
+            + bear_momentum
         )
 
         if vol_blocked:
@@ -396,7 +473,11 @@ class SignalEngine:
                 rsi_block = (
                     f"RSI overbought filter: {rsi_val:.1f} > max {cfg.rsi_buy_max:.0f}"
                 )
-            elif candidate == "SELL" and cfg.rsi_sell_min > 0 and rsi_val < cfg.rsi_sell_min:
+            elif (
+                candidate == "SELL"
+                and cfg.rsi_sell_min > 0
+                and rsi_val < cfg.rsi_sell_min
+            ):
                 rsi_block = (
                     f"RSI oversold filter: {rsi_val:.1f} < min {cfg.rsi_sell_min:.0f}"
                 )
@@ -422,7 +503,13 @@ class SignalEngine:
                 }
                 self.last_snapshot[market] = snapshot
                 return SignalResult(
-                    "WAIT", float(raw_conf), float(adjusted), float(delta), setup, notes, snapshot
+                    "WAIT",
+                    float(raw_conf),
+                    float(adjusted),
+                    float(delta),
+                    setup,
+                    notes,
+                    snapshot,
                 )
 
             setup = self.setup_key(candidate, last, trend15, atr_series)
@@ -437,7 +524,9 @@ class SignalEngine:
             delta, learn_note = self.learning_adjustment(setup)
             adjusted = max(0, min(99, raw_conf + delta))
 
-        vol_note = f", vol_regime={current_regime}" + (f" BLOCKED: {vol_block_reason}" if vol_blocked else "")
+        vol_note = f", vol_regime={current_regime}" + (
+            f" BLOCKED: {vol_block_reason}" if vol_blocked else ""
+        )
         notes = (
             f"raw={raw_sig}, buy_score={buy:.1f}, sell_score={sell:.1f}, "
             f"threshold={threshold:.0f}, adjusted={adjusted:.1f}, "
@@ -445,15 +534,24 @@ class SignalEngine:
             f"{vol_note}, {learn_note}"
         )
         snapshot = {
-            "last": last, "trend15": trend15, "setup_key": setup,
-            "raw_signal": raw_sig, "raw_confidence": raw_conf,
-            "adjusted_confidence": adjusted, "learning_delta": delta,
-            "buy_score": buy, "sell_score": sell,
+            "last": last,
+            "trend15": trend15,
+            "setup_key": setup,
+            "raw_signal": raw_sig,
+            "raw_confidence": raw_conf,
+            "adjusted_confidence": adjusted,
+            "learning_delta": delta,
+            "buy_score": buy,
+            "sell_score": sell,
             "vol_regime": current_regime,
         }
         self.last_snapshot[market] = snapshot
 
-        if cfg.vol_regime_filter_enabled and current_regime == "low" and signal in ("BUY", "SELL"):
+        if (
+            cfg.vol_regime_filter_enabled
+            and current_regime == "low"
+            and signal in ("BUY", "SELL")
+        ):
             signal = "WAIT"
             notes = f"{notes} | {vol_block_reason}"
 
@@ -476,4 +574,12 @@ class SignalEngine:
             would_have_fired=would_fire,
             snapshot=snapshot,
         )
-        return SignalResult(signal, float(raw_conf), float(adjusted), float(delta), setup, notes, snapshot)
+        return SignalResult(
+            signal,
+            float(raw_conf),
+            float(adjusted),
+            float(delta),
+            setup,
+            notes,
+            snapshot,
+        )
