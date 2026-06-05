@@ -131,7 +131,25 @@ function resolveMlProbability(state) {
 }
 
 function resolvePositions(state) {
-  return state?.positions ?? state?.active_trades ?? [];
+  if (Array.isArray(state?.positions) && state.positions.length > 0) return state.positions;
+  if (Array.isArray(state?.active_trades) && state.active_trades.length > 0) return state.active_trades;
+  // Aggregate from per-market slices (filtered to selected_epic when present)
+  const markets = state?.markets;
+  if (markets && typeof markets === "object") {
+    const epicFilter = state?.selected_epic;
+    const all = [];
+    for (const [epic, mslice] of Object.entries(markets)) {
+      if (epicFilter && epic !== epicFilter) continue;
+      const positions = mslice?.positions;
+      if (Array.isArray(positions)) {
+        positions.forEach((p) => {
+          all.push({ epic, market: p.market ?? mslice?.market_name ?? mslice?.market ?? epic, ...p });
+        });
+      }
+    }
+    if (all.length > 0) return all;
+  }
+  return [];
 }
 
 function resolveMlDecisionLog(state) {

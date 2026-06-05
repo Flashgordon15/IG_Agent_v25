@@ -220,3 +220,36 @@ New class `TestSession4PreLaunchValidation` with 9 tests:
 
 ### Suite result
 428 tests passed, 0 failures, 25 deprecation warnings (datetime.utcnow — pre-existing).
+
+---
+
+## Session 5 — 2026-06-05 (v25.2.2)
+
+### Critical fix: correct IG contract point values
+
+**Root cause:** `ig_point_value_gbp` was set to 1.0 for all instruments. The real IG CFD contract multipliers are much larger, causing the agent to underestimate P&L and risk by up to 15× for Nasdaq.
+
+**Evidence:** Live IG P&L data: -£241.96 for a 16.2pt adverse move on Nasdaq at size=1.0 → £241.96 / 16.2 = **£14.94/pt**.
+
+**Changes — `config/config_v25.json`:**
+
+| Instrument | Epic | Old £/pt | New £/pt | Basis |
+|---|---|---|---|---|
+| Nasdaq 100 | IX.D.NASDAQ.IFM.IP | 1.0 | **14.94** | Live IG P&L confirmed |
+| Wall Street | IX.D.DOW.IFM.IP | 1.0 | **7.87** | $10/pt ÷ 1.27 GBPUSD |
+| Spot Gold | CS.D.CFPGOLD.CFP.IP | 1.0 | **0.79** | $1/pt ÷ 1.27 GBPUSD |
+| Japan 225 | IX.D.NIKKEI.IFM.IP | 1.0 | **5.13** | ¥1000/pt ÷ 195 GBPJPY |
+
+**Position sizes recalculated for ~£50 risk/trade target (size × £/pt × stop_pts = £50):**
+
+| Instrument | Stop pts | Old size | New size | Risk/trade |
+|---|---|---|---|---|
+| Nasdaq 100 | 100 | 3.0 | **0.05** | £74.70 |
+| Wall Street | 80 | 10 | **0.1** | £62.96 |
+| Spot Gold | 10 | 5 | **6.0** | £47.40 |
+| Japan 225 | 45 | 10 | **0.2** | £46.17 |
+
+**Additional changes:**
+- `adaptive_min_trade_size` lowered from 0.5 → **0.01** — previously clamped Nasdaq/Dow/Nikkei sizes up to 0.5, which would have meant £373.50 risk/trade for Nasdaq at the adaptive floor alone.
+- `risk_cap_gbp` per instrument updated to reflect actual max exposure (Nasdaq: 150, Wall Street: 150, Gold: 200, Japan 225: 100).
+- `version` in config_v25.json bumped to `25.2.2`.

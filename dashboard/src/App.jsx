@@ -37,6 +37,24 @@ function listMarketEpics(state) {
   return [];
 }
 
+function resolveEpicPositions(state, selectedEpic, slice) {
+  // Prefer the per-market slice positions (backend stores them here)
+  if (Array.isArray(slice?.positions) && slice.positions.length > 0) {
+    const name = slice.market_name ?? slice.market ?? selectedEpic;
+    return slice.positions.map((p) => ({
+      epic: selectedEpic,
+      market: p.market ?? name,
+      ...p,
+    }));
+  }
+  // Fall back to top-level positions filtered by epic
+  if (Array.isArray(state?.positions) && state.positions.length > 0) {
+    const filtered = state.positions.filter((p) => !p.epic || p.epic === selectedEpic);
+    return filtered.length > 0 ? filtered : state.positions;
+  }
+  return [];
+}
+
 function resolveMarketView(state, selectedEpic) {
   if (!state) return null;
   const markets = state.markets;
@@ -48,7 +66,7 @@ function resolveMarketView(state, selectedEpic) {
     ...state,
     ...slice,
     points: state.points,
-    positions: state.positions,
+    positions: resolveEpicPositions(state, selectedEpic, slice),
     balance_gbp: state.balance_gbp,
     daily_pnl_gbp: state.daily_pnl_gbp,
     win_rate_20: state.win_rate_20,
