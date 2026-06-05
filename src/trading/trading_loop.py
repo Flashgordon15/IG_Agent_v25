@@ -1083,12 +1083,26 @@ class TradingLoop:
         except (TypeError, ValueError):
             ig_min_size = effective_size
         actual_size = max(effective_size, ig_min_size)
-        risk_gbp = stop * actual_size * point_value
         cap_raw = self._config.get("risk_cap_gbp")
         try:
             risk_cap = float(cap_raw) if cap_raw is not None else STAGE1_GBP_RISK_CAP
         except (TypeError, ValueError):
             risk_cap = STAGE1_GBP_RISK_CAP
+
+        # Auto-clip size to risk cap rather than hard-blocking the trade.
+        size_was_clipped = False
+        if point_value > 0 and stop > 0 and risk_cap > 0:
+            max_size_by_risk = risk_cap / (stop * point_value)
+            if actual_size > max_size_by_risk:
+                increment = ig_min_size if ig_min_size > 0 else 0.01
+                clipped = math.floor(max_size_by_risk / increment) * increment
+                if clipped >= ig_min_size:
+                    actual_size = clipped
+                    size_was_clipped = True
+                # else: even min size exceeds cap — leave actual_size as-is so the
+                # risk check below fires with a clear log message.
+
+        risk_gbp = stop * actual_size * point_value
         risk_ok = risk_gbp <= risk_cap
 
         passed = spread_ok and position_ok and risk_ok
@@ -1116,9 +1130,10 @@ class TradingLoop:
                 f"{', IG min' if actual_size > effective_size else ''})"
             )
         else:
+            clip_note = f", clipped to {actual_size:.3g}" if size_was_clipped else ""
             detail = (
                 f"OK — spread {spread:.1f} pts (normal {normal:.1f}, max {spread_cap:.1f}), "
-                f"flat, risk £{risk_gbp:.0f} (cap £{risk_cap:.0f})"
+                f"flat, risk £{risk_gbp:.0f} (cap £{risk_cap:.0f}){clip_note}"
             )
         return GateResult(
             name="risk_validation",
@@ -1137,6 +1152,7 @@ class TradingLoop:
                 "base_size": round(base_size, 3),
                 "effective_size": round(effective_size, 3),
                 "actual_size": round(actual_size, 3),
+                "size_clipped_to_risk_cap": size_was_clipped,
                 "ig_min_deal_size": round(ig_min_size, 3),
                 "size_multiplier": round(size_mult, 3),
                 "stop_points": round(stop, 1),
