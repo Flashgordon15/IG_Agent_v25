@@ -48,6 +48,14 @@ def health() -> dict[str, Any]:
     }
 
 
+@router.get("/api/startup/status")
+def get_startup_status() -> dict[str, Any]:
+    """Real-time startup phase progress — polled by the StartupSplash component."""
+    from system.startup_tracker import get_status
+
+    return get_status()
+
+
 @router.get("/state")
 def state() -> dict[str, Any]:
     """Full dashboard snapshot — same schema as WebSocket tick messages."""
@@ -162,10 +170,10 @@ def api_flatten_all() -> JSONResponse:
     from system.telegram_notifier import get_telegram_notifier
 
     try:
+        from system.config_loader import ConfigLoader
         from system.credentials_loader import try_load_credentials
         from system.ig_rest_session import ensure_shared_authenticated
         from system.paths import config_dir
-        from system.config_loader import ConfigLoader
 
         status = try_load_credentials()
         if not status.ok or status.credentials is None:
@@ -187,8 +195,13 @@ def api_flatten_all() -> JSONResponse:
                 continue
             close_dir = "SELL" if side == "BUY" else "BUY"
             try:
-                rest.close_position(deal_id, direction=close_dir, size=size,
-                                    epic=epic or None, currency_code=cfg.currency_code)
+                rest.close_position(
+                    deal_id,
+                    direction=close_dir,
+                    size=size,
+                    epic=epic or None,
+                    currency_code=cfg.currency_code,
+                )
                 closed.append(deal_id)
                 log_engine(f"flatten_all: closed {epic} deal={deal_id}")
             except Exception as e:
@@ -201,10 +214,14 @@ def api_flatten_all() -> JSONResponse:
                 f"🔴 FLATTEN ALL — {len(closed)} position(s) closed"
                 + (f"\nErrors: {len(errors)}" if errors else "")
             )
-        return JSONResponse({
-            "ok": True, "closed": closed,
-            "errors": errors, "count": len(closed),
-        })
+        return JSONResponse(
+            {
+                "ok": True,
+                "closed": closed,
+                "errors": errors,
+                "count": len(closed),
+            }
+        )
     except Exception as e:
         log_engine(f"flatten_all failed: {type(e).__name__}: {e}")
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -217,10 +234,10 @@ def api_flatten_epic(epic: str) -> JSONResponse:
     from system.telegram_notifier import get_telegram_notifier
 
     try:
+        from system.config_loader import ConfigLoader
         from system.credentials_loader import try_load_credentials
         from system.ig_rest_session import ensure_shared_authenticated
         from system.paths import config_dir
-        from system.config_loader import ConfigLoader
 
         status = try_load_credentials()
         if not status.ok or status.credentials is None:
@@ -242,8 +259,13 @@ def api_flatten_epic(epic: str) -> JSONResponse:
             if not deal_id or size <= 0:
                 continue
             close_dir = "SELL" if side == "BUY" else "BUY"
-            rest.close_position(deal_id, direction=close_dir, size=size,
-                                epic=epic, currency_code=cfg.currency_code)
+            rest.close_position(
+                deal_id,
+                direction=close_dir,
+                size=size,
+                epic=epic,
+                currency_code=cfg.currency_code,
+            )
             closed.append(deal_id)
             log_engine(f"flatten_epic: closed {epic} deal={deal_id}")
 
@@ -274,7 +296,9 @@ def api_agent_stop() -> JSONResponse:
         if notifier and notifier.enabled:
             notifier.send("🔴 IG Agent v25 stopped (via dashboard)")
         log_engine("agent/stop: trading loop stopped via API")
-        return JSONResponse({"ok": result.get("ok", False), "status": result.get("status")})
+        return JSONResponse(
+            {"ok": result.get("ok", False), "status": result.get("status")}
+        )
     except Exception as e:
         log_engine(f"agent/stop failed: {type(e).__name__}: {e}")
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -294,13 +318,16 @@ def api_agent_restart() -> JSONResponse:
 
         stop_trading()
         import time as _time
+
         _time.sleep(1)
         result = start_trading()
         notifier = get_telegram_notifier()
         if notifier and notifier.enabled:
             notifier.send("🟡 IG Agent v25 restarted (via dashboard)")
         log_engine("agent/restart: trading loop restarted via API")
-        return JSONResponse({"ok": result.get("ok", False), "status": result.get("status")})
+        return JSONResponse(
+            {"ok": result.get("ok", False), "status": result.get("status")}
+        )
     except Exception as e:
         log_engine(f"agent/restart failed: {type(e).__name__}: {e}")
         raise HTTPException(status_code=500, detail=str(e)) from e

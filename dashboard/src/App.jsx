@@ -8,6 +8,7 @@ import PointsPanel from "./components/PointsPanel.jsx";
 import IntelligencePanel from "./components/IntelligencePanel.jsx";
 import SystemPanel from "./components/SystemPanel.jsx";
 import SplashScreen from "./components/SplashScreen.jsx";
+import StartupSplash from "./components/StartupSplash.jsx";
 
 const TABS = [
   { id: "live", label: "LIVE" },
@@ -179,6 +180,8 @@ export default function App() {
   const [selectedEpic, setSelectedEpic] = useState(null);
   const [splashData, setSplashData] = useState(null);
   const [splashVisible, setSplashVisible] = useState(false);
+  // startupDone: null = checking, false = show splash, true = skip splash
+  const [startupDone, setStartupDone] = useState(null);
   const prevStateRef = useRef(null);
   const soundRef = useRef(null);
 
@@ -192,16 +195,34 @@ export default function App() {
     }
   }, []);
 
-
-  // Splash screen: fetch once on mount, show if new version not yet dismissed
+  // Startup splash: on mount do a single immediate check.
+  // If the agent is already fully up (page refresh / already running),
+  // skip the startup splash entirely. Otherwise show it until 100%.
   useEffect(() => {
+    fetch("/api/startup/status", { cache: "no-store" })
+      .then((r) => r.ok ? r.json() : null)
+      .then((data) => {
+        if (data?.ready) {
+          setStartupDone(true);  // already running — skip splash
+        } else {
+          setStartupDone(false); // still starting — show splash
+        }
+      })
+      .catch(() => {
+        setStartupDone(false);   // server unreachable yet — show splash
+      });
+  }, []);
+
+  // Version changelog splash: shown once per new version, AFTER startup
+  useEffect(() => {
+    if (!startupDone) return;
     fetchSplash().then((data) => {
       if (!data) return;
       setSplashData(data);
       const alreadyDismissed = data.shown_for_version === data.version;
       if (!alreadyDismissed) setSplashVisible(true);
     });
-  }, []);
+  }, [startupDone]);
 
   const handleSplashDismiss = useCallback(() => {
     setSplashVisible(false);
@@ -349,6 +370,23 @@ export default function App() {
     openPositions: (state?.positions ?? []).length,
     maxPositions: state?.max_open_positions ?? 10,
   };
+
+  // Show startup splash while agent is initialising (null = still checking initial status)
+  if (startupDone === false) {
+    return <StartupSplash onComplete={() => setStartupDone(true)} />;
+  }
+
+  // Thin loading state while the initial /api/startup/status fetch completes
+  if (startupDone === null) {
+    return (
+      <div style={{
+        position: "fixed", inset: 0, background: "#0b0f19",
+        display: "flex", alignItems: "center", justifyContent: "center",
+      }}>
+        <p style={{ fontSize: "12px", color: "#334155" }}>Connecting…</p>
+      </div>
+    );
+  }
 
   return (
     <div className="flex min-h-screen min-w-0 flex-col bg-bg text-foreground">

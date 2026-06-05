@@ -33,13 +33,21 @@ from system.engine_log import log_engine
 from system.instance_lock import acquire_instance_lock, release_instance_lock
 from system.paths import config_dir, logs_dir, project_root
 
+try:
+    from system.startup_tracker import mark as _startup_mark
+except Exception:
+
+    def _startup_mark(phase_id: str, note: str | None = None) -> None:  # type: ignore[misc]
+        pass
+
+
 EXIT_OK = 0
 EXIT_LOCK = 2
 EXIT_CONFIG = 3
 EXIT_INSTANCE = 4
 
 _SESSION_REFRESH_INTERVAL_SEC = 45 * 60  # 45 minutes
-_LOG_ROTATE_MAX_BYTES = 20 * 1024 * 1024   # 20 MB — rotate shell-written logs
+_LOG_ROTATE_MAX_BYTES = 20 * 1024 * 1024  # 20 MB — rotate shell-written logs
 _LOG_KEEP_BACKUPS = 3
 
 
@@ -90,15 +98,24 @@ def _start_session_refresh_watchdog(rest_client: Any) -> None:
                         rest_client.ensure_session()
                         log_engine("IG session keep-alive: session verified")
                     except Exception as e:
-                        log_engine(f"IG session keep-alive failed: {type(e).__name__}: {e}")
+                        log_engine(
+                            f"IG session keep-alive failed: {type(e).__name__}: {e}"
+                        )
                 else:
-                    log_engine("IG session keep-alive: proactive token refresh completed")
+                    log_engine(
+                        "IG session keep-alive: proactive token refresh completed"
+                    )
             except Exception as e:
-                log_engine(f"IG session refresh watchdog error: {type(e).__name__}: {e}")
+                log_engine(
+                    f"IG session refresh watchdog error: {type(e).__name__}: {e}"
+                )
 
     t = threading.Thread(target=_refresh_loop, name="ig-session-refresh", daemon=True)
     t.start()
-    log_engine(f"IG session refresh watchdog started (interval {_SESSION_REFRESH_INTERVAL_SEC//60}m)")
+    log_engine(
+        f"IG session refresh watchdog started (interval {_SESSION_REFRESH_INTERVAL_SEC // 60}m)"
+    )
+
 
 _BROWSER_DELAY_SEC = 3.0
 _API_HOST = "127.0.0.1"
@@ -187,8 +204,7 @@ def run_preflight() -> int:
     """Steps 1–4. Returns exit code (0 = continue)."""
     if emergency_stop_lock_present():
         print(
-            "IG Agent v25: emergency_stop.lock present — "
-            "delete it to restart.",
+            "IG Agent v25: emergency_stop.lock present — delete it to restart.",
             file=sys.stderr,
         )
         return EXIT_LOCK
@@ -227,12 +243,11 @@ def run_preflight() -> int:
 
     holder = bootstrap_credentials()
     if holder.credentials:
-        log_engine(
-            f"credentials bootstrap: loaded ({holder.credentials.account_type})"
-        )
+        log_engine(f"credentials bootstrap: loaded ({holder.credentials.account_type})")
     else:
         log_engine(f"credentials bootstrap: not ready — {holder.status.error}")
 
+    _startup_mark("preflight")
     return EXIT_OK
 
 
@@ -322,6 +337,16 @@ class AgentRuntime:
             cfg = _load_config()
             merged = apply_config_defaults(cfg.as_dict())
             cfg = Config(_data=merged)
+            n_instruments = len(
+                [
+                    k
+                    for k, v in (cfg.get("instruments") or {}).items()
+                    if isinstance(v, dict) and v.get("enabled")
+                ]
+            )
+            _startup_mark(
+                "config", note=f"{n_instruments} instruments" if n_instruments else None
+            )
 
             rest = _rest_client_if_ready()
             from api.snapshot_store import wire_hub_quotes_to_dashboard
@@ -335,6 +360,10 @@ class AgentRuntime:
             cred_status = try_load_credentials()
             if rest is not None and cred_status.ok and cred_status.credentials:
                 verify_account_on_broker(rest, cred_status.credentials)
+            _startup_mark(
+                "ig_auth",
+                note="demo account" if rest is not None else "credentials not loaded",
+            )
 
             self.trading_loop = build_market_orchestrator(cfg, rest_client=rest)
             register_trading_loop(self.trading_loop)
@@ -342,7 +371,9 @@ class AgentRuntime:
             def _start_live_engines() -> None:
                 wire_hub_quotes_to_dashboard(min_interval=0.25)
                 self._stream_client = start_market_stream(cfg, rest_client=rest)
+                _startup_mark("stream")
                 self.trading_loop.start()
+                _startup_mark("ready")
                 from system.replay_daily_scheduler import start_replay_daily_scheduler
 
                 start_replay_daily_scheduler()

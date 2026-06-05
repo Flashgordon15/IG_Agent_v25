@@ -212,6 +212,8 @@ def build_market_orchestrator(
     mode: ExecutionMode | None = None,
 ) -> MarketOrchestrator:
     """Phase A — one loop per enabled instrument, shared PointsEngine."""
+    from system.startup_tracker import mark as _startup_mark
+
     reg = InstrumentRegistry(cfg.as_dict())
     enabled = reg.get_enabled_with_ids()
     if not enabled:
@@ -219,6 +221,7 @@ def build_market_orchestrator(
 
     store = LearningStore(str(cfg.learning_db))
     points_engine = PointsEngine(store)
+    _startup_mark("database")
 
     try:
         from system.telegram_notifier import (
@@ -295,10 +298,12 @@ def build_market_orchestrator(
                 position_sync=position_sync,
             )
         )
+    _startup_mark("loops", note=f"{len(loops)} markets ready")
 
     from trading.ohlc_bootstrap import bootstrap_ohlc_parallel
 
     bootstrap_ohlc_parallel(rest_client, loops)
+    _startup_mark("ohlc", note=f"{len(loops)} markets loaded")
 
     if rest_client is None:
         from system.stream_ready import signal_stream_ready
