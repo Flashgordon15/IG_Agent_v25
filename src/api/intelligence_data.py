@@ -8,7 +8,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from system.paths import data_dir, project_root
+from system.paths import data_dir
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -48,7 +48,11 @@ def replay_summary() -> dict[str, Any]:
                 best_rsi = line.strip()
             if line.strip().startswith("→") or "Recommend" in line:
                 recommendations.append(line.strip())
-    bars = sum(1 for _ in cache_path.read_text(encoding="utf-8").splitlines() if _.strip()) if cache_path.is_file() else 0
+    bars = (
+        sum(1 for _ in cache_path.read_text(encoding="utf-8").splitlines() if _.strip())
+        if cache_path.is_file()
+        else 0
+    )
     mtime = analysis_path.stat().st_mtime if analysis_path.is_file() else None
     return {
         "bars_analysed": len(rows),
@@ -59,12 +63,16 @@ def replay_summary() -> dict[str, Any]:
         "best_rsi": best_rsi,
         "recommendations": recommendations[:8],
         "last_updated": (
-            datetime.fromtimestamp(mtime).isoformat(timespec="seconds") if mtime else None
+            datetime.fromtimestamp(mtime).isoformat(timespec="seconds")
+            if mtime
+            else None
         ),
     }
 
 
-def _tail_jsonl_today(path: Path, today: str, *, tail_bytes: int = 2 * 1024 * 1024) -> list[dict[str, Any]]:
+def _tail_jsonl_today(
+    path: Path, today: str, *, tail_bytes: int = 2 * 1024 * 1024
+) -> list[dict[str, Any]]:
     """Read only today's records from a large JSONL by tailing the file.
 
     Shadow logs grow indefinitely. Reading the full file on every request is O(40MB+).
@@ -94,20 +102,27 @@ def shadow_today() -> dict[str, Any]:
     today = date.today().isoformat()
     rows = _tail_jsonl_today(path, today)
     would = sum(1 for r in rows if r.get("would_have_fired"))
+    # Only count rows that had a real signal — skip "collecting" phase (empty setup_key)
     blocked = Counter(
-        str(r.get("setup_key") or "unknown") for r in rows if not r.get("would_have_fired")
+        str(r.get("setup_key"))
+        for r in rows
+        if not r.get("would_have_fired") and r.get("setup_key")
     )
     top_block = blocked.most_common(1)[0][0] if blocked else None
+    top_3 = [{"setup_key": sk, "count": cnt} for sk, cnt in blocked.most_common(3)]
+    # Count rows where confidence was within 5 pts of a standard 80% threshold
     lower_thresh = sum(
         1
         for r in rows
         if not r.get("would_have_fired")
-        and float(r.get("adjusted_score", 0)) >= float(r.get("raw_score", 0)) - 5
+        and r.get("setup_key")
+        and float(r.get("adjusted_score", 0)) >= 75.0
     )
     return {
         "evaluations": len(rows),
         "would_have_traded": would,
         "top_blocked_setup": top_block,
+        "top_3_setups": top_3,
         "estimated_extra_if_threshold_minus_5": lower_thresh,
     }
 
@@ -118,9 +133,9 @@ def learning_status() -> dict[str, Any]:
     confirmed = 0
     top_setups: list[dict[str, Any]] = []
     try:
+        from data.learning_store import LearningStore
         from system.config_loader import ConfigLoader
         from system.paths import config_dir
-        from data.learning_store import LearningStore
 
         cfg = ConfigLoader(config_dir() / "config_v25.json").load_config()
         store = LearningStore(str(cfg.learning_db))
@@ -147,9 +162,13 @@ def learning_status() -> dict[str, Any]:
 
 
 def run_replay_pipeline() -> dict[str, Any]:
-    from system.replay_scheduler_runner import in_replay_api_window, run_replay_pipeline as _run
+    from system.replay_scheduler_runner import in_replay_api_window
+    from system.replay_scheduler_runner import run_replay_pipeline as _run
 
     if not in_replay_api_window():
-        return {"ok": False, "error": "Replay blocked during live window 22:30–07:00 BST"}
+        return {
+            "ok": False,
+            "error": "Replay blocked during live window 22:30–07:00 BST",
+        }
     rc = _run(scheduled=False)
     return {"ok": rc == 0, "returncode": rc}

@@ -152,6 +152,12 @@ class SessionManager:
         from_clock = self._elapsed_bars_from_open_time(at=at)
         return min(COLD_START_BARS, max(from_candles, from_clock))
 
+    def elapsed_bars_since_open(self, *, at: datetime | None = None) -> int:
+        """Uncapped elapsed 5-minute bars since session open (for gap expiry checks)."""
+        from_candles = max(0, self._complete_bar_count() - int(self._bars_at_open))
+        from_clock = self._elapsed_bars_from_open_time(at=at)
+        return max(from_candles, from_clock)
+
     def is_cold_start(self, *, at: datetime | None = None) -> bool:
         return self.bars_since_open(at=at) < COLD_START_BARS
 

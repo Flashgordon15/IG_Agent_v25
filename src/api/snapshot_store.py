@@ -15,11 +15,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from api.snapshot import _iso_now, build_default_tick, enrich_signal_thresholds, normalize_tick
+from api.snapshot import (
+    _iso_now,
+    build_default_tick,
+    enrich_signal_thresholds,
+    normalize_tick,
+)
 from data.models import Quote
-from trading.open_position_view import enrich_positions_with_quote
 from system.paths import data_dir
 from system.state_manager import atomic_write_json, read_json_file
+from trading.open_position_view import enrich_positions_with_quote
 
 _SNAPSHOT_FILENAME = "dashboard_snapshot.json"
 _lock = threading.RLock()
@@ -132,7 +137,9 @@ def push_hub_quote_to_dashboard(
 
     markets = tick.get("markets")
     if isinstance(markets, dict):
-        next_markets = {k: dict(v) if isinstance(v, dict) else v for k, v in markets.items()}
+        next_markets = {
+            k: dict(v) if isinstance(v, dict) else v for k, v in markets.items()
+        }
         slice_tick = dict(next_markets.get(epic_key) or {})
         slice_tick["epic"] = epic_key
         slice_tick["bid"] = float(bid)
@@ -239,6 +246,74 @@ def _tick_for_readers(tick: dict[str, Any]) -> dict[str, Any]:
     if isinstance(sig, dict):
         out["signal"] = dict(sig)
     enrich_signal_thresholds(out)
+    # Inject live OHLC market count so SystemPanel can show it without an extra API call
+    if "ohlc_markets_cached" not in out:
+        try:
+            from system.paths import data_dir as _data_dir
+
+            ohlc_dir = _data_dir() / "ohlc_cache"
+            out["ohlc_markets_cached"] = sum(
+                1
+                for f in ohlc_dir.iterdir()
+                if f.suffix == ".jsonl" and not f.name.endswith(".synthetic")
+            )
+        except Exception:
+            pass
+
+    # ML model metadata for SystemPanel (model_version, last_retrain_time)
+    if "model_version" not in out:
+        try:
+            import json as _json
+            import time as _time
+            from datetime import datetime as _dt
+
+            from system.paths import data_dir as _data_dir
+
+            meta_file = _data_dir() / "ml_model" / "meta.json"
+            if meta_file.exists():
+                meta = _json.loads(meta_file.read_text())
+                out["model_version"] = (
+                    meta.get("version") or meta.get("trained_at") or "—"
+                )
+                out["last_retrain_time"] = meta.get("trained_at")
+            else:
+                model_file = _data_dir() / "ml_model" / "model.pkl"
+                if model_file.exists():
+                    mtime = model_file.stat().st_mtime
+                    out["last_retrain_time"] = _dt.fromtimestamp(mtime).strftime(
+                        "%Y-%m-%d %H:%M"
+                    )
+                    out["model_version"] = out["last_retrain_time"]
+        except Exception:
+            pass
+
+    # Agent uptime derived from lock-file mtime
+    if "uptime" not in out:
+        try:
+            import time as _time
+
+            from system.paths import data_dir as _data_dir
+
+            lock = _data_dir() / ".ig_agent_v25.lock"
+            if lock.exists():
+                secs = int(_time.time() - lock.stat().st_mtime)
+                h, m = divmod(secs // 60, 60)
+                out["uptime"] = f"{h}h {m:02d}m" if h else f"{m}m {secs % 60:02d}s"
+        except Exception:
+            pass
+
+    # Position sync status from diagnostics snapshot
+    if "position_sync_status" not in out:
+        try:
+            from system.demo_execution_trace import get_demo_diagnostics_snapshot
+
+            diag = get_demo_diagnostics_snapshot()
+            status = diag.ig_position_sync_status
+            if status:
+                out["position_sync_status"] = status
+        except Exception:
+            pass
+
     return out
 
 

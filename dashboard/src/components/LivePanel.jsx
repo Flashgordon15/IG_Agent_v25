@@ -31,6 +31,15 @@ function fmtLogTs(entry) {
 function fmtLogLine(entry) {
   if (entry == null) return "—";
   if (typeof entry === "string") return entry;
+  // ML blend decision entries
+  if (entry.ml_prob != null) {
+    const dir = entry.direction ?? "?";
+    const mkt = entry.market ? `[${entry.market}]` : "";
+    const prob = `ML ${(entry.ml_prob * 100).toFixed(1)}%`;
+    const rules = `rules ${entry.rules_conf?.toFixed(1) ?? "?"}%`;
+    const mode = entry.blended ? `→ blended ${entry.confidence?.toFixed(1) ?? "?"}%` : "(near-50%, rules used)";
+    return [mkt, dir, prob, rules, mode].filter(Boolean).join(" · ");
+  }
   const parts = [entry.decision, entry.action, entry.label, entry.setup, entry.direction].filter(Boolean);
   if (parts.length) return parts.join(" · ");
   if (entry.message) return String(entry.message);

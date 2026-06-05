@@ -195,22 +195,12 @@ export default function App() {
     }
   }, []);
 
-  // Startup splash: on mount do a single immediate check.
-  // If the agent is already fully up (page refresh / already running),
-  // skip the startup splash entirely. Otherwise show it until 100%.
+  // Always show the startup splash on every fresh page load.
+  // If the agent is already running (ready:true on first poll), the splash
+  // ticks all phases instantly and auto-dismisses after a brief hold.
+  // This ensures the user always sees the splash when clicking the desktop icon.
   useEffect(() => {
-    fetch("/api/startup/status", { cache: "no-store" })
-      .then((r) => r.ok ? r.json() : null)
-      .then((data) => {
-        if (data?.ready) {
-          setStartupDone(true);  // already running — skip splash
-        } else {
-          setStartupDone(false); // still starting — show splash
-        }
-      })
-      .catch(() => {
-        setStartupDone(false);   // server unreachable yet — show splash
-      });
+    setStartupDone(false);
   }, []);
 
   // Version changelog splash: shown once per new version, AFTER startup

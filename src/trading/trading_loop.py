@@ -196,6 +196,7 @@ class TradingLoop:
         self._tick_count = 0
         self._session_tracker = SessionTickTracker()
         self._ml_store: Any | None = None
+        self._ml_decision_log: list[dict] = []  # rolling last-20 ML blend decisions
         self._balance_refresher: Any | None = None
         self._last_tick_mono: float = 0.0
         self._watchdog_stop = threading.Event()
@@ -806,23 +807,27 @@ class TradingLoop:
 
         cold = bool(self._session.is_cold_start())
         atr = self._atr_estimate(quote)
-        bars = self._session.bars_since_open()
+        # Use uncapped elapsed bars so the expiry at GAP_CLEAR_BARS can actually fire.
+        # bars_since_open() is intentionally capped at COLD_START_BARS(6) for cold-start
+        # detection only; gap expiry needs the true elapsed count.
+        bars_cold = self._session.bars_since_open()
+        bars_elapsed = self._session.elapsed_bars_since_open()
         gap = bool(self._session.check_gap_open(atr, open_price=float(quote.mid)))
         # Gap block expires after GAP_CLEAR_BARS (1 hour) — market has had time to settle
-        if gap and bars >= GAP_CLEAR_BARS:
+        if gap and bars_elapsed >= GAP_CLEAR_BARS:
             gap = False
         passed = (not cold) and (not gap)
         if cold:
-            detail = f"cold start — {bars}/6 bars"
+            detail = f"cold start — {bars_cold}/6 bars"
         elif gap:
-            remaining = GAP_CLEAR_BARS - bars
+            remaining = max(0, GAP_CLEAR_BARS - bars_elapsed)
             detail = f"gap open >1.0× ATR (clears in ~{remaining * 5}min)"
         else:
             detail = "cold start and gap OK"
         return GateResult(
             name="cold_start_gap",
             passed=passed,
-            value={"cold": cold, "gap": gap, "bars": bars},
+            value={"cold": cold, "gap": gap, "bars": bars_elapsed},
             detail=detail,
         )
 
@@ -1165,9 +1170,11 @@ class TradingLoop:
                             # is out-of-distribution or has no signal — don't let it
                             # veto a strong rules score.
                             _ML_CONVICTION = 0.15
+                            blended = False
                             if abs(ml_prob - 0.5) >= _ML_CONVICTION:
                                 conf = (rules_conf * 0.6) + (ml_prob * 100.0 * 0.4)
                                 conf = max(0.0, min(100.0, conf))
+                                blended = True
                                 log_engine(
                                     f"ML score {ml_prob:.3f} rules {rules_conf:.1f} blended {conf:.1f}"
                                 )
@@ -1175,6 +1182,20 @@ class TradingLoop:
                                 log_engine(
                                     f"ML score {ml_prob:.3f} near-50% (no conviction) — using rules {rules_conf:.1f}"
                                 )
+                            # Record for the dashboard ML decision log
+                            entry = {
+                                "ts": datetime.now().strftime("%H:%M:%S"),
+                                "market": self._market,
+                                "direction": sig.signal,
+                                "ml_prob": round(float(ml_prob), 3),
+                                "rules_conf": round(rules_conf, 1),
+                                "confidence": round(conf, 1),
+                                "blended": blended,
+                                "setup": sig.setup_key,
+                            }
+                            self._ml_decision_log.append(entry)
+                            if len(self._ml_decision_log) > 20:
+                                self._ml_decision_log = self._ml_decision_log[-20:]
             except Exception as e:
                 log_engine(f"ML gate blend skipped: {type(e).__name__}: {e}")
         passed = sig.signal in ("BUY", "SELL") and conf >= threshold
@@ -1582,7 +1603,7 @@ class TradingLoop:
             "sentiment": sentiment_factor,
             "tick_age_s": round(tick_age_s, 1),
             "stream_status": stream_status,
-            "rest_calls_min": 0,
+            "rest_calls_min": self._rest_calls_last_minute(),
             "errors": self._errors_snapshot(),
             "health": {
                 "badge": badge,
@@ -1641,6 +1662,7 @@ class TradingLoop:
             if self._store
             else 0,
             "ml_enabled": bool(self._config._data.get("USE_ML_SIGNAL", False)),
+            "ml_decision_log": list(reversed(self._ml_decision_log)),
             "closed_trades": self._closed_trades_payload(),
             "recent_trades": self._recent_trades_results(),
             "pnl_history": self._pnl_history_payload(),
@@ -1659,6 +1681,14 @@ class TradingLoop:
             return compute_price_trend_30m(df, now=now)
         except Exception:
             return None
+
+    def _rest_calls_last_minute(self) -> int:
+        try:
+            from system.rest_api_budget import get_rest_api_budget
+
+            return get_rest_api_budget().calls_last_minute()
+        except Exception:
+            return 0
 
     def _rest_client(self) -> Any | None:
         try:

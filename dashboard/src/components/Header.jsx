@@ -216,11 +216,14 @@ export default function Header({
         </div>
 
         {/* Sentiment badge */}
-        {sentiment && (sentiment === "crowded_long" || sentiment === "crowded_short") && (
-          <span className="inline-flex shrink-0 items-center rounded border border-warning/40 bg-warning/10 px-1.5 py-0.5 text-[10px] font-semibold text-warning">
-            {sentiment === "crowded_long" ? "↑ CROWD LONG" : "↓ CROWD SHORT"}
-          </span>
-        )}
+        {sentiment && (() => {
+          const lbl = typeof sentiment === "object" ? sentiment?.label : sentiment;
+          return (lbl === "crowded_long" || lbl === "crowded_short") ? (
+            <span className="inline-flex shrink-0 items-center rounded border border-warning/40 bg-warning/10 px-1.5 py-0.5 text-[10px] font-semibold text-warning">
+              {lbl === "crowded_long" ? "↑ CROWD LONG" : "↓ CROWD SHORT"}
+            </span>
+          ) : null;
+        })()}
       </div>
     </header>
   );

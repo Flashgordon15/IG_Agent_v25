@@ -71,9 +71,9 @@ def dismiss_splash() -> dict[str, Any]:
     data = read_version_state()
     data["shown"] = True
     data["shown_for_version"] = CURRENT_VERSION
-    data["dismissed_at"] = datetime.now(timezone.utc).strftime(
-        "%Y-%m-%dT%H:%M:%S.%f"
-    )[:-3] + "Z"
+    data["dismissed_at"] = (
+        datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    )
     path = version_json_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -176,16 +176,18 @@ def _deduplicate_ig_imports(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def get_closed_trades(limit: int = 10) -> list[dict[str, Any]]:
     """Last *limit* closed trades by close time (no session/today cutoff)."""
     try:
+        from data.learning_store import LearningStore
         from system.config_loader import ConfigLoader
         from system.paths import config_dir
-        from data.learning_store import LearningStore
 
         cfg = ConfigLoader(config_dir() / "config_v25.json").load_config()
         store = LearningStore(str(cfg.learning_db))
         want = max(1, int(limit))
         # Over-fetch so SIM/soak exclusions and deduplication still yield *want* rows.
         rows = store.recent_closed_trades(limit=max(want * 8, 80))
-        filtered: list[dict[str, Any]] = [r for r in rows if not is_excluded_display_row(r)]
+        filtered: list[dict[str, Any]] = [
+            r for r in rows if not is_excluded_display_row(r)
+        ]
         deduped = _deduplicate_ig_imports(filtered)
         deduped.sort(key=lambda r: str(r.get("closed_at") or ""), reverse=True)
         out: list[dict[str, Any]] = []
@@ -265,24 +267,18 @@ def get_system_info() -> dict[str, Any]:
     branch = ""
     commit = ""
     try:
-        branch = (
-            subprocess.check_output(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                cwd=root,
-                text=True,
-                stderr=subprocess.DEVNULL,
-            )
-            .strip()
-        )
-        commit = (
-            subprocess.check_output(
-                ["git", "rev-parse", "--short", "HEAD"],
-                cwd=root,
-                text=True,
-                stderr=subprocess.DEVNULL,
-            )
-            .strip()
-        )
+        branch = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=root,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=root,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
     except Exception:
         pass
 
@@ -294,12 +290,68 @@ def get_system_info() -> dict[str, Any]:
         except OSError:
             pass
 
+    # Caffeinate — macOS sleep-prevention utility
+    caffeinate_pid: int | None = None
+    try:
+        result = subprocess.check_output(
+            ["pgrep", "-x", "caffeinate"], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+        if result:
+            caffeinate_pid = int(result.splitlines()[0])
+    except Exception:
+        pass
+
+    # OHLC cache — count market cache files
+    ohlc_dir = data_dir() / "ohlc_cache"
+    ohlc_markets_cached = 0
+    try:
+        ohlc_markets_cached = sum(
+            1
+            for f in ohlc_dir.iterdir()
+            if f.suffix == ".jsonl" and not f.name.endswith(".synthetic")
+        )
+    except Exception:
+        pass
+
+    # Agent uptime
+    uptime_s: float | None = None
+    try:
+        import time
+
+        lock_path = data_dir() / ".ig_agent_v25.lock"
+        if lock_path.exists():
+            uptime_s = round(time.time() - lock_path.stat().st_mtime, 0)
+    except Exception:
+        pass
+
+    # Session count — number of completed sessions from learning store
+    sessions_passed: int | None = None
+    try:
+        import sqlite3
+
+        db_path = data_dir() / "learning_db.sqlite3"
+        if db_path.exists():
+            with sqlite3.connect(str(db_path), timeout=5) as conn:
+                row = conn.execute(
+                    "SELECT COUNT(DISTINCT date(open_time)) FROM trades "
+                    "WHERE result IS NOT NULL AND result != 'OPEN'"
+                ).fetchone()
+                sessions_passed = int(row[0]) if row else 0
+    except Exception:
+        pass
+
     return {
         "branch": branch,
         "commit": commit,
         "ml_store_path": str(ml_path),
         "ml_record_count": ml_count,
         "ml_fields": 26,
+        "caffeinate_pid": caffeinate_pid,
+        "caffeinate_running": caffeinate_pid is not None,
+        "ohlc_markets_cached": ohlc_markets_cached,
+        "uptime_s": uptime_s,
+        "sessions_passed": sessions_passed,
+        "sessions_required": 3,
     }
 
 
@@ -337,7 +389,9 @@ def run_system_tests() -> dict[str, Any]:
         errors = int(err_m.group(1)) if err_m else 0
         summary = out.strip().splitlines()[-1] if out.strip() else ""
         if not summary and proc.returncode != 0:
-            summary = (proc.stderr or proc.stdout or "pytest exited non-zero").strip()[:240]
+            summary = (proc.stderr or proc.stdout or "pytest exited non-zero").strip()[
+                :240
+            ]
         ok = proc.returncode == 0 and failed == 0 and errors == 0
         result: dict[str, Any] = {
             "ok": ok,

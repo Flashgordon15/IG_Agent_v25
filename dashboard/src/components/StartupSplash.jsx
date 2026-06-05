@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 
 const POLL_INTERVAL_MS = 500;
-const TIMEOUT_MS = 90_000;       // show error after 90 s with no "ready"
-const COMPLETE_LINGER_MS = 900;  // hold "100% — all systems ready" before revealing dashboard
+const TIMEOUT_MS = 90_000;   // show error after 90 s with no "ready"
+const MIN_DISPLAY_MS = 10_000; // always show for at least 10 seconds
 
 const STATUS_COLORS = {
   done:        "#22c55e",   // green
@@ -42,24 +42,38 @@ function PhaseIcon({ status }) {
 }
 
 export default function StartupSplash({ onComplete }) {
-  const [phases, setPhases]       = useState([]);
-  const [pct, setPct]             = useState(0);
-  const [ready, setReady]         = useState(false);
-  const [error, setError]         = useState(null);
-  const [fadeOut, setFadeOut]     = useState(false);
+  const [phases, setPhases]         = useState([]);
+  const [pct, setPct]               = useState(0);
+  const [ready, setReady]           = useState(false);
+  const [minElapsed, setMinElapsed] = useState(false);
+  const [error, setError]           = useState(null);
+  const [fadeOut, setFadeOut]       = useState(false);
   const [displayPct, setDisplayPct] = useState(0);
-  const timerRef  = useRef(null);
-  const startRef  = useRef(Date.now());
-  const readyRef  = useRef(false);
+  const [elapsed, setElapsed]       = useState(0);
+  const timerRef = useRef(null);
+  const startRef = useRef(Date.now());
+  const readyRef = useRef(false);
 
-  // Animated display percentage — smooth CSS counter
+  // Smooth display percentage counter
   useEffect(() => {
     const target = ready ? 100 : pct;
     if (displayPct === target) return;
-    const step = target > displayPct ? 1 : -1;
-    const id = setTimeout(() => setDisplayPct((v) => v + step), 14);
+    const id = setTimeout(
+      () => setDisplayPct((v) => v + (target > v ? 1 : -1)),
+      14,
+    );
     return () => clearTimeout(id);
   }, [pct, displayPct, ready]);
+
+  // Elapsed-time counter for the 10-second minimum
+  useEffect(() => {
+    const id = setInterval(() => {
+      const ms = Date.now() - startRef.current;
+      setElapsed(Math.min(ms, MIN_DISPLAY_MS));
+      if (ms >= MIN_DISPLAY_MS) setMinElapsed(true);
+    }, 100);
+    return () => clearInterval(id);
+  }, []);
 
   const poll = async () => {
     try {
@@ -73,11 +87,6 @@ export default function StartupSplash({ onComplete }) {
         readyRef.current = true;
         setReady(true);
         clearInterval(timerRef.current);
-        // brief hold at 100% then fade out
-        setTimeout(() => {
-          setFadeOut(true);
-          setTimeout(() => onComplete?.(), 600);
-        }, COMPLETE_LINGER_MS);
       }
     } catch {
       // server not yet up — silently retry
@@ -95,7 +104,27 @@ export default function StartupSplash({ onComplete }) {
       }
     }, POLL_INTERVAL_MS);
     return () => clearInterval(timerRef.current);
-  }, []);  // eslint-disable-line react-hooks/exhaustive-deps
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleEnter = () => {
+    setFadeOut(true);
+    setTimeout(() => onComplete?.(), 600);
+  };
+
+  const handleRetry = () => {
+    setError(null);
+    startRef.current = Date.now();
+    setMinElapsed(false);
+    readyRef.current = false;
+    setReady(false);
+    timerRef.current = setInterval(poll, POLL_INTERVAL_MS);
+    poll();
+  };
+
+  // Show OK button once both ready AND 10s minimum have elapsed
+  const showEnterButton = ready && minElapsed && !error;
+  // Show a progress indicator for the minimum display time
+  const minPct = Math.round((elapsed / MIN_DISPLAY_MS) * 100);
 
   const barColor = error ? STATUS_COLORS.error
     : ready ? STATUS_COLORS.done
@@ -221,12 +250,7 @@ export default function StartupSplash({ onComplete }) {
               <span style={{ fontSize: "12px", color: "#fca5a5" }}>{error}</span>
               <button
                 type="button"
-                onClick={() => {
-                  setError(null);
-                  startRef.current = Date.now();
-                  timerRef.current = setInterval(poll, POLL_INTERVAL_MS);
-                  poll();
-                }}
+                onClick={handleRetry}
                 style={{
                   background: "rgba(239,68,68,0.2)", border: "1px solid rgba(239,68,68,0.4)",
                   borderRadius: "4px", color: "#fca5a5", cursor: "pointer",
@@ -239,13 +263,60 @@ export default function StartupSplash({ onComplete }) {
             </div>
           )}
 
-          {/* Footer hint */}
-          {!ready && !error && (
-            <p style={{
-              fontSize: "10px", color: "#334155", textAlign: "center", margin: 0,
+          {/* Enter Dashboard button — shown when ready + 10s elapsed */}
+          {showEnterButton && (
+            <button
+              type="button"
+              onClick={handleEnter}
+              style={{
+                width: "100%", borderRadius: "8px",
+                background: "linear-gradient(135deg, #16a34a, #22c55e)",
+                color: "#fff", fontWeight: 700, fontSize: "14px",
+                padding: "0.875rem", border: "none", cursor: "pointer",
+                boxShadow: "0 0 20px rgba(34,197,94,0.3)",
+                letterSpacing: "0.03em",
+                animation: "fadeIn 0.5s ease both",
+              }}
+            >
+              Enter Dashboard
+            </button>
+          )}
+
+          {/* Waiting indicator — systems check or minimum timer */}
+          {!showEnterButton && !error && (
+            <div style={{
+              display: "flex", alignItems: "center", gap: "0.75rem",
+              padding: "0.5rem 0",
             }}>
-              Authenticating with IG and loading market data…
-            </p>
+              {/* Minimum-time ring */}
+              <svg width="32" height="32" viewBox="0 0 32 32" style={{ flexShrink: 0 }}>
+                <circle cx="16" cy="16" r="13" fill="none" stroke="#1e2d45" strokeWidth="3" />
+                <circle cx="16" cy="16" r="13" fill="none"
+                  stroke={ready ? STATUS_COLORS.done : STATUS_COLORS.in_progress}
+                  strokeWidth="3"
+                  strokeDasharray={`${2 * Math.PI * 13}`}
+                  strokeDashoffset={`${2 * Math.PI * 13 * (1 - minPct / 100)}`}
+                  strokeLinecap="round"
+                  transform="rotate(-90 16 16)"
+                  style={{ transition: "stroke-dashoffset 0.1s linear" }}
+                />
+                <text x="16" y="20" textAnchor="middle"
+                  fill={ready ? STATUS_COLORS.done : "#64748b"}
+                  fontSize="9" fontWeight="600">
+                  {ready ? "✓" : `${Math.round((MIN_DISPLAY_MS - elapsed) / 1000)}s`}
+                </text>
+              </svg>
+              <div>
+                <p style={{ fontSize: "12px", color: ready ? "#86efac" : "#94a3b8", margin: 0, fontWeight: ready ? 600 : 400 }}>
+                  {ready ? "All systems ready — validating…" : "Running system checks…"}
+                </p>
+                <p style={{ fontSize: "10px", color: "#334155", margin: "0.2rem 0 0" }}>
+                  {ready
+                    ? `Enter button appears in ${Math.max(0, Math.round((MIN_DISPLAY_MS - elapsed) / 1000))}s`
+                    : phases.find(p => p.status === "in_progress")?.label ?? "Connecting to IG…"}
+                </p>
+              </div>
+            </div>
           )}
         </div>
       </div>
