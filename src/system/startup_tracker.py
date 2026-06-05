@@ -15,14 +15,15 @@ from typing import Any
 # ── Phase registry ──────────────────────────────────────────────────────────
 # (id, human label, cumulative % when this phase completes)
 PHASES: list[tuple[str, str, int]] = [
-    ("preflight", "Pre-flight checks", 8),
-    ("config", "Configuration loaded", 16),
-    ("ig_auth", "IG API authenticated", 32),
-    ("database", "Database connected", 42),
-    ("self_test", "Self-test suite passed", 55),
-    ("ohlc", "Market data loaded", 68),
-    ("loops", "Trading loops built", 80),
-    ("stream", "Live stream connected", 92),
+    ("session_cleanup", "Previous session closed", 7),
+    ("preflight", "Pre-flight checks", 14),
+    ("config", "Configuration loaded", 21),
+    ("ig_auth", "IG API authenticated", 35),
+    ("database", "Database connected", 45),
+    ("self_test", "Self-test suite passed", 57),
+    ("ohlc", "Market data loaded", 70),
+    ("loops", "Trading loops built", 82),
+    ("stream", "Live stream connected", 93),
     ("ready", "All systems ready", 100),
 ]
 

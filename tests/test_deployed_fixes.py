@@ -355,7 +355,7 @@ class TestSession3OhlcBootstrapStagger:
 
 
 class TestSession3StartupCleanup:
-    """main.py must kill stale agent processes at startup."""
+    """main.py must kill stale agent processes at startup and report it in the splash."""
 
     def test_pre_startup_cleanup_exists(self):
         src = (SRC / "main.py").read_text()
@@ -369,4 +369,33 @@ class TestSession3StartupCleanup:
         assert "_pre_startup_cleanup()" in src, (
             "_pre_startup_cleanup() is defined but never called in main() — "
             "stale processes will not be killed on startup"
+        )
+
+    def test_cleanup_marks_session_cleanup_phase(self):
+        src = (SRC / "main.py").read_text()
+        assert '"session_cleanup"' in src, (
+            "_pre_startup_cleanup() does not mark the session_cleanup startup phase — "
+            "splash screen will not show 'Previous session closed'"
+        )
+
+    def test_session_cleanup_phase_in_tracker(self):
+        import sys
+
+        sys.path.insert(0, str(SRC))
+        from system.startup_tracker import PHASES
+
+        phase_ids = [p[0] for p in PHASES]
+        assert "session_cleanup" in phase_ids, (
+            "'session_cleanup' phase is missing from startup_tracker.PHASES — "
+            "splash screen will not show the cleanup step"
+        )
+        assert phase_ids.index("session_cleanup") == 0, (
+            "'session_cleanup' must be the first startup phase"
+        )
+
+    def test_cleanup_uses_sigkill_fallback(self):
+        src = (SRC / "main.py").read_text()
+        assert "SIGKILL" in src, (
+            "_pre_startup_cleanup() has no SIGKILL fallback — "
+            "stubborn processes will not be killed"
         )

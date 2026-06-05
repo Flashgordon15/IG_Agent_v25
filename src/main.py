@@ -201,19 +201,19 @@ def merge_credentials_for_validation(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _pre_startup_cleanup() -> None:
-    """Kill any stale agent processes and remove stale lock file before acquiring a new one.
+    """Kill any stale agent processes and release resources before acquiring a new lock.
 
-    Runs every time the agent starts so a previous crash or force-quit never blocks
-    the next launch.  Only targets processes running src/main.py (this process is
-    excluded by PID).
+    Runs every time the agent starts so a previous crash, force-quit, or silent
+    background session never blocks the next launch.
     """
     import os
     import subprocess
 
     my_pid = os.getpid()
     lock_path = Path(__file__).parent / "data" / ".ig_agent_v25.lock"
+    killed_pids: list[int] = []
 
-    # Kill stale agent processes (same main.py, different PID)
+    # 1. Find and SIGTERM any other agent processes
     try:
         result = subprocess.run(
             ["pgrep", "-f", "src/main.py"],
@@ -230,7 +230,8 @@ def _pre_startup_cleanup() -> None:
                 continue
             try:
                 os.kill(pid, signal.SIGTERM)
-                log_engine(f"pre-startup: sent SIGTERM to stale agent PID {pid}")
+                killed_pids.append(pid)
+                log_engine(f"pre-startup: sent SIGTERM to previous session PID {pid}")
             except ProcessLookupError:
                 pass
             except Exception as e:
@@ -238,7 +239,33 @@ def _pre_startup_cleanup() -> None:
     except Exception as e:
         log_engine(f"pre-startup: pgrep failed: {e}")
 
-    # Remove a stale lock left by the terminated process
+    # 2. Wait up to 5 s for terminated processes to release port 8080 and lock
+    if killed_pids:
+        _deadline = time.time() + 5.0
+        while time.time() < _deadline:
+            still_alive = []
+            for pid in killed_pids:
+                try:
+                    os.kill(pid, 0)  # 0 = probe only, raises if dead
+                    still_alive.append(pid)
+                except ProcessLookupError:
+                    pass
+                except Exception:
+                    pass
+            if not still_alive:
+                break
+            time.sleep(0.3)
+        # SIGKILL any survivors
+        for pid in killed_pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+                log_engine(f"pre-startup: SIGKILL fallback for PID {pid}")
+            except ProcessLookupError:
+                pass
+            except Exception:
+                pass
+
+    # 3. Remove stale lock
     try:
         if lock_path.exists():
             lock_path.unlink()
@@ -246,8 +273,30 @@ def _pre_startup_cleanup() -> None:
     except Exception as e:
         log_engine(f"pre-startup: could not remove lock: {e}")
 
-    # Brief pause so OS cleans up any terminated processes
-    time.sleep(1)
+    # 4. Wait for port 8080 to be free (previous server may still be tearingdown)
+    import socket as _socket
+
+    _port_free = False
+    for _ in range(10):  # up to 3 s
+        with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+            s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+            if s.connect_ex(("127.0.0.1", _API_PORT)) != 0:
+                _port_free = True
+                break
+        time.sleep(0.3)
+    if not _port_free:
+        log_engine(
+            "pre-startup: port 8080 still in use after cleanup — proceeding anyway"
+        )
+
+    # 5. Mark startup phase (visible in splash screen)
+    note = (
+        f"killed {len(killed_pids)} previous session(s)"
+        if killed_pids
+        else "no previous session running"
+    )
+    _startup_mark("session_cleanup", note)
+    log_engine(f"pre-startup: cleanup complete — {note}")
 
 
 def run_preflight() -> int:
