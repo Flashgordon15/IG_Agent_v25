@@ -7,8 +7,8 @@ Section 4.5 Step 5 / 6.5. Never hardcodes BST/JST session hours.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -35,6 +35,7 @@ DEFAULT_STATE_FILE = "session_state.json"
 COLD_START_BARS = 6
 COLD_START_BAR_MINUTES = 5
 GAP_ATR_MULTIPLE = 1.0
+GAP_CLEAR_BARS = 12  # clear gap-open block after 1 hour (12 × 5-min bars)
 MAINTENANCE_MAX_GAP_SEC = 2 * 3600
 AUTOSAVE_INTERVAL_SEC = 30.0
 FLATTEN_LEAD_MINUTES = 5.0
@@ -182,7 +183,9 @@ class SessionManager:
             self._persist()
             return True
         except Exception as e:
-            log_engine(f"session_manager check_gap_open failed: {type(e).__name__}: {e}")
+            log_engine(
+                f"session_manager check_gap_open failed: {type(e).__name__}: {e}"
+            )
             return False
 
     def should_flatten(self, *, at: datetime | None = None) -> bool:
@@ -202,7 +205,9 @@ class SessionManager:
         except Exception:
             return None
 
-    def is_entry_blocked_near_session_end(self, *, at: datetime | None = None) -> tuple[bool, int | None]:
+    def is_entry_blocked_near_session_end(
+        self, *, at: datetime | None = None
+    ) -> tuple[bool, int | None]:
         """Block new entries when fewer than ENTRY_BLOCK_MINUTES remain."""
         mins = self.minutes_to_session_end(at=at)
         if mins is None:
@@ -273,7 +278,9 @@ class SessionManager:
         reason = str(status.reason or "").lower()
         return "break" in reason or "maintenance" in reason
 
-    def on_session_open(self, quote: Quote | None = None, *, at: datetime | None = None) -> None:
+    def on_session_open(
+        self, quote: Quote | None = None, *, at: datetime | None = None
+    ) -> None:
         now = at or (quote.time if quote is not None else datetime.now())
         maintenance = self._check_maintenance_reopen(now)
         already_open = self._session_open and self._open_time is not None
@@ -335,7 +342,9 @@ class SessionManager:
 
         self._persist(force=True)
 
-    def on_session_close(self, quote: Quote | None = None, *, at: datetime | None = None) -> None:
+    def on_session_close(
+        self, quote: Quote | None = None, *, at: datetime | None = None
+    ) -> None:
         now = at or (quote.time if quote is not None else datetime.now())
         self._session_open = False
         self._last_close_time = now
@@ -470,7 +479,9 @@ class SessionManager:
         self._last_close_price = float(lcp) if lcp is not None else None
         self._maintenance_count_today = int(data.get("maintenance_count_today", 0))
         phase = data.get("phase", "CLOSED")
-        self._phase = phase if phase in ("OPEN", "CLOSED", "FLATTEN", "MAINTENANCE") else "CLOSED"
+        self._phase = (
+            phase if phase in ("OPEN", "CLOSED", "FLATTEN", "MAINTENANCE") else "CLOSED"
+        )
         bars_elapsed = int(data.get("bars_elapsed", 0))
         current = self._complete_bar_count()
         self._bars_at_open = max(0, current - bars_elapsed)

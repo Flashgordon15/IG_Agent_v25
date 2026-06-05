@@ -565,19 +565,21 @@ class SignalEngine:
             # direction on the same bar time (rare) can still fire.
             self._last_signal_bar.pop(market, None)
 
-        would_fire = signal in ("BUY", "SELL") and float(adjusted) >= float(threshold)
+        raw_conf = min(100.0, float(raw_conf))
+        adjusted = min(100.0, float(adjusted))
+        would_fire = signal in ("BUY", "SELL") and adjusted >= float(threshold)
         self._append_shadow_log(
             market,
             direction=signal,
-            raw_score=float(raw_conf),
-            adjusted_score=float(adjusted),
+            raw_score=raw_conf,
+            adjusted_score=adjusted,
             would_have_fired=would_fire,
             snapshot=snapshot,
         )
         return SignalResult(
             signal,
-            float(raw_conf),
-            float(adjusted),
+            raw_conf,
+            adjusted,
             float(delta),
             setup,
             notes,

@@ -196,6 +196,7 @@
       "stale_threshold_seconds": 15,
       "best_session": "13:30-21:00 BST",
       "trading_session_whitelist": [
+        "london_morning",
         "london_us_overlap",
         "us_afternoon"
       ]
@@ -249,6 +250,7 @@
       "epic": "IX.D.NASDAQ.IFM.IP",
       "best_session": "14:30-21:00 BST",
       "trading_session_whitelist": [
+        "london_morning",
         "london_us_overlap",
         "us_afternoon"
       ],

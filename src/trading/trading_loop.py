@@ -802,20 +802,27 @@ class TradingLoop:
         )
 
     def _gate_cold_start_gap(self, quote: Quote) -> GateResult:
+        from trading.session_manager import GAP_CLEAR_BARS
+
         cold = bool(self._session.is_cold_start())
         atr = self._atr_estimate(quote)
+        bars = self._session.bars_since_open()
         gap = bool(self._session.check_gap_open(atr, open_price=float(quote.mid)))
+        # Gap block expires after GAP_CLEAR_BARS (1 hour) — market has had time to settle
+        if gap and bars >= GAP_CLEAR_BARS:
+            gap = False
         passed = (not cold) and (not gap)
         if cold:
-            detail = f"cold start — {self._session.bars_since_open()}/6 bars"
+            detail = f"cold start — {bars}/6 bars"
         elif gap:
-            detail = "gap open >1.0× ATR"
+            remaining = GAP_CLEAR_BARS - bars
+            detail = f"gap open >1.0× ATR (clears in ~{remaining * 5}min)"
         else:
             detail = "cold start and gap OK"
         return GateResult(
             name="cold_start_gap",
             passed=passed,
-            value={"cold": cold, "gap": gap, "bars": self._session.bars_since_open()},
+            value={"cold": cold, "gap": gap, "bars": bars},
             detail=detail,
         )
 

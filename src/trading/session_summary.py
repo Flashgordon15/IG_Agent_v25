@@ -14,7 +14,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 from data.ml_training_store import MLTrainingStore
@@ -163,7 +163,9 @@ def collect_session_trades(
     pnl = 0.0
     total = 0
     for row in rows:
-        if not _trade_in_window(row.get("closed_at"), since=open_time, until=close_time):
+        if not _trade_in_window(
+            row.get("closed_at"), since=open_time, until=close_time
+        ):
             continue
         total += 1
         result = str(row.get("result") or "").upper()
@@ -323,8 +325,7 @@ def _launch_reconcile_pending_trades() -> None:
         threading.Thread(target=_wait, daemon=True).start()
     except Exception as exc:
         log_engine(
-            f"reconcile_pending_trades: launch failed: "
-            f"{type(exc).__name__}: {exc}"
+            f"reconcile_pending_trades: launch failed: {type(exc).__name__}: {exc}"
         )
 
 
@@ -340,11 +341,20 @@ def write_session_end_summary(
     if tracker.summary_written:
         return None
 
-    open_time = session.session_open_time
+    raw_open = session.session_open_time
+    open_time = raw_open if isinstance(raw_open, datetime) else None
     trades = collect_session_trades(store, open_time=open_time, close_time=close_at)
     ps = points.snapshot()
-    points_delta = float(ps.session_score)
-    points_state = str(ps.nominal_state)
+    try:
+        points_delta = float(ps.session_score)
+    except (TypeError, ValueError):
+        points_delta = 0.0
+    raw_state = ps.nominal_state
+    points_state = (
+        raw_state
+        if raw_state in ("HEALTHY", "CAUTION", "WARNING", "STOP")
+        else "HEALTHY"
+    )
     ml_records = count_ml_records_in_session(
         ml_store, open_time=open_time, close_time=close_at
     )
