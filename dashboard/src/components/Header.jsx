@@ -128,6 +128,7 @@ export default function Header({
   reconnecting,
   openPositions,
   maxPositions,
+  onStopAgent,
 }) {
   const agent = agentStateStyle(agentState);
   const stream = resolveStreamStatus(streamStatus, wsConnected, reconnecting, marketState);
@@ -224,6 +225,19 @@ export default function Header({
             </span>
           ) : null;
         })()}
+
+        {/* Stop Agent button — always visible, right-most */}
+        <div className="ml-auto shrink-0">
+          <button
+            type="button"
+            onClick={onStopAgent}
+            className="inline-flex items-center gap-1.5 rounded-md border border-danger/50 bg-danger/10 px-2.5 py-1 text-[11px] font-semibold text-danger transition-colors hover:bg-danger/20 active:scale-95"
+            title="Save session state and shut down the agent cleanly"
+          >
+            <span className="h-1.5 w-1.5 rounded-full bg-danger" aria-hidden />
+            Stop Agent
+          </button>
+        </div>
       </div>
     </header>
   );

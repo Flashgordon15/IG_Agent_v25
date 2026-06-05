@@ -4,11 +4,22 @@ HTTP routes — dashboard API (Section 4.5 Steps 8 + 13).
 
 from __future__ import annotations
 
+import threading
+import time
 from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
+
+# ── Heartbeat monitor ────────────────────────────────────────────────────────
+# Browser pings /api/heartbeat every 30 s. If the backend sees no ping for
+# HEARTBEAT_TIMEOUT_SEC it assumes the browser was closed and shuts down.
+HEARTBEAT_INTERVAL_SEC = 30
+HEARTBEAT_TIMEOUT_SEC = 600  # 10 minutes — generous to survive tab sleeps
+_last_heartbeat: float = time.time()
+_heartbeat_monitor_started = False
+_heartbeat_lock = threading.Lock()
 
 from api.agent_control import (
     is_paused,
@@ -330,4 +341,83 @@ def api_agent_restart() -> JSONResponse:
         )
     except Exception as e:
         log_engine(f"agent/restart failed: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+# ── Heartbeat ─────────────────────────────────────────────────────────────────
+
+
+def _start_heartbeat_monitor() -> None:
+    """Background thread: shut down gracefully if no heartbeat for HEARTBEAT_TIMEOUT_SEC."""
+    global _heartbeat_monitor_started
+    with _heartbeat_lock:
+        if _heartbeat_monitor_started:
+            return
+        _heartbeat_monitor_started = True
+
+    from system.engine_log import log_engine
+
+    def _monitor() -> None:
+        while True:
+            time.sleep(HEARTBEAT_INTERVAL_SEC)
+            age = time.time() - _last_heartbeat
+            if age > HEARTBEAT_TIMEOUT_SEC:
+                log_engine(
+                    f"heartbeat: no ping for {age:.0f}s (>{HEARTBEAT_TIMEOUT_SEC}s) "
+                    "— browser closed, shutting down agent"
+                )
+                _trigger_shutdown(source="heartbeat_timeout")
+                return
+
+    t = threading.Thread(target=_monitor, name="heartbeat-monitor", daemon=True)
+    t.start()
+
+
+def _trigger_shutdown(source: str = "api") -> None:
+    """Write a clean shutdown log entry then kill the process after a short delay."""
+    from system.engine_log import log_engine
+
+    log_engine(f"agent shutdown requested (source={source}) — exiting in 2s")
+    try:
+        from system.telegram_notifier import get_telegram_notifier
+
+        notifier = get_telegram_notifier()
+        if notifier and notifier.enabled:
+            notifier.send(f"🔴 IG Agent v25 shutdown ({source})")
+    except Exception:
+        pass
+
+    def _exit() -> None:
+        time.sleep(2)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    threading.Thread(target=_exit, name="shutdown-trigger", daemon=True).start()
+
+
+@router.post("/api/heartbeat")
+def api_heartbeat() -> JSONResponse:
+    """Browser keep-alive ping (every 30 s). Starts the idle-shutdown monitor on first call."""
+    global _last_heartbeat
+    _last_heartbeat = time.time()
+    _start_heartbeat_monitor()
+    return JSONResponse({"ok": True, "ts": _last_heartbeat})
+
+
+@router.post("/api/shutdown")
+def api_shutdown() -> JSONResponse:
+    """Graceful agent shutdown — stop trading, write session log, exit process."""
+    from system.engine_log import log_engine
+
+    try:
+        # Stop trading loop first (non-blocking)
+        try:
+            stop_trading()
+        except Exception as se:
+            log_engine(f"shutdown: stop_trading error (continuing): {se}")
+
+        log_engine("shutdown: initiated via dashboard Stop button")
+        _trigger_shutdown(source="dashboard")
+        return JSONResponse({"ok": True, "status": "shutting_down"})
+    except Exception as e:
+        log_engine(f"shutdown failed: {type(e).__name__}: {e}")
         raise HTTPException(status_code=500, detail=str(e)) from e

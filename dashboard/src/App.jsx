@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { WS_URL } from "./config.js";
 import { fetchState, fetchSplash, dismissSplash } from "./api.js";
+
+const HEARTBEAT_INTERVAL_MS = 25000; // ping every 25 s (server times out at 10 min)
 import Header from "./components/Header.jsx";
 import LivePanel from "./components/LivePanel.jsx";
 import TradesPanel from "./components/TradesPanel.jsx";
@@ -182,6 +184,8 @@ export default function App() {
   const [splashVisible, setSplashVisible] = useState(false);
   // startupDone: null = checking, false = show splash, true = skip splash
   const [startupDone, setStartupDone] = useState(null);
+  // "idle" | "confirming" | "stopping" | "stopped"
+  const [shutdownState, setShutdownState] = useState("idle");
   const prevStateRef = useRef(null);
   const soundRef = useRef(null);
 
@@ -338,6 +342,33 @@ export default function App() {
     return () => soundRef.current?.stopStopAlarm();
   }, []);
 
+  // Heartbeat — keeps the backend alive; starts the idle-shutdown monitor server-side
+  useEffect(() => {
+    if (startupDone !== true) return;
+    const ping = () => fetch("/api/heartbeat", { method: "POST" }).catch(() => {});
+    ping(); // immediate first ping
+    const id = window.setInterval(ping, HEARTBEAT_INTERVAL_MS);
+    return () => window.clearInterval(id);
+  }, [startupDone]);
+
+  const handleStopAgent = useCallback(() => {
+    setShutdownState("confirming");
+  }, []);
+
+  const handleStopConfirm = useCallback(async () => {
+    setShutdownState("stopping");
+    try {
+      await fetch("/api/shutdown", { method: "POST" });
+    } catch {
+      // process will exit — connection error is expected
+    }
+    setShutdownState("stopped");
+  }, []);
+
+  const handleStopCancel = useCallback(() => {
+    setShutdownState("idle");
+  }, []);
+
   const headerProps = {
     state: viewState,
     bid: viewState?.bid,
@@ -359,7 +390,31 @@ export default function App() {
     reconnecting,
     openPositions: (state?.positions ?? []).length,
     maxPositions: state?.max_open_positions ?? 10,
+    onStopAgent: handleStopAgent,
   };
+
+  // Agent stopped screen
+  if (shutdownState === "stopped") {
+    return (
+      <div style={{
+        position: "fixed", inset: 0, background: "#0b0f19",
+        display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+        gap: "16px",
+      }}>
+        <div style={{
+          width: "40px", height: "40px", borderRadius: "50%",
+          background: "rgba(239,68,68,0.15)", border: "1px solid rgba(239,68,68,0.4)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+        }}>
+          <span style={{ width: "12px", height: "12px", borderRadius: "50%", background: "#ef4444", display: "block" }} />
+        </div>
+        <p style={{ color: "#f8fafc", fontSize: "16px", fontWeight: 600, margin: 0 }}>Agent stopped</p>
+        <p style={{ color: "#64748b", fontSize: "12px", margin: 0, textAlign: "center", maxWidth: "280px" }}>
+          Session saved. You can close this tab or click the desktop icon to restart.
+        </p>
+      </div>
+    );
+  }
 
   // Show startup splash while agent is initialising (null = still checking initial status)
   if (startupDone === false) {
@@ -381,6 +436,72 @@ export default function App() {
   return (
     <div className="flex min-h-screen min-w-0 flex-col bg-bg text-foreground">
       <Header {...headerProps} />
+
+      {/* Stop confirmation modal */}
+      {(shutdownState === "confirming" || shutdownState === "stopping") && (
+        <div style={{
+          position: "fixed", inset: 0, zIndex: 9999,
+          background: "rgba(0,0,0,0.7)", backdropFilter: "blur(4px)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+        }}>
+          <div style={{
+            background: "#111827", border: "1px solid #374151",
+            borderRadius: "12px", padding: "28px 32px", maxWidth: "360px", width: "90%",
+            textAlign: "center",
+          }}>
+            {shutdownState === "stopping" ? (
+              <>
+                <p style={{ color: "#f8fafc", fontSize: "15px", fontWeight: 600, marginBottom: "8px" }}>
+                  Shutting down…
+                </p>
+                <p style={{ color: "#64748b", fontSize: "12px" }}>
+                  Saving session state and stopping trading loops.
+                </p>
+              </>
+            ) : (
+              <>
+                <div style={{
+                  width: "44px", height: "44px", borderRadius: "50%",
+                  background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.35)",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  margin: "0 auto 16px",
+                }}>
+                  <span style={{ fontSize: "18px" }}>⏹</span>
+                </div>
+                <p style={{ color: "#f8fafc", fontSize: "15px", fontWeight: 600, marginBottom: "6px" }}>
+                  Stop Agent?
+                </p>
+                <p style={{ color: "#64748b", fontSize: "12px", marginBottom: "24px", lineHeight: 1.5 }}>
+                  This will stop all trading loops, save the session log, and shut down the agent process.
+                  Any open positions will remain open on IG.
+                </p>
+                <div style={{ display: "flex", gap: "10px", justifyContent: "center" }}>
+                  <button
+                    onClick={handleStopCancel}
+                    style={{
+                      padding: "8px 20px", borderRadius: "6px",
+                      border: "1px solid #374151", background: "transparent",
+                      color: "#94a3b8", fontSize: "12px", fontWeight: 600, cursor: "pointer",
+                    }}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleStopConfirm}
+                    style={{
+                      padding: "8px 20px", borderRadius: "6px",
+                      border: "1px solid rgba(239,68,68,0.5)", background: "rgba(239,68,68,0.15)",
+                      color: "#ef4444", fontSize: "12px", fontWeight: 600, cursor: "pointer",
+                    }}
+                  >
+                    Stop Agent
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
       {splashVisible && (
         <SplashScreen versionData={splashData} onDismiss={handleSplashDismiss} />
       )}
