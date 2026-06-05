@@ -12,13 +12,13 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 
-# ── Heartbeat monitor ────────────────────────────────────────────────────────
-# Browser pings /api/heartbeat every 30 s. If the backend sees no ping for
-# HEARTBEAT_TIMEOUT_SEC it assumes the browser was closed and shuts down.
+# ── Heartbeat ────────────────────────────────────────────────────────────────
+# Browser pings /api/heartbeat every 30 s. The endpoint is kept so the
+# dashboard can use it as a liveness indicator, but missed pings no longer
+# trigger a shutdown. Use POST /api/shutdown for deliberate agent termination.
 HEARTBEAT_INTERVAL_SEC = 30
-HEARTBEAT_TIMEOUT_SEC = 600  # 10 minutes — generous to survive tab sleeps
+HEARTBEAT_TIMEOUT_SEC = 600  # retained for reference; not used for shutdown
 _last_heartbeat: float = time.time()
-_heartbeat_monitor_started = False
 _heartbeat_lock = threading.Lock()
 
 from api.agent_control import (
@@ -363,29 +363,11 @@ def api_agent_restart() -> JSONResponse:
 
 
 def _start_heartbeat_monitor() -> None:
-    """Background thread: shut down gracefully if no heartbeat for HEARTBEAT_TIMEOUT_SEC."""
-    global _heartbeat_monitor_started
-    with _heartbeat_lock:
-        if _heartbeat_monitor_started:
-            return
-        _heartbeat_monitor_started = True
+    """No-op: auto-shutdown on browser disconnect is disabled.
 
-    from system.engine_log import log_engine
-
-    def _monitor() -> None:
-        while True:
-            time.sleep(HEARTBEAT_INTERVAL_SEC)
-            age = time.time() - _last_heartbeat
-            if age > HEARTBEAT_TIMEOUT_SEC:
-                log_engine(
-                    f"heartbeat: no ping for {age:.0f}s (>{HEARTBEAT_TIMEOUT_SEC}s) "
-                    "— browser closed, shutting down agent"
-                )
-                _trigger_shutdown(source="heartbeat_timeout")
-                return
-
-    t = threading.Thread(target=_monitor, name="heartbeat-monitor", daemon=True)
-    t.start()
+    The agent must run headless overnight; use POST /api/shutdown to stop it
+    deliberately. This function is retained so existing call-sites compile.
+    """
 
 
 def _trigger_shutdown(source: str = "api") -> None:
@@ -454,10 +436,9 @@ def api_clear_inflight(epic: str) -> JSONResponse:
 
 @router.post("/api/heartbeat")
 def api_heartbeat() -> JSONResponse:
-    """Browser keep-alive ping (every 30 s). Starts the idle-shutdown monitor on first call."""
+    """Browser keep-alive ping (every 30 s). Records last-seen time for dashboard liveness only."""
     global _last_heartbeat
     _last_heartbeat = time.time()
-    _start_heartbeat_monitor()
     return JSONResponse({"ok": True, "ts": _last_heartbeat})
 
 
