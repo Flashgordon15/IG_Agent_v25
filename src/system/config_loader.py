@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from system.config import Config
-from system.paths import config_dir, project_root, resolve_path
+from system.paths import config_dir, resolve_path
 
 _MODE: str = "TEST"
 _config: Config | None = None
@@ -57,6 +57,7 @@ def _update_config_mtime() -> None:
     except Exception:
         pass
 
+
 V22_FALLBACK = "legacy_v22/config_v22_adaptive_autotrader.json"
 SCHEMA_FILE = "config_schema.json"
 
@@ -88,8 +89,9 @@ def _sync_operating_mode_from_credentials(cfg: dict[str, Any]) -> None:
     except Exception:
         creds = None
     try:
-        from system.credentials_loader import CREDENTIALS_PATH
         import json as _json
+
+        from system.credentials_loader import CREDENTIALS_PATH
 
         if CREDENTIALS_PATH.is_file():
             raw_creds = _json.loads(CREDENTIALS_PATH.read_text(encoding="utf-8"))
@@ -101,7 +103,11 @@ def _sync_operating_mode_from_credentials(cfg: dict[str, Any]) -> None:
         op = str(cfg.get("operating_mode", "TEST")).upper()
         if creds.account_type == "DEMO" and op == "TEST":
             cfg["operating_mode"] = "DEMO"
-        elif creds.account_type == "LIVE" and op == "TEST" and cfg.get("allow_live_trading"):
+        elif (
+            creds.account_type == "LIVE"
+            and op == "TEST"
+            and cfg.get("allow_live_trading")
+        ):
             cfg["operating_mode"] = "LIVE"
 
     # Fill telegram credentials from credentials file when config leaves them blank.
@@ -139,7 +145,12 @@ def apply_runtime_overrides(**kwargs: Any) -> Config:
         cfg = get_config()
         data = dict(cfg.as_dict())
         if "max_positions_per_epic" in kwargs:
-            n = max(1, min(MAX_POSITIONS_PER_EPIC_LIMIT, int(kwargs["max_positions_per_epic"])))
+            n = max(
+                1,
+                min(
+                    MAX_POSITIONS_PER_EPIC_LIMIT, int(kwargs["max_positions_per_epic"])
+                ),
+            )
             kwargs = dict(kwargs)
             kwargs["max_positions_per_epic"] = n
             if n > 1:
@@ -166,7 +177,12 @@ def update_config_values(**kwargs: Any) -> Config:
         cfg = get_config()
         data = dict(cfg.as_dict())
         if "max_positions_per_epic" in kwargs:
-            n = max(1, min(MAX_POSITIONS_PER_EPIC_LIMIT, int(kwargs["max_positions_per_epic"])))
+            n = max(
+                1,
+                min(
+                    MAX_POSITIONS_PER_EPIC_LIMIT, int(kwargs["max_positions_per_epic"])
+                ),
+            )
             kwargs = dict(kwargs)
             kwargs["max_positions_per_epic"] = n
             if n > 1:
@@ -269,7 +285,9 @@ class ConfigLoader:
             merged = _deep_merge(base, primary)
         # IG secrets: config/credentials/credentials.json via system.credentials_loader only
         if "operating_mode" not in merged:
-            merged["operating_mode"] = "LIVE" if not merged.get("dry_run", True) else "TEST"
+            merged["operating_mode"] = (
+                "LIVE" if not merged.get("dry_run", True) else "TEST"
+            )
         return merged
 
     def _resolve_paths(self, cfg: dict[str, Any]) -> None:
@@ -282,7 +300,11 @@ class ConfigLoader:
         set_mode(op if op in ("TEST", "DEMO", "LIVE") else "TEST")
 
     def save(self, config: Config | dict[str, Any] | None = None) -> None:
-        data = config.as_dict() if isinstance(config, Config) else (config or get_config().as_dict())
+        data = (
+            config.as_dict()
+            if isinstance(config, Config)
+            else (config or get_config().as_dict())
+        )
         tmp_path = self._path.with_suffix(self._path.suffix + ".tmp")
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
@@ -295,25 +317,36 @@ class ConfigLoader:
         markets = cfg.get("markets")
         if isinstance(markets, list) and markets:
             return markets
-        return [{"name": cfg.get("market_search", "Market"), "epic": cfg.get("epic", "")}]
+        return [
+            {"name": cfg.get("market_search", "Market"), "epic": cfg.get("epic", "")}
+        ]
 
     def validate_schema(self, config: dict[str, Any] | None = None) -> list[str]:
         data = config if config is not None else get_config().as_dict()
         errors: list[str] = []
         try:
             import jsonschema
+
             schema = json.loads(self._schema_path.read_text(encoding="utf-8"))
             validator = jsonschema.Draft202012Validator(schema)
             for err in validator.iter_errors(data):
                 errors.append(f"{'.'.join(str(p) for p in err.path)}: {err.message}")
-        except ImportError:
+        except (ImportError, FileNotFoundError):
+            # ImportError: jsonschema not installed → manual checks only.
+            # FileNotFoundError: schema file not yet generated → skip schema validation.
             errors.extend(self._validate_manual(data))
         return errors
 
     @staticmethod
     def _validate_manual(data: dict[str, Any]) -> list[str]:
         errors: list[str] = []
-        required = ("epic", "operating_mode", "account_type", "signal_threshold", "risk_points")
+        required = (
+            "epic",
+            "operating_mode",
+            "account_type",
+            "signal_threshold",
+            "risk_points",
+        )
         for key in required:
             if key not in data or data[key] in ("", None):
                 errors.append(f"missing required field: {key}")
