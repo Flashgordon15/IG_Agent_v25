@@ -267,3 +267,46 @@ def test_no_live_artifacts_in_runtime_state() -> None:
             f"Live runtime_state.json contains test artifact string '{marker}'; "
             "the test isolation fixture has failed — do NOT start live trading."
         )
+
+
+# ---------------------------------------------------------------------------
+# 9. Deployment verification runs on startup
+# ---------------------------------------------------------------------------
+
+
+def test_deploy_check_called_on_startup() -> None:
+    """_run_deployment_verification must be defined AND called in _pre_startup_cleanup.
+
+    This guarantees that every time the agent boots it self-verifies all critical
+    deployment checks before any trading loops start.  If this guard is missing a
+    code regression could silently reach live trading without detection.
+    """
+    source = _MAIN_PY.read_text(encoding="utf-8")
+
+    assert "def _run_deployment_verification(" in source, (
+        "main.py must define '_run_deployment_verification'; "
+        "startup self-verification is missing"
+    )
+
+    # Locate _pre_startup_cleanup body and confirm the call is inside it
+    lines = source.splitlines()
+    in_func = False
+    func_body_lines: list[str] = []
+    for line in lines:
+        if line.startswith("def _pre_startup_cleanup("):
+            in_func = True
+            continue
+        if in_func:
+            if (
+                line
+                and not line[0].isspace()
+                and (line.startswith("def ") or line.startswith("class "))
+            ):
+                break
+            func_body_lines.append(line)
+
+    func_body = "\n".join(func_body_lines)
+    assert "_run_deployment_verification()" in func_body, (
+        "_run_deployment_verification() is not called inside _pre_startup_cleanup — "
+        "deployment self-check will be skipped on every startup"
+    )

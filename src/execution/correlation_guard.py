@@ -23,7 +23,7 @@ _buy_count: int = 0
 _sell_count: int = 0
 _session_key: str = ""
 
-MAX_NEW_PER_DIRECTION = 6  # max new entries in the same direction per session
+MAX_NEW_PER_DIRECTION = 15  # max new entries in the same direction per session
 _enabled: bool = True
 
 

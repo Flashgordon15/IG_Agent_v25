@@ -22,6 +22,7 @@ PHASES: list[tuple[str, str, int]] = [
     ("database", "Database connected", 45),
     ("self_test", "Self-test suite passed", 53),
     ("smoke_test", "Startup smoke check passed", 60),
+    ("deploy_check", "Deployment verification passed", 65),
     ("ohlc", "Market data loaded", 70),
     ("loops", "Trading loops built", 82),
     ("stream", "Live stream connected", 93),

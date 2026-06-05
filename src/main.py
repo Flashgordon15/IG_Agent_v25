@@ -219,6 +219,37 @@ def _clear_pycache() -> None:
     )
 
 
+def _run_deployment_verification() -> None:
+    """Run deployment health checks — abort startup if any fail."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/test_deployment_verified.py",
+            "-q",
+            "--tb=short",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=Path(__file__).resolve().parents[1],
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parent)},
+    )
+    if result.returncode != 0:
+        log_engine(
+            f"DEPLOYMENT VERIFICATION FAILED — agent will not start trading:\n"
+            f"{result.stdout}\n{result.stderr}"
+        )
+        raise SystemExit(
+            "Deployment verification failed. Fix the issues above before launching."
+        )
+    last_line = (
+        result.stdout.strip().splitlines()[-1] if result.stdout.strip() else "ok"
+    )
+    log_engine(f"Deployment verification passed ({last_line})")
+    _startup_mark("deploy_check", note="all checks passed")
+
+
 def _pre_startup_cleanup() -> None:
     """Kill any stale agent processes and release resources before acquiring a new lock.
 
@@ -226,6 +257,7 @@ def _pre_startup_cleanup() -> None:
     background session never blocks the next launch.
     """
     _clear_pycache()
+    _run_deployment_verification()
 
     import os
 
