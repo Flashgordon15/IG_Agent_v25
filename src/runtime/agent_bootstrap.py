@@ -340,7 +340,7 @@ def build_market_orchestrator(
     # Pre-populate any missing OHLC caches from Yahoo before REST bootstrap
     # so the REST fetches are skipped (cache-first) for markets already seeded.
     try:
-        from data.ohlc_yahoo_seeder import EPIC_YAHOO_MAP
+        from data.ohlc_yahoo_seeder import EPIC_YAHOO_MAP, fetch_yahoo_ohlc_for_epic
         from system.paths import data_dir
 
         _ohlc_dir = data_dir() / "ohlc_cache"
