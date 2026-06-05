@@ -32,7 +32,7 @@ TickPhase = Literal["OPEN", "CLOSED", "FLATTEN", "MAINTENANCE"]
 
 STATE_VERSION = 1
 DEFAULT_STATE_FILE = "session_state.json"
-COLD_START_BARS = 6
+COLD_START_BARS = 2  # Reduced from 6; OHLC history pre-warms indicators at startup
 COLD_START_BAR_MINUTES = 5
 GAP_ATR_MULTIPLE = 1.0
 GAP_CLEAR_BARS = 12  # clear gap-open block after 1 hour (12 × 5-min bars)
