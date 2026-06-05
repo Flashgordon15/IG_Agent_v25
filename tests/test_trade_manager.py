@@ -140,8 +140,13 @@ class TradeManagerExtensionTests(unittest.TestCase):
             skip_ig_synced_exits=True,
             points_engine=self.points,
         )
+        self._friday_patch = patch.object(
+            TradeManager, "_is_friday_close_window", return_value=False
+        )
+        self._friday_patch.start()
 
     def tearDown(self) -> None:
+        self._friday_patch.stop()
         self.store.close()
         self.tmp.cleanup()
 
@@ -381,8 +386,13 @@ class ATRBasedTriggerTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.store = LearningStore(str(Path(self.tmp.name) / "t.db"))
         self.store.connect()
+        self._friday_patch = patch.object(
+            TradeManager, "_is_friday_close_window", return_value=False
+        )
+        self._friday_patch.start()
 
     def tearDown(self) -> None:
+        self._friday_patch.stop()
         self.store.close()
         self.tmp.cleanup()
 
@@ -459,8 +469,13 @@ class LimitExtensionTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.store = LearningStore(str(Path(self.tmp.name) / "t.db"))
         self.store.connect()
+        self._friday_patch = patch.object(
+            TradeManager, "_is_friday_close_window", return_value=False
+        )
+        self._friday_patch.start()
 
     def tearDown(self) -> None:
+        self._friday_patch.stop()
         self.store.close()
         self.tmp.cleanup()
 
