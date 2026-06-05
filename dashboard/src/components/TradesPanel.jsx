@@ -8,7 +8,24 @@ const EXCLUDED_SOURCE_TAGS = ["sim", "soak", "proof", "replay", "test"];
 const VALID_RESULTS = new Set(["WIN", "LOSS", "PENDING"]);
 
 function resolvePositions(state) {
-  return state?.positions ?? state?.active_trades ?? [];
+  // Top-level positions (aggregated by backend from all market slices)
+  if (Array.isArray(state?.positions) && state.positions.length > 0) return state.positions;
+  if (Array.isArray(state?.active_trades) && state.active_trades.length > 0) return state.active_trades;
+  // Fallback: aggregate from per-market slices in case backend hasn't enriched yet
+  const markets = state?.markets;
+  if (markets && typeof markets === "object") {
+    const all = [];
+    for (const [epic, mslice] of Object.entries(markets)) {
+      const positions = mslice?.positions;
+      if (Array.isArray(positions)) {
+        positions.forEach((p) => {
+          all.push({ epic, market: mslice?.market_name ?? mslice?.market ?? epic, ...p });
+        });
+      }
+    }
+    if (all.length > 0) return all;
+  }
+  return [];
 }
 
 function isExcludedSource(trade) {

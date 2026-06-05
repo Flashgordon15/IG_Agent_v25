@@ -1061,7 +1061,7 @@ class TradingLoop:
         stop = float(self._config.stop_distance_points)
         base_size = float(self._config.trade_size)
         point_value = float(self._config.get("ig_point_value_gbp", 1.0))
-        # Plan with points-tier minimum size (CAUTION → 0.25× at 80%+, 0.5× at 88%+).
+        # Plan with points-tier minimum size (CAUTION → 0.5× at 80%+).
         from trading.points_engine import CONF_MARGINAL_MIN
 
         planning_conf = max(

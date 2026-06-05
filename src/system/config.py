@@ -148,7 +148,9 @@ class Config:
 
     @property
     def adaptive_max_entry_spread(self) -> float:
-        return float(self._data.get("adaptive_max_entry_spread", self.max_spread_points))
+        return float(
+            self._data.get("adaptive_max_entry_spread", self.max_spread_points)
+        )
 
     @property
     def adaptive_max_limit_atr_multiple(self) -> float:
@@ -310,7 +312,9 @@ class Config:
 
     @property
     def breakeven_lock_points(self) -> float:
-        return float(self._data.get("breakeven_lock_points", self.breakeven_offset_points))
+        return float(
+            self._data.get("breakeven_lock_points", self.breakeven_offset_points)
+        )
 
     @property
     def breakeven_once_per_position(self) -> bool:
@@ -334,15 +338,61 @@ class Config:
 
     @property
     def trailing_stop_step_points(self) -> float:
-        return float(self._data.get("trailing_stop_step_points", self.adaptive_trailing_distance_points))
+        return float(
+            self._data.get(
+                "trailing_stop_step_points", self.adaptive_trailing_distance_points
+            )
+        )
+
+    # --- Dynamic trailing stop block (ATR-based thresholds + limit extension) ---
+    @property
+    def trailing_stop(self) -> dict[str, Any]:
+        raw = self._data.get("trailing_stop")
+        return dict(raw) if isinstance(raw, dict) else {}
+
+    @property
+    def trail_trigger_atr_multiple(self) -> float:
+        """Start trailing when profit >= N × entry_ATR. 0 = use adaptive_trailing_trigger_points."""
+        return float(self.trailing_stop.get("trail_trigger_atr_multiple", 0.0))
+
+    @property
+    def breakeven_trigger_atr_multiple(self) -> float:
+        """Move stop to breakeven when profit >= N × entry_ATR. 0 = use breakeven_trigger_points."""
+        return float(self.trailing_stop.get("breakeven_trigger_atr_multiple", 0.0))
+
+    @property
+    def limit_extension_enabled(self) -> bool:
+        """Extend take-profit limit when trade trends beyond trigger_atr_multiple × ATR."""
+        return bool(self.trailing_stop.get("limit_extension_enabled", False))
+
+    @property
+    def limit_extension_trigger_atr_multiple(self) -> float:
+        """Minimum profit (× ATR) before first limit extension fires."""
+        return float(
+            self.trailing_stop.get("limit_extension_trigger_atr_multiple", 1.5)
+        )
+
+    @property
+    def limit_extension_step_atr_multiple(self) -> float:
+        """How far to push the limit per extension (× ATR)."""
+        return float(self.trailing_stop.get("limit_extension_step_atr_multiple", 1.0))
+
+    @property
+    def limit_extension_max_extensions(self) -> int:
+        """Maximum number of limit extensions per open position."""
+        return int(self.trailing_stop.get("limit_extension_max_extensions", 2))
 
     @property
     def stop_distance_points(self) -> float:
-        return float(self._data.get("stop_distance_points", self.default_stop_distance_points))
+        return float(
+            self._data.get("stop_distance_points", self.default_stop_distance_points)
+        )
 
     @property
     def limit_distance_points(self) -> float:
-        return float(self._data.get("limit_distance_points", self.default_limit_distance_points))
+        return float(
+            self._data.get("limit_distance_points", self.default_limit_distance_points)
+        )
 
     # --- Risk manager ---
     @property
@@ -527,11 +577,15 @@ class Config:
 
     @property
     def startup_countdown_seconds_warm_session(self) -> float:
-        return max(0.0, float(self._data.get("startup_countdown_seconds_warm_session", 3.0)))
+        return max(
+            0.0, float(self._data.get("startup_countdown_seconds_warm_session", 3.0))
+        )
 
     @property
     def startup_countdown_warm_session_minutes(self) -> float:
-        return max(1.0, float(self._data.get("startup_countdown_warm_session_minutes", 30.0)))
+        return max(
+            1.0, float(self._data.get("startup_countdown_warm_session_minutes", 30.0))
+        )
 
     @property
     def market_watch_enabled(self) -> bool:
@@ -628,7 +682,13 @@ class Config:
 
     @property
     def trading_session_whitelist(self) -> list[str]:
-        default = ["asia_early", "london_morning", "london_us_overlap", "us_afternoon", "late"]
+        default = [
+            "asia_early",
+            "london_morning",
+            "london_us_overlap",
+            "us_afternoon",
+            "late",
+        ]
         return list(self._data.get("trading_session_whitelist", default))
 
     # --- Test parity ---

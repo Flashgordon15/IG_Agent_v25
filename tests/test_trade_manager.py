@@ -58,7 +58,9 @@ def _cfg(**overrides) -> Config:
     return Config(_data=data)
 
 
-def _open_trade(store: LearningStore, *, entry: float = 100.0, stop: float = 90.0) -> int:
+def _open_trade(
+    store: LearningStore, *, entry: float = 100.0, stop: float = 90.0
+) -> int:
     return store.open_trade(
         TradeRecord(
             id=None,
@@ -82,7 +84,9 @@ def _open_trade(store: LearningStore, *, entry: float = 100.0, stop: float = 90.
     )
 
 
-def _open_sell_trade(store: LearningStore, *, entry: float = 100.0, stop: float = 110.0) -> int:
+def _open_sell_trade(
+    store: LearningStore, *, entry: float = 100.0, stop: float = 110.0
+) -> int:
     return store.open_trade(
         TradeRecord(
             id=None,
@@ -170,7 +174,9 @@ class TradeManagerExtensionTests(unittest.TestCase):
         self.store.set_v25_entry_meta(
             tid, confidence_band="high", entry_atr=20.0, trail_distance=35.0
         )
-        self.store.conn.execute("UPDATE trades SET target=? WHERE id=?", (entry + 200, tid))
+        self.store.conn.execute(
+            "UPDATE trades SET target=? WHERE id=?", (entry + 200, tid)
+        )
         self.store.conn.commit()
         cfg = _cfg(
             breakeven_enabled=False,
@@ -184,7 +190,9 @@ class TradeManagerExtensionTests(unittest.TestCase):
         )
         self.assertTrue(any("TRAILING" in m for m in msgs))
         stop = float(
-            self.store.conn.execute("SELECT stop FROM trades WHERE id=?", (tid,)).fetchone()["stop"]
+            self.store.conn.execute(
+                "SELECT stop FROM trades WHERE id=?", (tid,)
+            ).fetchone()["stop"]
         )
         self.assertAlmostEqual(stop, px - 35.0, places=1)
 
@@ -199,7 +207,9 @@ class TradeManagerExtensionTests(unittest.TestCase):
         )
         self.assertTrue(any("BREAKEVEN" in m for m in msgs))
         stop = float(
-            self.store.conn.execute("SELECT stop FROM trades WHERE id=?", (tid,)).fetchone()["stop"]
+            self.store.conn.execute(
+                "SELECT stop FROM trades WHERE id=?", (tid,)
+            ).fetchone()["stop"]
         )
         self.assertAlmostEqual(stop, entry, places=1)
 
@@ -220,7 +230,9 @@ class TradeManagerExtensionTests(unittest.TestCase):
         msgs1 = mgr.update_from_quote("Japan 225", "IX.D.NIKKEI.IFM.IP", quote)
         self.assertTrue(any("PARTIAL CLOSE" in m for m in msgs1))
         size_after = float(
-            self.store.conn.execute("SELECT size FROM trades WHERE id=?", (tid,)).fetchone()["size"]
+            self.store.conn.execute(
+                "SELECT size FROM trades WHERE id=?", (tid,)
+            ).fetchone()["size"]
         )
         self.assertAlmostEqual(size_after, 1.0)
         self.assertTrue(self.store.is_partial_close_done(tid))
@@ -258,14 +270,18 @@ class TradeManagerExtensionTests(unittest.TestCase):
             "Japan 225", "IX.D.NIKKEI.IFM.IP", Quote(datetime.now(), px, px + 1)
         )
         stop_high = float(
-            self.store.conn.execute("SELECT stop FROM trades WHERE id=?", (tid,)).fetchone()["stop"]
+            self.store.conn.execute(
+                "SELECT stop FROM trades WHERE id=?", (tid,)
+            ).fetchone()["stop"]
         )
         px_low = entry + 5
         mgr.update_from_quote(
             "Japan 225", "IX.D.NIKKEI.IFM.IP", Quote(datetime.now(), px_low, px_low + 1)
         )
         stop_after = float(
-            self.store.conn.execute("SELECT stop FROM trades WHERE id=?", (tid,)).fetchone()["stop"]
+            self.store.conn.execute(
+                "SELECT stop FROM trades WHERE id=?", (tid,)
+            ).fetchone()["stop"]
         )
         self.assertAlmostEqual(stop_after, stop_high, places=1)
 
@@ -292,7 +308,9 @@ class TrailDirectionAssertionTests(unittest.TestCase):
         self.assertTrue(msgs)
         mock_log.assert_not_called()
         new_stop = float(
-            self.store.conn.execute("SELECT stop FROM trades WHERE id=?", (tid,)).fetchone()["stop"]
+            self.store.conn.execute(
+                "SELECT stop FROM trades WHERE id=?", (tid,)
+            ).fetchone()["stop"]
         )
         self.assertAlmostEqual(new_stop, px - 25)
 
@@ -311,7 +329,9 @@ class TrailDirectionAssertionTests(unittest.TestCase):
         self.assertIn("current=115", msg)
         self.assertIn("proposed=95", msg)
         unchanged = float(
-            self.store.conn.execute("SELECT stop FROM trades WHERE id=?", (tid,)).fetchone()["stop"]
+            self.store.conn.execute(
+                "SELECT stop FROM trades WHERE id=?", (tid,)
+            ).fetchone()["stop"]
         )
         self.assertAlmostEqual(unchanged, stop)
 
@@ -326,12 +346,16 @@ class TrailDirectionAssertionTests(unittest.TestCase):
         self.assertTrue(msgs)
         mock_log.assert_not_called()
         new_stop = float(
-            self.store.conn.execute("SELECT stop FROM trades WHERE id=?", (tid,)).fetchone()["stop"]
+            self.store.conn.execute(
+                "SELECT stop FROM trades WHERE id=?", (tid,)
+            ).fetchone()["stop"]
         )
         self.assertAlmostEqual(new_stop, px + 25)
 
     @patch("trading.trade_manager.log_engine")
-    def test_sell_trail_rejected_when_stop_would_rise(self, mock_log: MagicMock) -> None:
+    def test_sell_trail_rejected_when_stop_would_rise(
+        self, mock_log: MagicMock
+    ) -> None:
         entry, stop, target = 100.0, 85.0, 0.0
         tid = _open_sell_trade(self.store, entry=entry, stop=stop)
         px = 90.0
@@ -343,9 +367,228 @@ class TrailDirectionAssertionTests(unittest.TestCase):
         msg = mock_log.call_args[0][0]
         self.assertEqual(msg, "ERROR: Trail would move stop backwards — rejected.")
         unchanged = float(
-            self.store.conn.execute("SELECT stop FROM trades WHERE id=?", (tid,)).fetchone()["stop"]
+            self.store.conn.execute(
+                "SELECT stop FROM trades WHERE id=?", (tid,)
+            ).fetchone()["stop"]
         )
         self.assertAlmostEqual(unchanged, stop)
+
+
+class ATRBasedTriggerTests(unittest.TestCase):
+    """Verify that ATR-based breakeven/trail triggers override fixed-point config."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = LearningStore(str(Path(self.tmp.name) / "t.db"))
+        self.store.connect()
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.tmp.cleanup()
+
+    def test_atr_breakeven_fires_before_fixed_trigger(self) -> None:
+        """With trail_trigger_atr_multiple=0.5 and ATR=20, breakeven triggers at 10 pts profit."""
+        entry = 100.0
+        tid = _open_trade(self.store, entry=entry, stop=80.0)
+        self.store.set_v25_entry_meta(
+            tid, confidence_band="standard", entry_atr=20.0, trail_distance=30.0
+        )
+        cfg = _cfg(
+            breakeven_trigger_points=50,  # high fixed trigger (would NOT fire at 12 pts)
+            adaptive_trailing_stop_enabled=False,
+            trailing_stop={"breakeven_trigger_atr_multiple": 0.5},  # 0.5 * 20 = 10 pts
+        )
+        mgr = TradeManager(cfg, self.store, skip_ig_synced_exits=True)
+        px = entry + 12  # profit=12 > ATR trigger=10
+        msgs = mgr.update_from_quote(
+            "Japan 225", "IX.D.NIKKEI.IFM.IP", Quote(datetime.now(), px, px + 1)
+        )
+        self.assertTrue(any("BREAKEVEN" in m for m in msgs), msgs)
+
+    def test_atr_trail_trigger_overrides_fixed_points(self) -> None:
+        """With trail_trigger_atr_multiple=1.0 and ATR=20, trail fires at 22 pts profit."""
+        entry = 100.0
+        tid = _open_trade(self.store, entry=entry, stop=80.0)
+        self.store.set_v25_entry_meta(
+            tid, confidence_band="standard", entry_atr=20.0, trail_distance=15.0
+        )
+        self.store.conn.execute(
+            "UPDATE trades SET target=? WHERE id=?", (entry + 200, tid)
+        )
+        self.store.conn.commit()
+        cfg = _cfg(
+            breakeven_enabled=False,
+            adaptive_trailing_trigger_points=50,  # fixed trigger (would NOT fire at 22 pts)
+            trailing_stop={"trail_trigger_atr_multiple": 1.0},  # 1.0 * 20 = 20 pts
+        )
+        mgr = TradeManager(cfg, self.store, skip_ig_synced_exits=True)
+        px = entry + 22  # profit=22 > ATR trigger=20
+        msgs = mgr.update_from_quote(
+            "Japan 225", "IX.D.NIKKEI.IFM.IP", Quote(datetime.now(), px, px + 1)
+        )
+        self.assertTrue(any("TRAILING" in m for m in msgs), msgs)
+
+    def test_atr_trigger_zero_falls_back_to_points(self) -> None:
+        """When trail_trigger_atr_multiple=0 (missing block), falls back to adaptive_trailing_trigger_points."""
+        entry = 100.0
+        tid = _open_trade(self.store, entry=entry, stop=80.0)
+        self.store.set_v25_entry_meta(
+            tid, confidence_band="standard", entry_atr=20.0, trail_distance=15.0
+        )
+        self.store.conn.execute(
+            "UPDATE trades SET target=? WHERE id=?", (entry + 200, tid)
+        )
+        self.store.conn.commit()
+        cfg = _cfg(
+            breakeven_enabled=False,
+            adaptive_trailing_trigger_points=10,  # fixed trigger fires at 12 pts
+            # No trailing_stop block → mult=0 → fallback
+        )
+        mgr = TradeManager(cfg, self.store, skip_ig_synced_exits=True)
+        px = entry + 12
+        msgs = mgr.update_from_quote(
+            "Japan 225", "IX.D.NIKKEI.IFM.IP", Quote(datetime.now(), px, px + 1)
+        )
+        self.assertTrue(any("TRAILING" in m for m in msgs), msgs)
+
+
+class LimitExtensionTests(unittest.TestCase):
+    """Verify that limit extension fires and caps correctly."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = LearningStore(str(Path(self.tmp.name) / "t.db"))
+        self.store.connect()
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.tmp.cleanup()
+
+    def _mgr_with_ext(self, **overrides) -> TradeManager:
+        data = {
+            "breakeven_enabled": False,
+            "adaptive_trailing_stop_enabled": False,
+            "trailing_stop": {
+                "limit_extension_enabled": True,
+                "limit_extension_trigger_atr_multiple": 1.5,
+                "limit_extension_step_atr_multiple": 1.0,
+                "limit_extension_max_extensions": 2,
+            },
+        }
+        data.update(overrides)
+        cfg = _cfg(**data)
+        return TradeManager(cfg, self.store, skip_ig_synced_exits=True)
+
+    def test_limit_extension_fires_on_trigger(self) -> None:
+        entry, atr = 100.0, 20.0
+        initial_target = entry + 60
+        tid = _open_trade(self.store, entry=entry, stop=80.0)
+        self.store.set_v25_entry_meta(
+            tid, confidence_band="standard", entry_atr=atr, trail_distance=15.0
+        )
+        self.store.conn.execute(
+            "UPDATE trades SET target=? WHERE id=?", (initial_target, tid)
+        )
+        self.store.conn.commit()
+
+        mgr = self._mgr_with_ext()
+        # profit = 32 pts >= trigger (1.5 * 20 = 30)
+        px = entry + 32
+        msgs = mgr.update_from_quote(
+            "Japan 225", "IX.D.NIKKEI.IFM.IP", Quote(datetime.now(), px, px + 1)
+        )
+        self.assertTrue(any("LIMIT EXTENDED" in m for m in msgs), msgs)
+        new_target = float(
+            self.store.conn.execute(
+                "SELECT target FROM trades WHERE id=?", (tid,)
+            ).fetchone()["target"]
+        )
+        self.assertAlmostEqual(new_target, initial_target + atr, places=1)
+
+    def test_limit_extension_capped_at_max(self) -> None:
+        entry, atr = 100.0, 20.0
+        initial_target = entry + 60
+        tid = _open_trade(self.store, entry=entry, stop=80.0)
+        self.store.set_v25_entry_meta(
+            tid, confidence_band="standard", entry_atr=atr, trail_distance=15.0
+        )
+        self.store.conn.execute(
+            "UPDATE trades SET target=? WHERE id=?", (initial_target, tid)
+        )
+        self.store.conn.commit()
+
+        mgr = self._mgr_with_ext()
+        # Drive profit high enough to exceed both extensions (max=2)
+        for profit in [32, 52, 75]:
+            px = entry + profit
+            mgr.update_from_quote(
+                "Japan 225", "IX.D.NIKKEI.IFM.IP", Quote(datetime.now(), px, px + 1)
+            )
+        # Should have been extended exactly 2 times (step=20 each)
+        new_target = float(
+            self.store.conn.execute(
+                "SELECT target FROM trades WHERE id=?", (tid,)
+            ).fetchone()["target"]
+        )
+        self.assertAlmostEqual(new_target, initial_target + 2 * atr, places=1)
+        self.assertEqual(mgr._limit_ext_count.get(tid, 0), 2)
+
+    def test_limit_extension_not_fired_when_disabled(self) -> None:
+        entry, atr = 100.0, 20.0
+        initial_target = entry + 60
+        tid = _open_trade(self.store, entry=entry, stop=80.0)
+        self.store.set_v25_entry_meta(
+            tid, confidence_band="standard", entry_atr=atr, trail_distance=15.0
+        )
+        self.store.conn.execute(
+            "UPDATE trades SET target=? WHERE id=?", (initial_target, tid)
+        )
+        self.store.conn.commit()
+
+        cfg = _cfg(
+            breakeven_enabled=False,
+            adaptive_trailing_stop_enabled=False,
+            trailing_stop={"limit_extension_enabled": False},  # disabled
+        )
+        mgr = TradeManager(cfg, self.store, skip_ig_synced_exits=True)
+        px = entry + 50
+        msgs = mgr.update_from_quote(
+            "Japan 225", "IX.D.NIKKEI.IFM.IP", Quote(datetime.now(), px, px + 1)
+        )
+        self.assertFalse(any("LIMIT EXTENDED" in m for m in msgs), msgs)
+        current_target = float(
+            self.store.conn.execute(
+                "SELECT target FROM trades WHERE id=?", (tid,)
+            ).fetchone()["target"]
+        )
+        self.assertAlmostEqual(current_target, initial_target, places=1)
+
+    def test_sell_limit_extension_moves_target_down(self) -> None:
+        entry, atr = 100.0, 20.0
+        initial_target = entry - 60
+        tid = _open_sell_trade(self.store, entry=entry, stop=110.0)
+        self.store.set_v25_entry_meta(
+            tid, confidence_band="standard", entry_atr=atr, trail_distance=15.0
+        )
+        self.store.conn.execute(
+            "UPDATE trades SET target=? WHERE id=?", (initial_target, tid)
+        )
+        self.store.conn.commit()
+
+        mgr = self._mgr_with_ext()
+        # SELL: profit = entry - px = 100 - 68 = 32 >= 1.5 * 20 = 30
+        px = entry - 32
+        msgs = mgr.update_from_quote(
+            "Japan 225", "IX.D.NIKKEI.IFM.IP", Quote(datetime.now(), px + 1, px)
+        )
+        self.assertTrue(any("LIMIT EXTENDED" in m for m in msgs), msgs)
+        new_target = float(
+            self.store.conn.execute(
+                "SELECT target FROM trades WHERE id=?", (tid,)
+            ).fetchone()["target"]
+        )
+        # SELL target should decrease (move further in profit direction)
+        self.assertAlmostEqual(new_target, initial_target - atr, places=1)
 
 
 if __name__ == "__main__":

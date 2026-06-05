@@ -246,6 +246,26 @@ def _tick_for_readers(tick: dict[str, Any]) -> dict[str, Any]:
     if isinstance(sig, dict):
         out["signal"] = dict(sig)
     enrich_signal_thresholds(out)
+
+    # Aggregate positions from all market slices into the top-level positions array
+    # so the dashboard TradesPanel always has a flat list to render.
+    markets = out.get("markets")
+    if isinstance(markets, dict):
+        all_positions: list[dict] = []
+        for epic_key, mslice in markets.items():
+            if not isinstance(mslice, dict):
+                continue
+            for pos in mslice.get("positions") or []:
+                if isinstance(pos, dict):
+                    enriched = dict(pos)
+                    enriched.setdefault("epic", epic_key)
+                    enriched.setdefault(
+                        "market",
+                        mslice.get("market_name") or mslice.get("market") or epic_key,
+                    )
+                    all_positions.append(enriched)
+        if all_positions:
+            out["positions"] = all_positions
     # Inject live OHLC market count so SystemPanel can show it without an extra API call
     if "ohlc_markets_cached" not in out:
         try:

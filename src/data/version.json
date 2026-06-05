@@ -1,20 +1,46 @@
 {
-  "version": "25.3.0",
+  "version": "25.2.1",
   "shown": false,
   "build_date": "2026-06-05",
-  "dismissed_at": null,
   "changelog": [
-    "Environment scorer cold start cap aligned: COLD_START_BAR_CAP reduced from 6 to 2 bars — fitness now reaches full score in ~10 min instead of 30 min",
-    "Dashboard now shows ML-blended confidence in market box (not raw rules %): extracted from gate signal_confidence.value.confidence",
-    "Added rules_confidence and threshold_delta to snapshot signal dict for transparency",
-    "OHLC bootstrap now cache-first split: cached markets load in parallel, REST-needed markets stagger 22s apart to avoid bursting 3/min cap",
-    "Nasdaq (IX.D.NASDAQ.IFM.IP / NQ=F) added to EPIC_YAHOO_MAP and DEFAULT_SEED_EPICS for automatic OHLC pre-population",
-    "Startup OHLC pre-seed: missing Yahoo-mapped caches now auto-populated before REST bootstrap on every launch",
-    "Agent startup now kills stale agent processes and removes stale lock file before acquiring a new lock",
-    "Startup self-test added: test_deployed_fixes.py regression suite runs during bootstrap (self_test phase)",
-    "Startup tracker gains self_test phase (55%) in splash screen checklist",
-    "Test suite updated: session_manager and trade_eligibility tests use COLD_START_BARS constant instead of hardcoded 6",
-    "Regression tests expanded: 10 new tests in test_deployed_fixes.py covering all Session 3 fixes (30 total)"
+    {
+      "version": "25.2.1",
+      "date": "2026-06-05",
+      "title": "Trailing stop tuning & limit extension enabled",
+      "changes": [
+        "New: Limit extension enabled — take-profit extends up to 3× as winning trades trend further",
+        "Changed: Trail trigger tightened to 0.75× ATR (was 1.0×) — locks in profits sooner",
+        "Changed: Breakeven trigger at 0.4× ATR (was 0.5×) — faster stop-to-entry on fast moves",
+        "Changed: CAUTION size multiplier lifted to 0.5× flat (was 0.25× below 88% confidence)",
+        "Changed: Limit extension step reduced to 0.75× ATR for finer, more frequent extensions",
+        "Changed: Max limit extensions per position increased to 3 (was 2)"
+      ]
+    },
+    {
+      "version": "25.2.0",
+      "date": "2026-06-05",
+      "title": "Cold start, blended confidence & startup cleanup",
+      "changes": [
+        "Changed: COLD_START_BARS reduced from 6 to 2 — markets ready in ~10 min",
+        "New: Dashboard market boxes now show ML-blended confidence (not raw rules %)",
+        "New: ATR-scaled trailing stop triggers for all instruments",
+        "New: Nasdaq added to Yahoo OHLC pre-seeder for faster cold start",
+        "Fixed: Startup now kills stale processes and removes lock file automatically",
+        "New: Startup self-test suite runs on every launch"
+      ]
+    },
+    {
+      "version": "25.1.0",
+      "date": "2026-06-04",
+      "title": "ML decisions, session whitelist & gap expiry",
+      "changes": [
+        "New: ML decision log visible on dashboard",
+        "Fixed: gap_detected now clears after 12 bars",
+        "New: london_morning added to Nasdaq/Wall Street session whitelist",
+        "Fixed: Session summary MagicMock bug resolved",
+        "New: Stop Agent button with heartbeat-based shutdown"
+      ]
+    }
   ],
-  "shown_for_version": "25.2.1"
+  "shown_for_version": "25.2.0"
 }

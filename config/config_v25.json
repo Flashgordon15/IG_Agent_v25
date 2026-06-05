@@ -329,5 +329,13 @@
     "bot_token": "",
     "chat_id": ""
   },
-  "rest_hard_cap_per_minute": 3
+  "rest_hard_cap_per_minute": 3,
+  "trailing_stop": {
+    "trail_trigger_atr_multiple": 0.75,
+    "breakeven_trigger_atr_multiple": 0.4,
+    "limit_extension_enabled": true,
+    "limit_extension_trigger_atr_multiple": 1.5,
+    "limit_extension_step_atr_multiple": 0.75,
+    "limit_extension_max_extensions": 3
+  }
 }

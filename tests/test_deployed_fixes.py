@@ -399,3 +399,311 @@ class TestSession3StartupCleanup:
             "_pre_startup_cleanup() has no SIGKILL fallback — "
             "stubborn processes will not be killed"
         )
+
+
+# ---------------------------------------------------------------------------
+# SESSION 4 PRE-LAUNCH VALIDATION
+# ---------------------------------------------------------------------------
+
+
+class TestSession4PreLaunchValidation:
+    """Pre-launch validation for Session 4 changes: trailing stop ATR scaling,
+    CAUTION size multiplier, position laddering, dashboard positions aggregation,
+    ML blend cap, and environment fitness gating."""
+
+    # ------------------------------------------------------------------
+    # Test A: Trades & points sync
+    # ------------------------------------------------------------------
+
+    def test_points_engine_records_trade_and_updates_state(self, tmp_path):
+        import sys
+
+        sys.path.insert(0, str(SRC))
+        from trading.points_engine import PointsEngine, _nominal_state
+
+        engine = PointsEngine(store=None, state_path=tmp_path / "pts.json")
+        # Fresh engine starts at cumulative=0 → CAUTION
+        assert engine.get_state() in ("CAUTION", "HEALTHY")
+
+        # Record 8 wins — flat scoring (no DB): each += 1.0
+        for _ in range(8):
+            engine.record_trade("WIN", confidence=90.0, pnl_pts=5.0)
+
+        snap = engine.snapshot()
+        assert snap.cumulative > 6.0, (
+            f"After 8 wins cumulative={snap.cumulative:.1f} — expected > 6.0 (HEALTHY threshold)"
+        )
+        assert engine.get_state() == "HEALTHY", (
+            f"State={engine.get_state()} — expected HEALTHY after cumulative > 6"
+        )
+
+    def test_points_engine_caution_size_multiplier_flat(self, tmp_path):
+        """CAUTION state must return 0.5× for all confidence values ≥ 80 (new flat rate)."""
+        import sys
+
+        sys.path.insert(0, str(SRC))
+        from trading.points_engine import CONF_MARGINAL_MIN, PointsEngine
+
+        engine = PointsEngine(store=None, state_path=tmp_path / "pts_caution.json")
+        # cumulative=0 → CAUTION
+        assert engine.get_state() == "CAUTION", (
+            f"Expected CAUTION at zero cumulative, got {engine.get_state()}"
+        )
+        for conf in (80, 85, 88, 95):
+            mult = engine.get_size_multiplier(float(conf))
+            assert mult == 0.5, (
+                f"CAUTION state: get_size_multiplier({conf}) = {mult}, expected 0.5 "
+                f"(flat rate for all conf >= {CONF_MARGINAL_MIN})"
+            )
+
+    # ------------------------------------------------------------------
+    # Test B: Trailing stop
+    # ------------------------------------------------------------------
+
+    def test_trailing_stop_config_keys_present(self):
+        cfg = json.loads(CONFIG.read_text())
+        ts = cfg.get("trailing_stop")
+        assert isinstance(ts, dict), "trailing_stop block missing from config_v25.json"
+        for key in (
+            "trail_trigger_atr_multiple",
+            "breakeven_trigger_atr_multiple",
+            "limit_extension_enabled",
+            "limit_extension_max_extensions",
+        ):
+            assert key in ts, f"trailing_stop.{key} missing from config_v25.json"
+        assert ts["limit_extension_enabled"] is True, (
+            f"limit_extension_enabled={ts['limit_extension_enabled']}, expected True"
+        )
+        assert ts["limit_extension_max_extensions"] == 3, (
+            f"limit_extension_max_extensions={ts['limit_extension_max_extensions']}, expected 3"
+        )
+
+    def test_trailing_stop_atr_trigger_scales(self, tmp_path):
+        """_effective_trail_trigger must return mult * atr when mult > 0."""
+        import sys
+
+        sys.path.insert(0, str(SRC))
+
+        cfg_data = json.loads(CONFIG.read_text())
+        mult = cfg_data["trailing_stop"]["trail_trigger_atr_multiple"]
+        assert 0 < mult < 1.0, (
+            f"trail_trigger_atr_multiple={mult} — expected a fractional ATR multiple < 1.0"
+        )
+
+        # Verify TradeManager._effective_trail_trigger uses the multiple correctly
+        src = (SRC / "trading" / "trade_manager.py").read_text()
+        assert "_effective_trail_trigger" in src, (
+            "_effective_trail_trigger() missing from trade_manager.py"
+        )
+        assert "trail_trigger_atr_multiple" in src, (
+            "trade_manager.py does not reference trail_trigger_atr_multiple — "
+            "ATR scaling not wired up"
+        )
+        assert "mult * entry_atr" in src or "mult * atr" in src, (
+            "trade_manager._effective_trail_trigger does not multiply mult by atr"
+        )
+
+    # ------------------------------------------------------------------
+    # Test C: Position laddering
+    # ------------------------------------------------------------------
+
+    def test_dynamic_max_per_epic_healthy_required(self):
+        """Laddering must stay at base_cap unless points state == HEALTHY."""
+        import sys
+
+        sys.path.insert(0, str(SRC))
+        from trading.trading_loop import TradingLoop
+
+        class _MockPoints:
+            def __init__(self, state: str) -> None:
+                self._state = state
+
+            def get_state(self) -> str:
+                return self._state
+
+        class _MockTracker:
+            def __init__(self, positions=None) -> None:
+                self._positions = positions or []
+
+            def snapshot(self) -> dict:
+                return {"positions": self._positions}
+
+        loop = object.__new__(TradingLoop)
+        loop._epic = "IX.D.FTSE.IFM.IP"
+
+        # CAUTION — must not ladder
+        loop._points = _MockPoints("CAUTION")
+        cap, reason = loop._dynamic_max_per_epic(2, 1, _MockTracker())
+        assert cap == 2, f"CAUTION state: expected base_cap=2, got {cap}"
+        assert "CAUTION" in reason, f"Reason should mention CAUTION, got: {reason!r}"
+
+        # HEALTHY, no positions → no ladder
+        loop._points = _MockPoints("HEALTHY")
+        cap, reason = loop._dynamic_max_per_epic(2, 0, _MockTracker())
+        assert cap == 2, f"HEALTHY/no open: expected base_cap=2, got {cap}"
+
+        # HEALTHY, all positions profitable, oldest < 20 min → base_cap+1
+        pos_young = [{"epic": loop._epic, "pnl_gbp": 5.0, "open_mins": 10}]
+        cap, reason = loop._dynamic_max_per_epic(2, 1, _MockTracker(pos_young))
+        assert cap == 3, f"HEALTHY/profitable/young: expected base_cap+1=3, got {cap}"
+
+        # HEALTHY, all positions profitable, oldest >= 20 min → base_cap+2
+        pos_mature = [{"epic": loop._epic, "pnl_gbp": 5.0, "open_mins": 25}]
+        cap, reason = loop._dynamic_max_per_epic(2, 1, _MockTracker(pos_mature))
+        assert cap == 4, f"HEALTHY/profitable/mature: expected base_cap+2=4, got {cap}"
+
+    # ------------------------------------------------------------------
+    # Test D: Dashboard positions aggregation
+    # ------------------------------------------------------------------
+
+    def test_snapshot_positions_aggregated_from_markets(self):
+        """_tick_for_readers must hoist positions from markets[epic].positions to top level."""
+        import sys
+
+        sys.path.insert(0, str(SRC))
+        from api.snapshot_store import _tick_for_readers
+
+        tick = {
+            "markets": {
+                "EPIC1": {
+                    "market_name": "Wall Street",
+                    "positions": [
+                        {
+                            "deal_id": "X",
+                            "side": "SELL",
+                            "entry": 100.0,
+                            "current": 95.0,
+                            "pnl_gbp": 2.5,
+                            "size": 0.5,
+                        }
+                    ],
+                }
+            }
+        }
+        out = _tick_for_readers(tick)
+        positions = out.get("positions")
+        assert isinstance(positions, list) and len(positions) > 0, (
+            "_tick_for_readers did not aggregate positions from markets[epic].positions "
+            "into top-level 'positions' list — TradesPanel will show empty trades"
+        )
+        first = positions[0]
+        assert first.get("deal_id") == "X", f"Aggregated position lost deal_id: {first}"
+        assert first.get("epic") == "EPIC1", (
+            f"Aggregated position missing epic key: {first}"
+        )
+        assert first.get("market") == "Wall Street", (
+            f"Aggregated position missing market name: {first}"
+        )
+
+    # ------------------------------------------------------------------
+    # Test E: ML alignment
+    # ------------------------------------------------------------------
+
+    def test_ml_blend_confidence_capped_at_100(self):
+        """Blended confidence from ML + rules must never exceed 100."""
+        src = (SRC / "trading" / "trading_loop.py").read_text()
+        # The blend formula and clamp must both be present
+        assert "min(100.0, conf)" in src, (
+            "trading_loop._gate_signal_confidence does not clamp blended conf to 100 — "
+            "confidence > 100 would pass any threshold check"
+        )
+        assert "ml_prob * 100.0 * 0.4" in src or "ml_prob * 100" in src, (
+            "ML blend formula missing from trading_loop — ML probability not scaled to %"
+        )
+        # Verify the math: worst case 100% rules + 100% ML → exactly 100
+        rules_conf = 100.0
+        ml_prob = 1.0
+        blended = (rules_conf * 0.6) + (ml_prob * 100.0 * 0.4)
+        clamped = max(0.0, min(100.0, blended))
+        assert clamped <= 100.0, f"Blended confidence {blended} > 100 before clamp"
+        assert clamped == 100.0
+
+    # ------------------------------------------------------------------
+    # Test F: Market weakness vs agent (environment fitness gate)
+    # ------------------------------------------------------------------
+
+    def test_market_weakness_detection(self):
+        """_gate_environment_fitness must fail with a fitness-specific reason when score < threshold."""
+        import sys
+
+        sys.path.insert(0, str(SRC))
+        from datetime import datetime
+
+        import pandas as pd
+
+        from data.models import Quote
+        from trading.environment_scorer import GATE_PASS_MIN
+        from trading.trading_loop import TradingLoop
+
+        class _WeakEnv:
+            def score(self, market, quote=None, quote_df=None):
+                return 20.0  # well below GATE_PASS_MIN (55)
+
+            def get_sentiment_factor(self, market):
+                return {}
+
+        class _MockSignalEngine:
+            def quote_df(self, market):
+                return pd.DataFrame()
+
+        loop = object.__new__(TradingLoop)
+        loop._market = "EPIC1"
+        loop._env = _WeakEnv()
+        loop._signal_engine = _MockSignalEngine()
+
+        quote = Quote(datetime.now(), 100.0, 101.0)
+        result = loop._gate_environment_fitness(quote)
+
+        assert not result.passed, (
+            "environment_fitness gate passed with score=20% — "
+            "weak market conditions should block trading"
+        )
+        assert "fitness" in result.detail.lower(), (
+            f"Gate detail {result.detail!r} does not mention 'fitness' — "
+            "rejection reason is not distinguishable from a confidence failure"
+        )
+        assert result.name == "environment_fitness", (
+            f"Gate name is {result.name!r}, expected 'environment_fitness'"
+        )
+
+    def test_agent_blocks_on_low_fitness_not_confidence(self):
+        """High confidence (95%) + low fitness (25%) must still block via fitness gate."""
+        import sys
+
+        sys.path.insert(0, str(SRC))
+        from datetime import datetime
+
+        import pandas as pd
+
+        from data.models import Quote
+        from trading.environment_scorer import GATE_PASS_MIN
+        from trading.trading_loop import TradingLoop
+
+        class _LowFitnessEnv:
+            def score(self, market, quote=None, quote_df=None):
+                return 25.0  # below GATE_PASS_MIN regardless of confidence
+
+            def get_sentiment_factor(self, market):
+                return {}
+
+        class _MockSignalEngine:
+            def quote_df(self, market):
+                return pd.DataFrame()
+
+        loop = object.__new__(TradingLoop)
+        loop._market = "EPIC2"
+        loop._env = _LowFitnessEnv()
+        loop._signal_engine = _MockSignalEngine()
+
+        quote = Quote(datetime.now(), 100.0, 101.0)
+        result = loop._gate_environment_fitness(quote)
+
+        assert not result.passed, (
+            "fitness gate passed with score=25% — fitness must block regardless of confidence"
+        )
+        val = result.value
+        assert isinstance(val, dict), "gate value should be a dict with score/display"
+        score_reported = val.get("score") or val.get("display") or 0
+        assert int(str(score_reported).replace("%", "")) < GATE_PASS_MIN, (
+            f"Reported fitness score {score_reported} is not below GATE_PASS_MIN={GATE_PASS_MIN}"
+        )

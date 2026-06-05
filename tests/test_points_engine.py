@@ -141,20 +141,37 @@ class PointsEngineThresholdTests(unittest.TestCase):
 
     def test_trade_confidence_threshold_is_max_of_points_and_config(self) -> None:
         # cfg.confidence_floor=80, signal_threshold=85 → max(80, 85) = 85
-        cfg = type("Cfg", (), {"signal_threshold": 85.0, "confidence_floor": 80.0, "confidence_floor_recovery_per_win": 1.0})()
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "signal_threshold": 85.0,
+                "confidence_floor": 80.0,
+                "confidence_floor_recovery_per_win": 1.0,
+            },
+        )()
         with patch.object(self.engine, "get_state", return_value="HEALTHY"):
             self.assertEqual(self.engine.trade_confidence_threshold(cfg), 85.0)
         # WARNING state always returns CONF_HIGH (92) regardless of config floor
         with patch.object(self.engine, "get_state", return_value="WARNING"):
             self.assertEqual(self.engine.trade_confidence_threshold(cfg), 92.0)
         # cfg.confidence_floor=75 (bootstrap mode), signal_threshold=75 → 75
-        cfg2 = type("Cfg", (), {"signal_threshold": 75.0, "confidence_floor": 75.0, "confidence_floor_recovery_per_win": 1.0})()
+        cfg2 = type(
+            "Cfg",
+            (),
+            {
+                "signal_threshold": 75.0,
+                "confidence_floor": 75.0,
+                "confidence_floor_recovery_per_win": 1.0,
+            },
+        )()
         with patch.object(self.engine, "get_state", return_value="CAUTION"):
             self.assertEqual(self.engine.trade_confidence_threshold(cfg2), 75.0)
 
-    def test_min_size_confidence_threshold_caution_is_88(self) -> None:
+    def test_min_size_confidence_threshold_caution_is_80(self) -> None:
+        # CAUTION now gives 0.5× for all conf >= CONF_MARGINAL_MIN (80), so threshold is 80
         with patch.object(self.engine, "get_state", return_value="CAUTION"):
-            self.assertEqual(self.engine.min_size_confidence_threshold(), 88.0)
+            self.assertEqual(self.engine.min_size_confidence_threshold(), 80.0)
 
 
 class PointsEngineSessionTests(unittest.TestCase):
@@ -224,15 +241,16 @@ class PointsEngineThresholdSizeTests(unittest.TestCase):
         self.assertEqual(self.engine.get_size_multiplier(75.0), 0.0)
 
     def test_size_multiplier_caution_bands(self) -> None:
+        # CAUTION now uses flat 0.5× for all conf >= CONF_MARGINAL_MIN (80)
         self._set_state(0.0)
         self.assertEqual(self.engine.get_size_multiplier(89.0), 0.5)
-        self.assertEqual(self.engine.get_size_multiplier(82.0), 0.25)
+        self.assertEqual(self.engine.get_size_multiplier(82.0), 0.5)
         self.assertEqual(self.engine.get_size_multiplier(79.0), 0.0)
 
     def test_size_multiplier_spec_matrix(self) -> None:
-        # CAUTION (cum=0.0 → -5 <= cum <= 10): flat 0.25/0.5
+        # CAUTION (cum=0.0 → -5 <= cum <= 10): flat 0.5× for all conf >= 80
         self._set_state(0.0)
-        self.assertEqual(self.engine.get_size_multiplier(82.0), 0.25)
+        self.assertEqual(self.engine.get_size_multiplier(82.0), 0.5)
         self.assertEqual(self.engine.get_size_multiplier(89.0), 0.5)
         # HEALTHY (cum=15.0 > 10): tier_mult=1.5 → standard=0.75, high=1.5
         self._set_state(15.0)

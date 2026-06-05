@@ -87,3 +87,136 @@ All tests must pass. Each test maps directly to one row in this changelog.
 - **`tests/test_session_manager.py`** — `test_cold_start_under_cap_bars` and `test_cold_start_advances_with_elapsed_time` rewritten to use `COLD_START_BARS` constant; `test_state_persistence_round_trip` bars_elapsed assertion uses constant. Removed hardcoded 6.
 - **`tests/test_trade_eligibility.py`** — `test_build_cold_start_from_gates` display assertion uses `COLD_START_BARS` constant.
 - **`tests/test_deployed_fixes.py`** — 10 new regression tests added (Session 3): `TestSession3EnvironmentScorerColdStart`, `TestSession3BlendedConfidence`, `TestSession3NasdaqYahooMap`, `TestSession3OhlcBootstrapStagger`, `TestSession3StartupCleanup`. Total: 30 tests.
+
+---
+
+## Session 4 — 2026-06-05
+
+### Intelligent trailing stop, breakeven lock, and limit extension
+
+**What existed before this session:**
+- `_apply_breakeven` in `trading/trade_manager.py`: moves stop to entry when profit ≥ `breakeven_trigger_points` (30 pts fixed). Fully functional.
+- `_apply_trailing` in `trading/trade_manager.py`: trails stop at ATR-based distance (set at entry via `get_trail_distance`). Trigger was fixed at `adaptive_trailing_trigger_points` (50 pts) regardless of instrument ATR.
+- `_sync_stop_to_ig` in `trading/trade_manager.py`: pushes updated stop to IG via `PUT /positions/otc/{deal_id}`. `broker_stop_management=True` was already wired in `ExecutionEngine` for live/demo modes. The IG REST `update_position_stops` method existed and worked.
+- **Gap 1**: Trail and breakeven triggers were fixed points — too large for small-ATR instruments, too small for large-ATR (Nikkei/Dow) positions.
+- **Gap 2**: No mechanism to extend the take-profit limit as a trend continued.
+- **Gap 3**: `_sync_stop_to_ig` always did an extra GET to preserve the current IG limit level; limit updates required a separate, unimplemented path.
+
+**Changes made:**
+
+- **`config/config_v25.json`** — Added `"trailing_stop"` block with six new keys:
+  - `trail_trigger_atr_multiple` (default `1.0`): start trailing when profit ≥ N × entry ATR; 0 = use `adaptive_trailing_trigger_points`.
+  - `breakeven_trigger_atr_multiple` (default `0.5`): move stop to breakeven when profit ≥ N × entry ATR; 0 = use `breakeven_trigger_points`.
+  - `limit_extension_enabled` (default `false`): opt-in flag for limit extension.
+  - `limit_extension_trigger_atr_multiple` (default `1.5`): min profit before first extension.
+  - `limit_extension_step_atr_multiple` (default `1.0`): how far to push limit per extension.
+  - `limit_extension_max_extensions` (default `2`): cap on extensions per position (in-memory).
+
+- **`src/system/config.py`** — Added eight new `@property` accessors for the `trailing_stop` block (`trailing_stop`, `trail_trigger_atr_multiple`, `breakeven_trigger_atr_multiple`, `limit_extension_enabled`, `limit_extension_trigger_atr_multiple`, `limit_extension_step_atr_multiple`, `limit_extension_max_extensions`).
+
+- **`src/data/learning_store.py`** — Added `update_target(trade_id, target, note)` to update the take-profit level in the DB (mirrors existing `update_stop`).
+
+- **`src/trading/trade_manager.py`** — Core logic changes:
+  - Added `_last_ig_limit: dict[str, float]` and `_limit_ext_count: dict[int, int]` instance state.
+  - Added `_effective_trail_trigger(entry_atr)`: returns `trail_trigger_atr_multiple × ATR` when ATR > 0, else `cfg.trailing_stop_trigger_points`.
+  - Added `_effective_breakeven_trigger(entry_atr)`: same pattern for breakeven.
+  - Added `_apply_limit_extension(market, side, trade_id, entry, current_target, px, entry_atr)`: extends limit by `step_atr × ATR` each time profit exceeds the next threshold, up to `max_extensions` times. Persists to DB and logs.
+  - `update_from_quote`: now uses `_effective_breakeven_trigger` and `_effective_trail_trigger` to compute ATR-scaled thresholds (backwards-compatible — zero-config fallback to existing points). Also calls `_apply_limit_extension` when enabled, and passes `new_limit` to `_sync_stop_to_ig` when limit moved.
+  - `_sync_stop_to_ig`: added optional `new_limit` keyword arg. When provided, uses it directly in the `PUT` payload instead of doing an extra GET to read current IG limit — saves one REST call per trailing update. Deduplicates limit pushes via `_last_ig_limit` cache.
+
+- **`tests/test_trade_manager.py`** — 7 new tests across two new test classes:
+  - `ATRBasedTriggerTests`: `test_atr_breakeven_fires_before_fixed_trigger`, `test_atr_trail_trigger_overrides_fixed_points`, `test_atr_trigger_zero_falls_back_to_points`.
+  - `LimitExtensionTests`: `test_limit_extension_fires_on_trigger`, `test_limit_extension_capped_at_max`, `test_limit_extension_not_fired_when_disabled`, `test_sell_limit_extension_moves_target_down`.
+
+**Dashboard**: No rebuild needed — no new position snapshot fields were added. The existing `target`/`trail_active`/`breakeven_hit` fields in the position row automatically reflect updated values.
+
+---
+
+## Session 4 — 2026-06-05 — Performance tuning pass (Nasdaq star session)
+
+### Context
+Nasdaq (US Tech 100) producing multiple profitable SELL trades. Points engine at cumulative=3.0, state=CAUTION (needs >6 for HEALTHY). This session maximises live performance by enabling limit extension and lifting the CAUTION size floor.
+
+### Changes
+
+**`config/config_v25.json` — trailing_stop block tuned for Nasdaq ATR (80–150 pts / 5-min bar)**
+- `limit_extension_enabled`: `false` → **`true`** — activates the limit-extension mechanism built in Session 3.
+- `trail_trigger_atr_multiple`: `1.0` → **`0.75`** — begin trailing sooner (at 75% of entry ATR profit, ~60–112 pts). Reduces the chance of giving back gains before the trail activates.
+- `breakeven_trigger_atr_multiple`: `0.5` → **`0.4`** — move stop to breakeven earlier (at 40% of entry ATR, ~32–60 pts). Locks in profits faster on volatile Nasdaq moves.
+- `limit_extension_step_atr_multiple`: `1.0` → **`0.75`** — smaller per-extension step means more frequent extensions on a trending move; still ~60–112 pts per step for Nasdaq.
+- `limit_extension_max_extensions`: `2` → **`3`** — allows up to 3 limit extensions per position (was 2), giving trends more room to run.
+
+**`src/trading/points_engine.py` — CAUTION size multiplier lifted**
+- `get_size_multiplier` CAUTION branch: removed the 80–88% lower band returning `0.25×`. Now returns **`0.5×`** for all `conf >= CONF_MARGINAL_MIN (80%)` in CAUTION state.
+  - Old behaviour: conf 80–87% → 0.25×, conf ≥ 88% → 0.5×.
+  - New behaviour: conf ≥ 80% → 0.5× flat.
+  - Rationale: Nasdaq `trade_size=3`, so 0.25× = 0.75 effective (barely above IG min). 0.5× = 1.5, a meaningful position that reflects actual confidence. Agent firing at 85–99% in CAUTION was being unnecessarily penalised at 0.25× in the 85–88% band.
+- `min_size_confidence_threshold` CAUTION return: `88.0` → **`CONF_MARGINAL_MIN (80.0)`** — consistent with the new flat multiplier.
+
+**`src/trading/trading_loop.py`** — Updated stale comment on line 1064 to reflect new CAUTION 0.5× flat floor.
+
+**`tests/test_points_engine.py`** — Updated two tests to reflect the new CAUTION multiplier behaviour:
+- `test_min_size_confidence_threshold_caution_is_88` → renamed and updated to expect `80.0`.
+- `test_size_multiplier_caution_bands` and `test_size_multiplier_spec_matrix` — `82.0` confidence now asserts `0.5` (was `0.25`).
+
+### Confirmed unchanged (audited)
+- HEALTHY threshold (>6.0 pts): proportional — a high-confidence £200 win scores ~3 pts; takes 2–3 wins. Correct.
+- Nasdaq `trade_size=3`, `risk_cap_gbp=500`: effective size 1.5 at 0.5× CAUTION, risk £150/trade — well within cap.
+- `rsi_buy_max=85`, `rsi_sell_min=15`: relaxed RSI filters already in config. ✓
+- `max_open_positions=15`: not a bottleneck. ✓
+- `COLD_START_BARS=2` in `session_manager.py`: confirmed unchanged. ✓
+- Nasdaq `trading_session_whitelist`: `london_morning`, `london_us_overlap`, `us_afternoon`. ✓
+- Nasdaq confidence effective floor: `max(80, signal_threshold=75)` = 80 — agent firing at 85–99% well above floor. ✓
+
+---
+
+## Session 4 — 2026-06-05 — Pre-launch validation & final fixes
+
+### Context
+All open positions closed. Agent being restarted for a fresh live session. This entry covers the dashboard positions fix, version splash fix, and the full pre-launch test suite added before relaunch.
+
+### Changes
+
+**`src/api/snapshot_store.py` — Dashboard positions aggregation**
+- `_tick_for_readers`: added position aggregation loop — iterates `tick["markets"]` and hoists each market's `positions` list into a flat top-level `positions` array. Each entry is enriched with `epic` and `market` keys (fallback to epic if no `market_name`). This ensures the dashboard `TradesPanel` always has a populated `positions` list to render even when the trading loop publishes positions nested under the market slice.
+
+**`dashboard/src/components/TradesPanel.jsx` — Positions resolver fallback**
+- `resolvePositions`: added fallback chain — tries `tick.positions` first (top-level, from `_tick_for_readers`), then `tick.markets[epic].positions` for single-epic views, so the panel renders in both architectures without change to the snapshot format.
+
+**`src/data/version.json` — Structured changelog format**
+- Changed from a flat version string to a structured object `{version, date, title, changes:[]}`. The splash screen now reads `title` and `changes` to render a human-readable "What's new" section at startup.
+
+**`config/config_v25.json` — Trailing stop parameters finalised (live session)**
+- `trail_trigger_atr_multiple`: tuned to `0.75` — begin trailing at 75% of entry ATR profit.
+- `breakeven_trigger_atr_multiple`: tuned to `0.4` — move stop to breakeven at 40% of entry ATR profit.
+- `limit_extension_enabled`: `true` — limit extension active for Nasdaq star session.
+- `limit_extension_max_extensions`: `3` — up to 3 extensions per position.
+- `limit_extension_step_atr_multiple`: `0.75` — smaller step for more frequent extensions on trending moves.
+- `rsi_buy_max`: `85`, `rsi_sell_min`: `15` — relaxed RSI bounds for wider entry window.
+- `COLD_START_BARS`: `2` — fast cold-start (10 min vs 60 min) for intraday session restarts.
+- `london_morning` session added to `wall_street` and `nasdaq_100` whitelists.
+
+**`src/trading/points_engine.py` — CAUTION size multiplier flat**
+- CAUTION branch of `get_size_multiplier` now returns `0.5×` for all `conf >= CONF_MARGINAL_MIN (80%)`. Previously returned `0.25×` in the 80–87% band, `0.5×` above 88%.
+- `min_size_confidence_threshold` for CAUTION updated to return `CONF_MARGINAL_MIN (80.0)` (was `88.0`).
+
+**`src/trading/trading_loop.py` — Position laddering**
+- `_dynamic_max_per_epic(base_cap, open_count, tracker)`: new method. Returns `base_cap` when points state is not HEALTHY. Increments to `base_cap+1` when all open positions on the epic have `pnl_gbp > 0`, and `base_cap+2` when additionally the oldest position is ≥ 20 minutes old. Guards against stacking into new green positions and against adding to losing moves.
+
+### Tests added — `tests/test_deployed_fixes.py`
+New class `TestSession4PreLaunchValidation` with 9 tests:
+
+| Test | What it proves |
+|---|---|
+| `test_points_engine_records_trade_and_updates_state` | PointsEngine cumulative rises and transitions to HEALTHY after 8 profitable wins |
+| `test_points_engine_caution_size_multiplier_flat` | CAUTION state returns 0.5× for conf 80, 85, 88, 95 — no more 0.25× split |
+| `test_trailing_stop_config_keys_present` | `trailing_stop` block in config has all 4 required keys including `limit_extension_enabled=True` and `limit_extension_max_extensions=3` |
+| `test_trailing_stop_atr_trigger_scales` | `trail_trigger_atr_multiple` is a fractional multiple < 1.0; `_effective_trail_trigger` uses `mult × ATR` |
+| `test_dynamic_max_per_epic_healthy_required` | CAUTION → base_cap; HEALTHY+profitable+young → base_cap+1; HEALTHY+profitable+mature → base_cap+2 |
+| `test_snapshot_positions_aggregated_from_markets` | `_tick_for_readers` aggregates positions from `markets[epic].positions` into top-level list with `epic` and `market` keys |
+| `test_ml_blend_confidence_capped_at_100` | Blend formula `(rules×0.6)+(ml×100×0.4)` clamped to 100; source contains `min(100.0, conf)` |
+| `test_market_weakness_detection` | `_gate_environment_fitness` with score=20% returns `passed=False` with "fitness" in detail |
+| `test_agent_blocks_on_low_fitness_not_confidence` | score=25% blocks regardless of confidence level; gate value reports score below GATE_PASS_MIN |
+
+### Suite result
+428 tests passed, 0 failures, 25 deprecation warnings (datetime.utcnow — pre-existing).

@@ -432,7 +432,7 @@ class PointsEngine:
             if state == "WARNING":
                 return CONF_HIGH
             if state == "CAUTION":
-                return 88.0
+                return CONF_MARGINAL_MIN
             if state == "HEALTHY":
                 return CONF_STANDARD_MIN
             return CONF_MARGINAL_MIN
@@ -491,10 +491,8 @@ class PointsEngine:
                 return 0.0
 
             if state == "CAUTION":
-                if conf >= 88.0:
-                    return 0.5
                 if conf >= CONF_MARGINAL_MIN:
-                    return 0.25
+                    return 0.5
                 return 0.0
 
             if state == "WARNING":

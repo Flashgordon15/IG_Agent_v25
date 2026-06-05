@@ -230,6 +230,14 @@ class LearningStore:
         self.conn.commit()
 
     @_locked
+    def update_target(self, trade_id: int, target: float, note: str) -> None:
+        self.conn.execute(
+            "UPDATE trades SET target=?, notes=COALESCE(notes,'') || ? WHERE id=?",
+            (target, note, trade_id),
+        )
+        self.conn.commit()
+
+    @_locked
     def close_trade(
         self,
         trade_id: int,

@@ -9,14 +9,20 @@ from data.learning_store import LearningStore
 from data.models import Quote, TradeRecord
 from system.config import Config
 from system.engine_log import log_engine
-from system.trade_lifecycle_bus import STAGE_POSITION_TRACKING, STATUS_OK, get_lifecycle_bus
+from system.trade_lifecycle_bus import (
+    STAGE_POSITION_TRACKING,
+    STATUS_OK,
+    get_lifecycle_bus,
+)
 
 if TYPE_CHECKING:
     from trading.points_engine import PointsEngine
 
 HARD_CAP_ATR_MULTIPLE = 3.0
 PARTIAL_CLOSE_ATR_MULTIPLE = 1.5
-_MAX_AGE_WARNED: set[int] = set()  # trade IDs already warned to avoid repeat Telegram spam
+_MAX_AGE_WARNED: set[int] = (
+    set()
+)  # trade IDs already warned to avoid repeat Telegram spam
 PARTIAL_CLOSE_FRACTION = 0.5
 
 
@@ -40,6 +46,8 @@ class TradeManager:
         self._broker_stops = bool(broker_stop_management and rest_client is not None)
         self._points_engine = points_engine
         self._last_ig_stop: dict[str, float] = {}
+        self._last_ig_limit: dict[str, float] = {}
+        self._limit_ext_count: dict[int, int] = {}
         self._gone_deals: set[str] = set()
 
     @staticmethod
@@ -131,10 +139,23 @@ class TradeManager:
 
         extra = {"ig_deal_id": ig_deal_id} if ig_deal_id else None
         record = TradeRecord(
-            id=None, market=market, epic=epic, side=side, entry=entry, exit=None,
-            size=size, stop=stop, target=target, pnl_points=None, result=None,
-            confidence=raw_confidence, adjusted_confidence=adjusted_confidence,
-            setup_key=setup_key, dry_run=dry_run, deal_reference=deal_reference, notes=full_notes,
+            id=None,
+            market=market,
+            epic=epic,
+            side=side,
+            entry=entry,
+            exit=None,
+            size=size,
+            stop=stop,
+            target=target,
+            pnl_points=None,
+            result=None,
+            confidence=raw_confidence,
+            adjusted_confidence=adjusted_confidence,
+            setup_key=setup_key,
+            dry_run=dry_run,
+            deal_reference=deal_reference,
+            notes=full_notes,
             extra=extra,
         )
         trade_id = self.store.open_trade(record)
@@ -148,7 +169,10 @@ class TradeManager:
             or cfg.stop_distance_points
             or 0
         )
-        band = str(execution.get("confidence_band") or self.confidence_band(adjusted_confidence))
+        band = str(
+            execution.get("confidence_band")
+            or self.confidence_band(adjusted_confidence)
+        )
         trail_distance = float(
             execution.get("trail_distance")
             or self.get_trail_distance(adjusted_confidence, entry_atr)
@@ -223,6 +247,7 @@ class TradeManager:
                 continue
 
             prev_stop = stop
+            prev_target = target
             messages.extend(
                 self._apply_partial_close(
                     market,
@@ -244,10 +269,18 @@ class TradeManager:
                 size = float(row_after_partial["size"])
 
             if cfg.breakeven_enabled:
+                be_trigger = self._effective_breakeven_trigger(entry_atr)
                 messages.extend(
                     self._apply_breakeven(
-                        market, side, trade_id, entry, stop, target, px,
-                        cfg.breakeven_trigger_points, cfg.breakeven_lock_points,
+                        market,
+                        side,
+                        trade_id,
+                        entry,
+                        stop,
+                        target,
+                        px,
+                        be_trigger,
+                        cfg.breakeven_lock_points,
                     )
                 )
                 stop = self._current_stop(trade_id, stop)
@@ -256,21 +289,47 @@ class TradeManager:
                 trail_dist = trail_distance
                 if trail_dist <= 0:
                     trail_dist = float(cfg.trailing_stop_step_points)
+                trail_trigger = self._effective_trail_trigger(entry_atr)
                 messages.extend(
                     self._apply_trailing(
-                        market, side, trade_id, entry, stop, target, px,
-                        cfg.trailing_stop_trigger_points, trail_dist,
+                        market,
+                        side,
+                        trade_id,
+                        entry,
+                        stop,
+                        target,
+                        px,
+                        trail_trigger,
+                        trail_dist,
                     )
                 )
                 stop = self._current_stop(trade_id, stop)
 
+            if getattr(cfg, "limit_extension_enabled", False) and entry_atr > 0:
+                ext_msgs, target = self._apply_limit_extension(
+                    market, side, trade_id, entry, target, px, entry_atr
+                )
+                messages.extend(ext_msgs)
+
             if broker_managed:
-                if abs(stop - prev_stop) >= 0.05:
+                stop_moved = abs(stop - prev_stop) >= 0.05
+                limit_moved = abs(target - prev_target) >= 0.05
+                new_limit = target if limit_moved else None
+                if stop_moved or limit_moved:
                     pushed = self._sync_stop_to_ig(
-                        ig_deal, trade_id=trade_id, side=side, stop=stop, epic=epic
+                        ig_deal,
+                        trade_id=trade_id,
+                        side=side,
+                        stop=stop,
+                        epic=epic,
+                        new_limit=new_limit,
                     )
-                    if pushed:
-                        msg = messages[-1] if messages else f"IG stop synced stop={stop:.1f}"
+                    if pushed and stop_moved:
+                        msg = (
+                            messages[-1]
+                            if messages
+                            else f"IG stop synced stop={stop:.1f}"
+                        )
                         get_lifecycle_bus().emit(
                             STAGE_POSITION_TRACKING,
                             STATUS_OK,
@@ -292,7 +351,10 @@ class TradeManager:
                     else None
                 )
                 self.store.close_trade(
-                    trade_id, exit_price, pnl, hit,
+                    trade_id,
+                    exit_price,
+                    pnl,
+                    hit,
                     f"Closed on {hit} at {exit_price:.1f}; target was {target:.1f}",
                 )
                 get_lifecycle_bus().mark_position_closed(
@@ -485,6 +547,7 @@ class TradeManager:
         if age_mins < float(max_age):
             return []
         from system.pnl_math import classify_result, realised_pnl_points
+
         exit_price = px
         pnl = realised_pnl_points(side, entry, exit_price)
         hit = classify_result(pnl)
@@ -543,6 +606,7 @@ class TradeManager:
         if not self._is_friday_close_window():
             return []
         from system.pnl_math import classify_result, realised_pnl_points
+
         exit_price = px
         pnl = realised_pnl_points(side, entry, exit_price)
         hit = classify_result(pnl)
@@ -552,10 +616,18 @@ class TradeManager:
             else None
         )
         self.store.close_trade(
-            trade_id, exit_price, pnl, hit, "Friday 20:30 UTC auto-close (weekend gap protection)"
+            trade_id,
+            exit_price,
+            pnl,
+            hit,
+            "Friday 20:30 UTC auto-close (weekend gap protection)",
         )
         self._telegram_trade_closed(
-            trade_id, exit_price=exit_price, pnl_pts=pnl, result=hit, points_before=pts_before
+            trade_id,
+            exit_price=exit_price,
+            pnl_pts=pnl,
+            result=hit,
+            points_before=pts_before,
         )
         if ig_deal and self._rest is not None and hasattr(self._rest, "close_position"):
             try:
@@ -575,6 +647,7 @@ class TradeManager:
     def _telegram_alert(self, msg: str) -> None:
         try:
             from system.telegram_notifier import get_telegram_notifier
+
             n = get_telegram_notifier()
             if n:
                 n.send_alert(msg)
@@ -688,9 +761,13 @@ class TradeManager:
 
         if self._points_engine is not None:
             try:
-                self._points_engine.record_trade(result, adjusted_confidence, banked_pts)
+                self._points_engine.record_trade(
+                    result, adjusted_confidence, banked_pts
+                )
             except Exception as e:
-                log_engine(f"points_engine partial close score failed: {type(e).__name__}: {e}")
+                log_engine(
+                    f"points_engine partial close score failed: {type(e).__name__}: {e}"
+                )
 
         msg = (
             f"PARTIAL CLOSE | {market} | {side} | 50% at {px:.1f} | "
@@ -701,23 +778,102 @@ class TradeManager:
             self.on_alert(msg)
         return [msg]
 
-    def _apply_breakeven(self, market, side, trade_id, entry, stop, target, px, trigger, offset):
+    def _effective_trail_trigger(self, entry_atr: float) -> float:
+        """ATR-scaled trailing trigger when entry_atr known; falls back to config points."""
+        mult = float(getattr(self._cfg, "trail_trigger_atr_multiple", 0.0))
+        if mult > 0 and entry_atr > 0:
+            return mult * entry_atr
+        return float(self._cfg.trailing_stop_trigger_points)
+
+    def _effective_breakeven_trigger(self, entry_atr: float) -> float:
+        """ATR-scaled breakeven trigger when entry_atr known; falls back to config points."""
+        mult = float(getattr(self._cfg, "breakeven_trigger_atr_multiple", 0.0))
+        if mult > 0 and entry_atr > 0:
+            return mult * entry_atr
+        return float(self._cfg.breakeven_trigger_points)
+
+    def _apply_limit_extension(
+        self,
+        market: str,
+        side: str,
+        trade_id: int,
+        entry: float,
+        current_target: float,
+        px: float,
+        entry_atr: float,
+    ) -> tuple[list[str], float]:
+        """
+        Extend take-profit limit when trade trends strongly beyond the trigger threshold.
+
+        Each extension pushes the limit by ``limit_extension_step_atr_multiple × ATR``.
+        At most ``limit_extension_max_extensions`` extensions fire per position (in-memory counter).
+        Returns (messages, new_target). new_target == current_target when no extension fires.
+        """
+        cfg = self._cfg
+        if entry_atr <= 0:
+            return [], current_target
+
+        trigger_mult = float(getattr(cfg, "limit_extension_trigger_atr_multiple", 1.5))
+        step_mult = float(getattr(cfg, "limit_extension_step_atr_multiple", 1.0))
+        max_ext = int(getattr(cfg, "limit_extension_max_extensions", 2))
+        step = step_mult * entry_atr
+
+        ext_count = self._limit_ext_count.get(trade_id, 0)
+        if ext_count >= max_ext:
+            return [], current_target
+
+        profit = self._profit_points(side, entry, px)
+        # Each successive extension requires one more step of profit above the trigger floor.
+        required = (trigger_mult + ext_count * step_mult) * entry_atr
+        if profit < required:
+            return [], current_target
+
+        new_target = current_target + step if side == "BUY" else current_target - step
+
+        self.store.update_target(
+            trade_id,
+            new_target,
+            f" | Limit extended to {new_target:.1f} (ext #{ext_count + 1})",
+        )
+        self._limit_ext_count[trade_id] = ext_count + 1
+
+        msg = (
+            f"LIMIT EXTENDED | {market} {side} | "
+            f"target {current_target:.1f} → {new_target:.1f} | "
+            f"profit={profit:.1f} pts ext #{ext_count + 1}/{max_ext}"
+        )
+        log_engine(msg)
+        if self.on_alert:
+            self.on_alert(msg)
+        return [msg], new_target
+
+    def _apply_breakeven(
+        self, market, side, trade_id, entry, stop, target, px, trigger, offset
+    ):
         msgs: list[str] = []
         if side == "BUY":
             profit = px - entry
             be_stop = entry + offset
             if profit >= trigger and stop < be_stop:
-                self.store.update_stop(trade_id, be_stop, f" | Stop moved to breakeven {be_stop:.1f}")
+                self.store.update_stop(
+                    trade_id, be_stop, f" | Stop moved to breakeven {be_stop:.1f}"
+                )
                 msgs.append(f"BREAKEVEN STOP MOVED | {market} BUY | stop {be_stop:.1f}")
         else:
             profit = entry - px
             be_stop = entry - offset
             if profit >= trigger and stop > be_stop:
-                self.store.update_stop(trade_id, be_stop, f" | Stop moved to breakeven {be_stop:.1f}")
-                msgs.append(f"BREAKEVEN STOP MOVED | {market} SELL | stop {be_stop:.1f}")
+                self.store.update_stop(
+                    trade_id, be_stop, f" | Stop moved to breakeven {be_stop:.1f}"
+                )
+                msgs.append(
+                    f"BREAKEVEN STOP MOVED | {market} SELL | stop {be_stop:.1f}"
+                )
         return msgs
 
-    def _apply_trailing(self, market, side, trade_id, entry, stop, target, px, trigger, distance):
+    def _apply_trailing(
+        self, market, side, trade_id, entry, stop, target, px, trigger, distance
+    ):
         msgs: list[str] = []
         if side == "BUY":
             profit = px - entry
@@ -730,8 +886,12 @@ class TradeManager:
                     )
                 return []
             if profit >= trigger and trail_stop > stop and trail_stop < target:
-                self.store.update_stop(trade_id, trail_stop, f" | Trailing stop raised to {trail_stop:.1f}")
-                msgs.append(f"TRAILING STOP RAISED | {market} BUY | stop {trail_stop:.1f}")
+                self.store.update_stop(
+                    trade_id, trail_stop, f" | Trailing stop raised to {trail_stop:.1f}"
+                )
+                msgs.append(
+                    f"TRAILING STOP RAISED | {market} BUY | stop {trail_stop:.1f}"
+                )
         else:
             profit = entry - px
             trail_stop = px + distance
@@ -740,8 +900,14 @@ class TradeManager:
                     log_engine("ERROR: Trail would move stop backwards — rejected.")
                 return []
             if profit >= trigger and trail_stop < stop and trail_stop > target:
-                self.store.update_stop(trade_id, trail_stop, f" | Trailing stop lowered to {trail_stop:.1f}")
-                msgs.append(f"TRAILING STOP LOWERED | {market} SELL | stop {trail_stop:.1f}")
+                self.store.update_stop(
+                    trade_id,
+                    trail_stop,
+                    f" | Trailing stop lowered to {trail_stop:.1f}",
+                )
+                msgs.append(
+                    f"TRAILING STOP LOWERED | {market} SELL | stop {trail_stop:.1f}"
+                )
         return msgs
 
     def _ig_position_levels(self, deal_id: str) -> tuple[float | None, float | None]:
@@ -819,22 +985,41 @@ class TradeManager:
         side: str,
         stop: float,
         epic: str,
+        new_limit: float | None = None,
     ) -> bool:
+        """
+        Push updated stop (and optionally a new limit) to the IG broker via PUT.
+
+        ``new_limit`` should be passed when a limit extension has fired — it is used
+        directly in the PUT payload, skipping an extra GET to read the current IG limit
+        and saving one REST call against the 3-calls/min budget.
+        """
         if not self._rest or not deal_id:
             return False
         if deal_id in self._gone_deals:
             return False
 
         cache_key = f"{deal_id}:{trade_id}"
-        last_pushed = self._last_ig_stop.get(cache_key)
-        if last_pushed is not None and abs(last_pushed - stop) < 0.05:
+        last_pushed_stop = self._last_ig_stop.get(cache_key)
+
+        # Dedup the limit extension: skip if we already pushed this limit level.
+        limit_cache_key = f"{deal_id}:{trade_id}:limit"
+        last_pushed_limit = self._last_ig_limit.get(limit_cache_key)
+        if new_limit is not None and last_pushed_limit is not None:
+            if abs(last_pushed_limit - new_limit) < 0.05:
+                new_limit = None
+
+        stop_already_pushed = (
+            last_pushed_stop is not None and abs(last_pushed_stop - stop) < 0.05
+        )
+        if stop_already_pushed and new_limit is None:
             return False
 
         ig_stop = self._ig_stop_level(deal_id)
         if ig_stop is not None:
-            if side == "BUY" and stop <= ig_stop + 0.05:
+            if side == "BUY" and stop <= ig_stop + 0.05 and new_limit is None:
                 return False
-            if side == "SELL" and stop >= ig_stop - 0.05:
+            if side == "SELL" and stop >= ig_stop - 0.05 and new_limit is None:
                 return False
 
         try:
@@ -852,13 +1037,24 @@ class TradeManager:
                     epic=epic,
                 )
                 return False
-            _, ig_limit = self._ig_position_levels(deal_id)
+
+            # When new_limit is provided (limit extension), use it directly — no GET.
+            # Otherwise read current IG limit to preserve it in the PUT payload.
+            if new_limit is not None:
+                effective_limit: float | None = new_limit
+            else:
+                _, effective_limit = self._ig_position_levels(deal_id)
+
             kwargs: dict[str, float] = {"stop_level": round(stop, 1)}
-            if ig_limit is not None:
-                kwargs["limit_level"] = round(ig_limit, 1)
+            if effective_limit is not None:
+                kwargs["limit_level"] = round(effective_limit, 1)
             self._rest.update_position_stops(deal_id, **kwargs)
             self._last_ig_stop[cache_key] = stop
-            limit_note = f" limit={kwargs['limit_level']:.1f}" if "limit_level" in kwargs else ""
+            if new_limit is not None:
+                self._last_ig_limit[limit_cache_key] = new_limit
+            limit_note = (
+                f" limit={kwargs['limit_level']:.1f}" if "limit_level" in kwargs else ""
+            )
             log_engine(
                 f"IG stop updated epic={epic} deal={deal_id} side={side} stop={stop:.1f}{limit_note}"
             )
@@ -874,7 +1070,9 @@ class TradeManager:
                     epic=epic,
                 )
             else:
-                log_engine(f"IG stop update failed deal={deal_id}: {type(e).__name__}: {e}")
+                log_engine(
+                    f"IG stop update failed deal={deal_id}: {type(e).__name__}: {e}"
+                )
         except Exception as e:
             log_engine(f"IG stop update failed deal={deal_id}: {type(e).__name__}: {e}")
         return False
@@ -883,13 +1081,25 @@ class TradeManager:
     def _check_exit(side, entry, stop, target, px):
         if side == "BUY":
             if px <= stop:
-                hit = "LOSS" if stop < entry else "BREAKEVEN" if abs(stop - entry) < 1e-9 else "WIN"
+                hit = (
+                    "LOSS"
+                    if stop < entry
+                    else "BREAKEVEN"
+                    if abs(stop - entry) < 1e-9
+                    else "WIN"
+                )
                 return hit, stop
             if px >= target:
                 return "WIN", target
         else:
             if px >= stop:
-                hit = "LOSS" if stop > entry else "BREAKEVEN" if abs(stop - entry) < 1e-9 else "WIN"
+                hit = (
+                    "LOSS"
+                    if stop > entry
+                    else "BREAKEVEN"
+                    if abs(stop - entry) < 1e-9
+                    else "WIN"
+                )
                 return hit, stop
             if px <= target:
                 return "WIN", target
