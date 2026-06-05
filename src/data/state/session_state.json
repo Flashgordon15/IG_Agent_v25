@@ -1,1 +1,1 @@
-{"version":1,"session_open":true,"open_time":"2026-05-27T18:14:50.267073","bars_elapsed":6,"gap_detected":false,"last_close_time":null,"last_close_price":null,"maintenance_count_today":0,"phase":"OPEN","is_cold_start":false,"is_maintenance":false,"epic":"IX.D.NIKKEI.IFM.IP"}
+{"version":1,"session_open":true,"open_time":"2026-06-05T01:00:00.187038","bars_elapsed":6,"gap_detected":true,"last_close_time":"2026-06-05T00:00:01.928471","last_close_price":51598.5,"maintenance_count_today":1,"phase":"OPEN","is_cold_start":false,"is_maintenance":false,"epic":"IX.D.NASDAQ.IFM.IP"}

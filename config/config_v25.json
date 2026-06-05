@@ -92,7 +92,7 @@
   "telegram_bot_token": "",
   "telegram_chat_id": "",
   "$schema": "./config_schema.json",
-  "version": "25.3.0",
+  "version": "25.4.0",
   "app_version": "v25-dev",
   "operating_mode": "DEMO",
   "markets": [],
