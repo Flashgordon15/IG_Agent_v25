@@ -7,6 +7,7 @@ for gate 7 only. No GUI imports. Trading continues if the FastAPI dashboard fail
 
 from __future__ import annotations
 
+import math
 import subprocess
 import threading
 import time

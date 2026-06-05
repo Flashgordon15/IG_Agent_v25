@@ -1,1 +1,1 @@
-{"version":1,"saved_at":1780678931.912374,"entry":{"entries":[]},"exit":{"exits":[]},"pending":{"orders":[]},"daily_risk":{}}
+{"version":1,"saved_at":1780681803.152852,"entry":{"entries":[{"epic":"CS.D.CFPGOLD.CFP.IP","direction":"SELL","size":0.5,"local_created_at":1780681802.76604,"broker_deal_reference":""},{"epic":"IX.D.DOW.IFM.IP","direction":"SELL","size":0.325,"local_created_at":1780681803.152823,"broker_deal_reference":""}]},"exit":{"exits":[]},"pending":{"orders":[]},"daily_risk":{}}
