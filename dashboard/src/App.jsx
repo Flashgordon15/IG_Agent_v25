@@ -225,14 +225,13 @@ export default function App() {
     setStartupDone(false);
   }, []);
 
-  // Version changelog splash: shown once per new version, AFTER startup
+  // Version changelog splash: shown on every page load, AFTER startup
   useEffect(() => {
     if (!startupDone) return;
     fetchSplash().then((data) => {
       if (!data) return;
       setSplashData(data);
-      const alreadyDismissed = data.shown_for_version === data.version;
-      if (!alreadyDismissed) setSplashVisible(true);
+      setSplashVisible(true);
     });
   }, [startupDone]);
 
