@@ -73,6 +73,19 @@ def get_status() -> dict[str, Any]:
         error_snapshot = _error
         started_snapshot = _started_at
 
+    # Auto-complete: if the agent is already running healthy (fresh snapshot data
+    # present) but startup marks were never written (e.g. agent started with old code
+    # before startup_tracker existed), treat all phases as done so the splash clears.
+    if "ready" not in done_snapshot:
+        try:
+            from api.snapshot_store import snapshot_age_s
+
+            age = snapshot_age_s()
+            if age is not None and age < 120:
+                _auto_complete_all(done_snapshot, notes_snapshot)
+        except Exception:
+            pass
+
     # Find the last completed phase index to derive overall_pct
     last_done_idx = -1
     for i, pid in enumerate(_PHASE_IDS):
@@ -110,6 +123,15 @@ def get_status() -> dict[str, Any]:
         "error": error_snapshot,
         "started_at": started_snapshot,
     }
+
+
+def _auto_complete_all(done_snapshot: dict, notes_snapshot: dict) -> None:
+    """Mark every phase done in-place — used when agent is already running."""
+    now = datetime.now(timezone.utc).timestamp()
+    for pid in _PHASE_IDS:
+        if pid not in done_snapshot:
+            done_snapshot[pid] = now
+    notes_snapshot.setdefault("ready", "already running")
 
 
 def _next_pending(done_snapshot: dict) -> str | None:

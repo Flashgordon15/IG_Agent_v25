@@ -55,7 +55,9 @@ class LearningStore:
         assert self._conn is not None
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
-        self._conn.execute("PRAGMA wal_autocheckpoint=500")  # checkpoint every 500 pages (~2MB)
+        self._conn.execute(
+            "PRAGMA wal_autocheckpoint=500"
+        )  # checkpoint every 500 pages (~2MB)
 
     @_locked
     def connect(self) -> None:
@@ -155,7 +157,9 @@ class LearningStore:
         if "trail_distance" not in cols:
             c.execute("ALTER TABLE trades ADD COLUMN trail_distance REAL")
         if "partial_close_done" not in cols:
-            c.execute("ALTER TABLE trades ADD COLUMN partial_close_done INTEGER DEFAULT 0")
+            c.execute(
+                "ALTER TABLE trades ADD COLUMN partial_close_done INTEGER DEFAULT 0"
+            )
         # Cooldowns table — survives restarts
         c.execute(
             """
@@ -212,7 +216,9 @@ class LearningStore:
 
     @_locked
     def get_stop(self, trade_id: int) -> float | None:
-        row = self.conn.execute("SELECT stop FROM trades WHERE id=?", (trade_id,)).fetchone()
+        row = self.conn.execute(
+            "SELECT stop FROM trades WHERE id=?", (trade_id,)
+        ).fetchone()
         return float(row["stop"]) if row else None
 
     @_locked
@@ -235,7 +241,9 @@ class LearningStore:
         ig_pnl_currency: float | None = None,
         ig_close_deal_id: str | None = None,
     ) -> None:
-        row = self.conn.execute("SELECT * FROM trades WHERE id=?", (trade_id,)).fetchone()
+        row = self.conn.execute(
+            "SELECT * FROM trades WHERE id=?", (trade_id,)
+        ).fetchone()
         if not row or row["closed_at"]:
             return
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(trades)").fetchall()}
@@ -264,7 +272,7 @@ class LearningStore:
             self.conn.execute(
                 f"""
                 UPDATE trades
-                SET {', '.join(close_sets)}
+                SET {", ".join(close_sets)}
                 WHERE id=?
                 """,
                 tuple(close_params),
@@ -292,7 +300,9 @@ class LearningStore:
             row_keys = row.keys() if hasattr(row, "keys") else []
             row_epic = str(row["epic"]) if "epic" in row_keys else ""
             row_dry_run = (
-                int(row["dry_run"]) if "dry_run" in row_keys and row["dry_run"] is not None else 0
+                int(row["dry_run"])
+                if "dry_run" in row_keys and row["dry_run"] is not None
+                else 0
             )
             if row_epic and not row_dry_run:
                 from execution.japan225_daily_risk import record_trade_closed
@@ -312,9 +322,15 @@ class LearningStore:
         ref = str(row.get("deal_reference") or row.get("ig_deal_id") or "").strip()
         if not ref:
             return False
-        ig_pnl = float(row.get("ig_pnl_currency") if row.get("ig_pnl_currency") is not None else row.get("pnl_points") or 0)
+        ig_pnl = float(
+            row.get("ig_pnl_currency")
+            if row.get("ig_pnl_currency") is not None
+            else row.get("pnl_points") or 0
+        )
         result = str(row.get("result") or classify_result(ig_pnl))
-        closed_at = str(row.get("closed_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        closed_at = str(
+            row.get("closed_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        )
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(trades)").fetchall()}
 
         suffix = ref.upper()
@@ -391,8 +407,26 @@ class LearningStore:
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?{src_val})
                 """,
                 (
-                    closed_at, closed_at, market, epic, side, entry, exit_px, size,
-                    0.0, 0.0, ig_pnl, result, 0.0, 0.0, "IG|imported", 0, ref, notes, ref, ig_pnl,
+                    closed_at,
+                    closed_at,
+                    market,
+                    epic,
+                    side,
+                    entry,
+                    exit_px,
+                    size,
+                    0.0,
+                    0.0,
+                    ig_pnl,
+                    result,
+                    0.0,
+                    0.0,
+                    "IG|imported",
+                    0,
+                    ref,
+                    notes,
+                    ref,
+                    ig_pnl,
                 ),
             )
         else:
@@ -408,8 +442,24 @@ class LearningStore:
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?{src_val})
                 """,
                 (
-                    closed_at, closed_at, market, epic, side, entry, exit_px, size,
-                    0.0, 0.0, ig_pnl, result, 0.0, 0.0, "IG|imported", 0, ref, notes,
+                    closed_at,
+                    closed_at,
+                    market,
+                    epic,
+                    side,
+                    entry,
+                    exit_px,
+                    size,
+                    0.0,
+                    0.0,
+                    ig_pnl,
+                    result,
+                    0.0,
+                    0.0,
+                    "IG|imported",
+                    0,
+                    ref,
+                    notes,
                 ),
             )
         self.conn.commit()
@@ -462,7 +512,7 @@ class LearningStore:
         params.append(row["id"])
         self.conn.execute(
             f"""
-            UPDATE trades SET {', '.join(sets)}
+            UPDATE trades SET {", ".join(sets)}
             WHERE id=? AND closed_at IS NOT NULL
             """,
             tuple(params),
@@ -470,10 +520,7 @@ class LearningStore:
         self.conn.commit()
         ok = self.conn.total_changes > 0
         if ok:
-            if (
-                not already_confirmed
-                and not self.is_partial_close_done(row["id"])
-            ):
+            if not already_confirmed and not self.is_partial_close_done(row["id"]):
                 try:
                     detail = self.conn.execute(
                         """
@@ -485,6 +532,7 @@ class LearningStore:
                     ).fetchone()
                     if detail and not is_excluded_display_row(dict(detail)):
                         from datetime import date as _date
+
                         from execution.ml_training_hooks import get_points_engine
                         from system.engine_log import log_engine
 
@@ -495,14 +543,15 @@ class LearningStore:
                             "SELECT closed_at FROM trades WHERE id=?", (row["id"],)
                         ).fetchone()
                         closed_at_str = str(
-                            (closed_at_row["closed_at"] if closed_at_row else None) or ""
+                            (closed_at_row["closed_at"] if closed_at_row else None)
+                            or ""
                         )
-                        closed_today = closed_at_str.startswith(_date.today().isoformat())
+                        closed_today = closed_at_str.startswith(
+                            _date.today().isoformat()
+                        )
 
                         conf = float(
-                            detail["adjusted_confidence"]
-                            or detail["confidence"]
-                            or 0
+                            detail["adjusted_confidence"] or detail["confidence"] or 0
                         )
                         pts = float(detail["pnl_points"] or 0)
                         pe = get_points_engine()
@@ -588,7 +637,13 @@ class LearningStore:
                 last_updated=excluded.last_updated
             """,
             (
-                setup_key, n, wins, losses, bes, avg, wr,
+                setup_key,
+                n,
+                wins,
+                losses,
+                bes,
+                avg,
+                wr,
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             ),
         )
@@ -669,7 +724,9 @@ class LearningStore:
         entry_atr: float,
         trail_distance: float,
     ) -> None:
-        cols = {row[1] for row in self.conn.execute("PRAGMA table_info(trades)").fetchall()}
+        cols = {
+            row[1] for row in self.conn.execute("PRAGMA table_info(trades)").fetchall()
+        }
         if "confidence_band" not in cols:
             return
         self.conn.execute(
@@ -684,7 +741,9 @@ class LearningStore:
 
     @_locked
     def mark_partial_close_done(self, trade_id: int) -> None:
-        cols = {row[1] for row in self.conn.execute("PRAGMA table_info(trades)").fetchall()}
+        cols = {
+            row[1] for row in self.conn.execute("PRAGMA table_info(trades)").fetchall()
+        }
         if "partial_close_done" not in cols:
             return
         self.conn.execute(
@@ -695,7 +754,9 @@ class LearningStore:
 
     @_locked
     def is_partial_close_done(self, trade_id: int) -> bool:
-        cols = {row[1] for row in self.conn.execute("PRAGMA table_info(trades)").fetchall()}
+        cols = {
+            row[1] for row in self.conn.execute("PRAGMA table_info(trades)").fetchall()
+        }
         if "partial_close_done" not in cols:
             return False
         row = self.conn.execute(
@@ -713,7 +774,9 @@ class LearningStore:
         self.conn.commit()
 
     @_locked
-    def update_trade_upl(self, trade_id: int, upl: float, level: float | None = None) -> None:
+    def update_trade_upl(
+        self, trade_id: int, upl: float, level: float | None = None
+    ) -> None:
         note = f" | IG upl={upl:.2f}"
         if level is not None:
             note += f" level={level:.1f}"
@@ -801,8 +864,20 @@ class LearningStore:
             """,
             (
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                market, epic, side, entry, size, stop, target,
-                0.0, 0.0, "IG_IMPORT", 0, deal_reference or None, deal_id, notes,
+                market,
+                epic,
+                side,
+                entry,
+                size,
+                stop,
+                target,
+                0.0,
+                0.0,
+                "IG_IMPORT",
+                0,
+                deal_reference or None,
+                deal_id,
+                notes,
             ),
         )
         self.conn.commit()
@@ -873,6 +948,7 @@ class LearningStore:
                     FROM trades
                     WHERE closed_at IS NOT NULL AND substr(closed_at, 1, 10) = ?
                       AND (source IS NULL OR source != 'ig_import')
+                      AND NOT (dry_run = 1 AND COALESCE(ig_pnl_currency, 0) = 0)
                     """,
                     (d,),
                 ).fetchone()
@@ -882,6 +958,7 @@ class LearningStore:
             SELECT COALESCE(SUM({expr}), 0) AS s
             FROM trades
             WHERE closed_at IS NOT NULL AND substr(closed_at, 1, 10) = ?
+              AND NOT (dry_run = 1 AND COALESCE(ig_pnl_currency, 0) = 0)
             """,
             (d,),
         ).fetchone()
@@ -914,7 +991,9 @@ class LearningStore:
 
     @_locked
     def sum_open_unrealized_pnl(self) -> float:
-        cols = {row[1] for row in self.conn.execute("PRAGMA table_info(trades)").fetchall()}
+        cols = {
+            row[1] for row in self.conn.execute("PRAGMA table_info(trades)").fetchall()
+        }
         if "unrealized_pnl" not in cols:
             return 0.0
         row = self.conn.execute(
@@ -1008,7 +1087,9 @@ class LearningStore:
         """
         Remove TEST/simulator rows and closes without IG deal IDs (keeps IG-synced rows).
         """
-        cutoff = (datetime.now() - timedelta(days=max(1, keep_days))).strftime("%Y-%m-%d %H:%M:%S")
+        cutoff = (datetime.now() - timedelta(days=max(1, keep_days))).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
         cur = self.conn.cursor()
         cur.execute(
             """
@@ -1118,7 +1199,9 @@ class LearningStore:
     @_locked
     def recent_confirmed_closed_trades(self, limit: int = 20) -> list[dict[str, Any]]:
         """Last *limit* IG-confirmed closes (ig_pnl_currency set), excluding SIM/soak rows."""
-        cols = {row[1] for row in self.conn.execute("PRAGMA table_info(trades)").fetchall()}
+        cols = {
+            row[1] for row in self.conn.execute("PRAGMA table_info(trades)").fetchall()
+        }
         if "ig_pnl_currency" not in cols:
             return []
         rows = self.conn.execute(
@@ -1146,6 +1229,7 @@ class LearningStore:
     def is_writable(self) -> bool:
         import os
         from pathlib import Path
+
         p = Path(self.db_path)
         parent = p.parent
         if not parent.exists():
