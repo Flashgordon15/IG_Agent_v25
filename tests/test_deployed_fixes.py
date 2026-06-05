@@ -1036,3 +1036,107 @@ class TestStartupSmokeTest:
         assert "recover_pending_state_for_startup" in src_text, (
             "agent_bootstrap.py smoke test must call recover_pending_state_for_startup()"
         )
+
+
+# ---------------------------------------------------------------------------
+# PORT-8080 ZOMBIE CLEANUP ON EXIT AND STARTUP
+# ---------------------------------------------------------------------------
+
+
+class TestPortCleanupOnExit:
+    """Stale port-8080 processes must be force-killed on agent exit and startup."""
+
+    def test_force_cleanup_port_function_exists(self):
+        src_text = (SRC / "main.py").read_text()
+        assert "def _force_cleanup_port" in src_text, (
+            "_force_cleanup_port() not defined in main.py"
+        )
+
+    def test_cleanup_called_on_exit_hook(self):
+        src_text = (SRC / "main.py").read_text()
+        assert "atexit.register(_force_cleanup_port)" in src_text, (
+            "_force_cleanup_port not registered as atexit handler in main.py"
+        )
+
+    def test_cleanup_called_in_shutdown(self):
+        src_text = (SRC / "main.py").read_text()
+        shutdown_body = src_text.split("def shutdown(self)")[1].split("\n    def ")[0]
+        assert "_force_cleanup_port()" in shutdown_body, (
+            "_force_cleanup_port() must be called inside AgentRuntime.shutdown()"
+        )
+
+    def test_cleanup_called_on_startup(self):
+        src_text = (SRC / "main.py").read_text()
+        prestartup_body = src_text.split("def _pre_startup_cleanup")[1].split("\ndef ")[
+            0
+        ]
+        assert "_force_cleanup_port" in prestartup_body, (
+            "_force_cleanup_port() must be called inside _pre_startup_cleanup()"
+        )
+
+    def test_stale_port_process_killed_on_exit(self):
+        """lsof returns a foreign PID → os.kill must be called with SIGKILL."""
+        import sys as _sys
+
+        _sys.path.insert(0, str(SRC))
+        import signal as _signal
+        from unittest.mock import MagicMock, patch
+
+        import main as _main
+
+        fake_result = MagicMock()
+        fake_result.stdout = "77777\n"
+
+        with (
+            patch("subprocess.run", return_value=fake_result),
+            patch("os.getpid", return_value=1),
+            patch("os.kill") as mock_kill,
+            patch("pathlib.Path.unlink"),
+        ):
+            _main._force_cleanup_port(8080)
+
+        mock_kill.assert_called_once_with(77777, _signal.SIGKILL)
+
+    def test_own_pid_not_killed(self):
+        """lsof returns only the current PID → os.kill must NOT be called."""
+        import os as _os
+        import sys as _sys
+
+        _sys.path.insert(0, str(SRC))
+        from unittest.mock import MagicMock, patch
+
+        import main as _main
+
+        own = _os.getpid()
+        fake_result = MagicMock()
+        fake_result.stdout = f"{own}\n"
+
+        with (
+            patch("subprocess.run", return_value=fake_result),
+            patch("os.kill") as mock_kill,
+            patch("pathlib.Path.unlink"),
+        ):
+            _main._force_cleanup_port(8080)
+
+        mock_kill.assert_not_called()
+
+    def test_lock_removed_on_exit(self):
+        """_force_cleanup_port must call unlink on the lock path."""
+        import sys as _sys
+
+        _sys.path.insert(0, str(SRC))
+        from unittest.mock import MagicMock, patch
+
+        import main as _main
+
+        fake_result = MagicMock()
+        fake_result.stdout = ""
+
+        with (
+            patch("subprocess.run", return_value=fake_result),
+            patch("os.kill"),
+            patch("pathlib.Path.unlink") as mock_unlink,
+        ):
+            _main._force_cleanup_port(8080)
+
+        mock_unlink.assert_called_once()

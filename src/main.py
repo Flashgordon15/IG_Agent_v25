@@ -7,10 +7,12 @@ Runtime: trading loop (background) + FastAPI on :8080 (foreground).
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import signal
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -226,7 +228,6 @@ def _pre_startup_cleanup() -> None:
     _clear_pycache()
 
     import os
-    import subprocess
 
     my_pid = os.getpid()
     lock_path = Path(__file__).parent / "data" / ".ig_agent_v25.lock"
@@ -292,7 +293,11 @@ def _pre_startup_cleanup() -> None:
     except Exception as e:
         log_engine(f"pre-startup: could not remove lock: {e}")
 
-    # 4. Wait for port 8080 to be free (previous server may still be tearingdown)
+    # 4. Kill any process still bound to port 8080 (lsof catches zombie workers
+    #    that pgrep may have missed, e.g. uvicorn sub-processes).
+    _force_cleanup_port(_API_PORT)
+
+    # 5. Wait for port 8080 to be free (previous server may still be tearing down)
     import socket as _socket
 
     _port_free = False
@@ -308,7 +313,7 @@ def _pre_startup_cleanup() -> None:
             "pre-startup: port 8080 still in use after cleanup — proceeding anyway"
         )
 
-    # 5. Clear any stale in-flight / pending-order state left by the previous
+    # 6. Clear any stale in-flight / pending-order state left by the previous
     #    session.  These are in-memory-only dicts that survive process death via
     #    runtime_state.json.  Clearing them here means a fresh session always
     #    starts from a clean state; broker reconciliation re-establishes the
@@ -327,7 +332,7 @@ def _pre_startup_cleanup() -> None:
     except Exception as e:
         log_engine(f"pre-startup: inflight/pending clear failed (ignored): {e}")
 
-    # 6. Mark startup phase (visible in splash screen)
+    # 7. Mark startup phase (visible in splash screen)
     note = (
         f"killed {len(killed_pids)} previous session(s)"
         if killed_pids
@@ -335,6 +340,40 @@ def _pre_startup_cleanup() -> None:
     )
     _startup_mark("session_cleanup", note)
     log_engine(f"pre-startup: cleanup complete — {note}")
+
+
+def _force_cleanup_port(port: int = 8080) -> None:
+    """Kill any process listening on *port* (other than self) and remove the lock.
+
+    Uses ``lsof -ti :<port>`` which catches zombie uvicorn workers that
+    ``pgrep -f src/main.py`` misses.  Safe to call at startup and on exit.
+    """
+    own_pid = os.getpid()
+    try:
+        result = subprocess.run(
+            ["lsof", "-ti", f":{port}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        for pid_str in result.stdout.strip().splitlines():
+            try:
+                pid = int(pid_str.strip())
+            except ValueError:
+                continue
+            if pid == own_pid:
+                continue
+            try:
+                os.kill(pid, signal.SIGKILL)
+                log_engine(f"cleanup: SIGKILL PID {pid} on port {port}")
+            except ProcessLookupError:
+                pass
+            except Exception as e:
+                log_engine(f"cleanup: could not kill PID {pid}: {e}")
+    except Exception:
+        pass
+    lock = Path(__file__).parent / "data" / ".ig_agent_v25.lock"
+    lock.unlink(missing_ok=True)
 
 
 def run_preflight() -> int:
@@ -452,6 +491,7 @@ class AgentRuntime:
         except Exception:
             pass
         release_instance_lock()
+        _force_cleanup_port()
         log_engine("shutdown complete")
 
     def run(self) -> int:
@@ -540,6 +580,49 @@ class AgentRuntime:
             self.shutdown()
 
 
+def _force_cleanup_port(port: int = _API_PORT) -> None:
+    """Kill any process still listening on *port* except our own PID, and remove
+    the instance lock file.
+
+    Registered via ``atexit`` and also called from ``AgentRuntime.shutdown()``
+    and ``_pre_startup_cleanup()`` so stale listeners and lock files are
+    cleared both on orderly exit and on the next launch after a crash.
+    SIGKILL is used to ensure the port is released immediately.
+    """
+    try:
+        import subprocess as _sp
+
+        result = _sp.run(
+            ["lsof", "-t", f"-i:{port}", "-sTCP:LISTEN"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        my_pid = os.getpid()
+        for pid_str in result.stdout.strip().splitlines():
+            try:
+                pid = int(pid_str.strip())
+            except ValueError:
+                continue
+            if pid == my_pid:
+                continue
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Remove the instance lock so the next launch can acquire it cleanly
+    try:
+        lock_path = Path(__file__).parent / "data" / ".ig_agent_v25.lock"
+        lock_path.unlink()
+    except Exception:
+        pass
+
+
 def _install_signal_handlers(runtime: AgentRuntime) -> None:
     def _handle(signum: int, _frame: Any) -> None:
         log_engine(f"signal {signum} received — graceful shutdown")
@@ -554,6 +637,7 @@ def _install_signal_handlers(runtime: AgentRuntime) -> None:
 
 
 def main() -> None:
+    atexit.register(_force_cleanup_port)
     _rotate_oversized_logs()
     log_engine("=== IG Agent v25 full restart ===")
     _pre_startup_cleanup()
