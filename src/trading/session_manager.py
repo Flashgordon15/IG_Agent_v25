@@ -178,6 +178,7 @@ class SessionManager:
                 return False
             gap_pts = abs(float(open_price) - float(self._last_close_price))
             if gap_pts <= GAP_ATR_MULTIPLE * atr_v:
+                self._gap_detected = False
                 return False
             self._gap_detected = True
             if self._env_scorer is not None:

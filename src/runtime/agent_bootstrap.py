@@ -19,6 +19,7 @@ from system.config import Config
 from system.config_validator import apply_config_defaults
 from system.engine_log import log_engine
 from system.market_data_hub import get_market_data_hub
+from system.paths import data_dir
 from trading.environment_scorer import EnvironmentScorer
 from trading.instrument_registry import InstrumentRegistry
 from trading.points_engine import PointsEngine
@@ -130,6 +131,7 @@ def _build_single_loop(
     prime = InstrumentRegistry(cfg.as_dict()).session_whitelist_for_epic(epic)
     if prime:
         env_scorer.set_prime_sessions(prime)
+    _safe_epic = epic.replace(".", "_").replace("/", "_")
     session_manager = SessionManager(
         epic,
         market=market,
@@ -137,6 +139,7 @@ def _build_single_loop(
         environment_scorer=env_scorer,
         signal_engine=signal_engine,
         rest_client=rest_client,
+        state_path=str(data_dir() / "state" / f"session_state_{_safe_epic}.json"),
     )
 
     from execution.trade_tracker import TradeTracker

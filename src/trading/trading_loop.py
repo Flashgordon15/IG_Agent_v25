@@ -197,6 +197,9 @@ class TradingLoop:
         self._session_tracker = SessionTickTracker()
         self._ml_store: Any | None = None
         self._ml_decision_log: list[dict] = []  # rolling last-20 ML blend decisions
+        self._gap_first_seen_at: datetime | None = (
+            None  # wall-clock when gap first detected
+        )
         self._balance_refresher: Any | None = None
         self._last_tick_mono: float = 0.0
         self._watchdog_stop = threading.Event()
@@ -813,8 +816,23 @@ class TradingLoop:
         bars_cold = self._session.bars_since_open()
         bars_elapsed = self._session.elapsed_bars_since_open()
         gap = bool(self._session.check_gap_open(atr, open_price=float(quote.mid)))
-        # Gap block expires after GAP_CLEAR_BARS (1 hour) — market has had time to settle
-        if gap and bars_elapsed >= GAP_CLEAR_BARS:
+        # Track wall-clock age of gap independently of bar counting.
+        # Protects against mid-session restarts where _open_time is reset to restart time.
+        if gap:
+            if self._gap_first_seen_at is None:
+                self._gap_first_seen_at = datetime.now()
+        else:
+            self._gap_first_seen_at = None
+        # Gap block expires after GAP_CLEAR_BARS bars (1 hour) — market has had time to settle.
+        # Wall-clock fallback: if gap has been visible for ≥60 min, clear regardless of bar count.
+        gap_age_sec = (
+            (datetime.now() - self._gap_first_seen_at).total_seconds()
+            if self._gap_first_seen_at
+            else 0
+        )
+        if gap and (
+            bars_elapsed >= GAP_CLEAR_BARS or gap_age_sec >= GAP_CLEAR_BARS * 5 * 60
+        ):
             gap = False
         passed = (not cold) and (not gap)
         if cold:
