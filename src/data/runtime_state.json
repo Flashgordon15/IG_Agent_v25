@@ -1,1 +1,1 @@
-{"version":1,"saved_at":1780677693.749699,"entry":{"entries":[{"epic":"IX.D.NIKKEI.IFM.IP","direction":"BUY","size":1.0,"local_created_at":1780677693.749672,"broker_deal_reference":""}]},"exit":{"exits":[]},"pending":{"orders":[]},"daily_risk":{}}
+{"version":1,"saved_at":1780678931.912374,"entry":{"entries":[]},"exit":{"exits":[]},"pending":{"orders":[{"epic":"EPIC1","side":"BUY","order_type":"entry","local_created_at":1780678931.911304,"broker_deal_reference":""}]},"daily_risk":{}}

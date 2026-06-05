@@ -200,12 +200,31 @@ def merge_credentials_for_validation(data: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
+def _clear_pycache() -> None:
+    """Remove all __pycache__ dirs under src/ to force fresh bytecode on launch."""
+    import shutil
+
+    src_root = Path(__file__).parent
+    cleared = 0
+    for cache_dir in src_root.rglob("__pycache__"):
+        try:
+            shutil.rmtree(cache_dir)
+            cleared += 1
+        except Exception:
+            pass
+    log_engine(
+        f"startup: cleared {cleared} __pycache__ dirs — fresh bytecode guaranteed"
+    )
+
+
 def _pre_startup_cleanup() -> None:
     """Kill any stale agent processes and release resources before acquiring a new lock.
 
     Runs every time the agent starts so a previous crash, force-quit, or silent
     background session never blocks the next launch.
     """
+    _clear_pycache()
+
     import os
     import subprocess
 

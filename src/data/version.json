@@ -1,6 +1,6 @@
 {
-  "version": "25.4.0",
-  "shown": false,
+  "version": "25.2.0",
+  "shown": true,
   "build_date": "2026-06-05",
   "changelog": [
     {
@@ -8,15 +8,17 @@
       "date": "2026-06-05",
       "title": "Confidence-scaled sizing, Gold fix & UI polish",
       "changes": [
-        "New: Dynamic position sizing — size scales with ML confidence (0.25× at 80% → 1.0× at 95%+)",
+        "New: Dynamic position sizing \u2014 size scales with ML confidence (0.25\u00d7 at 80% \u2192 1.0\u00d7 at 95%+)",
         "New: HEALTHY points state doubles all position sizes via ladder",
-        "Fixed: Gold in-flight ghost order permanently resolved — rate-cap errors no longer block markets",
+        "Fixed: Gold in-flight ghost order permanently resolved \u2014 rate-cap errors no longer block markets",
         "Fixed: Stale pending orders auto-expire after 300s; startup wipes crossed-session ghosts",
         "New: POST /api/clear_inflight/{epic} for live manual recovery without restart",
         "Fixed: System tab uptime, position sync & OHLC cache no longer flicker",
-        "New: Test/dry-run trade toggle on Trades tab — real P&L stats unaffected by test trades",
+        "New: Test/dry-run trade toggle on Trades tab \u2014 real P&L stats unaffected by test trades",
         "Fixed: Per-market Active Trades now visible on individual market tabs",
-        "Fixed: flatten/all confirmed not causing trading pause"
+        "Fixed: flatten/all confirmed not causing trading pause",
+        "New: __pycache__ cleared on every launch — stale bytecode can never block new code",
+        "New: Startup smoke test checks for stale pending orders and auto-unpauses if needed"
       ]
     },
     {
@@ -24,11 +26,11 @@
       "date": "2026-06-05",
       "title": "Correct IG point values & trailing stop tuning",
       "changes": [
-        "Fixed: ig_point_value_gbp corrected for all instruments (Nasdaq £14.94, Wall St £7.87, Gold £0.79, Nikkei £5.13)",
-        "Changed: Position sizes recalibrated for £10k account (~£50–375 risk/trade)",
-        "New: ATR-scaled trailing stop triggers — trail at 0.75× ATR, breakeven at 0.4× ATR",
-        "New: Limit extension enabled — take-profit extends up to 3× on trending moves",
-        "Changed: CAUTION size multiplier lifted to 0.5× flat for all confidence ≥ 80%"
+        "Fixed: ig_point_value_gbp corrected for all instruments (Nasdaq \u00a314.94, Wall St \u00a37.87, Gold \u00a30.79, Nikkei \u00a35.13)",
+        "Changed: Position sizes recalibrated for \u00a310k account (~\u00a350\u2013375 risk/trade)",
+        "New: ATR-scaled trailing stop triggers \u2014 trail at 0.75\u00d7 ATR, breakeven at 0.4\u00d7 ATR",
+        "New: Limit extension enabled \u2014 take-profit extends up to 3\u00d7 on trending moves",
+        "Changed: CAUTION size multiplier lifted to 0.5\u00d7 flat for all confidence \u2265 80%"
       ]
     },
     {
@@ -36,7 +38,7 @@
       "date": "2026-06-05",
       "title": "Cold start, blended confidence & startup cleanup",
       "changes": [
-        "Changed: COLD_START_BARS reduced from 6 to 2 — markets ready in ~10 min",
+        "Changed: COLD_START_BARS reduced from 6 to 2 \u2014 markets ready in ~10 min",
         "New: Dashboard market boxes show ML-blended confidence",
         "Fixed: Startup kills stale processes and removes lock file automatically",
         "New: Startup self-test suite runs on every launch",
@@ -44,5 +46,6 @@
       ]
     }
   ],
-  "shown_for_version": "25.3.0"
+  "shown_for_version": "25.2.0",
+  "dismissed_at": "2026-06-05T16:46:41.456Z"
 }

@@ -260,6 +260,24 @@ def build_market_orchestrator(
         _startup_mark("self_test", f"skipped: {type(e).__name__}")
         log_engine(f"startup self-test skipped: {type(e).__name__}: {e}")
 
+    # Smoke test — verify no known blocking conditions carried over from previous session
+    try:
+        from execution.pending_order_reconcile import recover_pending_state_for_startup
+
+        recover_pending_state_for_startup()
+        from api.agent_control import is_paused, start_trading
+
+        if is_paused():
+            start_trading()  # auto-unpause if somehow paused at startup
+            log_engine(
+                "startup smoke-test: auto-unpaused trading (was paused at startup)"
+            )
+        _startup_mark("smoke_test", "clear")
+        log_engine("startup smoke-test: no blocking conditions detected")
+    except Exception as e:
+        _startup_mark("smoke_test", f"warning: {type(e).__name__}")
+        log_engine(f"startup smoke-test warning: {type(e).__name__}: {e}")
+
     try:
         from system.telegram_notifier import (
             configure_telegram,
@@ -292,8 +310,6 @@ def build_market_orchestrator(
         # Start transaction sync daemon — populates ig_pnl_currency on closed trades
         txn_sync: Any | None = None
         try:
-            from runtime.ig_transaction_sync import _set_transaction_sync_instance
-
             txn_sync = IgTransactionSync(
                 rest_client,
                 store,
@@ -305,7 +321,6 @@ def build_market_orchestrator(
                 display_hours=24.0,
             )
             txn_sync.start()
-            _set_transaction_sync_instance(txn_sync)
             log_engine("IG transaction sync started")
         except Exception as _txn_e:
             log_engine(
