@@ -292,6 +292,8 @@ def build_market_orchestrator(
         # Start transaction sync daemon — populates ig_pnl_currency on closed trades
         txn_sync: Any | None = None
         try:
+            from runtime.ig_transaction_sync import _set_transaction_sync_instance
+
             txn_sync = IgTransactionSync(
                 rest_client,
                 store,
@@ -303,6 +305,7 @@ def build_market_orchestrator(
                 display_hours=24.0,
             )
             txn_sync.start()
+            _set_transaction_sync_instance(txn_sync)
             log_engine("IG transaction sync started")
         except Exception as _txn_e:
             log_engine(

@@ -200,6 +200,10 @@ def get_closed_trades(limit: int = 10) -> list[dict[str, Any]]:
         return []
 
 
+_CONFIRMED_RESULTS = frozenset({"WIN", "LOSS", "BREAKEVEN", "CANCELLED"})
+_UNRESOLVED_RESULTS = frozenset({"PENDING", "UNCONFIRMED", "", "NONE"})
+
+
 def _format_trade_row(row: dict[str, Any]) -> dict[str, Any]:
     pnl_pts = float(row.get("pnl_points") or row.get("pnl") or 0)
     pnl_gbp = row.get("ig_pnl_currency")
@@ -207,14 +211,22 @@ def _format_trade_row(row: dict[str, Any]) -> dict[str, Any]:
         pnl_gbp = float(pnl_gbp)
     if row.get("closed_at") is None:
         result = "OPEN"
-    elif pnl_gbp is None:
-        result = "PENDING"
-    elif pnl_gbp > 0:
-        result = "WIN"
-    elif pnl_gbp < 0:
-        result = "LOSS"
+    elif pnl_gbp is not None:
+        # IG-confirmed P&L — derive result from the actual value.
+        if pnl_gbp > 0:
+            result = "WIN"
+        elif pnl_gbp < 0:
+            result = "LOSS"
+        else:
+            result = "BREAKEVEN"
     else:
-        result = "BREAKEVEN"
+        # No IG-confirmed P&L yet: fall back to the stored result if it is a
+        # known final state; only show PENDING for truly unresolved records.
+        stored = str(row.get("result") or "").upper()
+        if stored in _CONFIRMED_RESULTS:
+            result = stored
+        else:
+            result = "PENDING"
     points_score = row.get("points_score")
     return {
         "direction": row.get("side") or row.get("direction"),

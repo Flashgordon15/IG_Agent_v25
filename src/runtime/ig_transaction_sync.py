@@ -24,6 +24,20 @@ from system.sync_task_guard import SyncTaskGuard
 SYNC_INTERVAL_SEC = 30.0
 DISPLAY_STALE_SEC = 90.0
 SOFT_MIN_GAP_SEC = 45.0
+PENDING_POLL_INTERVAL_SEC = 60.0
+PENDING_MIN_GAP_SEC = 55.0
+
+_instance: "IgTransactionSync | None" = None
+
+
+def get_transaction_sync_instance() -> "IgTransactionSync | None":
+    """Return the running IgTransactionSync singleton (set by agent_bootstrap)."""
+    return _instance
+
+
+def _set_transaction_sync_instance(sync: "IgTransactionSync | None") -> None:
+    global _instance
+    _instance = sync
 
 
 class IgTransactionSync:
@@ -490,6 +504,20 @@ class IgTransactionSync:
                     )
                 except Exception:
                     pass
+        # Sweep stale UNCONFIRMED trades (>24h old) → CANCELLED
+        if hasattr(self._store, "mark_stale_unconfirmed_as_cancelled"):
+            try:
+                cancelled = self._store.mark_stale_unconfirmed_as_cancelled(
+                    after_hours=24.0
+                )
+                if cancelled:
+                    log_engine(
+                        f"IG transaction sync: {cancelled} stale UNCONFIRMED trade(s) "
+                        "marked CANCELLED (>24h, no IG history match)"
+                    )
+            except Exception:
+                pass
+
         return reconciled
 
     @staticmethod
@@ -547,10 +575,33 @@ class IgTransactionSync:
         with self._lock:
             return self._last_error
 
+    def _has_pending_trades(self) -> bool:
+        """Return True if any closed strategy trades still lack IG-confirmed P&L."""
+        if self._store is None or not hasattr(
+            self._store, "count_unconfirmed_closed_trades"
+        ):
+            return False
+        try:
+            return self._store.count_unconfirmed_closed_trades() > 0
+        except Exception:
+            return False
+
     def _loop(self) -> None:
+        # Initial wait before first poll — use full interval so startup REST burst is avoided.
         if self._stop.wait(self._interval):
             return
         while not self._stop.is_set():
-            self.request_sync(force=False, reason="interval")
-            if self._stop.wait(self._interval):
+            has_pending = self._has_pending_trades()
+            if has_pending:
+                # Temporarily lower min_gap so the shorter interval actually fires.
+                saved = self._min_gap_seconds
+                self._min_gap_seconds = PENDING_MIN_GAP_SEC
+                try:
+                    self.request_sync(force=False, reason="pending-interval")
+                finally:
+                    self._min_gap_seconds = saved
+            else:
+                self.request_sync(force=False, reason="interval")
+            wait_sec = PENDING_POLL_INTERVAL_SEC if has_pending else self._interval
+            if self._stop.wait(wait_sec):
                 break

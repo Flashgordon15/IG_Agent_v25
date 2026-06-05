@@ -200,6 +200,34 @@ function ClosePositionButton({ dealId, epic }) {
 // TradesPanel
 // ---------------------------------------------------------------------------
 
+function SyncButton() {
+  const [status, setStatus] = React.useState("idle"); // idle | loading | ok | error
+  const handleSync = async () => {
+    setStatus("loading");
+    try {
+      const res = await fetch("/api/trades/reconcile", { method: "POST" });
+      setStatus(res.ok ? "ok" : "error");
+    } catch {
+      setStatus("error");
+    }
+    setTimeout(() => setStatus("idle"), 3000);
+  };
+  const label  = status === "loading" ? "Syncing…" : status === "ok" ? "Synced ✓" : status === "error" ? "Error" : "Sync";
+  const cls    = status === "ok"      ? "border-success/50 text-success bg-success/10"
+               : status === "error"   ? "border-danger/50  text-danger  bg-danger/10"
+               :                        "border-border      text-muted   hover:bg-surface";
+  return (
+    <button
+      onClick={handleSync}
+      disabled={status === "loading"}
+      className={`rounded border px-2 py-1 text-[11px] font-medium transition-colors ${cls}`}
+      title="Manually reconcile closed trades against IG history"
+    >
+      {label}
+    </button>
+  );
+}
+
 export default function TradesPanel({ state }) {
   if (!state) {
     return (
@@ -321,8 +349,8 @@ export default function TradesPanel({ state }) {
 
       {/* 4. Closed trades */}
       <Card title="Closed trades">
-        {/* Test trades toggle */}
-        <div className="mb-2 flex items-center gap-2">
+        {/* Controls: test toggle + sync button */}
+        <div className="mb-2 flex items-center justify-between gap-2">
           <label className="flex cursor-pointer items-center gap-1.5 select-none text-[11px] text-muted">
             <span
               role="checkbox"
@@ -344,6 +372,7 @@ export default function TradesPanel({ state }) {
               </span>
             )}
           </label>
+          <SyncButton />
         </div>
 
         <div className="-mx-1 overflow-x-auto">

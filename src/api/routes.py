@@ -114,6 +114,21 @@ def api_trades(limit: int = 10) -> dict[str, Any]:
     return {"trades": trades, "points_total": points_total}
 
 
+@router.post("/api/trades/reconcile")
+def api_reconcile_trades() -> dict[str, Any]:
+    """Manually trigger an immediate trade reconciliation against IG history."""
+    from runtime.ig_transaction_sync import get_transaction_sync_instance
+
+    sync = get_transaction_sync_instance()
+    if sync is None:
+        return JSONResponse(
+            {"ok": False, "error": "Transaction sync not running (agent offline?)"},
+            status_code=503,
+        )
+    scheduled = sync.request_sync(force=True, reason="manual-reconcile")
+    return {"ok": True, "scheduled": scheduled}
+
+
 @router.get("/api/signals")
 def api_signals(limit: int = 50) -> dict[str, Any]:
     return {"signals": get_signal_log(limit=min(100, max(1, limit)))}

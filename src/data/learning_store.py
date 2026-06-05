@@ -1364,3 +1364,47 @@ class LearningStore:
     @_locked
     def circuit_breaker_half_size_active(self) -> bool:
         return self.get_runtime_state("circuit_breaker_half_size") == "1"
+
+    @_locked
+    def count_unconfirmed_closed_trades(self) -> int:
+        """Count closed strategy trades that still lack IG-confirmed P&L."""
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(trades)").fetchall()}
+        if "ig_pnl_currency" not in cols:
+            return 0
+        row = self.conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM trades
+            WHERE closed_at IS NOT NULL
+              AND ig_pnl_currency IS NULL
+              AND dry_run = 0
+              AND (source IS NULL OR source = 'strategy')
+            """
+        ).fetchone()
+        return int(row["n"]) if row else 0
+
+    @_locked
+    def mark_stale_unconfirmed_as_cancelled(self, after_hours: float = 24.0) -> int:
+        """Mark UNCONFIRMED closed trades older than *after_hours* as CANCELLED.
+
+        Only touches trades with no IG-confirmed P&L and a genuinely unknown
+        result (UNCONFIRMED / NULL / PENDING).  WIN/LOSS/BREAKEVEN rows whose
+        ig_pnl_currency is still NULL are left untouched — they already have a
+        strategy-computed result and just haven't been IG-confirmed yet.
+        """
+        cutoff = (datetime.now() - timedelta(hours=after_hours)).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            UPDATE trades SET result='CANCELLED'
+            WHERE closed_at IS NOT NULL
+              AND ig_pnl_currency IS NULL
+              AND (result IS NULL OR UPPER(result) IN ('UNCONFIRMED', 'PENDING', ''))
+              AND closed_at < ?
+              AND dry_run = 0
+            """,
+            (cutoff,),
+        )
+        self.conn.commit()
+        return cur.rowcount
