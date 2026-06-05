@@ -1467,6 +1467,7 @@ class IGRestClient:
                 "GET",
                 f"/confirms/{deal_reference}",
                 headers=self._auth_headers("1"),
+                budget_priority=True,
             )
             if r.status_code != 200:
                 time.sleep(poll_interval_seconds)
@@ -1582,10 +1583,17 @@ class IGRestClient:
     ) -> requests.Response:
         from system.rest_api_budget import RestBudgetPausedError, get_rest_api_budget
 
+        # budget_priority=True bypasses the min-interval wait and hard cap for
+        # critical order-confirmation calls — must be popped before passing to
+        # requests.Session.request() which does not accept this kwarg.
+        budget_priority: bool = kwargs.pop("budget_priority", False)
+
         mgr = get_rate_limit_manager()
         if auth_required:
             try:
-                get_rest_api_budget().acquire(label=f"{method} {path}")
+                get_rest_api_budget().acquire(
+                    label=f"{method} {path}", priority=budget_priority
+                )
             except RestBudgetPausedError as exc:
                 raise IGAPIError(f"REST deferred ({exc})") from exc
         else:

@@ -25,7 +25,9 @@ ESSENTIAL_REST_CATEGORIES = frozenset({"positions", "orders"})
 HARD_CAP_DEFAULT = 3
 PREEMPTIVE_CONSECUTIVE_READINGS = 3
 PREEMPTIVE_PAUSE_SEC = 30.0
-PREEMPTIVE_PAUSE_MAX_SEC = 120.0  # progressive backoff ceiling when stream is persistently stale
+PREEMPTIVE_PAUSE_MAX_SEC = (
+    120.0  # progressive backoff ceiling when stream is persistently stale
+)
 PREEMPTIVE_UTILIZATION_RATIO = 0.8
 FRESH_STREAM_TICK_MAX_AGE_SEC = 45.0
 
@@ -295,12 +297,18 @@ class RestApiBudget:
         with self._lock:
             self._hard_cap = max(1, int(value))
 
-    def acquire(self, *, label: str = "") -> None:
-        """Block until the next REST slot is available."""
+    def acquire(self, *, label: str = "", priority: bool = False) -> None:
+        """Block until the next REST slot is available.
+
+        Pass ``priority=True`` for critical order-path calls (e.g. confirm_deal)
+        that must not be queued behind the minimum-interval or hard-cap guards.
+        The bypass is logged and the slot timestamp is still updated so subsequent
+        non-priority callers observe the correct spacing.
+        """
         from system.rate_limit_manager import get_rate_limit_manager
 
         cat = categorize_rest_label(label)
-        if cat not in ESSENTIAL_REST_CATEGORIES:
+        if not priority and cat not in ESSENTIAL_REST_CATEGORIES:
             self._raise_if_non_essential_paused(cat, label=label)
 
         get_rate_limit_manager().check_rest_allowed()
@@ -327,14 +335,25 @@ class RestApiBudget:
         # the early check in _raise_if_non_essential_paused is approximate (reads
         # completed calls before any lock); this check is definitive and prevents
         # concurrent threads from all passing the cap simultaneously.
-        _exempt_cap = cat in ESSENTIAL_REST_CATEGORIES or e2e_diagnostics_rest_active()
+        # priority=True bypasses both the min_interval wait and the hard cap so
+        # that confirm_deal can always complete regardless of budget saturation.
+        _exempt_cap = (
+            priority
+            or cat in ESSENTIAL_REST_CATEGORIES
+            or e2e_diagnostics_rest_active()
+        )
         while True:
             with self._lock:
                 now = time.time()
                 elapsed = now - self._last_ts
-                if elapsed >= self._min_interval:
+                if priority or elapsed >= self._min_interval:
                     if not _exempt_cap and self._hard_cap_exceeded_locked(now):
                         raise RestBudgetPausedError("hard_rate_cap")
+                    if priority and elapsed < self._min_interval:
+                        log_engine(
+                            f"REST budget: bypassing cap for critical confirm_deal "
+                            f"(label={label!r}, skipped {self._min_interval - elapsed:.1f}s wait)"
+                        )
                     self._last_ts = now  # Reserve this slot
                     break
                 wait = self._min_interval - elapsed
@@ -371,7 +390,8 @@ class RestApiBudget:
     def _hard_cap_calls_locked(self, now: float) -> list[RestCallRecord]:
         """Non-essential, non-ohlc-bootstrap calls in the last minute — counted toward hard cap."""
         return [
-            r for r in self._prune_locked(now)
+            r
+            for r in self._prune_locked(now)
             if r.category not in ESSENTIAL_REST_CATEGORIES and not r.exempt_preemptive
         ]
 
@@ -383,7 +403,9 @@ class RestApiBudget:
 
     def _preemptive_utilization_high_locked(self, now: float) -> bool:
         count = len(self._preemptive_calls_locked(now))
-        threshold = max(1, math.ceil(self._warn_per_minute * PREEMPTIVE_UTILIZATION_RATIO))
+        threshold = max(
+            1, math.ceil(self._warn_per_minute * PREEMPTIVE_UTILIZATION_RATIO)
+        )
         return count >= threshold
 
     def _raise_if_non_essential_paused(self, category: str, *, label: str = "") -> None:
@@ -476,7 +498,9 @@ class RestApiBudget:
             # Progressive backoff: 30s → 60s → 120s as stream stays stale.
             stale_pauses = getattr(self, "_stale_pause_count", 0) + 1
             self._stale_pause_count = stale_pauses
-            pause_sec = min(PREEMPTIVE_PAUSE_SEC * stale_pauses, PREEMPTIVE_PAUSE_MAX_SEC)
+            pause_sec = min(
+                PREEMPTIVE_PAUSE_SEC * stale_pauses, PREEMPTIVE_PAUSE_MAX_SEC
+            )
             self._preemptive_pause_until = now + pause_sec
             self._consecutive_high_readings = 0
             self._preemptive_skip_logged = False
@@ -548,7 +572,9 @@ class RestApiBudget:
                 "warn_per_minute": self._warn_per_minute,
                 "hard_cap_per_minute": self._hard_cap,
                 "hard_cap_calls_last_minute": hard_cap_calls,
-                "hard_cap_utilization_pct": round(hard_cap_calls / self._hard_cap * 100),
+                "hard_cap_utilization_pct": round(
+                    hard_cap_calls / self._hard_cap * 100
+                ),
                 "total_calls": self._total_calls,
                 "throttled_waits": self._total_waits,
                 "calls_last_minute": len(recent),
@@ -582,7 +608,9 @@ def get_rest_api_budget() -> RestApiBudget:
         return _budget
 
 
-def configure_rest_api_budget(*, min_interval_seconds: float | None = None) -> RestApiBudget:
+def configure_rest_api_budget(
+    *, min_interval_seconds: float | None = None
+) -> RestApiBudget:
     budget = get_rest_api_budget()
     if min_interval_seconds is not None:
         budget.set_min_interval(min_interval_seconds)
