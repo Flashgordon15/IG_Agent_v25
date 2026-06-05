@@ -288,9 +288,9 @@ export default function SystemPanel({ state, wsConnected, reconnecting }) {
 
         <Card title="Agent info">
           <dl className="space-y-3">
-            <StatusRow label="Model Version">
+            <StatusRow label="ML Model">
               <span className="font-mono text-foreground">
-                {modelVersion ?? "No model"}
+                {modelVersion ?? "—"}
               </span>
             </StatusRow>
 
@@ -382,7 +382,7 @@ export default function SystemPanel({ state, wsConnected, reconnecting }) {
             </span>
           </StatusRow>
           <StatusRow label="Model">
-            <span className="font-mono text-foreground">{modelVersion ?? "Not trained"}</span>
+            <span className="font-mono text-foreground">{modelVersion ?? "—"}</span>
           </StatusRow>
           <StatusRow label="Last Retrain">
             <span className="tabular-nums text-foreground">{fmtTs(lastRetrain) ?? "Never"}</span>

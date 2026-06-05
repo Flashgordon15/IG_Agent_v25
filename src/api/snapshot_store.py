@@ -260,32 +260,31 @@ def _tick_for_readers(tick: dict[str, Any]) -> dict[str, Any]:
         except Exception:
             pass
 
-    # ML model metadata for SystemPanel (model_version, last_retrain_time)
-    if "model_version" not in out:
-        try:
-            import json as _json
-            import time as _time
-            from datetime import datetime as _dt
+    # ML model metadata for SystemPanel — always populate so dashboard never flickers
+    try:
+        import json as _json
+        from datetime import datetime as _dt
 
-            from system.paths import data_dir as _data_dir
+        from system.paths import data_dir as _data_dir
 
-            meta_file = _data_dir() / "ml_model" / "meta.json"
-            if meta_file.exists():
-                meta = _json.loads(meta_file.read_text())
-                out["model_version"] = (
-                    meta.get("version") or meta.get("trained_at") or "—"
-                )
-                out["last_retrain_time"] = meta.get("trained_at")
+        meta_file = _data_dir() / "ml_model" / "meta.json"
+        if meta_file.exists():
+            meta = _json.loads(meta_file.read_text())
+            out["model_version"] = meta.get("version") or meta.get("trained_at") or "—"
+            out["last_retrain_time"] = meta.get("trained_at") or "—"
+        else:
+            model_file = _data_dir() / "ml_model" / "model.pkl"
+            if model_file.exists():
+                mtime = model_file.stat().st_mtime
+                ts = _dt.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+                out["model_version"] = ts
+                out["last_retrain_time"] = ts
             else:
-                model_file = _data_dir() / "ml_model" / "model.pkl"
-                if model_file.exists():
-                    mtime = model_file.stat().st_mtime
-                    out["last_retrain_time"] = _dt.fromtimestamp(mtime).strftime(
-                        "%Y-%m-%d %H:%M"
-                    )
-                    out["model_version"] = out["last_retrain_time"]
-        except Exception:
-            pass
+                out.setdefault("model_version", "No model")
+                out.setdefault("last_retrain_time", "—")
+    except Exception:
+        out.setdefault("model_version", "—")
+        out.setdefault("last_retrain_time", "—")
 
     # Agent uptime derived from lock-file mtime
     if "uptime" not in out:
