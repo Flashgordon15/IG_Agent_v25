@@ -580,49 +580,6 @@ class AgentRuntime:
             self.shutdown()
 
 
-def _force_cleanup_port(port: int = _API_PORT) -> None:
-    """Kill any process still listening on *port* except our own PID, and remove
-    the instance lock file.
-
-    Registered via ``atexit`` and also called from ``AgentRuntime.shutdown()``
-    and ``_pre_startup_cleanup()`` so stale listeners and lock files are
-    cleared both on orderly exit and on the next launch after a crash.
-    SIGKILL is used to ensure the port is released immediately.
-    """
-    try:
-        import subprocess as _sp
-
-        result = _sp.run(
-            ["lsof", "-t", f"-i:{port}", "-sTCP:LISTEN"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        my_pid = os.getpid()
-        for pid_str in result.stdout.strip().splitlines():
-            try:
-                pid = int(pid_str.strip())
-            except ValueError:
-                continue
-            if pid == my_pid:
-                continue
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-    # Remove the instance lock so the next launch can acquire it cleanly
-    try:
-        lock_path = Path(__file__).parent / "data" / ".ig_agent_v25.lock"
-        lock_path.unlink()
-    except Exception:
-        pass
-
-
 def _install_signal_handlers(runtime: AgentRuntime) -> None:
     def _handle(signum: int, _frame: Any) -> None:
         log_engine(f"signal {signum} received — graceful shutdown")
