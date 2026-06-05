@@ -19,8 +19,10 @@ from system.config import Config
 from system.engine_log import log_engine, record_engine_warning
 
 GATE_PASS_MIN = 55.0
-SAFE_DEFAULT_SCORE = 55.0  # Matches GATE_PASS_MIN — scorer errors fail-open so trading continues
-COLD_START_BAR_CAP = 6
+SAFE_DEFAULT_SCORE = (
+    55.0  # Matches GATE_PASS_MIN — scorer errors fail-open so trading continues
+)
+COLD_START_BAR_CAP = 2  # Pre-loaded OHLC history warms indicators; 2 live bars suffice
 GAP_CAP_MINUTES = 15
 GAP_ATR_MULTIPLE = 1.0
 
@@ -70,9 +72,9 @@ def score_session_timing_factor(
     prime_sessions: list[str] | None = None,
 ) -> float:
     """
-  Score session timing from config prime windows (session_name buckets).
+    Score session timing from config prime windows (session_name buckets).
 
-  When prime_sessions is omitted, defaults to asia_early (Japan 225 legacy behaviour).
+    When prime_sessions is omitted, defaults to asia_early (Japan 225 legacy behaviour).
     """
     now = now or datetime.now()
     name = session_name(now)
@@ -158,7 +160,9 @@ class EnvironmentScorer:
         """Per-instrument prime session buckets for score_session_timing_factor."""
         self._prime_sessions = [str(s) for s in sessions if s]
 
-    def _quote_df(self, market: str, quote_df: pd.DataFrame | None = None) -> pd.DataFrame:
+    def _quote_df(
+        self, market: str, quote_df: pd.DataFrame | None = None
+    ) -> pd.DataFrame:
         """Candle source of truth — SignalEngine seed + live quotes (Option A override)."""
         if quote_df is not None:
             return quote_df
@@ -245,10 +249,12 @@ class EnvironmentScorer:
         bars = self._complete_bar_count(market)
         self._bars_at_session_open[market] = bars
         if bars >= COLD_START_BAR_CAP and market in self._session_open_at:
+            # Backdate by enough minutes to exceed the cap so cold-start clears immediately
             backdate = datetime.now() - timedelta(minutes=COLD_START_BAR_CAP * 5 + 1)
             self._session_open_at[market] = backdate
             log_engine(
-                f"environment_scorer: bootstrapped {bars} bars — cold-start cleared (mid-session restart)"
+                f"environment_scorer: bootstrapped {bars} bars — cold-start cleared "
+                f"(cap={COLD_START_BAR_CAP} bars)"
             )
         else:
             log_engine(f"environment_scorer: bootstrapped from {bars} bars")
@@ -379,7 +385,11 @@ class EnvironmentScorer:
             bars_from_clock = 0
             opened = self._session_open_at.get(market)
             if opened is not None:
-                probe = quote.time if quote is not None and isinstance(quote.time, datetime) else datetime.now()
+                probe = (
+                    quote.time
+                    if quote is not None and isinstance(quote.time, datetime)
+                    else datetime.now()
+                )
                 if opened.tzinfo is not None:
                     if probe.tzinfo is None:
                         probe = probe.replace(tzinfo=opened.tzinfo)

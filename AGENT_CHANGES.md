@@ -56,3 +56,34 @@ The corresponding regression test lives in `tests/test_deployed_fixes.py`.
 Run: `PYTHONPATH=src python3 -m pytest tests/test_deployed_fixes.py -v`
 
 All tests must pass. Each test maps directly to one row in this changelog.
+
+---
+
+## Session 3 — 2026-06-05 (v25.3.0)
+
+### Environment scorer cold start cap
+- **`src/trading/environment_scorer.py`** — `COLD_START_BAR_CAP` reduced from 6 to 2 bars (aligned with `session_manager.COLD_START_BARS`). Fitness now reaches 100% after ~10 real minutes instead of 30. Backdate log message improved to show the cap value.
+
+### Dashboard blended confidence
+- **`src/trading/trading_loop.py`** — `_build_snapshot_payload`: `signal.confidence` now reads the ML-blended value from the `signal_confidence` gate (`g.value["confidence"]`) instead of the raw rules-only `sig.adjusted_confidence`. Added `rules_confidence` (raw rules %) and `threshold_delta` (confidence − floor) to the signal dict for dashboard transparency.
+
+### OHLC bootstrap rate-limit stagger
+- **`src/trading/ohlc_bootstrap.py`** — `bootstrap_ohlc_parallel` split into two phases: (1) markets with warm local cache load in parallel (no REST budget consumed); (2) markets needing a REST fetch run sequentially with a 22-second stagger between calls. Added `_OHLC_REST_STAGGER_SEC = 22.0` constant. Added `import time`.
+
+### Nasdaq OHLC cache
+- **`src/data/ohlc_yahoo_seeder.py`** — Added `"IX.D.NASDAQ.IFM.IP": ("NQ=F", "US Tech 100")` to `EPIC_YAHOO_MAP` and `DEFAULT_SEED_EPICS`. Nasdaq OHLC history can now be fetched from Yahoo Finance at startup.
+
+### Startup OHLC pre-seed
+- **`src/runtime/agent_bootstrap.py`** — Before `bootstrap_ohlc_parallel`, iterates enabled markets and calls `fetch_yahoo_ohlc_for_epic()` for any with a missing or empty cache file. Markets already cached are skipped.
+
+### Startup self-test
+- **`src/system/startup_tracker.py`** — Added `self_test` phase (at 55%) between `database` and `ohlc`.
+- **`src/runtime/agent_bootstrap.py`** — After `_startup_mark("database")`, runs `tests/test_deployed_fixes.py` via subprocess with a 60-second timeout. Marks `self_test` phase done (or skipped on error).
+
+### Pre-startup process cleanup
+- **`src/main.py`** — Added `_pre_startup_cleanup()`: kills any stale `src/main.py` processes via `SIGTERM` and removes the stale instance lock file. Called at the top of `main()` before `AgentRuntime`.
+
+### Tests updated
+- **`tests/test_session_manager.py`** — `test_cold_start_under_cap_bars` and `test_cold_start_advances_with_elapsed_time` rewritten to use `COLD_START_BARS` constant; `test_state_persistence_round_trip` bars_elapsed assertion uses constant. Removed hardcoded 6.
+- **`tests/test_trade_eligibility.py`** — `test_build_cold_start_from_gates` display assertion uses `COLD_START_BARS` constant.
+- **`tests/test_deployed_fixes.py`** — 10 new regression tests added (Session 3): `TestSession3EnvironmentScorerColdStart`, `TestSession3BlendedConfidence`, `TestSession3NasdaqYahooMap`, `TestSession3OhlcBootstrapStagger`, `TestSession3StartupCleanup`. Total: 30 tests.

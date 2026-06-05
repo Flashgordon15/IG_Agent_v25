@@ -36,6 +36,7 @@ EPIC_YAHOO_MAP: dict[str, tuple[str, str]] = {
     "CS.D.GBPUSD.CFD.IP": ("GBPUSD=X", "GBP/USD"),
     "CS.D.CRUDE.CFD.IP": ("CL=F", "US Oil WTI"),
     "IX.D.DOW.IFM.IP": ("^DJI", "Wall Street"),
+    "IX.D.NASDAQ.IFM.IP": ("NQ=F", "US Tech 100"),
 }
 
 DEFAULT_SEED_EPICS = (
@@ -44,6 +45,7 @@ DEFAULT_SEED_EPICS = (
     "CS.D.GBPUSD.CFD.IP",
     "CS.D.CRUDE.CFD.IP",
     "IX.D.DOW.IFM.IP",
+    "IX.D.NASDAQ.IFM.IP",
 )
 
 
@@ -137,7 +139,12 @@ def validate_bars(bars: list[dict[str, Any]]) -> tuple[bool, str]:
         for key in ("t", "o", "h", "l", "c"):
             if bar.get(key) is None:
                 return False, f"null field {key} at index {i}"
-        o, h, low, c = float(bar["o"]), float(bar["h"]), float(bar["l"]), float(bar["c"])
+        o, h, low, c = (
+            float(bar["o"]),
+            float(bar["h"]),
+            float(bar["l"]),
+            float(bar["c"]),
+        )
         if h < low or h < o or h < c or low > o or low > c:
             return False, f"invalid OHLC at {bar.get('t')}"
         t = str(bar["t"])
@@ -259,8 +266,10 @@ def main() -> int:
     args = _parse_args()
     if args.symbol:
         epic = str(args.epic[0] if args.epic else "").strip()
-        path = ohlc_cache_path(epic, market=args.market) if epic else (
-            data_dir() / "ohlc_cache" / "yahoo_custom_5m.jsonl"
+        path = (
+            ohlc_cache_path(epic, market=args.market)
+            if epic
+            else (data_dir() / "ohlc_cache" / "yahoo_custom_5m.jsonl")
         )
         count = fetch_yahoo_ohlc(
             args.symbol,

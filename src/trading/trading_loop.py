@@ -1448,6 +1448,13 @@ class TradingLoop:
         if isinstance(sig, SignalResult):
             direction = str(sig.signal or "WAIT")
             confidence = float(sig.adjusted_confidence)
+            # Prefer the ML-blended confidence when available (gate already computed it)
+            for _g in ctx.gates:
+                if _g.name == "signal_confidence" and isinstance(_g.value, dict):
+                    _blended = _g.value.get("confidence")
+                    if _blended is not None:
+                        confidence = float(_blended)
+                    break
             setup = str(sig.setup_key or "")
             snap = sig.snapshot or {}
             raw_direction = str(snap.get("raw_signal") or "")
@@ -1634,13 +1641,19 @@ class TradingLoop:
             "signal": {
                 "direction": direction,
                 "raw_direction": raw_direction or None,
-                "confidence": int(round(confidence)),
+                "confidence": int(round(confidence)),  # ML-blended if available
+                "rules_confidence": int(round(float(sig.adjusted_confidence)))
+                if isinstance(sig, SignalResult)
+                else 0,
                 "threshold": int(round(signal_threshold)),
                 "config_signal_threshold": int(
                     round(float(self._config.signal_threshold))
                 ),
                 "points_confidence_floor": int(
                     round(float(self._points.get_threshold()))
+                ),
+                "threshold_delta": int(
+                    round(confidence - float(self._points.get_threshold()))
                 ),
                 "min_size_threshold": int(
                     round(float(self._points.min_size_confidence_threshold()))

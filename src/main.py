@@ -200,6 +200,56 @@ def merge_credentials_for_validation(data: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
+def _pre_startup_cleanup() -> None:
+    """Kill any stale agent processes and remove stale lock file before acquiring a new one.
+
+    Runs every time the agent starts so a previous crash or force-quit never blocks
+    the next launch.  Only targets processes running src/main.py (this process is
+    excluded by PID).
+    """
+    import os
+    import subprocess
+
+    my_pid = os.getpid()
+    lock_path = Path(__file__).parent / "data" / ".ig_agent_v25.lock"
+
+    # Kill stale agent processes (same main.py, different PID)
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "src/main.py"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        for pid_str in result.stdout.strip().splitlines():
+            try:
+                pid = int(pid_str.strip())
+            except ValueError:
+                continue
+            if pid == my_pid:
+                continue
+            try:
+                os.kill(pid, signal.SIGTERM)
+                log_engine(f"pre-startup: sent SIGTERM to stale agent PID {pid}")
+            except ProcessLookupError:
+                pass
+            except Exception as e:
+                log_engine(f"pre-startup: could not kill PID {pid}: {e}")
+    except Exception as e:
+        log_engine(f"pre-startup: pgrep failed: {e}")
+
+    # Remove a stale lock left by the terminated process
+    try:
+        if lock_path.exists():
+            lock_path.unlink()
+            log_engine("pre-startup: removed stale instance lock")
+    except Exception as e:
+        log_engine(f"pre-startup: could not remove lock: {e}")
+
+    # Brief pause so OS cleans up any terminated processes
+    time.sleep(1)
+
+
 def run_preflight() -> int:
     """Steps 1–4. Returns exit code (0 = continue)."""
     if emergency_stop_lock_present():
@@ -419,6 +469,7 @@ def _install_signal_handlers(runtime: AgentRuntime) -> None:
 def main() -> None:
     _rotate_oversized_logs()
     log_engine("=== IG Agent v25 full restart ===")
+    _pre_startup_cleanup()
     runtime = AgentRuntime()
     _install_signal_handlers(runtime)
     try:

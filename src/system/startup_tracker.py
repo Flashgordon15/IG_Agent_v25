@@ -17,11 +17,12 @@ from typing import Any
 PHASES: list[tuple[str, str, int]] = [
     ("preflight", "Pre-flight checks", 8),
     ("config", "Configuration loaded", 16),
-    ("ig_auth", "IG API authenticated", 35),
-    ("database", "Database connected", 45),
-    ("ohlc", "Market data loaded", 62),
-    ("loops", "Trading loops built", 76),
-    ("stream", "Live stream connected", 90),
+    ("ig_auth", "IG API authenticated", 32),
+    ("database", "Database connected", 42),
+    ("self_test", "Self-test suite passed", 55),
+    ("ohlc", "Market data loaded", 68),
+    ("loops", "Trading loops built", 80),
+    ("stream", "Live stream connected", 92),
     ("ready", "All systems ready", 100),
 ]
 

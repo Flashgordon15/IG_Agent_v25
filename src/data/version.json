@@ -1,22 +1,20 @@
 {
-  "version": "25.2.1",
+  "version": "25.3.0",
   "shown": false,
   "build_date": "2026-06-05",
-  "dismissed_at": "2026-06-05T07:48:13.614Z",
+  "dismissed_at": null,
   "changelog": [
-    "Fixed critical gap-expiry bug: cold_start_gap block now correctly clears after 1 hour (was permanently stuck)",
-    "Added elapsed_bars_since_open() to SessionManager \u2014 uncapped bar counter for gap expiry",
-    "Raised rsi_buy_max 78->80: standard overbought threshold, prevents false-positive filtering of high-confidence signals",
-    "Wired ML decision log to dashboard: TradingLoop now records every ML blend decision and publishes to live panel",
-    "Fixed Header sentiment crowd badge: was comparing dict object to string \u2014 badge was permanently invisible",
-    "Fixed REST calls/min: was hardcoded 0 in snapshot, now uses RestApiBudget.calls_last_minute()",
-    "Fixed /api/system: now returns caffeinate, uptime, ohlc_markets_cached, sessions_passed for SystemPanel",
-    "Fixed shadow_today top_blocked_setup: was always unknown due to empty-key rows; added top_3_setups",
-    "Fixed estimated_extra_if_threshold_minus_5: was counting all blocked signals (5492); now correctly 459",
-    "Added snapshot enrichment: model_version, last_retrain_time, uptime, position_sync_status for SystemPanel",
-    "Disabled Germany 40 (DAX): IX.D.DAX.IFM.IP delivers no data on demo account",
-    "Added AGENT_CHANGES.md: permanent append-only record of every code change",
-    "Added tests/test_deployed_fixes.py: 20 regression tests verifying every fix is present in live code"
+    "Environment scorer cold start cap aligned: COLD_START_BAR_CAP reduced from 6 to 2 bars — fitness now reaches full score in ~10 min instead of 30 min",
+    "Dashboard now shows ML-blended confidence in market box (not raw rules %): extracted from gate signal_confidence.value.confidence",
+    "Added rules_confidence and threshold_delta to snapshot signal dict for transparency",
+    "OHLC bootstrap now cache-first split: cached markets load in parallel, REST-needed markets stagger 22s apart to avoid bursting 3/min cap",
+    "Nasdaq (IX.D.NASDAQ.IFM.IP / NQ=F) added to EPIC_YAHOO_MAP and DEFAULT_SEED_EPICS for automatic OHLC pre-population",
+    "Startup OHLC pre-seed: missing Yahoo-mapped caches now auto-populated before REST bootstrap on every launch",
+    "Agent startup now kills stale agent processes and removes stale lock file before acquiring a new lock",
+    "Startup self-test added: test_deployed_fixes.py regression suite runs during bootstrap (self_test phase)",
+    "Startup tracker gains self_test phase (55%) in splash screen checklist",
+    "Test suite updated: session_manager and trade_eligibility tests use COLD_START_BARS constant instead of hardcoded 6",
+    "Regression tests expanded: 10 new tests in test_deployed_fixes.py covering all Session 3 fixes (30 total)"
   ],
-  "shown_for_version": "25.2.0"
+  "shown_for_version": "25.2.1"
 }

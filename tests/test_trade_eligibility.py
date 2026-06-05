@@ -11,14 +11,14 @@ from unittest.mock import MagicMock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from trading.session_manager import COLD_START_BARS
 from trading.trade_eligibility import (
+    build_trade_eligibility,
     cold_start_remaining_sec,
     format_duration_display,
     next_bar_close_at,
     seconds_until_bar_close,
-    build_trade_eligibility,
 )
-from trading.session_manager import COLD_START_BARS
 from trading.trading_loop import GateResult
 
 
@@ -69,8 +69,10 @@ class TradeEligibilityHelperTests(unittest.TestCase):
         )
         self.assertIsNotNone(out)
         assert out is not None
+        from trading.session_manager import COLD_START_BARS
+
         self.assertEqual(out.kind, "cold_start")
-        self.assertIn("1/6", out.display)
+        self.assertIn(f"1/{COLD_START_BARS}", out.display)
 
     def test_build_score_block_no_timer(self) -> None:
         session = MagicMock()

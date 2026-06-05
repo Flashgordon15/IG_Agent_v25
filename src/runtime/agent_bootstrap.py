@@ -226,6 +226,40 @@ def build_market_orchestrator(
     points_engine = PointsEngine(store)
     _startup_mark("database")
 
+    # Quick self-test — run deployed-fixes regression suite to catch stale code
+    try:
+        import subprocess
+        import sys
+
+        from system.paths import project_root
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "tests/test_deployed_fixes.py",
+                "-x",
+                "-q",
+                "--tb=no",
+            ],
+            cwd=str(project_root()),
+            env={**__import__("os").environ, "PYTHONPATH": str(project_root() / "src")},
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        passed = result.returncode == 0
+        note = "all passed" if passed else f"FAILED — {result.stdout.strip()[-200:]}"
+        _startup_mark("self_test", note)
+        if not passed:
+            log_engine(f"startup self-test FAILED:\n{result.stdout[-400:]}")
+        else:
+            log_engine("startup self-test: all deployed-fixes checks passed")
+    except Exception as e:
+        _startup_mark("self_test", f"skipped: {type(e).__name__}")
+        log_engine(f"startup self-test skipped: {type(e).__name__}: {e}")
+
     try:
         from system.telegram_notifier import (
             configure_telegram,
@@ -302,6 +336,36 @@ def build_market_orchestrator(
             )
         )
     _startup_mark("loops", note=f"{len(loops)} markets ready")
+
+    # Pre-populate any missing OHLC caches from Yahoo before REST bootstrap
+    # so the REST fetches are skipped (cache-first) for markets already seeded.
+    try:
+        from data.ohlc_yahoo_seeder import EPIC_YAHOO_MAP
+        from system.paths import data_dir
+
+        _ohlc_dir = data_dir() / "ohlc_cache"
+        _ohlc_dir.mkdir(parents=True, exist_ok=True)
+        for loop in loops:
+            _epic = loop._epic
+            if _epic not in EPIC_YAHOO_MAP:
+                continue
+            _slug = _epic.replace(".", "_").replace("/", "_")
+            _cache = _ohlc_dir / f"{_slug}_5m.jsonl"
+            if _cache.exists() and _cache.stat().st_size > 1024:
+                continue  # cache warm — skip Yahoo fetch
+            try:
+                _symbol, _market_name = EPIC_YAHOO_MAP[_epic]
+                log_engine(
+                    f"OHLC startup seed: fetching {_market_name} from Yahoo ({_symbol})"
+                )
+                fetch_yahoo_ohlc_for_epic(_epic, market=_market_name)
+                log_engine(f"OHLC startup seed: {_market_name} cache populated")
+            except Exception as _ye:
+                log_engine(
+                    f"OHLC startup seed skipped {_epic}: {type(_ye).__name__}: {_ye}"
+                )
+    except Exception as _e:
+        log_engine(f"OHLC pre-seed step skipped: {type(_e).__name__}: {_e}")
 
     from trading.ohlc_bootstrap import bootstrap_ohlc_parallel
 

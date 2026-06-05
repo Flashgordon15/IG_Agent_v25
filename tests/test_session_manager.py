@@ -48,12 +48,21 @@ class SessionManagerTests(unittest.TestCase):
         ):
             self.assertFalse(self.mgr.is_session_open())
 
-    def test_cold_start_under_six_bars(self) -> None:
-        self.mgr._bars_at_open = 2
-        self.engine.candles.return_value = list(range(6))
-        self.assertEqual(self.mgr.bars_since_open(), 3)
+    def test_cold_start_under_cap_bars(self) -> None:
+        # COLD_START_BARS=2: need ≥2 bars since open to clear cold start.
+        # _complete_bar_count() returns len(candles)-1, so use len=2 for 1 bar
+        # and len=3 for 2 bars (COLD_START_BARS).
+        from trading.session_manager import COLD_START_BARS
+
+        self.mgr._bars_at_open = 0
+        # 1 bar since open — still in cold start
+        self.engine.candles.return_value = list(range(2))  # len=2 → complete=1
+        self.assertEqual(self.mgr.bars_since_open(), 1)
         self.assertTrue(self.mgr.is_cold_start())
-        self.engine.candles.return_value = list(range(10))
+        # COLD_START_BARS bars elapsed — cold start cleared
+        self.engine.candles.return_value = list(
+            range(COLD_START_BARS + 1)
+        )  # len=3 → complete=2
         self.assertFalse(self.mgr.is_cold_start())
 
     def test_gap_detection_registers_scorer(self) -> None:
@@ -94,13 +103,19 @@ class SessionManagerTests(unittest.TestCase):
         self.assertEqual(self.mgr._maintenance_count_today, 1)
 
     def test_cold_start_advances_with_elapsed_time(self) -> None:
-        self.mgr._open_time = datetime.now() - timedelta(minutes=16)
+        # COLD_START_BARS=2: cold start clears after 2 bars (≥10 real minutes)
+        from trading.session_manager import COLD_START_BARS
+
+        self.mgr._open_time = datetime.now() - timedelta(minutes=5)
         self.mgr._bars_at_open = 0
-        self.engine.candles.return_value = [1, 2]
-        self.assertGreaterEqual(self.mgr.bars_since_open(), 3)
+        self.engine.candles.return_value = [1]  # 1 bar so far
+        self.assertGreaterEqual(self.mgr.bars_since_open(), 1)
         self.assertTrue(self.mgr.is_cold_start())
-        self.mgr._open_time = datetime.now() - timedelta(minutes=31)
-        self.assertGreaterEqual(self.mgr.bars_since_open(), 6)
+        # After COLD_START_BARS * 5 + 1 minutes, cold start must be cleared
+        self.mgr._open_time = datetime.now() - timedelta(
+            minutes=COLD_START_BARS * 5 + 1
+        )
+        self.assertGreaterEqual(self.mgr.bars_since_open(), COLD_START_BARS)
         self.assertFalse(self.mgr.is_cold_start())
 
     def test_new_day_open_resets_points_and_env(self) -> None:
@@ -194,7 +209,10 @@ class SessionManagerTests(unittest.TestCase):
         self.assertTrue(st["session_open"])
         self.assertTrue(st["gap_detected"])
         self.assertEqual(st["maintenance_count_today"], 2)
-        self.assertEqual(st["bars_elapsed"], 6)
+        # bars_elapsed is capped at COLD_START_BARS (now 2)
+        from trading.session_manager import COLD_START_BARS
+
+        self.assertEqual(st["bars_elapsed"], COLD_START_BARS)
 
 
 if __name__ == "__main__":

@@ -143,7 +143,9 @@ def bootstrap_ohlc_for_session(
         with ohlc_bootstrap_rest_window():
             bars = fetch(epic, resolution=resolution, num_points=num_points)
         if not bars:
-            log_engine(f"OHLC bootstrap: no bars from IG REST for {epic} — trying local cache")
+            log_engine(
+                f"OHLC bootstrap: no bars from IG REST for {epic} — trying local cache"
+            )
             return _bootstrap_from_cache(
                 epic, market, signal_engine, environment_scorer, num_points
             )
@@ -183,25 +185,56 @@ def bootstrap_ohlc_for_session(
         return 0
 
 
+# Minimum seconds between REST OHLC fetches — keeps burst safely under 3/min cap
+_OHLC_REST_STAGGER_SEC = 22.0
+
+
 def bootstrap_ohlc_parallel(
     rest_client: Any,
     loops: list[Any],
     *,
     max_workers: int = 3,
 ) -> None:
-    """Bootstrap OHLC for all trading loops in parallel (cache-first per epic)."""
+    """Bootstrap OHLC for all trading loops.
+
+    Cache-first: markets with a warm local cache are seeded instantly without
+    consuming REST budget.  Markets that need a live REST fetch run sequentially
+    with a 22-second stagger to stay safely under the 3-calls/min hard cap.
+    """
     if not loops:
         return
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    def _bootstrap_loop(loop: Any) -> int:
-        if rest_client is None:
-            return 0
+    open_loops: list[Any] = []
+    for loop in loops:
         try:
-            if not loop._session.is_session_open():
-                return 0
+            if loop._session.is_session_open():
+                open_loops.append(loop)
         except Exception:
+            open_loops.append(loop)
+
+    if not open_loops:
+        return
+
+    # Split into cache-serviced vs REST-needed based on local cache presence
+    cached_loops: list[Any] = []
+    rest_loops: list[Any] = []
+    for loop in open_loops:
+        try:
+            from system.paths import data_dir
+
+            slug = loop._epic.replace(".", "_").replace("/", "_")
+            cache_path = data_dir() / "ohlc_cache" / f"{slug}_5m.jsonl"
+            if cache_path.exists() and cache_path.stat().st_size > 1024:
+                cached_loops.append(loop)
+            else:
+                rest_loops.append(loop)
+        except Exception:
+            rest_loops.append(loop)
+
+    def _bootstrap_one(loop: Any) -> int:
+        if rest_client is None:
             return 0
         return bootstrap_ohlc_for_session(
             rest_client,
@@ -212,13 +245,28 @@ def bootstrap_ohlc_parallel(
             prefer_cache=True,
         )
 
-    workers = min(max(1, int(max_workers)), len(loops))
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(_bootstrap_loop, loop) for loop in loops]
-        for fut in as_completed(futures):
-            try:
-                fut.result()
-            except Exception as e:
-                log_engine(
-                    f"OHLC parallel bootstrap error: {type(e).__name__}: {e}"
-                )
+    # Cached markets: parallel, no REST calls, no rate-limit risk
+    if cached_loops:
+        workers = min(max(1, int(max_workers)), len(cached_loops))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(_bootstrap_one, lp) for lp in cached_loops]
+            for fut in as_completed(futures):
+                try:
+                    fut.result()
+                except Exception as e:
+                    log_engine(f"OHLC bootstrap error: {type(e).__name__}: {e}")
+
+    # REST-needed markets: sequential with stagger to avoid rate-limit burst
+    for i, loop in enumerate(rest_loops):
+        if i > 0:
+            log_engine(
+                f"OHLC bootstrap: staggering {_OHLC_REST_STAGGER_SEC:.0f}s before "
+                f"REST fetch for {loop._epic} (rate-limit protection)"
+            )
+            time.sleep(_OHLC_REST_STAGGER_SEC)
+        try:
+            _bootstrap_one(loop)
+        except Exception as e:
+            log_engine(
+                f"OHLC REST bootstrap error {loop._epic}: {type(e).__name__}: {e}"
+            )

@@ -253,3 +253,112 @@ class TestSession2SentimentBadge:
         assert 'sentiment === "crowded_long"' not in src, (
             'Header.jsx still uses `sentiment === "crowded_long"` (object vs string) — badge is broken'
         )
+
+
+# ---------------------------------------------------------------------------
+# SESSION 3 FIXES
+# ---------------------------------------------------------------------------
+
+
+class TestSession3EnvironmentScorerColdStart:
+    """Environment scorer cold start cap must be aligned with session manager (2 bars)."""
+
+    def test_cold_start_bar_cap_is_2(self):
+        src = (SRC / "trading" / "environment_scorer.py").read_text()
+        assert "COLD_START_BAR_CAP = 2" in src, (
+            "environment_scorer.COLD_START_BAR_CAP is not 2 — "
+            "fitness will be capped at 55% for 30 minutes instead of 10 minutes"
+        )
+
+    def test_environment_scorer_cap_matches_session_manager(self):
+        import sys
+
+        sys.path.insert(0, str(SRC))
+        from trading.environment_scorer import COLD_START_BAR_CAP as env_cap
+        from trading.session_manager import COLD_START_BARS as session_cap
+
+        assert env_cap == session_cap, (
+            f"environment_scorer.COLD_START_BAR_CAP ({env_cap}) != "
+            f"session_manager.COLD_START_BARS ({session_cap}) — "
+            "cold start clears at different times in scorer vs session manager"
+        )
+
+
+class TestSession3BlendedConfidence:
+    """Dashboard snapshot must expose ML-blended confidence, not raw rules score."""
+
+    def test_snapshot_reads_blended_from_gate(self):
+        src = (SRC / "trading" / "trading_loop.py").read_text()
+        assert (
+            '_g.value.get("confidence")' in src or 'g.value.get("confidence")' in src
+        ), (
+            "_build_snapshot_payload does not extract blended confidence from "
+            "signal_confidence gate — dashboard will show rules-only value"
+        )
+
+    def test_snapshot_includes_rules_confidence(self):
+        src = (SRC / "trading" / "trading_loop.py").read_text()
+        assert '"rules_confidence"' in src, (
+            "signal dict does not include rules_confidence — "
+            "impossible to distinguish blended from rules-only on dashboard"
+        )
+
+    def test_snapshot_includes_threshold_delta(self):
+        src = (SRC / "trading" / "trading_loop.py").read_text()
+        assert '"threshold_delta"' in src, (
+            "signal dict does not include threshold_delta — "
+            "dashboard cannot show how close confidence is to the floor"
+        )
+
+
+class TestSession3NasdaqYahooMap:
+    """Nasdaq must be in the Yahoo OHLC map so its cache can be pre-populated."""
+
+    def test_nasdaq_in_yahoo_map(self):
+        import sys
+
+        sys.path.insert(0, str(SRC))
+        from data.ohlc_yahoo_seeder import EPIC_YAHOO_MAP
+
+        assert "IX.D.NASDAQ.IFM.IP" in EPIC_YAHOO_MAP, (
+            "Nasdaq epic IX.D.NASDAQ.IFM.IP not in EPIC_YAHOO_MAP — "
+            "Nasdaq OHLC cache cannot be pre-populated from Yahoo"
+        )
+        symbol, market = EPIC_YAHOO_MAP["IX.D.NASDAQ.IFM.IP"]
+        assert symbol == "NQ=F", f"Expected NQ=F, got {symbol!r}"
+
+
+class TestSession3OhlcBootstrapStagger:
+    """OHLC bootstrap must stagger REST calls to avoid bursting the 3/min cap."""
+
+    def test_stagger_constant_defined(self):
+        src = (SRC / "trading" / "ohlc_bootstrap.py").read_text()
+        assert "_OHLC_REST_STAGGER_SEC" in src, (
+            "_OHLC_REST_STAGGER_SEC constant missing from ohlc_bootstrap.py — "
+            "parallel REST calls will burst the 3/min cap on startup"
+        )
+
+    def test_stagger_applied_in_parallel_bootstrap(self):
+        src = (SRC / "trading" / "ohlc_bootstrap.py").read_text()
+        assert "time.sleep(_OHLC_REST_STAGGER_SEC)" in src, (
+            "bootstrap_ohlc_parallel does not sleep between REST fetches — "
+            "multiple markets will burst the 3-calls/min cap simultaneously"
+        )
+
+
+class TestSession3StartupCleanup:
+    """main.py must kill stale agent processes at startup."""
+
+    def test_pre_startup_cleanup_exists(self):
+        src = (SRC / "main.py").read_text()
+        assert "_pre_startup_cleanup" in src, (
+            "_pre_startup_cleanup() is missing from main.py — "
+            "stale agent processes will block the next launch"
+        )
+
+    def test_cleanup_called_in_main(self):
+        src = (SRC / "main.py").read_text()
+        assert "_pre_startup_cleanup()" in src, (
+            "_pre_startup_cleanup() is defined but never called in main() — "
+            "stale processes will not be killed on startup"
+        )
