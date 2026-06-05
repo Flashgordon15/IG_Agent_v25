@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Any, Callable
 
 from system.engine_log import log_engine
+from system.ig_rest_sync_lock import ig_rest_sync_lock
 from system.ig_transactions import (
     build_activity_time_lookup,
     filter_rows_last_hours,
@@ -17,7 +18,6 @@ from system.ig_transactions import (
     ig_deal_key_variants,
     parse_ig_transaction_row,
 )
-from system.ig_rest_sync_lock import ig_rest_sync_lock
 from system.rate_limit_manager import get_rate_limit_manager
 from system.sync_task_guard import SyncTaskGuard
 
@@ -76,7 +76,9 @@ class IgTransactionSync:
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
-        self._thread = threading.Thread(target=self._loop, daemon=True, name="IgTransactionSync")
+        self._thread = threading.Thread(
+            target=self._loop, daemon=True, name="IgTransactionSync"
+        )
         self._thread.start()
         log_engine("IG transaction sync started")
 
@@ -164,7 +166,9 @@ class IgTransactionSync:
                 return False
 
         now = time.time()
-        effective_last = self._last_sync_ts if self._last_sync_ts > 0 else (now - SOFT_MIN_GAP_SEC)
+        effective_last = (
+            self._last_sync_ts if self._last_sync_ts > 0 else (now - SOFT_MIN_GAP_SEC)
+        )
         if not force:
             if now - effective_last < SOFT_MIN_GAP_SEC:
                 self._log_skip(f"soft gap {SOFT_MIN_GAP_SEC:.0f}s")
@@ -185,9 +189,13 @@ class IgTransactionSync:
 
         def work() -> None:
             try:
-                self.sync_once(force=force, fetch_activity=force or self.is_display_stale())
+                self.sync_once(
+                    force=force, fetch_activity=force or self.is_display_stale()
+                )
             except Exception as e:
-                log_engine(f"IG transaction sync request failed ({reason}): {type(e).__name__}: {e}")
+                log_engine(
+                    f"IG transaction sync request failed ({reason}): {type(e).__name__}: {e}"
+                )
 
         self._request_thread = threading.Thread(
             target=work,
@@ -248,7 +256,9 @@ class IgTransactionSync:
         # or rate-limit recovery. When _last_sync_ts is 0 (never run), treat it as
         # if a sync ran SOFT_MIN_GAP_SEC ago so the first call must wait only that
         # gap rather than firing immediately alongside other startup REST traffic.
-        effective_last = self._last_sync_ts if self._last_sync_ts > 0 else (now - SOFT_MIN_GAP_SEC)
+        effective_last = (
+            self._last_sync_ts if self._last_sync_ts > 0 else (now - SOFT_MIN_GAP_SEC)
+        )
         if not force:
             if now - effective_last < SOFT_MIN_GAP_SEC:
                 self._log_skip(f"soft gap {SOFT_MIN_GAP_SEC:.0f}s", force=force)
@@ -260,6 +270,15 @@ class IgTransactionSync:
         start, end = ig_date_range_dd_mm_yyyy(days_back=self._history_days)
         try:
             with ig_rest_sync_lock():
+                # Re-check inside the lock: a thread that was queued behind another
+                # sync may have been waiting while that sync triggered a rate limit.
+                if mgr.is_rest_blocked():
+                    rem = int(mgr.seconds_until_rest_reset())
+                    self._log_skip(
+                        f"IG REST rate limit ~{rem}s remaining (inside lock)",
+                        force=force,
+                    )
+                    return 0
                 txns = self._rest.fetch_transactions(
                     start,
                     end,
@@ -296,7 +315,9 @@ class IgTransactionSync:
                 if self._store.ingest_ig_closed_transaction(row):
                     updated += 1
             elif hasattr(self._store, "apply_ig_transaction_pnl"):
-                close_ref = str(row.get("ig_deal_id") or row.get("deal_reference") or "")
+                close_ref = str(
+                    row.get("ig_deal_id") or row.get("deal_reference") or ""
+                )
                 if self._store.apply_ig_transaction_pnl(
                     row.get("deal_reference") or "",
                     row.get("ig_deal_id") or "",
@@ -329,7 +350,9 @@ class IgTransactionSync:
                 + (f" [{ref_txt}]" if ref_txt else "")
             )
         elif txns:
-            log_engine(f"IG transaction sync: {len(txns)} raw txns, 0 deal closes in window")
+            log_engine(
+                f"IG transaction sync: {len(txns)} raw txns, 0 deal closes in window"
+            )
 
         if (updated or rows) and self._on_changed:
             self._on_changed()
@@ -408,7 +431,9 @@ class IgTransactionSync:
                 ig_row = self._heuristic_match(local, ig_rows, claimed_close_refs)
             if not ig_row:
                 continue
-            close_ref = str(ig_row.get("ig_deal_id") or ig_row.get("deal_reference") or "")
+            close_ref = str(
+                ig_row.get("ig_deal_id") or ig_row.get("deal_reference") or ""
+            )
             if close_ref:
                 claimed_close_refs.add(close_ref.upper())
             pnl = float(ig_row.get("ig_pnl_currency") or 0)
@@ -447,7 +472,9 @@ class IgTransactionSync:
                             "ml_score_at_entry": local.get("ml_score"),
                             "fitness_score_at_entry": local.get("fitness_score"),
                             "atr_at_entry": local.get("atr_at_entry"),
-                            "trail_exit_vs_fixed_target": local.get("trail_exit_vs_fixed"),
+                            "trail_exit_vs_fixed_target": local.get(
+                                "trail_exit_vs_fixed"
+                            ),
                             "partial_close_vs_hold": local.get("partial_close_info"),
                             "session_time_at_entry": local.get("session_time"),
                             "points_state_at_entry": local.get("points_state"),
@@ -473,14 +500,18 @@ class IgTransactionSync:
     ) -> dict[str, Any] | None:
         """Match open DIAAA deal to IG close ref when ids differ (e.g. LBH6GFAG)."""
         epic = str(local.get("epic") or "")
-        closed_dt = IgTransactionSync._parse_closed_ts(str(local.get("closed_at") or ""))
+        closed_dt = IgTransactionSync._parse_closed_ts(
+            str(local.get("closed_at") or "")
+        )
         open_id = str(local.get("ig_deal_id") or "").strip()
         if not closed_dt or not open_id:
             return None
         best: dict[str, Any] | None = None
         best_delta = 999999.0
         for ig in ig_rows:
-            close_ref = str(ig.get("ig_deal_id") or ig.get("deal_reference") or "").upper()
+            close_ref = str(
+                ig.get("ig_deal_id") or ig.get("deal_reference") or ""
+            ).upper()
             if not close_ref or close_ref in claimed:
                 continue
             if epic and str(ig.get("epic") or "") and str(ig.get("epic") or "") != epic:
