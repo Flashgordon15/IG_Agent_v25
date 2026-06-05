@@ -707,3 +707,67 @@ class TestSession4PreLaunchValidation:
         assert int(str(score_reported).replace("%", "")) < GATE_PASS_MIN, (
             f"Reported fitness score {score_reported} is not below GATE_PASS_MIN={GATE_PASS_MIN}"
         )
+
+
+# ---------------------------------------------------------------------------
+# SESSION 6 FIXES — dynamic confidence-tiered sizing (v25.3.0)
+# ---------------------------------------------------------------------------
+
+
+class TestSession6DynamicSizing:
+    """dynamic_sizing config and _confidence_adjusted_size logic."""
+
+    def test_dynamic_sizing_config_present(self):
+        """config_v25.json must have dynamic_sizing.enabled=True with 4 tiers."""
+        cfg = json.loads(CONFIG.read_text())
+        dyn = cfg.get("dynamic_sizing", {})
+        assert dyn.get("enabled") is True, "dynamic_sizing.enabled must be True"
+        tiers = dyn.get("tiers", [])
+        assert len(tiers) == 4, f"Expected 4 confidence tiers, got {len(tiers)}"
+
+    def test_confidence_tiered_sizing(self):
+        """confidence=95 → multiplier 1.0; confidence=82 → multiplier 0.25."""
+        import sys
+
+        sys.path.insert(0, str(SRC))
+        from execution.execution_engine import ExecutionEngine
+        from system.config import Config
+
+        cfg_data = json.loads(CONFIG.read_text())
+        config = Config(_data=cfg_data)
+
+        engine = object.__new__(ExecutionEngine)
+        engine.config = config
+
+        # Top tier: confidence ≥ 95 → 1.0×
+        size_top = engine._confidence_adjusted_size(1.0, 95.0)
+        assert size_top == 1.0, f"Tier 95 should give 1.0× multiplier, got {size_top}"
+
+        # Bottom tier: confidence 82 (≥80 but <85) → 0.25×
+        size_bottom = engine._confidence_adjusted_size(1.0, 82.0)
+        assert size_bottom == 0.25, (
+            f"Tier 80 (conf=82) should give 0.25× multiplier, got {size_bottom}"
+        )
+
+    def test_nasdaq_base_size_updated(self):
+        """Nasdaq base trade_size must be 0.25 (up from 0.05) for dynamic sizing."""
+        cfg = json.loads(CONFIG.read_text())
+        nasdaq = cfg["instruments"]["nasdaq_100"]
+        assert nasdaq["trade_size"] == 0.25, (
+            f"Nasdaq trade_size should be 0.25, got {nasdaq['trade_size']}"
+        )
+
+    def test_partial_close_keys_present(self):
+        """trailing_stop block must have partial_close_* keys (disabled by default)."""
+        cfg = json.loads(CONFIG.read_text())
+        ts = cfg.get("trailing_stop", {})
+        assert "partial_close_enabled" in ts, (
+            "trailing_stop missing partial_close_enabled"
+        )
+        assert ts["partial_close_enabled"] is False, (
+            "partial_close_enabled should be False"
+        )
+        assert "partial_close_at_r" in ts, "trailing_stop missing partial_close_at_r"
+        assert "partial_close_fraction" in ts, (
+            "trailing_stop missing partial_close_fraction"
+        )

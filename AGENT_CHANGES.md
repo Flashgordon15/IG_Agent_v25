@@ -51,6 +51,63 @@ The corresponding regression test lives in `tests/test_deployed_fixes.py`.
 
 ---
 
+## Session 6 — 2026-06-05 (v25.3.0)
+
+### Feature: Confidence-tiered dynamic position sizing
+
+**Motivation:** Flat sizing treats a 95% confidence trade the same as an 80% confidence trade. Dynamic sizing rewards high-conviction signals with proportionally larger positions while protecting capital on marginal entries.
+
+**Changes:**
+
+- **`config/config_v25.json` — `dynamic_sizing` block added (top level):**
+  - `enabled: true` — active immediately.
+  - `account_balance_gbp: 10000` — account reference for future margin % checks.
+  - `max_margin_pct: 0.15` — max 15% margin utilisation per trade (reference, not yet enforced in code).
+  - Four confidence tiers: ≥95 → 1.0×, ≥90 → 0.65×, ≥85 → 0.4×, ≥80 → 0.25×.
+
+- **`config/config_v25.json` — base `trade_size` updated per instrument** so that `base_size × 1.0 × ig_point_value_gbp × stop_pts ≤ £375` (top-tier risk):
+
+  | Instrument | Old size | New size | Risk at 1.0× tier | Risk at 0.25× tier |
+  |---|---|---|---|---|
+  | Nasdaq 100 | 0.05 | **0.25** | £373.50 (0.25×£14.94×100) | £93.38 |
+  | Wall Street | 0.1 | **0.3** | £188.88 (0.3×£7.87×80) | £47.22 |
+  | Spot Gold | 6.0 | **6.0** | £47.40 (unchanged) | £11.85 |
+  | Japan 225 | 0.2 | **0.4** | £92.34 (0.4×£5.13×45) | £23.09 |
+
+- **`config/config_v25.json` — `trailing_stop` block:** Added three new keys:
+  - `partial_close_enabled: false` — config stub; logic not yet implemented.
+  - `partial_close_at_r: 1.5` — trigger at 1.5R profit.
+  - `partial_close_fraction: 0.5` — close 50% of position.
+
+- **`src/execution/execution_engine.py` — `_confidence_adjusted_size` method added:**
+  - Reads `dynamic_sizing.tiers` from config, sorted highest-first.
+  - Returns `base_size × tier["size_multiplier"]` for the highest tier that `confidence ≥ min_confidence`.
+  - Falls back to lowest tier multiplier when confidence is below all tiers.
+  - Called in `get_execution_settings()` after the points-engine multiplier, so the full chain is: `base_size × points_state_mult × confidence_tier_mult`.
+  - Notes appended to execution settings: `conf-tier ×N.NN`.
+
+- **`config/config_v25.json` — version bumped** `25.2.2` → `25.3.0`.
+
+### Nasdaq effective sizes at each tier (base_size=0.25, stop_pts=100):
+
+| Confidence | Tier mult | Effective size (after 0.5× CAUTION) | Risk (£/pt=14.94) |
+|---|---|---|---|
+| ≥ 95% | 1.0× | 0.125 | £186.75 |
+| ≥ 90% | 0.65× | 0.0813 | £121.39 |
+| ≥ 85% | 0.4× | 0.05 | £74.70 |
+| ≥ 80% | 0.25× | 0.0313 | £46.74 |
+
+*(In HEALTHY state the points multiplier is 1.0× so sizes double)*
+
+### Tests added — `tests/test_deployed_fixes.py`
+New class `TestSession6DynamicSizing` with 4 tests:
+- `test_dynamic_sizing_config_present` — `dynamic_sizing.enabled=True`, 4 tiers present.
+- `test_confidence_tiered_sizing` — conf=95 → 1.0×, conf=82 → 0.25× via `_confidence_adjusted_size`.
+- `test_nasdaq_base_size_updated` — Nasdaq `trade_size=0.25`.
+- `test_partial_close_keys_present` — `trailing_stop` has all 3 partial-close keys, `enabled=False`.
+
+---
+
 ## How to verify before each restart
 
 Run: `PYTHONPATH=src python3 -m pytest tests/test_deployed_fixes.py -v`

@@ -92,7 +92,7 @@
   "telegram_bot_token": "",
   "telegram_chat_id": "",
   "$schema": "./config_schema.json",
-  "version": "25.2.2",
+  "version": "25.3.0",
   "app_version": "v25-dev",
   "operating_mode": "DEMO",
   "markets": [],
@@ -108,7 +108,7 @@
       "adaptive_max_risk_points": 90,
       "min_atr_points": 20,
       "ig_point_value_gbp": 5.13,
-      "trade_size": 0.2,
+      "trade_size": 0.4,
       "risk_cap_gbp": 100,
       "stale_threshold_seconds": 60,
       "best_session": "23:00-06:00 BST",
@@ -191,7 +191,7 @@
       "adaptive_max_risk_points": 150,
       "min_atr_points": 20,
       "ig_point_value_gbp": 7.87,
-      "trade_size": 0.1,
+      "trade_size": 0.3,
       "risk_cap_gbp": 150,
       "stale_threshold_seconds": 15,
       "best_session": "13:30-21:00 BST",
@@ -261,7 +261,7 @@
       "adaptive_max_risk_points": 200,
       "min_atr_points": 30,
       "ig_point_value_gbp": 14.94,
-      "trade_size": 0.05,
+      "trade_size": 0.25,
       "risk_cap_gbp": 150,
       "stale_threshold_seconds": 15,
       "execution_priority": 65
@@ -336,6 +336,20 @@
     "limit_extension_enabled": true,
     "limit_extension_trigger_atr_multiple": 1.5,
     "limit_extension_step_atr_multiple": 0.75,
-    "limit_extension_max_extensions": 3
+    "limit_extension_max_extensions": 3,
+    "partial_close_enabled": false,
+    "partial_close_at_r": 1.5,
+    "partial_close_fraction": 0.5
+  },
+  "dynamic_sizing": {
+    "enabled": true,
+    "account_balance_gbp": 10000,
+    "max_margin_pct": 0.15,
+    "tiers": [
+      {"min_confidence": 95, "size_multiplier": 1.0},
+      {"min_confidence": 90, "size_multiplier": 0.65},
+      {"min_confidence": 85, "size_multiplier": 0.4},
+      {"min_confidence": 80, "size_multiplier": 0.25}
+    ]
   }
 }

@@ -14,13 +14,13 @@ from execution.test_simulator import TestSimulator
 from execution.trade_manager import TradeManager
 from execution.trade_tracker import TradeTracker
 from execution.types import ExecutionMode, ExecutionResult, TradeSignal
+from ig_api.exceptions import RateLimitError
 from system.config import Config
 from system.demo_execution_trace import (
     log_simulator_fallback_warning,
     trace_execution,
     update_demo_diagnostics,
 )
-from ig_api.exceptions import RateLimitError
 from system.rate_limit_manager import get_rate_limit_manager
 from system.trade_lifecycle_bus import (
     STAGE_EXECUTION_REQUEST,
@@ -59,8 +59,8 @@ class ExecutionEngine:
         self._cooldown.attach_store(store)
         self._points = points_engine
         self._env_scorer = environment_scorer
-        from execution.ml_training_hooks import configure_ml_training
         from data.ml_training_store import MLTrainingStore
+        from execution.ml_training_hooks import configure_ml_training
 
         configure_ml_training(
             ml_store=ml_training_store or MLTrainingStore(),
@@ -89,6 +89,7 @@ class ExecutionEngine:
         self._live = None
         if rest_client:
             from execution.live_executor import LiveExecutor
+
             self._live = LiveExecutor(config, rest_client)
 
         executor_name = (
@@ -100,7 +101,11 @@ class ExecutionEngine:
             "MODE",
             "ExecutionEngine.__init__",
             decision=f"executor={executor_name}",
-            params={"mode": mode.value, "has_rest": rest_client is not None, "has_live": self._live is not None},
+            params={
+                "mode": mode.value,
+                "has_rest": rest_client is not None,
+                "has_live": self._live is not None,
+            },
         )
 
     def set_mode(self, mode: ExecutionMode) -> None:
@@ -170,21 +175,37 @@ class ExecutionEngine:
         )
         return result
 
+    def _confidence_adjusted_size(self, base_size: float, confidence: float) -> float:
+        """Scale position size by ML confidence tier from dynamic_sizing config."""
+        dyn = self.config.get("dynamic_sizing", {})
+        if not dyn.get("enabled", False):
+            return base_size
+        tiers = sorted(
+            dyn.get("tiers", []),
+            key=lambda t: t["min_confidence"],
+            reverse=True,
+        )
+        for tier in tiers:
+            if confidence >= tier["min_confidence"]:
+                return round(base_size * tier["size_multiplier"], 4)
+        return round(base_size * tiers[-1]["size_multiplier"] if tiers else 1.0, 4)
+
     def get_execution_settings(self, signal: TradeSignal) -> dict[str, Any]:
         trace_execution(
             "ADAPTIVE",
             "AdaptiveEngine.settings",
             decision="entering",
             next_fn="AdaptiveEngine.settings",
-            params={"setup_key": signal.setup_key, "confidence": signal.adjusted_confidence},
+            params={
+                "setup_key": signal.setup_key,
+                "confidence": signal.adjusted_confidence,
+            },
         )
         settings = self._adaptive.settings(
             signal.setup_key, signal.adjusted_confidence, signal.snapshot
         )
         if self._points is not None:
-            mult = float(
-                self._points.get_size_multiplier(signal.adjusted_confidence)
-            )
+            mult = float(self._points.get_size_multiplier(signal.adjusted_confidence))
             base_size = float(settings.get("size", self.config.trade_size))
             cfg = self.config
             sized = base_size * mult
@@ -198,6 +219,26 @@ class ExecutionEngine:
                 if notes
                 else f"points {self._points.get_state()} ×{mult:.2f}"
             )
+        # Confidence-tiered sizing: scale further by dynamic_sizing tiers.
+        # Applied after points-engine multiplier so tiers act on the already-
+        # state-adjusted size (CAUTION 0.5× × tier 0.65 = conservative combo).
+        pre_tier_size = float(settings.get("size", self.config.trade_size))
+        tiered_size = self._confidence_adjusted_size(
+            pre_tier_size, signal.adjusted_confidence
+        )
+        if tiered_size != pre_tier_size:
+            cfg = self.config
+            settings["size"] = max(
+                cfg.adaptive_min_trade_size,
+                min(cfg.adaptive_max_trade_size, tiered_size),
+            )
+            tier_mult = tiered_size / pre_tier_size if pre_tier_size else 1.0
+            notes = str(settings.get("notes") or "")
+            settings["notes"] = (
+                f"{notes}, conf-tier ×{tier_mult:.2f}"
+                if notes
+                else f"conf-tier ×{tier_mult:.2f}"
+            )
         if self._env_scorer is not None:
             try:
                 settings["fitness_score"] = float(
@@ -210,11 +251,17 @@ class ExecutionEngine:
             "AdaptiveEngine.settings",
             decision="rules applied",
             next_fn="RiskManager.assess",
-            params={k: settings.get(k) for k in ("size", "risk", "limit", "reward") if k in settings},
+            params={
+                k: settings.get(k)
+                for k in ("size", "risk", "limit", "reward")
+                if k in settings
+            },
         )
         return settings
 
-    def execute_trade(self, signal: TradeSignal, *, prevalidated: bool = False) -> ExecutionResult:
+    def execute_trade(
+        self, signal: TradeSignal, *, prevalidated: bool = False
+    ) -> ExecutionResult:
         try:
             get_rate_limit_manager().check_rest_allowed()
         except RateLimitError as e:
@@ -262,10 +309,14 @@ class ExecutionEngine:
         if self.mode.uses_broker() and self._rest_client is not None:
             try:
                 if hasattr(self._rest_client, "maybe_refresh_account_summary"):
-                    summary = self._rest_client.maybe_refresh_account_summary(min_interval=60.0)
+                    summary = self._rest_client.maybe_refresh_account_summary(
+                        min_interval=60.0
+                    )
                     account_balance = summary.get("balance")
                     account_available = summary.get("available")
-                if account_available is None and hasattr(self._rest_client, "fetch_account_balance"):
+                if account_available is None and hasattr(
+                    self._rest_client, "fetch_account_balance"
+                ):
                     account_balance = self._rest_client.fetch_account_balance()
                     account_available = account_balance
             except Exception as e:
@@ -288,7 +339,11 @@ class ExecutionEngine:
             "RiskManager.assess",
             decision=f"approved={risk.approved}",
             next_fn="LiveExecutor.execute" if risk.approved else "rejected",
-            params={"size": risk.size, "stop": risk.stop_distance, "reason": risk.reason},
+            params={
+                "size": risk.size,
+                "stop": risk.stop_distance,
+                "reason": risk.reason,
+            },
         )
         if not risk.approved:
             bus = get_lifecycle_bus()
@@ -310,9 +365,9 @@ class ExecutionEngine:
         }
 
         if self.mode.uses_broker():
+            from execution.margin_preflight import apply_margin_preflight
             from execution.market_suspension import gate_detail as suspend_detail
             from execution.market_suspension import is_blocked
-            from execution.margin_preflight import apply_margin_preflight
 
             if is_blocked():
                 reason = suspend_detail() or "Market suspended"
@@ -367,7 +422,9 @@ class ExecutionEngine:
 
         if self.mode.uses_simulator():
             if self.mode == ExecutionMode.DEMO:
-                log_simulator_fallback_warning("ExecutionMode.DEMO routed to TestSimulator")
+                log_simulator_fallback_warning(
+                    "ExecutionMode.DEMO routed to TestSimulator"
+                )
             trace_execution(
                 "EXECUTION",
                 "TestSimulator.execute",
@@ -381,7 +438,11 @@ class ExecutionEngine:
         if self._live is None:
             reason = f"{self.mode.value} mode requires REST client"
             update_demo_diagnostics(last_rejection=reason, executor_selected="none")
-            trace_execution("EXECUTION", "ExecutionEngine.execute_trade", decision=f"REJECTED: {reason}")
+            trace_execution(
+                "EXECUTION",
+                "ExecutionEngine.execute_trade",
+                decision=f"REJECTED: {reason}",
+            )
             return ExecutionResult(
                 success=False,
                 action="REJECTED",
@@ -396,7 +457,11 @@ class ExecutionEngine:
             next_fn="LiveExecutor.execute",
         )
         return self._live.execute(
-            signal, execution_params, self._trade_manager, self._cooldown, mode=self.mode
+            signal,
+            execution_params,
+            self._trade_manager,
+            self._cooldown,
+            mode=self.mode,
         )
 
     def _pre_entry_position_check(self, signal: TradeSignal) -> tuple[bool, str]:
@@ -421,9 +486,7 @@ class ExecutionEngine:
                     f"IG confirms {ig} open on {signal.epic} (max {max_pos} per epic)"
                 )
             if total >= max_total:
-                return True, (
-                    f"Total open positions {total} (max {max_total})"
-                )
+                return True, (f"Total open positions {total} (max {max_total})")
         except Exception:
             pass
         return False, ""
