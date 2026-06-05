@@ -62,8 +62,8 @@ class SignalEngine:
         if key in self._ohlc_seed or key in self.quotes_by_market:
             return key
         low = key.lower()
-        for bucket in (self._ohlc_seed, self.quotes_by_market):
-            for existing in bucket:
+        for _store in (self._ohlc_seed, self.quotes_by_market):
+            for existing in _store:
                 if str(existing).lower() == low:
                     return str(existing)
         return key

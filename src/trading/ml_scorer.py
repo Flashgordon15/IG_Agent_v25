@@ -74,7 +74,7 @@ class MLScorer:
             label_col = df.columns[-1]
 
         # Map string labels to binary, dropping BREAKEVEN rows
-        label_map = {"WIN": 1, "LOSS": 0, 1: 1, 0: 0, 1.0: 1, 0.0: 0}
+        label_map = {"WIN": 1, "LOSS": 0, 1: 1, 0: 0}
         df["_y"] = df[label_col].map(label_map)
         df = df[df["_y"].notna()].copy()
         y = df["_y"].astype(int)
