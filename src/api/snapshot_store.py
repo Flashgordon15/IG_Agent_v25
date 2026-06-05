@@ -36,6 +36,12 @@ _subscribers: list[Callable[[dict[str, Any]], None]] = []
 _last_hub_push_ts: float = 0.0
 _hub_push_min_interval: float = 0.25
 
+# Last-known-good caches for fields computed fresh in _tick_for_readers().
+# Using a cached value prevents momentary None/missing from causing UI flicker.
+_cached_uptime: str | None = None
+_cached_position_sync_status: str | None = None
+_cached_ohlc_markets_cached: int | None = None
+
 
 def snapshot_path() -> Path:
     if _path_override is not None:
@@ -55,11 +61,15 @@ def set_snapshot_path_for_tests(path: Path | str | None) -> None:
 
 def reset_snapshot_store_for_tests() -> None:
     global _cached, _cached_mtime, _subscribers
+    global _cached_uptime, _cached_position_sync_status, _cached_ohlc_markets_cached
     with _lock:
         _path_override = None
         _cached = build_default_tick()
         _cached_mtime = 0.0
         _subscribers.clear()
+        _cached_uptime = None
+        _cached_position_sync_status = None
+        _cached_ohlc_markets_cached = None
 
 
 def subscribe(callback: Callable[[dict[str, Any]], None]) -> Callable[[], None]:
@@ -268,17 +278,21 @@ def _tick_for_readers(tick: dict[str, Any]) -> dict[str, Any]:
             out["positions"] = all_positions
     # Inject live OHLC market count so SystemPanel can show it without an extra API call
     if "ohlc_markets_cached" not in out:
+        global _cached_ohlc_markets_cached
         try:
             from system.paths import data_dir as _data_dir
 
             ohlc_dir = _data_dir() / "ohlc_cache"
-            out["ohlc_markets_cached"] = sum(
+            count = sum(
                 1
                 for f in ohlc_dir.iterdir()
                 if f.suffix == ".jsonl" and not f.name.endswith(".synthetic")
             )
+            _cached_ohlc_markets_cached = count
+            out["ohlc_markets_cached"] = count
         except Exception:
-            pass
+            if _cached_ohlc_markets_cached is not None:
+                out["ohlc_markets_cached"] = _cached_ohlc_markets_cached
 
     # ML model metadata for SystemPanel — always populate so dashboard never flickers
     try:
@@ -308,6 +322,7 @@ def _tick_for_readers(tick: dict[str, Any]) -> dict[str, Any]:
 
     # Agent uptime derived from lock-file mtime
     if "uptime" not in out:
+        global _cached_uptime
         try:
             import time as _time
 
@@ -317,21 +332,31 @@ def _tick_for_readers(tick: dict[str, Any]) -> dict[str, Any]:
             if lock.exists():
                 secs = int(_time.time() - lock.stat().st_mtime)
                 h, m = divmod(secs // 60, 60)
-                out["uptime"] = f"{h}h {m:02d}m" if h else f"{m}m {secs % 60:02d}s"
+                uptime_str = f"{h}h {m:02d}m" if h else f"{m}m {secs % 60:02d}s"
+                _cached_uptime = uptime_str
+                out["uptime"] = uptime_str
+            elif _cached_uptime is not None:
+                out["uptime"] = _cached_uptime
         except Exception:
-            pass
+            if _cached_uptime is not None:
+                out["uptime"] = _cached_uptime
 
     # Position sync status from diagnostics snapshot
     if "position_sync_status" not in out:
+        global _cached_position_sync_status
         try:
             from system.demo_execution_trace import get_demo_diagnostics_snapshot
 
             diag = get_demo_diagnostics_snapshot()
             status = diag.ig_position_sync_status
             if status:
+                _cached_position_sync_status = status
                 out["position_sync_status"] = status
+            elif _cached_position_sync_status is not None:
+                out["position_sync_status"] = _cached_position_sync_status
         except Exception:
-            pass
+            if _cached_position_sync_status is not None:
+                out["position_sync_status"] = _cached_position_sync_status
 
     return out
 

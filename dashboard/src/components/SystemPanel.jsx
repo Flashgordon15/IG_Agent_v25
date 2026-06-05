@@ -1,9 +1,21 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { postEmergencyStop } from "../api.js";
 
 async function postJson(url) {
   const r = await fetch(url, { method: "POST" });
   try { return await r.json(); } catch { return { ok: r.ok }; }
+}
+
+// ---------------------------------------------------------------------------
+// Stable-value hook — remembers the last non-null/non-"—" value so fields
+// never flicker back to "—" when the backend momentarily omits a key.
+// ---------------------------------------------------------------------------
+
+function useStableValue(val, emptyFallback = "—") {
+  const ref = useRef(val);
+  const isBlank = val == null || val === "—" || val === "";
+  if (!isBlank) ref.current = val;
+  return ref.current ?? emptyFallback;
 }
 
 // ---------------------------------------------------------------------------
@@ -138,6 +150,14 @@ function StatusRow({ label, children }) {
 // ---------------------------------------------------------------------------
 
 export default function SystemPanel({ state, wsConnected, reconnecting }) {
+  // Stable hooks must be at the top level — before any early return.
+  const stableUptime = useStableValue(resolveUptime(state));
+  const stablePositionSync = useStableValue(resolvePositionSyncStatus(state));
+  const stableOhlcCount = useStableValue(
+    state?.ohlc_markets_cached != null ? state.ohlc_markets_cached : null,
+    null,
+  );
+
   const [modalOpen, setModalOpen] = useState(false);
   const [confirmInput, setConfirmInput] = useState("");
   const [resultMsg, setResultMsg] = useState("");
@@ -226,7 +246,7 @@ export default function SystemPanel({ state, wsConnected, reconnecting }) {
   const lastError = resolveLastError(state);
   const modelVersion = resolveModelVersion(state);
   const lastRetrain = resolveLastRetrain(state);
-  const uptime = resolveUptime(state);
+  const uptime = stableUptime;
 
   return (
     <div className="mx-auto max-w-5xl space-y-3 px-1 pb-4">
@@ -280,7 +300,7 @@ export default function SystemPanel({ state, wsConnected, reconnecting }) {
 
             <StatusRow label="Position Sync">
               <span className="font-mono text-foreground">
-                {resolvePositionSyncStatus(state)}
+                {stablePositionSync}
               </span>
             </StatusRow>
           </dl>
@@ -399,7 +419,7 @@ export default function SystemPanel({ state, wsConnected, reconnecting }) {
           </StatusRow>
           <StatusRow label="OHLC Cache">
             <span className="text-foreground text-[11px]">
-              {state?.ohlc_markets_cached != null ? `${state.ohlc_markets_cached} markets` : "—"}
+              {stableOhlcCount != null ? `${stableOhlcCount} markets` : "—"}
             </span>
           </StatusRow>
         </dl>
