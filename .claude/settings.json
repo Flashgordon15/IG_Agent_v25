@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c \"import sys, json, subprocess; data = json.load(sys.stdin); f = (data.get('tool_input') or {}).get('file_path') or (data.get('tool_response') or {}).get('filePath') or ''; ruff = '/Library/Frameworks/Python.framework/Versions/3.14/bin/ruff'; [subprocess.run([ruff] + args + [f]) for args in [['check', '--fix'], ['format']]] if f.endswith('.py') else None\" 2>/dev/null || true",
+            "timeout": 15,
+            "statusMessage": "ruff: lint + format..."
+          }
+        ]
+      }
+    ]
+  }
+}

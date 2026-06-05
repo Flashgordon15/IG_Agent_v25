@@ -1,0 +1,10 @@
+[lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]  # line length — project uses long lines in config/signal logic
+
+[lint.per-file-ignores]
+"tests/*" = ["F401", "F811"]  # test files re-import for fixture clarity
+
+[format]
+quote-style = "double"
+indent-style = "space"

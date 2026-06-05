@@ -50,6 +50,7 @@ def _rotate_oversized_logs() -> None:
     by shell redirects (launcher.log, ig_agent.log) that bypass Python's handler.
     """
     from pathlib import Path
+
     from system.paths import logs_dir
 
     log_dir = logs_dir()
@@ -323,14 +324,13 @@ class AgentRuntime:
             cfg = Config(_data=merged)
 
             rest = _rest_client_if_ready()
+            from api.snapshot_store import wire_hub_quotes_to_dashboard
             from runtime.agent_bootstrap import (
                 build_market_orchestrator,
                 start_market_stream,
             )
             from runtime.ig_account_verify import verify_account_on_broker
             from system.credentials_loader import try_load_credentials
-
-            from api.snapshot_store import wire_hub_quotes_to_dashboard
 
             cred_status = try_load_credentials()
             if rest is not None and cred_status.ok and cred_status.credentials:
