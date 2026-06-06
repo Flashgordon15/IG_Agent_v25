@@ -74,8 +74,16 @@ def _heartbeat_disabled() -> bool:
 
 def _telegram_configured() -> tuple[bool, str]:
     try:
-        from system.telegram_notifier import get_telegram_notifier
+        from system.config import Config
+        from system.config_loader import _sync_operating_mode_from_credentials
+        from system.config_validator import apply_config_defaults
+        from system.paths import config_dir
+        from system.telegram_notifier import configure_telegram, get_telegram_notifier
 
+        raw = json.loads((config_dir() / "config_v25.json").read_text(encoding="utf-8"))
+        merged = apply_config_defaults(raw)
+        _sync_operating_mode_from_credentials(merged)
+        configure_telegram(Config(_data=merged))
         notifier = get_telegram_notifier()
         if notifier is None or not notifier.enabled:
             return False, "telegram disabled (set bot_token + chat_id)"
