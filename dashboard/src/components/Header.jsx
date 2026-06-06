@@ -115,6 +115,7 @@ export default function Header({
   agentState,
   tradingLoopsRunning,
   tradingPaused,
+  tradingHealthy,
   pointsTrade,
   pointsSession,
   pointsCumulative,
@@ -133,9 +134,17 @@ export default function Header({
   onStopAgent,
 }) {
   const tradingStopped =
-    tradingLoopsRunning === false || tradingPaused === true;
+    tradingLoopsRunning === false
+    || tradingPaused === true
+    || tradingHealthy === false;
   const agent = tradingStopped
-    ? { label: "TRADING STOPPED", className: "border-danger/40 bg-danger/10 text-danger", flash: true }
+    ? {
+        label: tradingLoopsRunning === false || tradingPaused
+          ? "TRADING STOPPED"
+          : "NOT TRADING",
+        className: "border-danger/40 bg-danger/10 text-danger",
+        flash: true,
+      }
     : agentStateStyle(agentState);
   const stream = resolveStreamStatus(streamStatus, wsConnected, reconnecting, marketState);
   const streamUi = streamStyle(stream);

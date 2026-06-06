@@ -57,7 +57,25 @@ def enrich_tick_runtime(tick: dict[str, Any]) -> dict[str, Any]:
     """Attach live trading-loop status for dashboard / WebSocket consumers."""
     out = dict(tick)
     out["trading_paused"] = is_paused()
-    out["trading_loops_running"] = is_trading_running()
+    loops = is_trading_running()
+    out["trading_loops_running"] = loops
+    try:
+        from system.gate_activity import seconds_since_last_gate_eval
+        from system.rest_api_budget import hub_quote_stream_fresh
+
+        gate_age = seconds_since_last_gate_eval()
+        out["last_gate_check_age_sec"] = gate_age
+        quotes_fresh = hub_quote_stream_fresh() if loops else False
+        out["quotes_fresh"] = quotes_fresh
+        out["trading_healthy"] = bool(
+            loops
+            and not is_paused()
+            and gate_age is not None
+            and gate_age <= 120.0
+            and quotes_fresh
+        )
+    except Exception:
+        out["trading_healthy"] = loops and not is_paused()
     return out
 
 

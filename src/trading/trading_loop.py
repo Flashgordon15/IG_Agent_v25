@@ -361,6 +361,12 @@ class TradingLoop:
                 f"WAIT — no quote epic={self._epic} market={self._market} "
                 "(hub/REST returned no bid/offer)"
             )
+            try:
+                from system.gate_activity import record_gate_evaluation
+
+                record_gate_evaluation(self._epic)
+            except Exception:
+                pass
             self._publish_snapshot(ctx)
             with self._lock:
                 self._last_context = ctx

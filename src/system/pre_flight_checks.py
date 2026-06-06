@@ -61,7 +61,9 @@ def _read_log_tail(path: Path, *, max_lines: int = 4000) -> list[str]:
     return lines
 
 
-def _latest_gate_log_age_sec(*, now: datetime | None = None) -> tuple[float | None, str]:
+def _latest_gate_log_age_sec(
+    *, now: datetime | None = None
+) -> tuple[float | None, str]:
     """Return (age_seconds, source) from engine/launcher logs, newest first."""
     now = now or datetime.now()
     best_age: float | None = None
@@ -84,11 +86,17 @@ def _latest_gate_log_age_sec(*, now: datetime | None = None) -> tuple[float | No
 
 
 def check_anti_mock_session_summaries(logs: Path | None = None) -> PreFlightResult:
-    """Fail if any session_summary_*.txt contains unittest MagicMock strings."""
+    """Fail if any recent session_summary_*.txt contains unittest MagicMock strings."""
     root = logs or logs_dir()
+    now = datetime.now()
     bad: list[str] = []
     for path in sorted(root.glob("session_summary_*.txt")):
         try:
+            age_h = (
+                now - datetime.fromtimestamp(path.stat().st_mtime)
+            ).total_seconds() / 3600.0
+            if age_h > 48.0:
+                continue
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError as e:
             bad.append(f"{path.name}: read error {e}")

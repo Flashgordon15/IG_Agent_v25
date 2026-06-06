@@ -441,6 +441,18 @@ def test_watchdog_detects_trading_zombie() -> None:
     source = watchdog.read_text(encoding="utf-8")
     assert "trading_healthy" in source
     assert "/api/health" in source
+    assert "watchdog.pid" in source
+
+
+def test_trading_health_monitor_exists() -> None:
+    """Background monitor must detect zombie trading and alert via Telegram."""
+    path = _SRC / "system" / "trading_health_monitor.py"
+    assert path.is_file()
+    source = path.read_text(encoding="utf-8")
+    assert "start_trading_health_monitor" in source
+    assert "trading_healthy" in source
+    main = _MAIN_PY.read_text(encoding="utf-8")
+    assert "start_trading_health_monitor" in main
 
 
 def test_safe_to_leave_script_exists() -> None:

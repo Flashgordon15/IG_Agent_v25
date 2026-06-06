@@ -96,6 +96,7 @@ class ApiHealthTests(unittest.TestCase):
             "quotes_fresh",
             "issues",
             "markets",
+            "quote_fresh_by_epic",
         ):
             self.assertIn(key, body, f"missing /api/health field: {key}")
         self.assertIsInstance(body["agent_alive"], bool)

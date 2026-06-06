@@ -543,6 +543,12 @@ class AgentRuntime:
             stop_telegram_heartbeat()
         except Exception as e:
             log_engine(f"telegram shutdown notify failed: {type(e).__name__}: {e}")
+        try:
+            from system.trading_health_monitor import stop_trading_health_monitor
+
+            stop_trading_health_monitor()
+        except Exception:
+            pass
         release_instance_lock()
         _force_cleanup_port()
         log_engine("shutdown complete")
@@ -610,8 +616,10 @@ class AgentRuntime:
                     self.trading_loop.start()
                 _startup_mark("ready")
                 from system.replay_daily_scheduler import start_replay_daily_scheduler
+                from system.trading_health_monitor import start_trading_health_monitor
 
                 start_replay_daily_scheduler()
+                start_trading_health_monitor()
                 _start_session_refresh_watchdog(rest)
                 log_engine("orchestrator trading loop started (background)")
                 try:

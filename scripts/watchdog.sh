@@ -9,6 +9,7 @@ AGENT_DIR="/Users/chrisgordon/Desktop/IG_Agent_v25"
 LOCK_FILE="$AGENT_DIR/src/data/.ig_agent_v25.lock"
 LOG="$AGENT_DIR/src/data/logs/watchdog.log"
 RESTART_LOG="$AGENT_DIR/src/data/logs/agent_restart.log"
+PID_FILE="$AGENT_DIR/src/data/watchdog.pid"
 MAX_RESTARTS_PER_HOUR=10
 PORT=8080
 CHECK_INTERVAL=30
@@ -20,8 +21,10 @@ log() {
 }
 
 # Trap SIGTERM for clean shutdown
-trap 'log "WATCHDOG: received SIGTERM — exiting cleanly"; exit 0' TERM
-trap 'log "WATCHDOG: received SIGINT — exiting cleanly"; exit 0' INT
+trap 'rm -f "$PID_FILE"; log "WATCHDOG: received SIGTERM — exiting cleanly"; exit 0' TERM
+trap 'rm -f "$PID_FILE"; log "WATCHDOG: received SIGINT — exiting cleanly"; exit 0' INT
+
+echo "$$" > "$PID_FILE"
 
 # ------------------------------------------------------------------
 # agent_alive: true if port 8080 is bound AND the lock file exists

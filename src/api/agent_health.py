@@ -10,11 +10,12 @@ from typing import Any
 
 from api.agent_control import get_trading_loop, is_paused, is_trading_running
 from system.gate_activity import last_gate_check_by_epic, seconds_since_last_gate_eval
-from system.paths import logs_dir, project_root
+from system.paths import data_dir, logs_dir
 
 _API_HOST = "127.0.0.1"
 _API_PORT = 8080
 _WATCHDOG_MARKER = "scripts/watchdog.sh"
+_WATCHDOG_PID_FILE = data_dir() / "watchdog.pid"
 
 
 def _port_bound(port: int = _API_PORT) -> bool:
@@ -37,6 +38,14 @@ def _engine_log_age_sec() -> float | None:
 
 def _watchdog_active() -> bool:
     """True when our self-healing watchdog.sh process is running."""
+    try:
+        if _WATCHDOG_PID_FILE.is_file():
+            pid_str = _WATCHDOG_PID_FILE.read_text(encoding="utf-8").strip()
+            if pid_str.isdigit():
+                os.kill(int(pid_str), 0)
+                return True
+    except (OSError, ValueError):
+        pass
     try:
         result = subprocess.run(
             ["/usr/bin/pgrep", "-f", _WATCHDOG_MARKER],
@@ -214,7 +223,15 @@ def build_health_status() -> dict[str, Any]:
 def stop_watchdog() -> None:
     """SIGTERM the project watchdog so explicit Stop does not auto-restart."""
     try:
-        root = str(project_root())
+        if _WATCHDOG_PID_FILE.is_file():
+            pid_str = _WATCHDOG_PID_FILE.read_text(encoding="utf-8").strip()
+            if pid_str.isdigit():
+                subprocess.run(["/bin/kill", "-TERM", pid_str], timeout=3)
+            _WATCHDOG_PID_FILE.unlink(missing_ok=True)
+            return
+    except Exception:
+        pass
+    try:
         result = subprocess.run(
             ["/usr/bin/pgrep", "-f", _WATCHDOG_MARKER],
             capture_output=True,

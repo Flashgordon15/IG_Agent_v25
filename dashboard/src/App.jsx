@@ -393,6 +393,7 @@ export default function App() {
     agentState: state?.points?.state ?? state?.agent_state,
     tradingLoopsRunning: state?.trading_loops_running,
     tradingPaused: state?.trading_paused,
+    tradingHealthy: state?.trading_healthy,
     pointsTrade: state?.points?.last_trade,
     pointsSession: state?.points?.session,
     pointsCumulative: state?.points?.cumulative,

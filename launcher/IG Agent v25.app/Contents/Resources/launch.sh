@@ -30,6 +30,7 @@ notify_failure() {
 
 DASHBOARD_URL="http://localhost:8080/"
 HEALTH_URL="http://localhost:8080/health"
+API_HEALTH_URL="http://localhost:8080/api/health"
 
 open_dashboard() {
   if command -v open >/dev/null 2>&1; then
@@ -74,18 +75,36 @@ lock_holder_alive() {
   return 1
 }
 
+trading_healthy() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -sf --max-time 2 "${API_HEALTH_URL}" 2>/dev/null \
+      | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get('trading_healthy') else 1)" 2>/dev/null
+    return $?
+  fi
+  return 1
+}
+
 wait_for_dashboard() {
   local mode="$1"
   # Startup can take up to 3 minutes: Yahoo OHLC seeding + 22s REST stagger per market
   # + self-test suite. Poll every 0.5s for up to 360s (720 attempts).
   for _ in $(seq 1 720); do
     if dashboard_healthy; then
-      open_dashboard
-      log "dashboard ready (${mode})"
-      exit 0
+      if trading_healthy; then
+        open_dashboard
+        log "dashboard ready — trading healthy (${mode})"
+        exit 0
+      fi
+      log "dashboard up — awaiting trading_healthy (${mode})"
     fi
     sleep 0.5
   done
+  if dashboard_healthy; then
+    open_dashboard
+    log "WARN: dashboard up but trading_healthy not confirmed within 360s (${mode})"
+    notify_failure "Agent started but trading is not healthy. Check dashboard and engine.log."
+    exit 0
+  fi
   log "WARN: dashboard did not become healthy within 360s (${mode})"
   notify_failure "IG Agent did not start. Check src/data/logs/launcher.log"
   exit 1
