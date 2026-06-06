@@ -310,3 +310,56 @@ def test_deploy_check_called_on_startup() -> None:
         "_run_deployment_verification() is not called inside _pre_startup_cleanup — "
         "deployment self-check will be skipped on every startup"
     )
+
+
+# ---------------------------------------------------------------------------
+# 10. Watchdog script exists and is executable
+# ---------------------------------------------------------------------------
+
+
+def test_watchdog_script_exists() -> None:
+    """scripts/watchdog.sh must exist and be executable.
+
+    The watchdog is the self-healing layer that restarts the agent within 30 s
+    of death.  If the file is missing or not executable the agent can go dark
+    overnight without any automatic recovery.
+    """
+    watchdog = _ROOT / "scripts" / "watchdog.sh"
+    assert watchdog.exists(), (
+        f"scripts/watchdog.sh does not exist at {watchdog}; "
+        "the self-healing watchdog is missing — agent cannot auto-restart."
+    )
+    assert os.access(watchdog, os.X_OK), (
+        "scripts/watchdog.sh exists but is NOT executable; "
+        "run: chmod +x scripts/watchdog.sh"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 11. Watchdog contains restart cap logic
+# ---------------------------------------------------------------------------
+
+
+def test_watchdog_has_restart_cap() -> None:
+    """watchdog.sh must contain a restart-cap check (MAX_RESTARTS_PER_HOUR).
+
+    Without a cap the watchdog can trigger an infinite restart storm when the
+    agent has a persistent startup failure, filling disk with logs and
+    hammering the IG API until the account is rate-limited or suspended.
+    The cap must be present so the watchdog self-terminates after detecting
+    a fundamental breakage.
+    """
+    watchdog = _ROOT / "scripts" / "watchdog.sh"
+    if not watchdog.exists():
+        pytest.skip("watchdog.sh not found — skipping cap check")
+
+    source = watchdog.read_text(encoding="utf-8")
+
+    assert "MAX_RESTARTS_PER_HOUR" in source, (
+        "watchdog.sh does not define MAX_RESTARTS_PER_HOUR; "
+        "restart storm protection is missing."
+    )
+    assert "FATAL" in source or "restart storm" in source or "STOPPING" in source, (
+        "watchdog.sh does not log a FATAL/stop message when the cap is hit; "
+        "operators will not know the watchdog gave up."
+    )

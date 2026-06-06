@@ -190,6 +190,21 @@ else
 fi
 
 log "launch: cd ${ROOT} && PYTHONPATH=src ${CAFF_ARGS[*]:-} ${PY} src/main.py"
+
+# Start (or restart) the watchdog — kill any existing instance first so we
+# don't accumulate stale watchdog processes across launcher invocations.
+pkill -f "watchdog.sh" 2>/dev/null || true
+sleep 0.5
+WATCHDOG_SCRIPT="${ROOT}/scripts/watchdog.sh"
+if [ -x "${WATCHDOG_SCRIPT}" ]; then
+    bash "${WATCHDOG_SCRIPT}" >> "${ROOT}/src/data/logs/watchdog.log" 2>&1 &
+    WATCHDOG_PID=$!
+    disown "${WATCHDOG_PID}" 2>/dev/null || true
+    log "watchdog started pid=${WATCHDOG_PID}"
+else
+    log "WARN: watchdog not found or not executable at ${WATCHDOG_SCRIPT}"
+fi
+
 # Launcher opens the dashboard once health is up; tell main.py not to open again.
 export IG_AGENT_FROM_LAUNCHER=1
 (
