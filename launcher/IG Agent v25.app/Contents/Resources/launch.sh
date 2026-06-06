@@ -140,9 +140,8 @@ if [ -f "${ROOT}/emergency_stop.lock" ]; then
   exit 1
 fi
 
-ensure_watchdog
-
 if dashboard_healthy; then
+  ensure_watchdog
   log "agent already running — opening dashboard"
   open_dashboard
   exit 0

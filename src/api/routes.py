@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import os
 import signal
-import subprocess
 import threading
 import time
 from datetime import datetime, timezone
@@ -22,7 +21,7 @@ from api.agent_control import (
     start_trading,
     stop_trading,
 )
-from api.agent_health import build_health_status, stop_watchdog
+from api.agent_health import build_health_status
 from api.close_handler import close_deal
 from api.dashboard_data import (
     dismiss_splash,
@@ -391,7 +390,6 @@ def _trigger_shutdown(source: str = "api") -> None:
     """Write a clean shutdown log entry then kill the process after a short delay."""
     from system.engine_log import log_engine
 
-    stop_watchdog()
     log_engine(f"agent shutdown requested (source={source}) — exiting in 2s")
     try:
         from system.telegram_notifier import send_critical_alert
@@ -458,44 +456,20 @@ def api_heartbeat() -> JSONResponse:
     return JSONResponse({"ok": True, "ts": _last_heartbeat})
 
 
-def _shutdown_cleanup(*, stop_watchdog: bool = False) -> None:
-    """Stop trading, release lock, kill port zombies; optionally stop watchdog."""
-    from system.engine_log import log_engine
-    from system.instance_lock import release_instance_lock
+def _shutdown_cleanup(*, source: str = "dashboard") -> None:
+    """Full teardown before process exit — streams, IG session, watchdog, orphans."""
+    from system.shutdown_cleanup import perform_shutdown_cleanup
 
-    try:
-        stop_trading()
-    except Exception as se:
-        log_engine(f"shutdown: stop_trading error (continuing): {se}")
-
-    release_instance_lock()
-
-    try:
-        import main as _main
-
-        _main._force_cleanup_port()
-    except Exception as pe:
-        log_engine(f"shutdown: port cleanup error (continuing): {pe}")
-
-    if stop_watchdog:
-        try:
-            subprocess.run(
-                ["pkill", "-f", "scripts/watchdog.sh"],
-                capture_output=True,
-                timeout=5,
-            )
-            log_engine("shutdown: watchdog stopped")
-        except Exception as we:
-            log_engine(f"shutdown: watchdog stop error (continuing): {we}")
+    perform_shutdown_cleanup(source=source)
 
 
 @router.post("/api/shutdown")
-def api_shutdown(stop_watchdog: bool = False) -> JSONResponse:
+def api_shutdown() -> JSONResponse:
     """Graceful agent shutdown — stop trading, clean port/lock, exit process."""
     from system.engine_log import log_engine
 
     try:
-        _shutdown_cleanup(stop_watchdog=stop_watchdog)
+        _shutdown_cleanup(source="dashboard")
         log_engine("shutdown: initiated via dashboard Stop button")
         _trigger_shutdown(source="dashboard")
         return JSONResponse({"ok": True, "status": "shutting_down"})

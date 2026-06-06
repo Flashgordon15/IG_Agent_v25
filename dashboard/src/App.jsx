@@ -204,6 +204,8 @@ export default function App() {
   const [startupDone, setStartupDone] = useState(null);
   // "idle" | "confirming" | "stopping" | "stopped"
   const [shutdownState, setShutdownState] = useState("idle");
+  const [agentAlive, setAgentAlive] = useState(true);
+  const healthFailRef = useRef(0);
   const prevStateRef = useRef(null);
   const soundRef = useRef(null);
 
@@ -368,6 +370,30 @@ export default function App() {
     return () => window.clearInterval(id);
   }, [startupDone]);
 
+  // Agent liveness — distinguish dead backend from closed markets / CAUTION
+  useEffect(() => {
+    if (startupDone !== true) return;
+    const checkHealth = async () => {
+      try {
+        const res = await fetch("/api/health", { method: "GET" });
+        if (res.ok) {
+          healthFailRef.current = 0;
+          setAgentAlive(true);
+          return;
+        }
+      } catch {
+        /* unreachable */
+      }
+      healthFailRef.current += 1;
+      if (healthFailRef.current >= 3) {
+        setAgentAlive(false);
+      }
+    };
+    checkHealth();
+    const id = window.setInterval(checkHealth, 10000);
+    return () => window.clearInterval(id);
+  }, [startupDone]);
+
   const handleStopAgent = useCallback(() => {
     setShutdownState("confirming");
   }, []);
@@ -394,6 +420,7 @@ export default function App() {
     tradingLoopsRunning: state?.trading_loops_running,
     tradingPaused: state?.trading_paused,
     tradingHealthy: state?.trading_healthy,
+    agentAlive,
     pointsTrade: state?.points?.last_trade,
     pointsSession: state?.points?.session,
     pointsCumulative: state?.points?.cumulative,

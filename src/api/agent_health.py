@@ -166,29 +166,46 @@ def _quotes_fresh_by_epic(
     return {epic: hub_quote_stream_fresh(epic=epic, max_age=max_age) for epic in epics}
 
 
-def build_health_status() -> dict[str, Any]:
-    gate_age = seconds_since_last_gate_eval()
-    loops_running = is_trading_running()
-    paused = is_paused()
-    watchdog = _watchdog_active()
-    log_age = _engine_log_age_sec()
-    epics = _configured_epics()
-    quote_fresh = _quotes_fresh_by_epic(epics) if epics else {}
+def _markets_open_count(epics: list[str]) -> int:
+    """How many configured epics are in an IG-open session right now."""
+    if not epics:
+        return 0
+    try:
+        from system.market_watch.calendar import is_market_open
+
+        return sum(1 for epic in epics if is_market_open(epic))
+    except Exception:
+        return len(epics)
+
+
+def evaluate_trading_health(
+    *,
+    loops_running: bool,
+    paused: bool,
+    gate_age: float | None,
+    epics: list[str],
+    quote_fresh: dict[str, bool],
+    log_age: float | None = None,
+    watchdog: bool | None = None,
+) -> dict[str, Any]:
+    """Shared trading-health rules for /api/health and dashboard ticks."""
     fresh_count = sum(1 for ok in quote_fresh.values() if ok)
     quotes_fresh = bool(epics) and fresh_count == len(epics)
+    markets_open = _markets_open_count(epics)
+    quotes_required = markets_open > 0
 
     issues: list[str] = []
     if not loops_running:
         issues.append("trading_loops_not_running")
     if paused:
         issues.append("trading_paused")
-    if not watchdog:
+    if watchdog is False:
         issues.append("watchdog_inactive")
     if gate_age is None:
         issues.append("no_gate_activity_recorded")
     elif gate_age > 120.0:
         issues.append(f"gate_check_stale_{int(gate_age)}s")
-    if epics and not quotes_fresh:
+    if quotes_required and epics and not quotes_fresh:
         stale = [e for e, ok in quote_fresh.items() if not ok]
         issues.append(f"quotes_stale:{','.join(stale)}")
     if log_age is not None and log_age > 300.0:
@@ -199,8 +216,39 @@ def build_health_status() -> dict[str, Any]:
         and not paused
         and gate_age is not None
         and gate_age <= 120.0
-        and quotes_fresh
+        and (quotes_fresh or not quotes_required)
     )
+
+    return {
+        "trading_healthy": trading_healthy,
+        "quotes_fresh": quotes_fresh,
+        "quotes_fresh_count": fresh_count,
+        "quotes_total": len(epics),
+        "markets_open_count": markets_open,
+        "quotes_required_for_health": quotes_required,
+        "issues": issues,
+    }
+
+
+def build_health_status() -> dict[str, Any]:
+    gate_age = seconds_since_last_gate_eval()
+    loops_running = is_trading_running()
+    paused = is_paused()
+    watchdog = _watchdog_active()
+    log_age = _engine_log_age_sec()
+    epics = _configured_epics()
+    quote_fresh = _quotes_fresh_by_epic(epics) if epics else {}
+
+    health = evaluate_trading_health(
+        loops_running=loops_running,
+        paused=paused,
+        gate_age=gate_age,
+        epics=epics,
+        quote_fresh=quote_fresh,
+        log_age=log_age,
+        watchdog=watchdog,
+    )
+    trading_healthy = bool(health["trading_healthy"])
 
     return {
         "ok": trading_healthy and watchdog,
@@ -210,10 +258,12 @@ def build_health_status() -> dict[str, Any]:
         "trading_paused": paused,
         "port_bound": _port_bound(),
         "watchdog_active": watchdog,
-        "quotes_fresh": quotes_fresh,
-        "quotes_fresh_count": fresh_count,
-        "quotes_total": len(epics),
-        "issues": issues,
+        "quotes_fresh": health["quotes_fresh"],
+        "quotes_fresh_count": health["quotes_fresh_count"],
+        "quotes_total": health["quotes_total"],
+        "markets_open_count": health["markets_open_count"],
+        "quotes_required_for_health": health["quotes_required_for_health"],
+        "issues": health["issues"],
         "last_log_age_sec": log_age,
         "last_gate_check_age_sec": gate_age,
         "markets": _build_market_health(),

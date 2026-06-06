@@ -1063,8 +1063,8 @@ class TestPortCleanupOnExit:
         marker = "def shutdown(self"
         assert marker in src_text
         shutdown_body = src_text.split(marker, 1)[1].split("\n    def ")[0]
-        assert "_force_cleanup_port()" in shutdown_body, (
-            "_force_cleanup_port() must be called inside AgentRuntime.shutdown()"
+        assert "perform_shutdown_cleanup" in shutdown_body, (
+            "perform_shutdown_cleanup() must be called inside AgentRuntime.shutdown()"
         )
 
     def test_cleanup_called_on_startup(self):
