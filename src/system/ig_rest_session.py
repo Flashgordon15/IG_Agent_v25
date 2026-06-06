@@ -81,3 +81,20 @@ def clear_shared_rest_client() -> None:
     with _lock:
         _client = None
         _cred_key = None
+
+
+def shutdown_shared_ig_session() -> None:
+    """Logout IG REST session and drop the shared client."""
+    global _client
+    with _lock:
+        client = _client
+    if client is None:
+        return
+    end = getattr(client, "end_session", None)
+    if callable(end):
+        try:
+            end()
+            log_engine("IG REST session ended")
+        except Exception as e:
+            log_engine(f"IG REST session end failed: {type(e).__name__}: {e}")
+    clear_shared_rest_client()

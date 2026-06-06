@@ -237,6 +237,12 @@ def _init_telegram_from_config() -> None:
 
 def _run_deployment_verification() -> None:
     """Run deployment health checks — abort startup if any fail."""
+    if os.environ.get("IG_AGENT_SKIP_DEPLOY_CHECK") == "1":
+        log_engine(
+            "Deployment verification skipped (IG_AGENT_SKIP_DEPLOY_CHECK=1 — watchdog restart)"
+        )
+        _startup_mark("deploy_check", note="skipped watchdog restart")
+        return
     result = subprocess.run(
         [
             sys.executable,
@@ -289,56 +295,14 @@ def _pre_startup_cleanup() -> None:
     killed_pids: list[int] = []
 
     # 1. Find and SIGTERM any other agent processes
-    try:
-        result = subprocess.run(
-            ["pgrep", "-f", "src/main.py"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        for pid_str in result.stdout.strip().splitlines():
-            try:
-                pid = int(pid_str.strip())
-            except ValueError:
-                continue
-            if pid == my_pid:
-                continue
-            try:
-                os.kill(pid, signal.SIGTERM)
-                killed_pids.append(pid)
-                log_engine(f"pre-startup: sent SIGTERM to previous session PID {pid}")
-            except ProcessLookupError:
-                pass
-            except Exception as e:
-                log_engine(f"pre-startup: could not kill PID {pid}: {e}")
-    except Exception as e:
-        log_engine(f"pre-startup: pgrep failed: {e}")
+    from system.shutdown_cleanup import kill_other_agent_processes
 
-    # 2. Wait up to 5 s for terminated processes to release port 8080 and lock
-    if killed_pids:
-        _deadline = time.time() + 5.0
-        while time.time() < _deadline:
-            still_alive = []
-            for pid in killed_pids:
-                try:
-                    os.kill(pid, 0)  # 0 = probe only, raises if dead
-                    still_alive.append(pid)
-                except ProcessLookupError:
-                    pass
-                except Exception:
-                    pass
-            if not still_alive:
-                break
-            time.sleep(0.3)
-        # SIGKILL any survivors
-        for pid in killed_pids:
-            try:
-                os.kill(pid, signal.SIGKILL)
-                log_engine(f"pre-startup: SIGKILL fallback for PID {pid}")
-            except ProcessLookupError:
-                pass
-            except Exception:
-                pass
+    killed_pids = kill_other_agent_processes(
+        exclude_pid=my_pid,
+        sigkill_survivors=True,
+        wait_sec=5.0,
+        log_label="pre-startup",
+    )
 
     # 3. Remove stale lock
     try:
@@ -395,6 +359,41 @@ def _pre_startup_cleanup() -> None:
     )
     _startup_mark("session_cleanup", note)
     log_engine(f"pre-startup: cleanup complete — {note}")
+
+
+def _ensure_watchdog_running() -> None:
+    """Start scripts/watchdog.sh when absent (manual python src/main.py launches)."""
+    try:
+        from api.agent_health import _watchdog_active
+
+        if _watchdog_active():
+            log_engine("startup: watchdog already running")
+            return
+    except Exception:
+        pass
+
+    wd = project_root() / "scripts" / "watchdog.sh"
+    if not wd.is_file():
+        log_engine(f"startup: watchdog script missing ({wd})")
+        return
+    if not os.access(wd, os.X_OK):
+        log_engine("startup: watchdog script not executable")
+        return
+
+    log_path = logs_dir() / "watchdog.log"
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as log_fh:
+            subprocess.Popen(
+                ["bash", str(wd)],
+                stdout=log_fh,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                cwd=str(project_root()),
+            )
+        log_engine("startup: watchdog started")
+    except Exception as e:
+        log_engine(f"startup: watchdog start failed: {type(e).__name__}: {e}")
 
 
 def _force_cleanup_port(port: int = 8080) -> None:
@@ -522,35 +521,18 @@ class AgentRuntime:
         if self._shutting_down:
             return
         self._shutting_down = True
-        log_engine(f"shutdown: stopping trading loop (source={source})")
-        if self.trading_loop is not None:
+        log_engine(f"shutdown: graceful teardown (source={source})")
+        self._stream_client = None
+        from system.shutdown_cleanup import perform_shutdown_cleanup
+
+        perform_shutdown_cleanup(source=source)
+        if source not in ("dashboard", "api"):
             try:
-                self.trading_loop.stop()
+                from system.telegram_notifier import send_critical_alert
+
+                send_critical_alert(f"🛑 Agent stopped (source: {source})")
             except Exception as e:
-                log_engine(f"trading loop stop failed: {type(e).__name__}: {e}")
-        if self._stream_client is not None:
-            from runtime.agent_bootstrap import stop_market_stream
-
-            stop_market_stream(self._stream_client)
-            self._stream_client = None
-        try:
-            from system.telegram_notifier import (
-                send_critical_alert,
-                stop_telegram_heartbeat,
-            )
-
-            send_critical_alert(f"🛑 Agent stopped (source: {source})")
-            stop_telegram_heartbeat()
-        except Exception as e:
-            log_engine(f"telegram shutdown notify failed: {type(e).__name__}: {e}")
-        try:
-            from system.trading_health_monitor import stop_trading_health_monitor
-
-            stop_trading_health_monitor()
-        except Exception:
-            pass
-        release_instance_lock()
-        _force_cleanup_port()
+                log_engine(f"telegram shutdown notify failed: {type(e).__name__}: {e}")
         log_engine("shutdown complete")
 
     def run(self) -> int:
@@ -564,6 +546,8 @@ class AgentRuntime:
             print(_port_in_use_banner(_API_PORT), file=sys.stderr)
             release_instance_lock()
             sys.exit(1)
+
+        _ensure_watchdog_running()
 
         os.environ.setdefault("IG_AGENT_ROOT", str(project_root()))
         os.environ.setdefault("PYTHONPATH", str(project_root() / "src"))

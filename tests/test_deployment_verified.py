@@ -462,3 +462,303 @@ def test_safe_to_leave_script_exists() -> None:
     source = script.read_text(encoding="utf-8")
     assert "SAFE TO LEAVE" in source
     assert "trading_healthy" in source or "/api/health" in source
+
+
+def test_shutdown_cleanup_module_covers_full_teardown() -> None:
+    """Stop Agent must tear down streams, IG session, watchdog, orphans, lock, and port."""
+    path = _SRC / "system" / "shutdown_cleanup.py"
+    assert path.is_file(), "shutdown_cleanup.py missing"
+    source = path.read_text(encoding="utf-8")
+    for needle in (
+        "perform_shutdown_cleanup",
+        "stop_market_stream",
+        "stop_ig_position_sync",
+        "shutdown_shared_ig_session",
+        "stop_watchdog",
+        "kill_other_agent_processes",
+        "release_instance_lock",
+        "_force_cleanup_port",
+        "agent_fully_started",
+        "agent_fully_stopped",
+    ):
+        assert needle in source, f"shutdown_cleanup missing {needle}"
+
+
+def test_api_shutdown_delegates_to_shutdown_cleanup() -> None:
+    """POST /api/shutdown must run centralized cleanup before SIGTERM."""
+    routes = (_SRC / "api" / "routes.py").read_text(encoding="utf-8")
+    assert "perform_shutdown_cleanup" in routes
+    assert "shutdown: initiated via dashboard Stop button" in routes
+
+
+def test_confirm_stopped_script_exists() -> None:
+    """scripts/confirm_stopped.py verifies Stop Agent left no rogue processes."""
+    script = _ROOT / "scripts" / "confirm_stopped.py"
+    assert script.is_file(), "confirm_stopped.py missing"
+    source = script.read_text(encoding="utf-8")
+    assert "CONFIRM STOPPED" in source
+    assert "agent_fully_stopped" in source
+
+
+def test_confirm_started_script_exists() -> None:
+    """scripts/confirm_started.py verifies startup reached trading-ready state."""
+    script = _ROOT / "scripts" / "confirm_started.py"
+    assert script.is_file(), "confirm_started.py missing"
+    source = script.read_text(encoding="utf-8")
+    assert "CONFIRM STARTED" in source
+    assert "agent_fully_started" in source
+    for needle in (
+        "trading_healthy",
+        "stream_ready",
+        "watchdog",
+        "gate",
+    ):
+        assert needle in source.lower(), f"confirm_started missing {needle} check"
+
+
+def test_startup_cleanup_symmetry_with_shutdown() -> None:
+    """Startup cleanup must mirror shutdown: kill orphans, free port, clear lock."""
+    main = _MAIN_PY.read_text(encoding="utf-8")
+    shutdown = (_SRC / "system" / "shutdown_cleanup.py").read_text(encoding="utf-8")
+
+    assert "kill_other_agent_processes" in main
+    assert "_force_cleanup_port" in main
+    assert "agent_fully_started" in shutdown
+    assert "agent_fully_stopped" in shutdown
+    for needle in (
+        "kill_other_agent_processes",
+        "perform_shutdown_cleanup",
+        "agent_fully_started",
+        "agent_fully_stopped",
+    ):
+        assert needle in shutdown, f"shutdown_cleanup missing {needle}"
+
+
+def test_pre_startup_cleanup_kills_duplicate_processes() -> None:
+    """_pre_startup_cleanup must SIGTERM duplicate main.py before acquiring lock."""
+    source = _MAIN_PY.read_text(encoding="utf-8")
+    lines = source.splitlines()
+    in_func = False
+    body: list[str] = []
+    for line in lines:
+        if line.startswith("def _pre_startup_cleanup("):
+            in_func = True
+            continue
+        if in_func:
+            if (
+                line
+                and not line[0].isspace()
+                and (line.startswith("def ") or line.startswith("class "))
+            ):
+                break
+            body.append(line)
+    func_body = "\n".join(body)
+    assert "kill_other_agent_processes" in func_body
+    assert "_force_cleanup_port" in func_body
+
+
+def test_ensure_watchdog_called_after_preflight() -> None:
+    """Manual launches must start watchdog when launcher did not."""
+    source = _MAIN_PY.read_text(encoding="utf-8")
+    assert "def _ensure_watchdog_running(" in source
+    run_idx = source.index("def run(self)")
+    run_body = source[run_idx : run_idx + 2500]
+    assert "_ensure_watchdog_running()" in run_body
+    assert "run_preflight()" in run_body
+    assert run_body.index("run_preflight()") < run_body.index(
+        "_ensure_watchdog_running()"
+    )
+
+
+def test_agent_fully_started_detects_duplicate_processes() -> None:
+    """agent_fully_started must fail when more than one main.py is running."""
+    from system.shutdown_cleanup import agent_fully_started
+
+    with (
+        patch(
+            "system.shutdown_cleanup._list_main_py_pids",
+            return_value=[111, 222],
+        ),
+        patch("system.shutdown_cleanup._port_bound", return_value=True),
+        patch(
+            "system.shutdown_cleanup._instance_lock_holder_pid",
+            return_value=111,
+        ),
+        patch("api.agent_health._watchdog_active", return_value=True),
+        patch(
+            "system.shutdown_cleanup._fetch_api_health",
+            return_value={
+                "trading_loops_running": True,
+                "trading_healthy": True,
+                "last_gate_check_age_sec": 5.0,
+            },
+        ),
+        patch(
+            "system.pre_flight_checks.check_startup_stream_gate_log",
+            return_value=MagicMock(passed=True),
+        ),
+    ):
+        ok, issues = agent_fully_started()
+    assert not ok
+    assert any("duplicate main.py" in i for i in issues)
+
+
+def test_agent_fully_started_all_clear() -> None:
+    """agent_fully_started passes when process, health, lock, and stream gate are OK."""
+    from system.shutdown_cleanup import agent_fully_started
+
+    with (
+        patch("system.shutdown_cleanup._list_main_py_pids", return_value=[4242]),
+        patch("system.shutdown_cleanup._port_bound", return_value=True),
+        patch(
+            "system.shutdown_cleanup._instance_lock_holder_pid",
+            return_value=4242,
+        ),
+        patch("api.agent_health._watchdog_active", return_value=True),
+        patch(
+            "system.shutdown_cleanup._fetch_api_health",
+            return_value={
+                "trading_loops_running": True,
+                "trading_healthy": True,
+                "last_gate_check_age_sec": 12.0,
+            },
+        ),
+        patch(
+            "system.pre_flight_checks.check_startup_stream_gate_log",
+            return_value=MagicMock(passed=True),
+        ),
+    ):
+        ok, issues = agent_fully_started()
+    assert ok, issues
+    assert issues == []
+
+
+def test_agent_fully_started_requires_stream_ready_log() -> None:
+    """Missing stream_ready in engine.log must fail startup confirmation."""
+    from system.shutdown_cleanup import agent_fully_started
+
+    with (
+        patch("system.shutdown_cleanup._list_main_py_pids", return_value=[4242]),
+        patch("system.shutdown_cleanup._port_bound", return_value=True),
+        patch(
+            "system.shutdown_cleanup._instance_lock_holder_pid",
+            return_value=4242,
+        ),
+        patch("api.agent_health._watchdog_active", return_value=True),
+        patch(
+            "system.shutdown_cleanup._fetch_api_health",
+            return_value={
+                "trading_loops_running": True,
+                "trading_healthy": True,
+                "last_gate_check_age_sec": 12.0,
+            },
+        ),
+        patch(
+            "system.pre_flight_checks.check_startup_stream_gate_log",
+            return_value=MagicMock(passed=False),
+        ),
+    ):
+        ok, issues = agent_fully_started()
+    assert not ok
+    assert any("stream_ready" in i for i in issues)
+
+
+def test_confirm_started_script_exists() -> None:
+    """scripts/confirm_started.py verifies desktop launch completed successfully."""
+    script = _ROOT / "scripts" / "confirm_started.py"
+    assert script.is_file(), "confirm_started.py missing"
+    source = script.read_text(encoding="utf-8")
+    assert "CONFIRM STARTED" in source
+    assert "agent_fully_started" in source
+
+
+def test_startup_shutdown_symmetry() -> None:
+    """Startup and shutdown checks must mirror process, lock, port, and watchdog."""
+    path = _SRC / "system" / "shutdown_cleanup.py"
+    source = path.read_text(encoding="utf-8")
+    assert "agent_fully_stopped" in source
+    assert "agent_fully_started" in source
+    for needle in (
+        "main.py",
+        "watchdog",
+        "8080",
+        ".ig_agent_v25.lock",
+    ):
+        assert needle in source
+
+
+def test_ig_rest_client_has_end_session() -> None:
+    """IG REST client must support DELETE /session on graceful shutdown."""
+    source = (_SRC / "ig_api" / "rest_client.py").read_text(encoding="utf-8")
+    assert "def end_session" in source
+    assert 'DELETE", "/session"' in source or 'DELETE", "/session"' in source
+
+
+def test_watchdog_uses_dynamic_agent_dir_and_grace() -> None:
+    """watchdog.sh must not hardcode Desktop path; must grace startup and use launcher start script."""
+    watchdog = _ROOT / "scripts" / "watchdog.sh"
+    source = watchdog.read_text(encoding="utf-8")
+    assert 'SCRIPT_DIR="$(cd "$(dirname "$0")"' in source
+    assert "start_agent_background.sh" in source
+    assert "STARTUP_GRACE_SEC" in source
+    assert "/Users/chrisgordon/Desktop/IG_Agent_v25" not in source
+
+
+def test_start_agent_background_script_exists() -> None:
+    script = _ROOT / "scripts" / "start_agent_background.sh"
+    assert script.is_file()
+    assert os.access(script, os.X_OK)
+    source = script.read_text(encoding="utf-8")
+    assert "caffeinate" in source
+    assert "IG_AGENT_FROM_LAUNCHER=1" in source
+
+
+def test_evaluate_trading_health_closed_markets_skip_quotes() -> None:
+    """Stale quotes must not fail health when no markets are open."""
+    from unittest.mock import patch
+
+    from api.agent_health import evaluate_trading_health
+
+    with patch("api.agent_health._markets_open_count", return_value=0):
+        health = evaluate_trading_health(
+            loops_running=True,
+            paused=False,
+            gate_age=8.0,
+            epics=["CS.D.CFPGOLD.CFP.IP"],
+            quote_fresh={"CS.D.CFPGOLD.CFP.IP": False},
+        )
+    assert health["trading_healthy"] is True
+    assert health["quotes_required_for_health"] is False
+    assert not any("quotes_stale" in i for i in health["issues"])
+
+
+def test_watchdog_restart_skips_deploy_check() -> None:
+    """Watchdog restarts must not re-run pytest — burns restart budget and delays recovery."""
+    main = _MAIN_PY.read_text(encoding="utf-8")
+    assert "IG_AGENT_SKIP_DEPLOY_CHECK" in main
+    start = (_ROOT / "scripts" / "start_agent_background.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "IG_AGENT_SKIP_DEPLOY_CHECK=1" in start
+
+
+def test_watchdog_launchd_keeper_plist() -> None:
+    """launchd must KeepAlive the watchdog so restart-storm FATAL is not permanent."""
+    plist = _ROOT / "scripts" / "com.igagent.v25.watchdog.plist"
+    assert plist.is_file()
+    source = plist.read_text(encoding="utf-8")
+    assert "<key>KeepAlive</key>" in source
+    assert "<true/>" in source
+    assert "watchdog.sh" in source
+    install = (_ROOT / "scripts" / "install_launchd.sh").read_text(encoding="utf-8")
+    assert "com.igagent.v25.watchdog.plist" in install
+
+
+def test_dashboard_shows_agent_offline_banner() -> None:
+    app = (_ROOT / "dashboard" / "src" / "App.jsx").read_text(encoding="utf-8")
+    header = (_ROOT / "dashboard" / "src" / "components" / "Header.jsx").read_text(
+        encoding="utf-8"
+    )
+    assert "/api/health" in app
+    assert "agentAlive" in app
+    assert "AGENT OFFLINE" in header

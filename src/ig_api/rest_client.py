@@ -451,6 +451,22 @@ class IGRestClient:
         if not self._auth.tokens or not self._auth.tokens.is_valid:
             self.login()
 
+    def end_session(self) -> None:
+        """DELETE /session — release IG tokens on graceful shutdown."""
+        if not self._auth.tokens:
+            return
+        try:
+            r = self.request("DELETE", "/session")
+            log_demo_rest(
+                "DELETE /session — logout",
+                status_code=r.status_code,
+                body_preview=(r.text or "")[:200],
+            )
+        except Exception as e:
+            log_demo_rest("DELETE /session — logout error", error=str(e))
+        finally:
+            self._auth.tokens = None
+
     @staticmethod
     def _dealing_rule_value(rules: dict[str, Any], key: str) -> float:
         entry = rules.get(key, {})
