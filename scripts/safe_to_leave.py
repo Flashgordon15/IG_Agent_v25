@@ -105,13 +105,15 @@ def main() -> int:
     deploy_ok, deploy_detail = _run_deployment_tests()
     all_ok &= _check("Deployment verification tests", deploy_ok, deploy_detail)
 
-    for row in pre_flight_summary(run_all_pre_flight_checks(require_live_agent=False))[
-        "results"
-    ]:
+    for row in pre_flight_summary(
+        run_all_pre_flight_checks(require_live_agent=True, max_gate_age_sec=120.0)
+    )["results"]:
+        if row["id"] in ("7.1", "7.2"):
+            continue
         ok = row["passed"]
         all_ok &= _check(row["description"], ok, row.get("reason") or "")
 
-    # Live agent checks
+    # Live agent checks (duplicate gate/data checks for clear operator messaging)
     health = _fetch_health()
     if health is None:
         all_ok &= _check("Agent responding on :8080", False, "cannot reach /api/health")
