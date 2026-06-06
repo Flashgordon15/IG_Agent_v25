@@ -15,15 +15,6 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 
-# ── Heartbeat ────────────────────────────────────────────────────────────────
-# Browser pings /api/heartbeat every 30 s. The endpoint is kept so the
-# dashboard can use it as a liveness indicator, but missed pings no longer
-# trigger a shutdown. Use POST /api/shutdown for deliberate agent termination.
-HEARTBEAT_INTERVAL_SEC = 30
-HEARTBEAT_TIMEOUT_SEC = 600  # retained for reference; not used for shutdown
-_last_heartbeat: float = time.time()
-_heartbeat_lock = threading.Lock()
-
 from api.agent_control import (
     is_paused,
     is_trading_running,
@@ -49,6 +40,15 @@ from api.intelligence_data import (
     shadow_today,
 )
 from api.snapshot_store import get_tick, snapshot_age_s
+
+# ── Heartbeat ────────────────────────────────────────────────────────────────
+# Browser pings /api/heartbeat every 30 s. The endpoint is kept so the
+# dashboard can use it as a liveness indicator, but missed pings no longer
+# trigger a shutdown. Use POST /api/shutdown for deliberate agent termination.
+HEARTBEAT_INTERVAL_SEC = 30
+HEARTBEAT_TIMEOUT_SEC = 600  # retained for reference; not used for shutdown
+_last_heartbeat: float = time.time()
+_heartbeat_lock = threading.Lock()
 
 router = APIRouter()
 
