@@ -22,9 +22,43 @@ def register_trading_loop(loop: Any | None) -> None:
         _loop = loop
 
 
+def reset_agent_control_for_tests() -> None:
+    """Reset module state between pytest cases."""
+    global _loop, _paused
+    with _lock:
+        _loop = None
+        _paused = False
+
+
+def get_trading_loop() -> Any | None:
+    with _lock:
+        return _loop
+
+
 def is_paused() -> bool:
     with _lock:
         return _paused
+
+
+def is_trading_running() -> bool:
+    """True when the orchestrator loop is active and not API-paused."""
+    with _lock:
+        loop = _loop
+        paused = _paused
+    if loop is None or paused:
+        return False
+    try:
+        return bool(loop.is_running())
+    except Exception:
+        return False
+
+
+def enrich_tick_runtime(tick: dict[str, Any]) -> dict[str, Any]:
+    """Attach live trading-loop status for dashboard / WebSocket consumers."""
+    out = dict(tick)
+    out["trading_paused"] = is_paused()
+    out["trading_loops_running"] = is_trading_running()
+    return out
 
 
 def start_trading() -> dict[str, Any]:
@@ -52,6 +86,12 @@ def stop_trading() -> dict[str, Any]:
         return {"ok": True, "status": "already_stopped"}
     loop.stop()
     log_engine("api: trading loop stopped")
+    try:
+        from system.telegram_notifier import send_critical_alert
+
+        send_critical_alert("⚠️ Trading loops STOPPED — no trades firing")
+    except Exception as e:
+        log_engine(f"telegram loop-stop alert failed: {type(e).__name__}: {e}")
     return {"ok": True, "status": "stopped"}
 
 

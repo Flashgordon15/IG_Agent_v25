@@ -286,6 +286,9 @@ def build_market_orchestrator(
         )
 
         configure_telegram(cfg)
+        from system.telegram_notifier import send_startup_test
+
+        send_startup_test()
     except Exception as e:
         log_engine(f"telegram configure failed: {type(e).__name__}: {e}")
 

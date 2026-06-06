@@ -395,7 +395,7 @@ class TradingLoop:
         try:
             from system.gate_activity import record_gate_evaluation
 
-            record_gate_evaluation()
+            record_gate_evaluation(self._epic)
         except Exception:
             pass
         self._maybe_consume_points_skip_on_suppressed_signal(gates)
@@ -641,6 +641,14 @@ class TradingLoop:
         rejection = str(getattr(execution, "rejection_reason", "") or "")
         if success or action == "SUBMITTED":
             log_engine(f"EXEC OK epic={self._epic} signal={direction} action={action}")
+            try:
+                from system.telegram_notifier import send_critical_alert
+
+                params = getattr(execution, "execution_params", None) or {}
+                size = params.get("size", self._config.trade_size)
+                send_critical_alert(f"📈 Trade: {direction} {self._epic} size={size}")
+            except Exception as e:
+                log_engine(f"telegram trade alert failed: {type(e).__name__}: {e}")
         else:
             log_engine(
                 f"EXEC REJECTED epic={self._epic} signal={direction} "
@@ -949,6 +957,16 @@ class TradingLoop:
             )
         elif loss_gbp >= daily_limit:
             detail = f"daily loss £{loss_gbp:.2f} >= £{daily_limit:.0f}"
+            if not getattr(self, "_daily_loss_alert_sent", False):
+                self._daily_loss_alert_sent = True
+                try:
+                    from system.telegram_notifier import send_critical_alert
+
+                    send_critical_alert("🛑 Drawdown limit hit — trading halted")
+                except Exception as e:
+                    log_engine(
+                        f"telegram daily-loss alert failed: {type(e).__name__}: {e}"
+                    )
         else:
             detail = f"points {state}"
         return GateResult(

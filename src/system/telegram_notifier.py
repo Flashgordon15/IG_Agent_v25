@@ -81,9 +81,7 @@ def start_telegram_heartbeat(interval_sec: float = _HEARTBEAT_INTERVAL_SEC) -> N
                     payload = provider() if provider else {}
                     notifier.send_heartbeat(payload)
                 except Exception as e:
-                    log_engine(
-                        f"telegram heartbeat failed: {type(e).__name__}: {e}"
-                    )
+                    log_engine(f"telegram heartbeat failed: {type(e).__name__}: {e}")
 
         _heartbeat_thread = threading.Thread(
             target=_loop, name="telegram-heartbeat", daemon=True
@@ -93,6 +91,55 @@ def start_telegram_heartbeat(interval_sec: float = _HEARTBEAT_INTERVAL_SEC) -> N
 
 def stop_telegram_heartbeat() -> None:
     _heartbeat_stop.set()
+
+
+def send_critical_alert(message: str) -> bool:
+    """Send an immediate critical alert (blocking). Logs all failures; never raises."""
+    body = str(message or "").strip()
+    if not body:
+        log_engine("telegram critical alert skipped: empty message")
+        return False
+    if body.startswith("🚨 IG Agent CRITICAL"):
+        text = body
+    elif body.startswith("🚨"):
+        text = f"🚨 IG Agent CRITICAL\n{body[1:].lstrip()}"
+    else:
+        text = f"🚨 IG Agent CRITICAL\n{body}"
+    try:
+        notifier = get_telegram_notifier()
+        if notifier is None or not notifier.enabled:
+            log_engine(
+                "telegram critical alert NOT SENT — notifier disabled "
+                "(set telegram.enabled=true and bot_token/chat_id in config "
+                "or credentials.json)"
+            )
+            return False
+        ok = notifier.send_now(text)
+        if not ok:
+            log_engine(f"TELEGRAM ALERTS NOT WORKING: send failed for: {body[:120]}")
+        return ok
+    except Exception as e:
+        log_engine(f"TELEGRAM ALERTS NOT WORKING: {type(e).__name__}: {e}")
+        return False
+
+
+def send_startup_test() -> bool:
+    """Verify Telegram delivery at bootstrap. Logs clearly on failure."""
+    try:
+        notifier = get_telegram_notifier()
+        if notifier is None or not notifier.enabled:
+            log_engine(
+                "TELEGRAM ALERTS NOT WORKING: notifier disabled "
+                "(missing bot_token or chat_id)"
+            )
+            return False
+        ok = notifier.send_now("IG Agent v25 online — alerts active")
+        if not ok:
+            log_engine("TELEGRAM ALERTS NOT WORKING: startup test send failed")
+        return ok
+    except Exception as e:
+        log_engine(f"TELEGRAM ALERTS NOT WORKING: {type(e).__name__}: {e}")
+        return False
 
 
 class TelegramNotifier:
@@ -133,7 +180,7 @@ class TelegramNotifier:
             daemon=True,
         ).start()
 
-    def _send_sync(self, text: str) -> None:
+    def _send_sync(self, text: str) -> bool:
         url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
         payload = json.dumps(
             {"chat_id": self.chat_id, "text": text, "disable_web_page_preview": True}
@@ -148,21 +195,24 @@ class TelegramNotifier:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 if resp.status >= 400:
                     log_engine(f"telegram API HTTP {resp.status}")
+                    return False
+                return True
         except urllib.error.HTTPError as e:
             log_engine(f"telegram API HTTP error: {e.code} {e.reason}")
         except urllib.error.URLError as e:
             log_engine(f"telegram API network error: {e.reason}")
         except Exception as e:
             log_engine(f"telegram send failed: {type(e).__name__}: {e}")
+        return False
 
-    def send_now(self, text: str) -> None:
+    def send_now(self, text: str) -> bool:
         """Blocking send — for tests and startup when the caller may return immediately."""
         if not self.enabled:
-            return
+            return False
         body = text.strip()
         if not body:
-            return
-        self._send_sync(body)
+            return False
+        return self._send_sync(body)
 
     @staticmethod
     def _fmt_price(value: float) -> str:
@@ -177,7 +227,9 @@ class TelegramNotifier:
     def _now_bst() -> str:
         return datetime.now(_LONDON).strftime("%H:%M BST")
 
-    def _alert_deduped(self, key: str, text: str, *, dedupe_sec: float = _ALERT_DEDUPE_SEC) -> None:
+    def _alert_deduped(
+        self, key: str, text: str, *, dedupe_sec: float = _ALERT_DEDUPE_SEC
+    ) -> None:
         now = time.time()
         with _lock:
             last = self._alert_last_sent.get(key, 0.0)
@@ -191,7 +243,11 @@ class TelegramNotifier:
         self._send_async(text)
 
     def send_alert(self, message: str, *, dedupe_key: str | None = None) -> None:
-        line = message if message.startswith(("⚠️", "❌", "💓", "🟢", "🔴", "🚨")) else f"⚠️ {message}"
+        line = (
+            message
+            if message.startswith(("⚠️", "❌", "💓", "🟢", "🔴", "🚨"))
+            else f"⚠️ {message}"
+        )
         if dedupe_key:
             self._alert_deduped(dedupe_key, line)
         else:
@@ -205,9 +261,7 @@ class TelegramNotifier:
         points_state: str = "CAUTION",
     ) -> None:
         markets_line = f"Markets: {market_count} active | " if market_count else ""
-        self.send_now(
-            f"🟢 IG Agent v25 started\n{markets_line}Points: {points_state}"
-        )
+        self.send_now(f"🟢 IG Agent v25 started\n{markets_line}Points: {points_state}")
 
     def notify_shutdown(self) -> None:
         self.send_now("🔴 IG Agent v25 stopped")
@@ -243,8 +297,7 @@ class TelegramNotifier:
         cumulative: float,
     ) -> None:
         self.send_alert(
-            f"Points state: {old_state} → {new_state}\n"
-            f"Cumulative: {cumulative:.1f}",
+            f"Points state: {old_state} → {new_state}\nCumulative: {cumulative:.1f}",
             dedupe_key=f"points:{old_state}:{new_state}",
         )
 
@@ -310,7 +363,11 @@ class TelegramNotifier:
         balance_line = ""
         if balance is not None:
             pnl_sign = "+" if float(daily_pnl or 0) >= 0 else ""
-            pnl_str = f" | Daily P&L: {pnl_sign}£{float(daily_pnl or 0):,.2f}" if daily_pnl is not None else ""
+            pnl_str = (
+                f" | Daily P&L: {pnl_sign}£{float(daily_pnl or 0):,.2f}"
+                if daily_pnl is not None
+                else ""
+            )
             balance_line = f"\nBalance: £{float(balance):,.2f}{pnl_str}"
         text = (
             f"💓 Hourly update {self._now_bst()}\n"

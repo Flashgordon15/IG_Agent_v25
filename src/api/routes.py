@@ -4,6 +4,9 @@ HTTP routes — dashboard API (Section 4.5 Steps 8 + 13).
 
 from __future__ import annotations
 
+import os
+import signal
+import subprocess
 import threading
 import time
 from datetime import datetime, timezone
@@ -23,10 +26,12 @@ _heartbeat_lock = threading.Lock()
 
 from api.agent_control import (
     is_paused,
+    is_trading_running,
     run_emergency_stop,
     start_trading,
     stop_trading,
 )
+from api.agent_health import build_health_status, stop_watchdog
 from api.close_handler import close_deal
 from api.dashboard_data import (
     dismiss_splash,
@@ -59,6 +64,17 @@ def health() -> dict[str, Any]:
     }
 
 
+@router.get("/api/health")
+def api_health() -> dict[str, Any]:
+    """Operational health — agent, loops, port, watchdog, and per-market gate activity."""
+    status = build_health_status()
+    status["ts"] = (
+        datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    )
+    status["snapshot_age_s"] = snapshot_age_s()
+    return status
+
+
 @router.get("/api/startup/status")
 def get_startup_status() -> dict[str, Any]:
     """Real-time startup phase progress — polled by the StartupSplash component."""
@@ -72,6 +88,7 @@ def state() -> dict[str, Any]:
     """Full dashboard snapshot — same schema as WebSocket tick messages."""
     tick = get_tick()
     tick["trading_paused"] = is_paused()
+    tick["trading_loops_running"] = is_trading_running()
     return tick
 
 
@@ -374,15 +391,14 @@ def _trigger_shutdown(source: str = "api") -> None:
     """Write a clean shutdown log entry then kill the process after a short delay."""
     from system.engine_log import log_engine
 
+    stop_watchdog()
     log_engine(f"agent shutdown requested (source={source}) — exiting in 2s")
     try:
-        from system.telegram_notifier import get_telegram_notifier
+        from system.telegram_notifier import send_critical_alert
 
-        notifier = get_telegram_notifier()
-        if notifier and notifier.enabled:
-            notifier.send(f"🔴 IG Agent v25 shutdown ({source})")
-    except Exception:
-        pass
+        send_critical_alert(f"🛑 Agent stopped (source: {source})")
+    except Exception as e:
+        log_engine(f"telegram shutdown alert failed: {type(e).__name__}: {e}")
 
     def _exit() -> None:
         time.sleep(2)
@@ -442,18 +458,44 @@ def api_heartbeat() -> JSONResponse:
     return JSONResponse({"ok": True, "ts": _last_heartbeat})
 
 
+def _shutdown_cleanup(*, stop_watchdog: bool = False) -> None:
+    """Stop trading, release lock, kill port zombies; optionally stop watchdog."""
+    from system.engine_log import log_engine
+    from system.instance_lock import release_instance_lock
+
+    try:
+        stop_trading()
+    except Exception as se:
+        log_engine(f"shutdown: stop_trading error (continuing): {se}")
+
+    release_instance_lock()
+
+    try:
+        import main as _main
+
+        _main._force_cleanup_port()
+    except Exception as pe:
+        log_engine(f"shutdown: port cleanup error (continuing): {pe}")
+
+    if stop_watchdog:
+        try:
+            subprocess.run(
+                ["pkill", "-f", "scripts/watchdog.sh"],
+                capture_output=True,
+                timeout=5,
+            )
+            log_engine("shutdown: watchdog stopped")
+        except Exception as we:
+            log_engine(f"shutdown: watchdog stop error (continuing): {we}")
+
+
 @router.post("/api/shutdown")
-def api_shutdown() -> JSONResponse:
-    """Graceful agent shutdown — stop trading, write session log, exit process."""
+def api_shutdown(stop_watchdog: bool = False) -> JSONResponse:
+    """Graceful agent shutdown — stop trading, clean port/lock, exit process."""
     from system.engine_log import log_engine
 
     try:
-        # Stop trading loop first (non-blocking)
-        try:
-            stop_trading()
-        except Exception as se:
-            log_engine(f"shutdown: stop_trading error (continuing): {se}")
-
+        _shutdown_cleanup(stop_watchdog=stop_watchdog)
         log_engine("shutdown: initiated via dashboard Stop button")
         _trigger_shutdown(source="dashboard")
         return JSONResponse({"ok": True, "status": "shutting_down"})

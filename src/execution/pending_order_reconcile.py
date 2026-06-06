@@ -189,6 +189,12 @@ def log_unresolved_if_due(
     log_engine(
         f"Order confirmation unresolved for {key} — trading paused until reconciliation"
     )
+    try:
+        from system.telegram_notifier import send_critical_alert
+
+        send_critical_alert(f"{key} order confirmation unresolved")
+    except Exception as e:
+        log_engine(f"telegram unresolved-order alert failed: {type(e).__name__}: {e}")
 
 
 def reconcile_pending_via_position_state(epic: str, *, position_present: bool) -> None:

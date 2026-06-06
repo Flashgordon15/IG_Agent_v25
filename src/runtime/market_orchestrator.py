@@ -107,10 +107,30 @@ class MarketOrchestrator:
 
         check_interval = 20.0
         respawn_cooldown: dict[str, float] = {}
+        zombie_alert_sent = False
 
         while not self._stop.wait(check_interval):
             if not self._running:
                 break
+            any_running = any(loop.is_running() for loop in self._loops)
+            if self._running and self._loops and not any_running:
+                if not zombie_alert_sent:
+                    zombie_alert_sent = True
+                    log_engine(
+                        "CRITICAL: all trading loops stopped while orchestrator running"
+                    )
+                    try:
+                        from system.telegram_notifier import send_critical_alert
+
+                        send_critical_alert(
+                            "⚠️ Trading loops STOPPED — no trades firing"
+                        )
+                    except Exception as e:
+                        log_engine(
+                            f"telegram zombie-loop alert failed: {type(e).__name__}: {e}"
+                        )
+            else:
+                zombie_alert_sent = False
             for loop in self._loops:
                 if self._stop.is_set():
                     break

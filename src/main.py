@@ -219,6 +219,22 @@ def _clear_pycache() -> None:
     )
 
 
+def _init_telegram_from_config() -> None:
+    """Configure Telegram as early as possible so failure paths can alert."""
+    try:
+        raw = load_raw_config_dict()
+        from system.config import Config
+        from system.config_loader import _sync_operating_mode_from_credentials
+        from system.config_validator import apply_config_defaults
+        from system.telegram_notifier import configure_telegram
+
+        merged = apply_config_defaults(raw)
+        _sync_operating_mode_from_credentials(merged)
+        configure_telegram(Config(_data=merged))
+    except Exception as e:
+        log_engine(f"telegram early init failed: {type(e).__name__}: {e}")
+
+
 def _run_deployment_verification() -> None:
     """Run deployment health checks — abort startup if any fail."""
     result = subprocess.run(
@@ -240,6 +256,12 @@ def _run_deployment_verification() -> None:
             f"DEPLOYMENT VERIFICATION FAILED — agent will not start trading:\n"
             f"{result.stdout}\n{result.stderr}"
         )
+        try:
+            from system.telegram_notifier import send_critical_alert
+
+            send_critical_alert("Startup BLOCKED — deployment check failed")
+        except Exception:
+            pass
         raise SystemExit(
             "Deployment verification failed. Fix the issues above before launching."
         )
@@ -257,6 +279,7 @@ def _pre_startup_cleanup() -> None:
     background session never blocks the next launch.
     """
     _clear_pycache()
+    _init_telegram_from_config()
     _run_deployment_verification()
 
     import os
@@ -495,11 +518,11 @@ class AgentRuntime:
         self._stream_client: Any | None = None
         self._shutting_down = False
 
-    def shutdown(self) -> None:
+    def shutdown(self, *, source: str = "runtime") -> None:
         if self._shutting_down:
             return
         self._shutting_down = True
-        log_engine("shutdown: stopping trading loop")
+        log_engine(f"shutdown: stopping trading loop (source={source})")
         if self.trading_loop is not None:
             try:
                 self.trading_loop.stop()
@@ -512,16 +535,14 @@ class AgentRuntime:
             self._stream_client = None
         try:
             from system.telegram_notifier import (
-                get_telegram_notifier,
+                send_critical_alert,
                 stop_telegram_heartbeat,
             )
 
-            notifier = get_telegram_notifier()
-            if notifier is not None and notifier.enabled:
-                notifier.notify_shutdown()
+            send_critical_alert(f"🛑 Agent stopped (source: {source})")
             stop_telegram_heartbeat()
-        except Exception:
-            pass
+        except Exception as e:
+            log_engine(f"telegram shutdown notify failed: {type(e).__name__}: {e}")
         release_instance_lock()
         _force_cleanup_port()
         log_engine("shutdown complete")
@@ -578,16 +599,29 @@ class AgentRuntime:
             register_trading_loop(self.trading_loop)
 
             def _start_live_engines() -> None:
+                from api.agent_control import start_trading
+
                 wire_hub_quotes_to_dashboard(min_interval=0.25)
                 self._stream_client = start_market_stream(cfg, rest_client=rest)
                 _startup_mark("stream")
-                self.trading_loop.start()
+                # Auto-start trading loops — no dashboard Start button required.
+                result = start_trading()
+                if not result.get("ok"):
+                    self.trading_loop.start()
                 _startup_mark("ready")
                 from system.replay_daily_scheduler import start_replay_daily_scheduler
 
                 start_replay_daily_scheduler()
                 _start_session_refresh_watchdog(rest)
                 log_engine("orchestrator trading loop started (background)")
+                try:
+                    from system.telegram_notifier import send_critical_alert
+
+                    send_critical_alert("✅ Agent started — trading loops active")
+                except Exception as e:
+                    log_engine(
+                        f"telegram startup alert failed: {type(e).__name__}: {e}"
+                    )
                 from system.engine_log import _intermittent_settings
 
                 on, iv = _intermittent_settings()
@@ -609,13 +643,13 @@ class AgentRuntime:
             uvicorn.run(app, host=_API_HOST, port=_API_PORT, log_level="info")
             return EXIT_OK
         finally:
-            self.shutdown()
+            self.shutdown(source="normal")
 
 
 def _install_signal_handlers(runtime: AgentRuntime) -> None:
     def _handle(signum: int, _frame: Any) -> None:
         log_engine(f"signal {signum} received — graceful shutdown")
-        runtime.shutdown()
+        runtime.shutdown(source=f"signal:{signum}")
         raise SystemExit(128 + (signum if signum < 128 else 0))
 
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -641,14 +675,12 @@ def main() -> None:
     except Exception as e:
         log_engine(f"CRITICAL: {type(e).__name__}: {e}")
         try:
-            from system.telegram_notifier import get_telegram_notifier
+            from system.telegram_notifier import send_critical_alert
 
-            notifier = get_telegram_notifier()
-            if notifier is not None and notifier.enabled:
-                notifier.notify_crash(f"{type(e).__name__}: {e}")
+            send_critical_alert(f"Agent crash — {type(e).__name__}: {e}")
         except Exception:
             pass
-        runtime.shutdown()
+        runtime.shutdown(source="crash")
         raise SystemExit(1) from e
 
 

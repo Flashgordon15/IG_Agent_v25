@@ -143,6 +143,12 @@ class LiveExecutor:
                 f"Order confirmation unresolved for {signal.epic} — "
                 f"trading paused until reconciliation"
             )
+            try:
+                from system.telegram_notifier import send_critical_alert
+
+                send_critical_alert(f"{signal.epic} order confirmation unresolved")
+            except Exception:
+                pass
             update_demo_diagnostics(last_rejection=reason)
             trace_execution(
                 "ORDER", "LiveExecutor.execute", decision=f"REJECTED: {reason}"
@@ -197,6 +203,12 @@ class LiveExecutor:
                 trace_execution(
                     "ORDER", "LiveExecutor.execute", decision=f"REJECTED: {cg_reason}"
                 )
+                try:
+                    from system.telegram_notifier import send_critical_alert
+
+                    send_critical_alert(cg_reason)
+                except Exception:
+                    pass
                 return ExecutionResult(
                     success=False,
                     action="REJECTED",

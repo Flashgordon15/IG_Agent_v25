@@ -80,6 +80,22 @@ restart_agent() {
     log "WATCHDOG: agent restarted — new PID=$new_pid"
 }
 
+notify_telegram() {
+    local msg="$1"
+    local PY="python3"
+    for candidate in \
+        "${AGENT_DIR}/.venv/bin/python3" \
+        "${AGENT_DIR}/venv/bin/python3" \
+        "$(command -v python3 2>/dev/null || true)"
+    do
+        if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+            PY="$candidate"
+            break
+        fi
+    done
+    PYTHONPATH=src "$PY" "$AGENT_DIR/scripts/telegram_alert.py" "$msg" >> "$LOG" 2>&1 || true
+}
+
 # ------------------------------------------------------------------
 # Main loop
 # ------------------------------------------------------------------
@@ -117,6 +133,7 @@ while true; do
         # Record this restart
         restart_times+=("$(date +%s)")
         log "WATCHDOG: restart #${#restart_times[@]} of $MAX_RESTARTS_PER_HOUR allowed per hour"
+        notify_telegram "🔄 Watchdog restarted agent (restart #${#restart_times[@]})"
     fi
 
     sleep "$CHECK_INTERVAL"

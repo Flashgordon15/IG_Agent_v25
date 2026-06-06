@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from system.engine_log import log_engine
 from system.paths import logs_dir
@@ -41,6 +40,14 @@ def record_startup_failure(reason: str) -> None:
         log_engine(
             f"WATCHDOG FAILED — wrote {_BANNER_PATH.name} after {count} failures"
         )
+    try:
+        from system.telegram_notifier import send_critical_alert
+
+        send_critical_alert(
+            f"Agent restart failed (attempt #{count}): {str(reason)[:120]}"
+        )
+    except Exception as e:
+        log_engine(f"telegram watchdog alert failed: {type(e).__name__}: {e}")
 
 
 def record_startup_success() -> None:
