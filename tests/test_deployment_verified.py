@@ -364,9 +364,12 @@ def test_api_health_endpoint_defined() -> None:
     assert "build_health_status" in routes
     for field in (
         "agent_alive",
+        "trading_healthy",
         "trading_loops_running",
         "port_bound",
         "watchdog_active",
+        "quotes_fresh",
+        "issues",
         "last_log_age_sec",
         "markets",
         "last_gate_check_age_sec",
@@ -428,3 +431,22 @@ def test_watchdog_has_restart_cap() -> None:
         "watchdog.sh does not log a FATAL/stop message when the cap is hit; "
         "operators will not know the watchdog gave up."
     )
+
+
+def test_watchdog_detects_trading_zombie() -> None:
+    """watchdog.sh must restart when /api/health reports trading unhealthy."""
+    watchdog = _ROOT / "scripts" / "watchdog.sh"
+    if not watchdog.exists():
+        pytest.skip("watchdog.sh not found")
+    source = watchdog.read_text(encoding="utf-8")
+    assert "trading_healthy" in source
+    assert "/api/health" in source
+
+
+def test_safe_to_leave_script_exists() -> None:
+    """scripts/safe_to_leave.py must exist — operator trust gate before going away."""
+    script = _ROOT / "scripts" / "safe_to_leave.py"
+    assert script.is_file(), "safe_to_leave.py missing"
+    source = script.read_text(encoding="utf-8")
+    assert "SAFE TO LEAVE" in source
+    assert "trading_healthy" in source or "/api/health" in source

@@ -86,12 +86,15 @@ class ApiHealthTests(unittest.TestCase):
         for key in (
             "ok",
             "agent_alive",
+            "trading_healthy",
             "trading_loops_running",
             "trading_paused",
             "port_bound",
             "last_log_age_sec",
             "last_gate_check_age_sec",
             "watchdog_active",
+            "quotes_fresh",
+            "issues",
             "markets",
         ):
             self.assertIn(key, body, f"missing /api/health field: {key}")

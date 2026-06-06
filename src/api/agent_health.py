@@ -38,7 +38,6 @@ def _engine_log_age_sec() -> float | None:
 def _watchdog_active() -> bool:
     """True when our self-healing watchdog.sh process is running."""
     try:
-        root = str(project_root())
         result = subprocess.run(
             ["pgrep", "-f", _WATCHDOG_MARKER],
             capture_output=True,
@@ -58,7 +57,8 @@ def _watchdog_active() -> bool:
                 timeout=3,
             )
             cmd = (proc.stdout or "").strip()
-            if _WATCHDOG_MARKER in cmd and root in cmd:
+            # pgrep matches full path; ps may show relative "bash scripts/watchdog.sh"
+            if _WATCHDOG_MARKER in cmd:
                 return True
         return False
     except Exception:
@@ -119,19 +119,95 @@ def _build_market_health() -> list[dict[str, Any]]:
     return markets
 
 
+def _configured_epics() -> list[str]:
+    epics: list[str] = []
+    loop = get_trading_loop()
+    if loop is not None and hasattr(loop, "loops"):
+        for epic_loop in loop.loops:
+            epic = str(getattr(epic_loop, "_epic", "") or "").strip()
+            if epic:
+                epics.append(epic)
+    elif loop is not None:
+        epic = str(getattr(loop, "_epic", "") or "").strip()
+        if epic:
+            epics.append(epic)
+    if epics:
+        return epics
+    try:
+        from system.config_loader import get_config_loader
+
+        cfg = get_config_loader().load()
+        for _iid, inst in (cfg.instruments or {}).items():
+            if not inst.get("enabled", True):
+                continue
+            epic = str(inst.get("epic") or "").strip()
+            if epic:
+                epics.append(epic)
+    except Exception:
+        pass
+    return epics
+
+
+def _quotes_fresh_by_epic(
+    epics: list[str], *, max_age: float = 45.0
+) -> dict[str, bool]:
+    from system.rest_api_budget import hub_quote_stream_fresh
+
+    return {epic: hub_quote_stream_fresh(epic=epic, max_age=max_age) for epic in epics}
+
+
 def build_health_status() -> dict[str, Any]:
     gate_age = seconds_since_last_gate_eval()
+    loops_running = is_trading_running()
+    paused = is_paused()
+    watchdog = _watchdog_active()
+    log_age = _engine_log_age_sec()
+    epics = _configured_epics()
+    quote_fresh = _quotes_fresh_by_epic(epics) if epics else {}
+    fresh_count = sum(1 for ok in quote_fresh.values() if ok)
+    quotes_fresh = bool(epics) and fresh_count == len(epics)
+
+    issues: list[str] = []
+    if not loops_running:
+        issues.append("trading_loops_not_running")
+    if paused:
+        issues.append("trading_paused")
+    if not watchdog:
+        issues.append("watchdog_inactive")
+    if gate_age is None:
+        issues.append("no_gate_activity_recorded")
+    elif gate_age > 120.0:
+        issues.append(f"gate_check_stale_{int(gate_age)}s")
+    if epics and not quotes_fresh:
+        stale = [e for e, ok in quote_fresh.items() if not ok]
+        issues.append(f"quotes_stale:{','.join(stale)}")
+    if log_age is not None and log_age > 300.0:
+        issues.append(f"engine_log_stale_{int(log_age)}s")
+
+    trading_healthy = (
+        loops_running
+        and not paused
+        and gate_age is not None
+        and gate_age <= 120.0
+        and quotes_fresh
+    )
+
     return {
-        "ok": True,
-        # Responding to /api/health proves the agent process is alive.
+        "ok": trading_healthy and watchdog,
         "agent_alive": True,
-        "trading_loops_running": is_trading_running(),
-        "trading_paused": is_paused(),
+        "trading_healthy": trading_healthy,
+        "trading_loops_running": loops_running,
+        "trading_paused": paused,
         "port_bound": _port_bound(),
-        "watchdog_active": _watchdog_active(),
-        "last_log_age_sec": _engine_log_age_sec(),
+        "watchdog_active": watchdog,
+        "quotes_fresh": quotes_fresh,
+        "quotes_fresh_count": fresh_count,
+        "quotes_total": len(epics),
+        "issues": issues,
+        "last_log_age_sec": log_age,
         "last_gate_check_age_sec": gate_age,
         "markets": _build_market_health(),
+        "quote_fresh_by_epic": quote_fresh,
     }
 
 
@@ -158,7 +234,7 @@ def stop_watchdog() -> None:
                 timeout=3,
             )
             cmd = (proc.stdout or "").strip()
-            if _WATCHDOG_MARKER in cmd and root in cmd:
+            if _WATCHDOG_MARKER in cmd:
                 subprocess.run(["kill", "-TERM", pid_str], timeout=3)
     except Exception:
         pass
