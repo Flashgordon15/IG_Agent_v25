@@ -11,9 +11,27 @@ WATCHDOG_PLIST="com.igagent.v25.watchdog.plist"
 mkdir -p "${ROOT}/src/data/logs"
 mkdir -p "${LAUNCH_AGENTS}"
 
+PY=""
+for candidate in \
+  "${ROOT}/.venv/bin/python3" \
+  "${ROOT}/venv/bin/python3" \
+  "/Library/Frameworks/Python.framework/Versions/3.14/bin/python3" \
+  "$(command -v python3 2>/dev/null || true)"
+do
+  if [ -n "${candidate}" ] && [ -x "${candidate}" ]; then
+    PY="${candidate}"
+    break
+  fi
+done
+if [ -z "${PY}" ]; then
+  echo "ERROR: no python3 executable found for launchd plists" >&2
+  exit 1
+fi
+
 install_plist() {
   local src_name="$1"
-  sed "s|__IG_AGENT_ROOT__|${ROOT}|g" "${ROOT}/scripts/${src_name}" > "${LAUNCH_AGENTS}/${src_name}"
+  sed -e "s|__IG_AGENT_ROOT__|${ROOT}|g" -e "s|__PYTHON_BIN__|${PY}|g" \
+    "${ROOT}/scripts/${src_name}" > "${LAUNCH_AGENTS}/${src_name}"
 }
 
 install_plist "${AGENT_PLIST}"

@@ -13,10 +13,12 @@ already open, only new entries. The counter resets when reset_session() is calle
 
 from __future__ import annotations
 
+import json
 import threading
 from datetime import datetime
 
 from system.engine_log import log_engine
+from system.paths import data_dir
 
 _lock = threading.Lock()
 _buy_count: int = 0
@@ -25,10 +27,71 @@ _session_key: str = ""
 
 MAX_NEW_PER_DIRECTION = 15  # max new entries in the same direction per session
 _enabled: bool = True
+_STATE_FILE = data_dir() / "state" / "correlation_guard.json"
 
 
 def _session_date_key() -> str:
     return datetime.now().strftime("%Y-%m-%d")
+
+
+def _is_date_session_key(key: str) -> bool:
+    if len(key) != 10:
+        return False
+    try:
+        datetime.strptime(key, "%Y-%m-%d")
+        return True
+    except ValueError:
+        return False
+
+
+def _persist_state() -> None:
+    try:
+        _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _STATE_FILE.write_text(
+            json.dumps(
+                {
+                    "buy": _buy_count,
+                    "sell": _sell_count,
+                    "session": _session_key,
+                }
+            ),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        log_engine(f"correlation_guard: persist failed: {type(e).__name__}: {e}")
+
+
+def _load_state() -> None:
+    global _buy_count, _sell_count, _session_key
+    if not _STATE_FILE.is_file():
+        return
+    try:
+        raw = json.loads(_STATE_FILE.read_text(encoding="utf-8"))
+        _session_key = str(raw.get("session") or "")
+        _buy_count = int(raw.get("buy") or 0)
+        _sell_count = int(raw.get("sell") or 0)
+        log_engine(
+            f"correlation_guard: restored buy={_buy_count} sell={_sell_count} "
+            f"session={_session_key}"
+        )
+    except Exception as e:
+        log_engine(f"correlation_guard: load failed: {type(e).__name__}: {e}")
+
+
+_load_state()
+
+
+def reset_correlation_guard_for_tests() -> None:
+    """Clear in-memory and on-disk guard state between pytest cases."""
+    global _buy_count, _sell_count, _session_key
+    with _lock:
+        _session_key = ""
+        _buy_count = 0
+        _sell_count = 0
+    try:
+        _STATE_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 def reset_session(*, key: str | None = None) -> None:
@@ -37,16 +100,24 @@ def reset_session(*, key: str | None = None) -> None:
         _session_key = key or _session_date_key()
         _buy_count = 0
         _sell_count = 0
+        _persist_state()
     log_engine(f"correlation_guard: session reset key={_session_key}")
 
 
 def _maybe_auto_reset() -> None:
     global _buy_count, _sell_count, _session_key
     today = _session_date_key()
+    if not _session_key:
+        _session_key = today
+        _persist_state()
+        return
+    if not _is_date_session_key(_session_key):
+        return
     if _session_key != today:
         _session_key = today
         _buy_count = 0
         _sell_count = 0
+        _persist_state()
 
 
 def check_and_record(direction: str) -> tuple[bool, str]:
@@ -78,6 +149,7 @@ def check_and_record(direction: str) -> tuple[bool, str]:
                     f"(max {MAX_NEW_PER_DIRECTION})",
                 )
             _sell_count += 1
+        _persist_state()
         return True, ""
 
 
@@ -90,6 +162,7 @@ def undo(direction: str) -> None:
             _buy_count = max(0, _buy_count - 1)
         elif d == "SELL":
             _sell_count = max(0, _sell_count - 1)
+        _persist_state()
 
 
 def snapshot() -> dict[str, object]:

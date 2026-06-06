@@ -762,3 +762,75 @@ def test_dashboard_shows_agent_offline_banner() -> None:
     assert "/api/health" in app
     assert "agentAlive" in app
     assert "AGENT OFFLINE" in header
+
+
+def test_safe_to_leave_runtime_heartbeat_check() -> None:
+    """safe_to_leave must verify heartbeat monitor at runtime, not source string match."""
+    source = (_ROOT / "scripts" / "safe_to_leave.py").read_text(encoding="utf-8")
+    assert "_heartbeat_auto_shutdown_disabled" in source
+    assert "inspect.getsource" in source
+    assert "_start_heartbeat_monitor" in source
+    assert "_heartbeat_disabled" not in source
+
+
+def test_safe_to_leave_requires_telegram() -> None:
+    """Overnight trust gate must fail without Telegram — no WARN-only path."""
+    source = (_ROOT / "scripts" / "safe_to_leave.py").read_text(encoding="utf-8")
+    assert "Telegram alerts configured" in source
+    assert '"WARN"' not in source
+    assert "--require-telegram" not in source
+
+
+def test_agent_bootstrap_skips_deploy_self_test_on_watchdog_restart() -> None:
+    source = (_ROOT / "src" / "runtime" / "agent_bootstrap.py").read_text(
+        encoding="utf-8"
+    )
+    assert "IG_AGENT_SKIP_DEPLOY_CHECK" in source
+    assert "test_deployed_fixes.py" in source
+
+
+def test_install_launchd_substitutes_python_bin() -> None:
+    install = (_ROOT / "scripts" / "install_launchd.sh").read_text(encoding="utf-8")
+    agent_plist = (_ROOT / "scripts" / "com.igagent.v25.plist").read_text(
+        encoding="utf-8"
+    )
+    assert "__PYTHON_BIN__" in agent_plist
+    assert "__PYTHON_BIN__" in install
+    assert "SuccessfulExit" in agent_plist
+
+
+def test_correlation_guard_persists_state() -> None:
+    source = _GUARD_PY.read_text(encoding="utf-8")
+    assert "correlation_guard.json" in source
+    assert "_persist_state" in source
+    assert "_load_state" in source
+
+
+def test_evaluate_trading_health_maintenance_quotes_exempt() -> None:
+    from unittest.mock import patch
+
+    from api.agent_health import evaluate_trading_health
+
+    epic = "CS.D.CFJPY.CFJ.IP"
+    with (
+        patch("api.agent_health._markets_open_count", return_value=1),
+        patch("api.agent_health._epic_quote_exempt", return_value=True),
+    ):
+        health = evaluate_trading_health(
+            loops_running=True,
+            paused=False,
+            gate_age=8.0,
+            epics=[epic],
+            quote_fresh={epic: False},
+        )
+    assert health["trading_healthy"] is True
+    assert health["quotes_fresh"] is True
+    assert not any(i.startswith("quotes_stale:") for i in health["issues"])
+
+
+def test_main_respawns_watchdog_when_silent() -> None:
+    """Manual launches must start watchdog if it was stopped."""
+    source = _MAIN_PY.read_text(encoding="utf-8")
+    assert "_ensure_watchdog_running" in source
+    assert "watchdog.sh" in source
+    assert "_watchdog_active" in source

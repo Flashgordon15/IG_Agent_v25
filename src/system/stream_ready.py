@@ -45,12 +45,19 @@ def _hub_has_live_quotes(*, max_age_sec: float = 30.0) -> bool:
     return False
 
 
-def wait_stream_ready(timeout: float | None = None) -> bool:
+def wait_stream_ready(timeout: float | None = None, *, epic: str = "") -> bool:
     if _ready.is_set():
         return True
     effective_timeout = float(timeout if timeout is not None else _DEFAULT_WAIT_SEC)
     deadline = time.monotonic() + effective_timeout
     while not _ready.is_set():
+        if epic:
+            try:
+                from system.gate_activity import record_gate_evaluation
+
+                record_gate_evaluation(epic)
+            except Exception:
+                pass
         if _hub_has_live_quotes():
             log_engine(
                 "stream_ready: hub quotes already live — proceeding without stream signal"

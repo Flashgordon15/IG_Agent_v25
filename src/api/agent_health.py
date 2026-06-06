@@ -166,6 +166,24 @@ def _quotes_fresh_by_epic(
     return {epic: hub_quote_stream_fresh(epic=epic, max_age=max_age) for epic in epics}
 
 
+def _epic_quote_exempt(epic: str) -> bool:
+    """True when stale quotes for this epic are expected (closed or maintenance)."""
+    try:
+        from system.market_watch.calendar import is_market_open
+        from system.market_watch.japan225_session import (
+            is_hub_price_maintenance,
+            is_scheduled_daily_maintenance,
+        )
+
+        if not is_market_open(epic):
+            return True
+        if is_scheduled_daily_maintenance(epic) or is_hub_price_maintenance(epic):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _markets_open_count(epics: list[str]) -> int:
     """How many configured epics are in an IG-open session right now."""
     if not epics:
@@ -190,9 +208,11 @@ def evaluate_trading_health(
 ) -> dict[str, Any]:
     """Shared trading-health rules for /api/health and dashboard ticks."""
     fresh_count = sum(1 for ok in quote_fresh.values() if ok)
-    quotes_fresh = bool(epics) and fresh_count == len(epics)
+    stale_epics = [e for e in epics if not quote_fresh.get(e, False)]
+    exempt_stale = [e for e in stale_epics if _epic_quote_exempt(e)]
     markets_open = _markets_open_count(epics)
-    quotes_required = markets_open > 0
+    quotes_required = markets_open > 0 and len(exempt_stale) < len(stale_epics)
+    quotes_fresh = bool(epics) and (not stale_epics or not quotes_required)
 
     issues: list[str] = []
     if not loops_running:
@@ -205,9 +225,12 @@ def evaluate_trading_health(
         issues.append("no_gate_activity_recorded")
     elif gate_age > 120.0:
         issues.append(f"gate_check_stale_{int(gate_age)}s")
-    if quotes_required and epics and not quotes_fresh:
-        stale = [e for e, ok in quote_fresh.items() if not ok]
-        issues.append(f"quotes_stale:{','.join(stale)}")
+    if quotes_required and stale_epics:
+        actionable = [e for e in stale_epics if e not in exempt_stale]
+        if actionable:
+            issues.append(f"quotes_stale:{','.join(actionable)}")
+        elif stale_epics:
+            issues.append(f"quotes_maintenance:{','.join(stale_epics)}")
     if log_age is not None and log_age > 300.0:
         issues.append(f"engine_log_stale_{int(log_age)}s")
 
@@ -226,6 +249,7 @@ def evaluate_trading_health(
         "quotes_total": len(epics),
         "markets_open_count": markets_open,
         "quotes_required_for_health": quotes_required,
+        "quotes_maintenance_epics": exempt_stale,
         "issues": issues,
     }
 
