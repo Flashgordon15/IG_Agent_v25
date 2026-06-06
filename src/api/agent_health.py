@@ -39,7 +39,7 @@ def _watchdog_active() -> bool:
     """True when our self-healing watchdog.sh process is running."""
     try:
         result = subprocess.run(
-            ["pgrep", "-f", _WATCHDOG_MARKER],
+            ["/usr/bin/pgrep", "-f", _WATCHDOG_MARKER],
             capture_output=True,
             text=True,
             timeout=3,
@@ -51,7 +51,7 @@ def _watchdog_active() -> bool:
             if not pid_str.isdigit():
                 continue
             proc = subprocess.run(
-                ["ps", "-p", pid_str, "-o", "args="],
+                ["/bin/ps", "-p", pid_str, "-o", "args="],
                 capture_output=True,
                 text=True,
                 timeout=3,
@@ -216,7 +216,7 @@ def stop_watchdog() -> None:
     try:
         root = str(project_root())
         result = subprocess.run(
-            ["pgrep", "-f", _WATCHDOG_MARKER],
+            ["/usr/bin/pgrep", "-f", _WATCHDOG_MARKER],
             capture_output=True,
             text=True,
             timeout=3,
@@ -228,13 +228,13 @@ def stop_watchdog() -> None:
             if not pid_str.isdigit():
                 continue
             proc = subprocess.run(
-                ["ps", "-p", pid_str, "-o", "args="],
+                ["/bin/ps", "-p", pid_str, "-o", "args="],
                 capture_output=True,
                 text=True,
                 timeout=3,
             )
             cmd = (proc.stdout or "").strip()
             if _WATCHDOG_MARKER in cmd:
-                subprocess.run(["kill", "-TERM", pid_str], timeout=3)
+                subprocess.run(["/bin/kill", "-TERM", pid_str], timeout=3)
     except Exception:
         pass
