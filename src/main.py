@@ -237,6 +237,12 @@ def _init_telegram_from_config() -> None:
 
 def _run_deployment_verification() -> None:
     """Run deployment health checks — abort startup if any fail."""
+    if os.environ.get("IG_AGENT_SKIP_DEPLOY_CHECK") == "1":
+        log_engine(
+            "Deployment verification skipped (IG_AGENT_SKIP_DEPLOY_CHECK=1 — watchdog restart)"
+        )
+        _startup_mark("deploy_check", note="skipped watchdog restart")
+        return
     result = subprocess.run(
         [
             sys.executable,

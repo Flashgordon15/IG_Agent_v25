@@ -42,6 +42,7 @@ fi
 
 export IG_AGENT_ROOT="${AGENT_DIR}"
 export IG_AGENT_FROM_LAUNCHER=1
+export IG_AGENT_SKIP_DEPLOY_CHECK=1
 export PYTHONPATH="${AGENT_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
 log "start_agent_background: python=${PY} caffeinate=${CAFF_ARGS[*]:-off}"

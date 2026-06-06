@@ -732,6 +732,28 @@ def test_evaluate_trading_health_closed_markets_skip_quotes() -> None:
     assert not any("quotes_stale" in i for i in health["issues"])
 
 
+def test_watchdog_restart_skips_deploy_check() -> None:
+    """Watchdog restarts must not re-run pytest — burns restart budget and delays recovery."""
+    main = _MAIN_PY.read_text(encoding="utf-8")
+    assert "IG_AGENT_SKIP_DEPLOY_CHECK" in main
+    start = (_ROOT / "scripts" / "start_agent_background.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "IG_AGENT_SKIP_DEPLOY_CHECK=1" in start
+
+
+def test_watchdog_launchd_keeper_plist() -> None:
+    """launchd must KeepAlive the watchdog so restart-storm FATAL is not permanent."""
+    plist = _ROOT / "scripts" / "com.igagent.v25.watchdog.plist"
+    assert plist.is_file()
+    source = plist.read_text(encoding="utf-8")
+    assert "<key>KeepAlive</key>" in source
+    assert "<true/>" in source
+    assert "watchdog.sh" in source
+    install = (_ROOT / "scripts" / "install_launchd.sh").read_text(encoding="utf-8")
+    assert "com.igagent.v25.watchdog.plist" in install
+
+
 def test_dashboard_shows_agent_offline_banner() -> None:
     app = (_ROOT / "dashboard" / "src" / "App.jsx").read_text(encoding="utf-8")
     header = (_ROOT / "dashboard" / "src" / "components" / "Header.jsx").read_text(
