@@ -336,7 +336,72 @@ def test_watchdog_script_exists() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 11. Watchdog contains restart cap logic
+# 11. Trading loops auto-start on launch (no Start button)
+# ---------------------------------------------------------------------------
+
+
+def test_trading_loops_auto_start_on_launch() -> None:
+    """main.py must auto-start trading via start_trading() in the API startup hook.
+
+    Requiring a manual dashboard Start after every launch was a major cause of
+    zero-trade overnight sessions when the agent restarted without user present.
+    """
+    source = _MAIN_PY.read_text(encoding="utf-8")
+    assert "register_api_startup(_start_live_engines)" in source
+    assert "start_trading()" in source
+
+
+# ---------------------------------------------------------------------------
+# 12. /api/health operational endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_api_health_endpoint_defined() -> None:
+    """routes.py must expose GET /api/health with trading loop + watchdog fields."""
+    routes = (_SRC / "api" / "routes.py").read_text(encoding="utf-8")
+    health = (_SRC / "api" / "agent_health.py").read_text(encoding="utf-8")
+    assert '@router.get("/api/health")' in routes
+    assert "build_health_status" in routes
+    for field in (
+        "agent_alive",
+        "trading_loops_running",
+        "port_bound",
+        "watchdog_active",
+        "last_log_age_sec",
+        "markets",
+        "last_gate_check_age_sec",
+    ):
+        assert field in health
+    assert "last_gate_check" in health
+
+
+def test_heartbeat_no_auto_shutdown() -> None:
+    """_start_heartbeat_monitor must be a no-op — browser disconnect must not kill agent."""
+    routes = (_SRC / "api" / "routes.py").read_text(encoding="utf-8")
+    assert "auto-shutdown on browser disconnect is disabled" in routes
+
+    lines = routes.splitlines()
+    in_func = False
+    body: list[str] = []
+    for line in lines:
+        if line.startswith("def _start_heartbeat_monitor("):
+            in_func = True
+            continue
+        if in_func:
+            if (
+                line
+                and not line[0].isspace()
+                and (line.startswith("def ") or line.startswith("class "))
+            ):
+                break
+            body.append(line)
+    func_body = "\n".join(body)
+    assert "threading.Thread" not in func_body
+    assert "os.kill" not in func_body
+
+
+# ---------------------------------------------------------------------------
+# 13. Watchdog contains restart cap logic
 # ---------------------------------------------------------------------------
 
 

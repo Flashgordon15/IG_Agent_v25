@@ -359,7 +359,7 @@ export default function App() {
     return () => soundRef.current?.stopStopAlarm();
   }, []);
 
-  // Heartbeat — keeps the backend alive; starts the idle-shutdown monitor server-side
+  // Heartbeat — dashboard liveness ping (auto-shutdown on disconnect is disabled)
   useEffect(() => {
     if (startupDone !== true) return;
     const ping = () => fetch("/api/heartbeat", { method: "POST" }).catch(() => {});
@@ -391,6 +391,8 @@ export default function App() {
     bid: viewState?.bid,
     offer: viewState?.offer,
     agentState: state?.points?.state ?? state?.agent_state,
+    tradingLoopsRunning: state?.trading_loops_running,
+    tradingPaused: state?.trading_paused,
     pointsTrade: state?.points?.last_trade,
     pointsSession: state?.points?.session,
     pointsCumulative: state?.points?.cumulative,

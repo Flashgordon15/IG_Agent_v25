@@ -10,6 +10,7 @@ from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from api.agent_control import enrich_tick_runtime
 from api.snapshot_store import get_tick, subscribe
 from system.engine_log import log_engine
 
@@ -43,16 +44,17 @@ class _WsHub:
         self._loop.call_soon_threadsafe(_enqueue)
 
     def _deliver(self, tick: dict[str, Any]) -> None:
+        enriched = enrich_tick_runtime(tick)
         for queue in list(self._queues.values()):
             try:
-                queue.put_nowait(tick)
+                queue.put_nowait(enriched)
             except asyncio.QueueFull:
                 try:
                     queue.get_nowait()
                 except asyncio.QueueEmpty:
                     pass
                 try:
-                    queue.put_nowait(tick)
+                    queue.put_nowait(enriched)
                 except asyncio.QueueFull:
                     pass
 
@@ -78,7 +80,7 @@ async def websocket_ticks(ws: WebSocket) -> None:
     await ws.accept()
     outbound: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=64)
     hub.register(ws, outbound)
-    await outbound.put(get_tick())
+    await outbound.put(enrich_tick_runtime(get_tick()))
 
     async def _reader() -> None:
         while True:

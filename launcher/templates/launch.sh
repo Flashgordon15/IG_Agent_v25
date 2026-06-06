@@ -46,6 +46,22 @@ dashboard_healthy() {
   return 1
 }
 
+ensure_watchdog() {
+  local wd="${ROOT}/scripts/watchdog.sh"
+  if [ ! -x "${wd}" ]; then
+    log "WARN: watchdog script missing or not executable (${wd})"
+    return 0
+  fi
+  if pgrep -f "${wd}" >/dev/null 2>&1; then
+    log "watchdog already running"
+    return 0
+  fi
+  nohup bash "${wd}" >>"${LOG_DIR}/watchdog.log" 2>&1 &
+  local wd_pid=$!
+  disown "${wd_pid}" 2>/dev/null || true
+  log "watchdog started pid=${wd_pid}"
+}
+
 lock_holder_alive() {
   local lock_pid=""
   if [ ! -f "${LOCK_FILE}" ]; then
@@ -103,6 +119,8 @@ if [ -f "${ROOT}/emergency_stop.lock" ]; then
   notify_failure "Emergency stop lock is set. Delete emergency_stop.lock in the project folder, then retry."
   exit 1
 fi
+
+ensure_watchdog
 
 if dashboard_healthy; then
   log "agent already running — opening dashboard"

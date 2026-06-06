@@ -78,7 +78,15 @@ else
   echo "WARN: missing ${CONFIG}" >&2
 fi
 
-# 3. Kill all agent processes (not this script)
+# 3. Stop self-healing watchdog (prevent auto-restart after emergency stop)
+if command -v pgrep >/dev/null 2>&1; then
+  while read -r wpid; do
+    [[ -z "$wpid" ]] && continue
+    kill -TERM "$wpid" 2>/dev/null || true
+  done < <(pgrep -f "${ROOT}/scripts/watchdog.sh" 2>/dev/null || true)
+fi
+
+# 4. Kill all agent processes (not this script)
 SELF=$$
 _kill_project_pids() {
   local sig=$1
@@ -102,7 +110,7 @@ _kill_project_pids TERM
 sleep 1
 _kill_project_pids KILL
 
-# 4. Write emergency_stop.lock to project root
+# 5. Write emergency_stop.lock to project root
 : > "${ROOT}/emergency_stop.lock"
 
 echo "Emergency stop complete. Delete ${ROOT}/emergency_stop.lock before restart."

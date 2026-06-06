@@ -5,17 +5,14 @@ All endpoints are read-only snapshots. POST /api/replay/run spawns a
 subprocess trigger only — it never imports trading_loop and never writes
 state files directly.
 """
+
 from __future__ import annotations
 
 import argparse
 import asyncio
 import json
-import subprocess
-import sys
 import threading
-from collections import Counter
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +20,7 @@ from fastapi import APIRouter, FastAPI, HTTPException, WebSocket, WebSocketDisco
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from api.agent_control import enrich_tick_runtime
 from api.snapshot_store import get_tick, subscribe, watch_snapshot_file
 from system.paths import data_dir, project_root
 
@@ -167,6 +165,7 @@ def api_replay_summary() -> dict[str, Any]:
 def api_shadow_today() -> dict[str, Any]:
     """Tail-read today's shadow log — avoids reading the full 40MB+ file."""
     from api.intelligence_data import shadow_today as _shadow_today
+
     return _shadow_today()
 
 
@@ -174,6 +173,7 @@ def api_shadow_today() -> dict[str, Any]:
 def api_learning_status() -> dict[str, Any]:
     """Defer to optimised implementation in intelligence_data."""
     from api.intelligence_data import learning_status as _learning_status
+
     return _learning_status()
 
 
@@ -184,9 +184,9 @@ def api_learning_status_legacy() -> dict[str, Any]:
     confirmed_trade_count = 0
     top_setups_by_win_rate: list[dict[str, Any]] = []
     try:
+        from data.learning_store import LearningStore
         from system.config_loader import ConfigLoader
         from system.paths import config_dir
-        from data.learning_store import LearningStore
 
         cfg = ConfigLoader(config_dir() / "config_v25.json").load_config()
         store = LearningStore(str(cfg.learning_db))
@@ -250,10 +250,13 @@ def api_replay_run() -> JSONResponse:
             live = threading.active_count()
             if live > 400:
                 return JSONResponse(
-                    {"ok": False, "error": (
-                        f"thread count high ({live}) — restart agent to free threads, "
-                        "then retry replay"
-                    )},
+                    {
+                        "ok": False,
+                        "error": (
+                            f"thread count high ({live}) — restart agent to free threads, "
+                            "then retry replay"
+                        ),
+                    },
                     status_code=503,
                 )
             threading.Thread(target=_run, name="replay-manual", daemon=True).start()
@@ -286,9 +289,10 @@ class _StreamHub:
             self._unsub = subscribe(self._on_tick_threadsafe)
 
     def _deliver(self, tick: dict[str, Any]) -> None:
+        enriched = enrich_tick_runtime(tick)
         for q in list(self._queues.values()):
             try:
-                q.put_nowait(tick)
+                q.put_nowait(enriched)
             except asyncio.QueueFull:
                 try:
                     q.get_nowait()
@@ -318,7 +322,7 @@ async def ws_stream(ws: WebSocket) -> None:
     await ws.accept()
     outbound: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=64)
     stream_hub.register(ws, outbound)
-    await outbound.put(get_tick())
+    await outbound.put(enrich_tick_runtime(get_tick()))
 
     async def _reader() -> None:
         while True:
@@ -409,7 +413,8 @@ def create_app(*, watch_snapshot: bool = True) -> FastAPI:
     app.include_router(router)
     app.include_router(ws_router)
 
-    from api import routes as _legacy_routes, ws as _legacy_ws
+    from api import routes as _legacy_routes
+    from api import ws as _legacy_ws
 
     app.include_router(_legacy_routes.router)
     app.include_router(_legacy_ws.router)
