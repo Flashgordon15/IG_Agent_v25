@@ -103,6 +103,27 @@ def _on_ac_power() -> tuple[bool, str]:
         return True, f"power check skipped ({type(e).__name__})"
 
 
+def _on_ac_power() -> tuple[bool, str]:
+    """caffeinate -s only prevents sleep on AC; battery + lid close can still kill the agent."""
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            ["pmset", "-g", "batt"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        out = (result.stdout or "").lower()
+        if "battery power" in out or "on battery" in out:
+            return False, "on battery — plug in Mac for overnight (lid close may sleep)"
+        if "ac power" in out or "now drawing from 'ac power'" in out:
+            return True, "on AC power"
+        return True, "power source unknown — assume plugged in"
+    except Exception as e:
+        return True, f"power check skipped ({type(e).__name__})"
+
+
 def _telegram_configured() -> tuple[bool, str]:
     try:
         from system.config import Config
