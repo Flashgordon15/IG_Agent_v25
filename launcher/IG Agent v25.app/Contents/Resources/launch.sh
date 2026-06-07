@@ -140,12 +140,61 @@ if [ -f "${ROOT}/emergency_stop.lock" ]; then
   exit 1
 fi
 
+code_newer_than_agent() {
+  if [ -z "${ROOT}" ]; then
+    return 1
+  fi
+  python3 - "${ROOT}" <<'PY' 2>/dev/null
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
+
+root = Path(sys.argv[1])
+markers = [
+    root / "src" / "main.py",
+    root / "src" / "api" / "routes.py",
+    root / "dashboard" / "dist" / "index.html",
+]
+try:
+    pid = subprocess.check_output(
+        ["lsof", "-t", "-iTCP:8080", "-sTCP:LISTEN"],
+        text=True,
+    ).strip().splitlines()[0]
+except (subprocess.CalledProcessError, IndexError):
+    raise SystemExit(1)
+try:
+    started = subprocess.check_output(["ps", "-p", pid, "-o", "lstart="], text=True).strip()
+    start_epoch = datetime.strptime(started, "%a %b %d %H:%M:%S %Y").timestamp()
+except (subprocess.CalledProcessError, ValueError):
+    raise SystemExit(1)
+latest = max((p.stat().st_mtime for p in markers if p.is_file()), default=0.0)
+raise SystemExit(0 if latest > start_epoch + 1 else 1)
+PY
+}
+
+notify_user() {
+  local msg="$1"
+  if command -v osascript >/dev/null 2>&1; then
+    osascript -e "display notification \"${msg}\" with title \"IG Agent v25\"" 2>/dev/null || true
+  fi
+}
+
 if dashboard_healthy; then
   ensure_watchdog
   log "agent already running — opening dashboard"
+  if code_newer_than_agent; then
+    log "WARN: code on disk is newer than running agent — Stop Agent then relaunch to load changes"
+    notify_user "Code updated since this session started. Use Stop Agent, then launch again."
+  else
+    notify_user "Opening dashboard…"
+  fi
   open_dashboard
   exit 0
 fi
+
+notify_user "Starting IG Agent… dashboard will open when ready."
+log "startup notification sent — awaiting agent health"
 
 if lock_holder_alive; then
   log "instance lock held — waiting for dashboard health"

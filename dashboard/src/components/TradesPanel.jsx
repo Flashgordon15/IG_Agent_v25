@@ -5,7 +5,8 @@ import React from "react";
 // ---------------------------------------------------------------------------
 
 const TEST_SOURCE_TAGS = ["sim", "soak", "proof", "replay", "test"];
-const VALID_RESULTS = new Set(["WIN", "LOSS", "PENDING"]);
+const VALID_RESULTS = new Set(["WIN", "LOSS", "PENDING", "BREAKEVEN"]);
+const LEGACY_FOREX_RE = /converted at 0\.7/i;
 
 function resolvePositions(state) {
   // Top-level positions (aggregated by backend from all market slices)
@@ -83,7 +84,17 @@ function resultBadgeClass(result) {
   const r = String(result ?? "").toUpperCase();
   if (r === "WIN") return "border-success/40 bg-success/10 text-success";
   if (r === "LOSS") return "border-danger/40 bg-danger/10 text-danger";
+  if (r === "BREAKEVEN") return "border-muted/40 bg-muted/10 text-muted";
+  if (r === "PENDING") return "border-warning/40 bg-warning/10 text-warning";
   return "border-warning/40 bg-warning/10 text-warning";
+}
+
+function isLegacyForexMarket(key) {
+  return LEGACY_FOREX_RE.test(String(key ?? ""));
+}
+
+function isPendingTrade(trade) {
+  return String(trade?.result ?? "").toUpperCase() === "PENDING";
 }
 
 function positionKey(pos, idx) { return pos?.deal_id ?? pos?.id ?? `${pos?.epic ?? "row"}-${idx}`; }
@@ -102,11 +113,12 @@ function fmtBreakEven(pos) {
 // ---------------------------------------------------------------------------
 
 function buildPerformanceSummary(closedTrades, positions) {
-  const wins   = closedTrades.filter((t) => String(t.result ?? "").toUpperCase() === "WIN").length;
-  const losses = closedTrades.filter((t) => String(t.result ?? "").toUpperCase() === "LOSS").length;
+  const settled = closedTrades.filter((t) => !isPendingTrade(t));
+  const wins   = settled.filter((t) => String(t.result ?? "").toUpperCase() === "WIN").length;
+  const losses = settled.filter((t) => String(t.result ?? "").toUpperCase() === "LOSS").length;
   const total  = wins + losses;
   const winRate = total > 0 ? Math.round((wins / total) * 100) : null;
-  const totalPnl = closedTrades.reduce((acc, t) => acc + (Number(t.pnl_gbp ?? t.pnl) || 0), 0);
+  const totalPnl = settled.reduce((acc, t) => acc + (Number(t.pnl_gbp ?? t.pnl) || 0), 0);
   const openPnl  = positions.reduce((acc, p) => acc + (Number(p.pnl_gbp ?? p.unrealised_pnl_gbp ?? p.upl) || 0), 0);
   return { wins, losses, total, winRate, totalPnl, openPnl };
 }
@@ -114,12 +126,16 @@ function buildPerformanceSummary(closedTrades, positions) {
 function buildMarketBreakdown(closedTrades) {
   const map = {};
   for (const t of closedTrades) {
+    if (isPendingTrade(t)) continue;
     const key = t.market || t.epic || "Unknown";
+    if (isLegacyForexMarket(key)) continue;
     if (!map[key]) map[key] = { wins: 0, losses: 0, pnl: 0 };
     const result = String(t.result ?? "").toUpperCase();
     if (result === "WIN") map[key].wins++;
     else if (result === "LOSS") map[key].losses++;
-    map[key].pnl += Number(t.pnl_gbp ?? t.pnl) || 0;
+    if (result === "WIN" || result === "LOSS" || result === "BREAKEVEN") {
+      map[key].pnl += Number(t.pnl_gbp ?? t.pnl) || 0;
+    }
   }
   return Object.entries(map)
     .sort(([, a], [, b]) => (b.wins + b.losses) - (a.wins + a.losses))
@@ -224,9 +240,9 @@ export default function TradesPanel({ state }) {
 
       {/* 1. Performance summary stats */}
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 sm:gap-3">
-        <StatBox label="Closed P&L" value={total > 0 ? fmtGbp(totalPnl) : "—"} valueClassName={totalPnl >= 0 ? "text-success" : "text-danger"} />
+        <StatBox label="Closed P&L (all time)" value={total > 0 ? fmtGbp(totalPnl) : "—"} valueClassName={totalPnl >= 0 ? "text-success" : "text-danger"} />
         <StatBox label="Open P&L"   value={positions.length > 0 ? fmtGbp(openPnl) : "—"} valueClassName={openPnl >= 0 ? "text-success" : "text-danger"} />
-        <StatBox label="Win rate"   value={winRate != null ? `${winRate}%` : "—"} valueClassName={winRate != null && winRate >= 50 ? "text-success" : "text-warning"} />
+        <StatBox label="Win rate (all closed)" value={winRate != null ? `${winRate}%` : "—"} valueClassName={winRate != null && winRate >= 50 ? "text-success" : "text-warning"} />
         <StatBox label="Trades"     value={`${wins}W / ${losses}L`} valueClassName="text-foreground" />
       </div>
 

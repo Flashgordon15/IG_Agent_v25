@@ -1250,6 +1250,11 @@ class TradingLoop:
                                 "rules_conf": round(rules_conf, 1),
                                 "confidence": round(conf, 1),
                                 "blended": blended,
+                                "blend_note": (
+                                    f"→ blended {conf:.1f}%"
+                                    if blended
+                                    else "near-50%, rules used"
+                                ),
                                 "setup": sig.setup_key,
                             }
                             self._ml_decision_log.append(entry)
@@ -1913,13 +1918,17 @@ class TradingLoop:
         try:
             if self._store is None or not hasattr(self._store, "recent_closed_trades"):
                 return []
-            from system.closed_trades_display import is_excluded_display_row
+            from system.closed_trades_display import (
+                deduplicate_ig_imports,
+                is_excluded_display_row,
+            )
 
             rows = self._store.recent_closed_trades(limit=100)
+            filtered = [r for r in rows if not is_excluded_display_row(r)]
+            deduped = deduplicate_ig_imports(filtered)
+            deduped.sort(key=lambda r: str(r.get("closed_at") or ""), reverse=True)
             out: list[dict[str, Any]] = []
-            for row in rows:
-                if is_excluded_display_row(row):
-                    continue
+            for row in deduped:
                 pnl_gbp = row.get("ig_pnl_currency")
                 pnl_pts = float(row.get("pnl_points") or 0)
                 if pnl_gbp is not None:

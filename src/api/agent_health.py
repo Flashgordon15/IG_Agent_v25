@@ -298,12 +298,21 @@ def build_health_status() -> dict[str, Any]:
 def stop_watchdog() -> None:
     """SIGTERM the project watchdog so explicit Stop does not auto-restart."""
     try:
+        uid = os.getuid()
+        subprocess.run(
+            ["launchctl", "bootout", f"gui/{uid}/com.igagent.v25.watchdog"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        pass
+    try:
         if _WATCHDOG_PID_FILE.is_file():
             pid_str = _WATCHDOG_PID_FILE.read_text(encoding="utf-8").strip()
             if pid_str.isdigit():
                 subprocess.run(["/bin/kill", "-TERM", pid_str], timeout=3)
             _WATCHDOG_PID_FILE.unlink(missing_ok=True)
-            return
     except Exception:
         pass
     try:
@@ -328,5 +337,19 @@ def stop_watchdog() -> None:
             cmd = (proc.stdout or "").strip()
             if _WATCHDOG_MARKER in cmd:
                 subprocess.run(["/bin/kill", "-TERM", pid_str], timeout=3)
+    except Exception:
+        pass
+    for sig in ("-TERM", "-KILL"):
+        try:
+            subprocess.run(
+                ["/usr/bin/pkill", sig, "-f", _WATCHDOG_MARKER],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+        except Exception:
+            pass
+    try:
+        _WATCHDOG_PID_FILE.unlink(missing_ok=True)
     except Exception:
         pass

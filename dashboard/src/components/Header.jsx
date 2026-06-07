@@ -1,3 +1,4 @@
+import { useCallback, useState } from "react";
 import { fmtPrice } from "../utils/fmtPrice.js";
 
 function isNil(v) {
@@ -13,7 +14,7 @@ function fmtPoints(v) {
   const n = Number(v);
   if (!Number.isFinite(n)) return "—";
   const sign = n > 0 ? "+" : "";
-  return `${sign}${Math.round(n)}`;
+  return `${sign}${n.toFixed(1)}`;
 }
 
 function fmtPnl(v) {
@@ -134,6 +135,25 @@ export default function Header({
   maxPositions,
   onStopAgent,
 }) {
+  const [safeLeaveModal, setSafeLeaveModal] = useState(null);
+
+  const handleSafeToLeave = useCallback(async () => {
+    setSafeLeaveModal({ loading: true });
+    try {
+      const res = await fetch("/api/safe-to-leave", { method: "POST" });
+      const data = await res.json();
+      setSafeLeaveModal({ loading: false, ...data });
+    } catch (e) {
+      setSafeLeaveModal({
+        loading: false,
+        ok: false,
+        message: "Request failed",
+        checks: [],
+        error: String(e?.message || e),
+      });
+    }
+  }, []);
+
   const tradingStopped =
     agentAlive === false
     || tradingLoopsRunning === false
@@ -221,9 +241,9 @@ export default function Header({
 
         {/* Stat pills group */}
         <div className="flex items-center gap-3 rounded-lg border border-border bg-card/60 px-3 py-1.5">
-          <Pill label="Daily P&L" value={dash(dailyPnl, fmtPnl)} valueClassName={pnlColor} />
+          <Pill label="Today P&L" value={dash(dailyPnl, fmtPnl)} valueClassName={pnlColor} />
           <span className="h-4 w-px bg-border" aria-hidden />
-          <Pill label="Win Rate" value={dash(winRate, fmtWinRate)} />
+          <Pill label="Win (last 20)" value={dash(winRate, fmtWinRate)} />
           <span className="h-4 w-px bg-border" aria-hidden />
           <Pill label="Fit" value={isNil(fitness) ? "—" : String(Math.round(Number(fitness)))} valueClassName={fitnessColor(fitness)} />
           <span className="h-4 w-px bg-border" aria-hidden />
@@ -249,12 +269,22 @@ export default function Header({
           ) : null;
         })()}
 
-        {/* Stop Agent button — always visible, right-most */}
-        <div className="ml-auto shrink-0">
+        {/* Safe to leave + Stop Agent — right-most */}
+        <div className="ml-auto flex shrink-0 flex-col items-stretch gap-1">
+          <button
+            type="button"
+            onClick={handleSafeToLeave}
+            disabled={safeLeaveModal?.loading}
+            className="inline-flex items-center justify-center gap-1.5 rounded-md border border-success/50 bg-success/10 px-2.5 py-1 text-[11px] font-semibold text-success transition-colors hover:bg-success/20 active:scale-95 disabled:cursor-wait disabled:opacity-60"
+            title="Run overnight trust checks before walking away"
+          >
+            <span className="h-1.5 w-1.5 rounded-full bg-success" aria-hidden />
+            {safeLeaveModal?.loading ? "Checking…" : "Safe to Leave"}
+          </button>
           <button
             type="button"
             onClick={onStopAgent}
-            className="inline-flex items-center gap-1.5 rounded-md border border-danger/50 bg-danger/10 px-2.5 py-1 text-[11px] font-semibold text-danger transition-colors hover:bg-danger/20 active:scale-95"
+            className="inline-flex items-center justify-center gap-1.5 rounded-md border border-danger/50 bg-danger/10 px-2.5 py-1 text-[11px] font-semibold text-danger transition-colors hover:bg-danger/20 active:scale-95"
             title="Save session state and shut down the agent cleanly"
           >
             <span className="h-1.5 w-1.5 rounded-full bg-danger" aria-hidden />
@@ -262,6 +292,54 @@ export default function Header({
           </button>
         </div>
       </div>
+
+      {safeLeaveModal && !safeLeaveModal.loading && (
+        <div
+          className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/70 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="safe-to-leave-title"
+        >
+          <div className="mx-4 flex max-h-[80vh] w-full max-w-md flex-col overflow-hidden rounded-xl border border-border bg-card p-6 shadow-xl">
+            <h2
+              id="safe-to-leave-title"
+              className={`text-center text-[15px] font-semibold ${safeLeaveModal.ok ? "text-success" : "text-danger"}`}
+            >
+              {safeLeaveModal.ok ? "Safe to Leave" : "Not Safe to Leave"}
+            </h2>
+            {safeLeaveModal.message && (
+              <p className="mt-2 text-center text-[12px] text-muted">{safeLeaveModal.message}</p>
+            )}
+            {safeLeaveModal.error && (
+              <p className="mt-2 text-center text-[12px] text-danger">{safeLeaveModal.error}</p>
+            )}
+            <ul className="mt-4 max-h-[50vh] space-y-1 overflow-y-auto text-left text-[11px]">
+              {(safeLeaveModal.checks || []).map((row) => (
+                <li
+                  key={`${row.status}-${row.label}`}
+                  className={
+                    row.status === "pass"
+                      ? "text-success"
+                      : row.status === "skip"
+                        ? "text-muted"
+                        : "text-danger"
+                  }
+                >
+                  [{row.status.toUpperCase()}] {row.label}
+                  {row.detail ? ` — ${row.detail}` : ""}
+                </li>
+              ))}
+            </ul>
+            <button
+              type="button"
+              onClick={() => setSafeLeaveModal(null)}
+              className="mt-5 rounded-md border border-border px-4 py-2 text-[12px] font-semibold text-muted transition-colors hover:bg-card/80"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
     </header>
   );
 }

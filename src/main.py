@@ -285,6 +285,9 @@ def _pre_startup_cleanup() -> None:
     background session never blocks the next launch.
     """
     _clear_pycache()
+    from system.shutdown_cleanup import clear_manual_stop
+
+    clear_manual_stop()
     _init_telegram_from_config()
     _run_deployment_verification()
 
@@ -405,7 +408,7 @@ def _force_cleanup_port(port: int = 8080) -> None:
     own_pid = os.getpid()
     try:
         result = subprocess.run(
-            ["lsof", "-ti", f":{port}"],
+            ["lsof", "-iTCP", f":{port}", "-sTCP:LISTEN", "-t"],
             capture_output=True,
             text=True,
             timeout=5,

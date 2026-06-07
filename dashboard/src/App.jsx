@@ -202,8 +202,10 @@ export default function App() {
   const [splashVisible, setSplashVisible] = useState(false);
   // startupDone: null = checking, false = show splash, true = skip splash
   const [startupDone, setStartupDone] = useState(null);
-  // "idle" | "confirming" | "stopping" | "stopped"
+  // "idle" | "confirming" | "stopping" | "verifying" | "stopped"
   const [shutdownState, setShutdownState] = useState("idle");
+  const [shutdownVerification, setShutdownVerification] = useState(null);
+  const [agentStillRunning, setAgentStillRunning] = useState(false);
   const [agentAlive, setAgentAlive] = useState(true);
   const healthFailRef = useRef(0);
   const prevStateRef = useRef(null);
@@ -227,11 +229,16 @@ export default function App() {
     setStartupDone(false);
   }, []);
 
-  // Version changelog splash: shown on every page load, AFTER startup
+  // Version changelog splash: once per version (localStorage), AFTER startup
   useEffect(() => {
     if (!startupDone) return;
     fetchSplash().then((data) => {
       if (!data) return;
+      const version = String(data.version ?? "unknown");
+      const seenKey = `ig_agent_splash_seen_${version}`;
+      if (typeof window !== "undefined" && window.localStorage.getItem(seenKey)) {
+        return;
+      }
       setSplashData(data);
       setSplashVisible(true);
     });
@@ -239,8 +246,12 @@ export default function App() {
 
   const handleSplashDismiss = useCallback(() => {
     setSplashVisible(false);
+    const version = splashData?.version;
+    if (version && typeof window !== "undefined") {
+      window.localStorage.setItem(`ig_agent_splash_seen_${version}`, "1");
+    }
     dismissSplash();
-  }, []);
+  }, [splashData]);
 
   useEffect(() => {
     const epics = listMarketEpics(state);
@@ -350,12 +361,16 @@ export default function App() {
     state?.points?.state === "STOP" || state?.trading_paused === true;
 
   useEffect(() => {
+    if (shutdownState !== "idle") {
+      soundRef.current?.stopStopAlarm();
+      return;
+    }
     if (inStopState) {
       soundRef.current?.startStopAlarm();
     } else {
       soundRef.current?.stopStopAlarm();
     }
-  }, [inStopState]);
+  }, [inStopState, shutdownState]);
 
   useEffect(() => {
     return () => soundRef.current?.stopStopAlarm();
@@ -398,19 +413,119 @@ export default function App() {
     setShutdownState("confirming");
   }, []);
 
+  const verifyRowsFromResult = useCallback((result) => {
+    if (!result) return [];
+    if (Array.isArray(result.checks) && result.checks.length > 0) {
+      return result.checks;
+    }
+    return (result.issues || []).map((issue) => ({
+      label: issue,
+      ok: false,
+      detail: "",
+    }));
+  }, []);
+
+  const pollShutdownVerify = useCallback(async (urls, timeoutMs = 45000) => {
+    const pollUrls = (Array.isArray(urls) ? urls : [urls]).filter(Boolean);
+    const deadline = Date.now() + timeoutMs;
+    let lastPayload = null;
+    while (Date.now() < deadline) {
+      for (const url of pollUrls) {
+        try {
+          const res = await fetch(url);
+          if (res.ok) {
+            const data = await res.json();
+            lastPayload = data;
+            if (data.status === "done") {
+              return data;
+            }
+          }
+        } catch {
+          // try next verify source
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
+    if (lastPayload) {
+      return lastPayload;
+    }
+    return {
+      ok: false,
+      checks: [],
+      issues: ["verification timed out — run: PYTHONPATH=src python3 scripts/confirm_stopped.py"],
+    };
+  }, []);
+
   const handleStopConfirm = useCallback(async () => {
     setShutdownState("stopping");
+    setShutdownVerification(null);
+    soundRef.current?.stopStopAlarm();
+    let cleanupChecks = [];
+    const verifyUrls = [
+      "http://127.0.0.1:8081/shutdown-verify",
+      "/api/shutdown/verify-status",
+    ];
+    const controller = new AbortController();
+    const abortTimer = window.setTimeout(() => controller.abort(), 8000);
     try {
-      await fetch("/api/shutdown", { method: "POST" });
+      const res = await fetch("/api/shutdown", {
+        method: "POST",
+        signal: controller.signal,
+      });
+      if (res.ok) {
+        const data = await res.json();
+        cleanupChecks = data.cleanup_checks || [];
+        if (data.verify_poll_url) {
+          verifyUrls[0] = data.verify_poll_url;
+        }
+        if (data.verify_fallback_url) {
+          verifyUrls[1] = data.verify_fallback_url;
+        }
+      }
     } catch {
-      // process will exit — connection error is expected
+      // connection may drop as the process exits — continue to verification
+    } finally {
+      window.clearTimeout(abortTimer);
     }
+    setShutdownState("verifying");
+    const finalVerify = await pollShutdownVerify(verifyUrls);
+    setShutdownVerification({
+      cleanup: cleanupChecks,
+      final: finalVerify,
+      ok: Boolean(finalVerify?.ok),
+    });
     setShutdownState("stopped");
-  }, []);
+  }, [pollShutdownVerify]);
 
   const handleStopCancel = useCallback(() => {
     setShutdownState("idle");
   }, []);
+
+  useEffect(() => {
+    if (shutdownState !== "stopped") {
+      setAgentStillRunning(false);
+      return undefined;
+    }
+    let cancelled = false;
+    const probe = async () => {
+      try {
+        const res = await fetch("/api/health", { signal: AbortSignal.timeout(2000) });
+        if (!cancelled && res.ok) {
+          setAgentStillRunning(true);
+        }
+      } catch {
+        if (!cancelled) {
+          setAgentStillRunning(false);
+        }
+      }
+    };
+    probe();
+    const timer = window.setInterval(probe, 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [shutdownState]);
 
   const headerProps = {
     state: viewState,
@@ -440,25 +555,92 @@ export default function App() {
     onStopAgent: handleStopAgent,
   };
 
-  // Agent stopped screen
+  // Agent stopped screen (with post-shutdown verification)
   if (shutdownState === "stopped") {
+    const agentDown = !agentStillRunning;
+    const fullyVerified = shutdownVerification?.ok === true && agentDown;
+    const agentStoppedVerify = agentDown
+      && (shutdownVerification?.final?.checks || []).some(
+        (row) => row.label === "No main.py process" && row.ok,
+      );
+    const checkRows = [
+      ...(shutdownVerification?.cleanup || []),
+      ...verifyRowsFromResult(shutdownVerification?.final),
+    ];
     return (
       <div style={{
         position: "fixed", inset: 0, background: "#0b0f19",
         display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
-        gap: "16px",
+        gap: "12px", padding: "24px",
       }}>
         <div style={{
           width: "40px", height: "40px", borderRadius: "50%",
-          background: "rgba(239,68,68,0.15)", border: "1px solid rgba(239,68,68,0.4)",
+          background: fullyVerified ? "rgba(34,197,94,0.15)" : "rgba(239,68,68,0.15)",
+          border: fullyVerified ? "1px solid rgba(34,197,94,0.4)" : "1px solid rgba(239,68,68,0.4)",
           display: "flex", alignItems: "center", justifyContent: "center",
         }}>
-          <span style={{ width: "12px", height: "12px", borderRadius: "50%", background: "#ef4444", display: "block" }} />
+          <span style={{
+            width: "12px", height: "12px", borderRadius: "50%",
+            background: fullyVerified ? "#22c55e" : "#ef4444", display: "block",
+          }} />
         </div>
-        <p style={{ color: "#f8fafc", fontSize: "16px", fontWeight: 600, margin: 0 }}>Agent stopped</p>
-        <p style={{ color: "#64748b", fontSize: "12px", margin: 0, textAlign: "center", maxWidth: "280px" }}>
-          Session saved. You can close this tab or click the desktop icon to restart.
+        <p style={{ color: "#f8fafc", fontSize: "16px", fontWeight: 600, margin: 0 }}>
+          {agentStillRunning
+            ? "Agent still running"
+            : fullyVerified
+              ? "Fully stopped — verified"
+              : agentStoppedVerify
+                ? "Agent stopped — safe to close tab"
+                : "Stop requested"}
         </p>
+        <p style={{ color: "#64748b", fontSize: "12px", margin: 0, textAlign: "center", maxWidth: "360px" }}>
+          {agentStillRunning
+            ? "This tab shows a stale stop screen — the agent is still alive on port 8080. Click Stop Agent again or close this tab and use the desktop icon to stop properly."
+            : fullyVerified
+              ? "All shutdown checks passed. Safe to close this tab or restart from the desktop icon."
+              : agentStoppedVerify
+                ? "Trading agent is down. You may close this browser tab. If any watchdog check failed, it will not restart the agent while manual stop is active."
+                : "Verification did not fully pass. See checks below or run confirm_stopped.py in Terminal."}
+        </p>
+        {checkRows.length > 0 && (
+          <ul style={{
+            listStyle: "none", margin: "8px 0 0", padding: 0, width: "min(360px, 92vw)",
+            maxHeight: "40vh", overflowY: "auto", textAlign: "left", fontSize: "11px",
+          }}>
+            {checkRows.map((row, idx) => (
+              <li
+                key={`${row.label}-${row.detail}-${idx}`}
+                style={{ color: row.ok ? "#22c55e" : "#ef4444", marginBottom: "4px" }}
+              >
+                [{row.ok ? "PASS" : "FAIL"}] {row.label}
+                {row.detail ? ` — ${row.detail}` : ""}
+              </li>
+            ))}
+          </ul>
+        )}
+        {agentStillRunning && (
+          <button
+            type="button"
+            onClick={() => {
+              setShutdownState("idle");
+              setShutdownVerification(null);
+              setAgentStillRunning(false);
+            }}
+            style={{
+              marginTop: "8px",
+              padding: "8px 16px",
+              borderRadius: "6px",
+              border: "1px solid #374151",
+              background: "transparent",
+              color: "#94a3b8",
+              fontSize: "12px",
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            Return to dashboard — stop again
+          </button>
+        )}
       </div>
     );
   }
@@ -485,7 +667,7 @@ export default function App() {
       <Header {...headerProps} />
 
       {/* Stop confirmation modal */}
-      {(shutdownState === "confirming" || shutdownState === "stopping") && (
+      {(shutdownState === "confirming" || shutdownState === "stopping" || shutdownState === "verifying") && (
         <div style={{
           position: "fixed", inset: 0, zIndex: 9999,
           background: "rgba(0,0,0,0.7)", backdropFilter: "blur(4px)",
@@ -496,13 +678,15 @@ export default function App() {
             borderRadius: "12px", padding: "28px 32px", maxWidth: "360px", width: "90%",
             textAlign: "center",
           }}>
-            {shutdownState === "stopping" ? (
+            {shutdownState === "stopping" || shutdownState === "verifying" ? (
               <>
                 <p style={{ color: "#f8fafc", fontSize: "15px", fontWeight: 600, marginBottom: "8px" }}>
-                  Shutting down…
+                  {shutdownState === "verifying" ? "Verifying shutdown…" : "Shutting down…"}
                 </p>
                 <p style={{ color: "#64748b", fontSize: "12px" }}>
-                  Saving session state and stopping trading loops.
+                  {shutdownState === "verifying"
+                    ? "Confirming no agent, watchdog, lock, or port 8080 remains."
+                    : "Saving session state and stopping trading loops."}
                 </p>
               </>
             ) : (

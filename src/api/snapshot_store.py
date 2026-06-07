@@ -87,7 +87,7 @@ def subscribe(callback: Callable[[dict[str, Any]], None]) -> Callable[[], None]:
 
 def _notify_locked(tick: dict[str, Any]) -> None:
     """Push a JSON-safe copy to WebSocket subscribers (may run on engine thread)."""
-    payload = json.loads(json.dumps(tick, default=str))
+    payload = json.loads(json.dumps(_tick_for_readers(tick), default=str))
     for cb in list(_subscribers):
         try:
             cb(payload)
@@ -321,7 +321,7 @@ def _tick_for_readers(tick: dict[str, Any]) -> dict[str, Any]:
         out.setdefault("last_retrain_time", "—")
 
     # Agent uptime derived from lock-file mtime
-    if "uptime" not in out:
+    if not out.get("uptime"):
         global _cached_uptime
         try:
             import time as _time
@@ -342,7 +342,7 @@ def _tick_for_readers(tick: dict[str, Any]) -> dict[str, Any]:
                 out["uptime"] = _cached_uptime
 
     # Position sync status from diagnostics snapshot
-    if "position_sync_status" not in out:
+    if not out.get("position_sync_status"):
         global _cached_position_sync_status
         try:
             from system.demo_execution_trace import get_demo_diagnostics_snapshot

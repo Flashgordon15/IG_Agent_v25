@@ -37,14 +37,16 @@ function Card({ title, children, className = "" }) {
 }
 
 function fmtTs(ts) {
-  if (!ts) return null;
+  if (!ts || ts === "—" || ts === "Never") return null;
   try {
-    return new Date(ts).toLocaleString("en-GB", {
+    const d = new Date(ts);
+    if (Number.isNaN(d.getTime())) return null;
+    return d.toLocaleString("en-GB", {
       dateStyle: "short",
       timeStyle: "medium",
     });
   } catch {
-    return String(ts);
+    return null;
   }
 }
 
@@ -67,11 +69,13 @@ function resolveRestUsed(state) {
   return Number.isFinite(n) ? Math.max(0, Math.round(n)) : 0;
 }
 
+const REST_BUDGET_CAP = 3;
+
 function restBudgetMeta(used) {
-  if (used <= 3) {
+  if (used < REST_BUDGET_CAP) {
     return { bar: "bg-success", text: "text-success" };
   }
-  if (used <= 5) {
+  if (used === REST_BUDGET_CAP) {
     return { bar: "bg-warning", text: "text-warning" };
   }
   return { bar: "bg-danger", text: "text-danger" };
@@ -267,7 +271,7 @@ export default function SystemPanel({ state, wsConnected, reconnecting }) {
               <div className="mb-1 flex items-center justify-between gap-2 text-[12px] sm:text-[13px]">
                 <span className="text-muted">REST Budget</span>
                 <span className={`font-mono tabular-nums ${restMeta.text}`}>
-                  {restUsed} / 6
+                  {restUsed} / {REST_BUDGET_CAP}
                 </span>
               </div>
               <div className="h-2 overflow-hidden rounded bg-border">
@@ -275,7 +279,7 @@ export default function SystemPanel({ state, wsConnected, reconnecting }) {
                   className={["h-full transition-all duration-300", restMeta.bar].join(
                     " ",
                   )}
-                  style={{ width: `${Math.min(100, (restUsed / 6) * 100)}%` }}
+                  style={{ width: `${Math.min(100, (restUsed / REST_BUDGET_CAP) * 100)}%` }}
                 />
               </div>
             </div>
@@ -370,7 +374,7 @@ export default function SystemPanel({ state, wsConnected, reconnecting }) {
           <StatusRow label="Last Gate">
             <span className="tabular-nums text-muted">{state?.last_gate_eval_ago ?? state?.gate_eval_ago ?? "—"}</span>
           </StatusRow>
-          <StatusRow label="Win Rate">
+          <StatusRow label="Win rate (last 20)">
             <span className="tabular-nums">{state?.win_rate_20 != null ? `${Math.round(state.win_rate_20)}%` : "—"}</span>
           </StatusRow>
           {state?.drawdown?.drawdown_pct != null && (

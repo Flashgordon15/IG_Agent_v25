@@ -485,19 +485,45 @@ def test_shutdown_cleanup_module_covers_full_teardown() -> None:
 
 
 def test_api_shutdown_delegates_to_shutdown_cleanup() -> None:
-    """POST /api/shutdown must run centralized cleanup before SIGTERM."""
+    """POST /api/shutdown must run centralized cleanup before process exit."""
     routes = (_SRC / "api" / "routes.py").read_text(encoding="utf-8")
+    assert "from fastapi import APIRouter, BackgroundTasks, HTTPException" in routes
     assert "perform_shutdown_cleanup" in routes
     assert "shutdown: initiated via dashboard Stop button" in routes
+    assert "verify_fallback_url" in routes
 
 
 def test_confirm_stopped_script_exists() -> None:
     """scripts/confirm_stopped.py verifies Stop Agent left no rogue processes."""
     script = _ROOT / "scripts" / "confirm_stopped.py"
     assert script.is_file(), "confirm_stopped.py missing"
-    source = script.read_text(encoding="utf-8")
-    assert "CONFIRM STOPPED" in source
-    assert "agent_fully_stopped" in source
+
+
+def test_shutdown_verify_server_and_dashboard_integration() -> None:
+    """Dashboard Stop Agent must run post-exit verification like confirm_stopped."""
+    verify = _ROOT / "scripts" / "shutdown_verify_server.py"
+    cleanup = _SRC / "system" / "shutdown_cleanup.py"
+    routes = _SRC / "api" / "routes.py"
+    app = _ROOT / "dashboard" / "src" / "App.jsx"
+    assert verify.is_file()
+    cleanup_src = cleanup.read_text(encoding="utf-8")
+    assert "spawn_post_shutdown_verifier" in cleanup_src
+    assert "mark_manual_stop" in cleanup_src
+    assert "manual_stop_active" in (_ROOT / "scripts" / "watchdog.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "post_cleanup_shutdown_checks" in cleanup.read_text(encoding="utf-8")
+    routes_src = routes.read_text(encoding="utf-8")
+    assert "verify_poll_url" in routes_src
+    assert "skip_port_cleanup=True" in routes_src
+    assert "BackgroundTasks" in routes_src
+    main_src = _MAIN_PY.read_text(encoding="utf-8")
+    assert "-sTCP:LISTEN" in main_src
+    app_src = app.read_text(encoding="utf-8")
+    assert "pollShutdownVerify" in app_src
+    assert "Fully stopped — verified" in app_src
+    confirm = (_ROOT / "scripts" / "confirm_stopped.py").read_text(encoding="utf-8")
+    assert "agent_fully_stopped" in confirm
 
 
 def test_confirm_started_script_exists() -> None:
@@ -779,6 +805,26 @@ def test_safe_to_leave_requires_telegram() -> None:
     assert "Telegram alerts configured" in source
     assert '"WARN"' not in source
     assert "--require-telegram" not in source
+
+
+def test_dashboard_safe_to_leave_button_and_api() -> None:
+    header = (_ROOT / "dashboard" / "src" / "components" / "Header.jsx").read_text(
+        encoding="utf-8"
+    )
+    routes = (_ROOT / "src" / "api" / "routes.py").read_text(encoding="utf-8")
+    data = (_ROOT / "src" / "api" / "dashboard_data.py").read_text(encoding="utf-8")
+    assert "Safe to Leave" in header
+    assert "/api/safe-to-leave" in header
+    assert "api_safe_to_leave" in routes
+    assert "def run_safe_to_leave" in data
+
+
+def test_safe_to_leave_skips_tick_freshness_when_markets_closed() -> None:
+    """Hub tick freshness (7.4) must not fail safe_to_leave when no market is open."""
+    source = (_ROOT / "scripts" / "safe_to_leave.py").read_text(encoding="utf-8")
+    assert '"7.4"' in source
+    assert "markets_open_count" in source
+    assert "no markets open" in source
 
 
 def test_agent_bootstrap_skips_deploy_self_test_on_watchdog_restart() -> None:

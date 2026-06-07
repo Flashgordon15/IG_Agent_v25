@@ -15,6 +15,61 @@ from system.engine_log import log_engine
 from system.paths import data_dir
 
 _cleanup_done = False
+_MANUAL_STOP_FILE = data_dir() / "state" / "manual_stop.json"
+_MANUAL_STOP_MAX_AGE_SEC = 600.0
+
+
+def reset_shutdown_verify_state() -> None:
+    """Clear stale verify snapshot so dashboard polling cannot read a prior run."""
+    path = data_dir() / "state" / "last_shutdown_verify.json"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "ok": False,
+                    "status": "pending",
+                    "checks": [],
+                    "issues": [],
+                    "ts": time.time(),
+                }
+            ),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def mark_manual_stop(*, source: str = "dashboard") -> None:
+    """Signal watchdog/launchd not to auto-restart after deliberate Stop Agent."""
+    try:
+        reset_shutdown_verify_state()
+        _MANUAL_STOP_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _MANUAL_STOP_FILE.write_text(
+            json.dumps({"ts": time.time(), "source": source}),
+            encoding="utf-8",
+        )
+        log_engine(f"manual_stop: flagged (source={source})")
+    except Exception as e:
+        log_engine(f"manual_stop: flag failed: {type(e).__name__}: {e}")
+
+
+def clear_manual_stop() -> None:
+    try:
+        _MANUAL_STOP_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def manual_stop_active(*, max_age_sec: float = _MANUAL_STOP_MAX_AGE_SEC) -> bool:
+    if not _MANUAL_STOP_FILE.is_file():
+        return False
+    try:
+        raw = json.loads(_MANUAL_STOP_FILE.read_text(encoding="utf-8"))
+        age = time.time() - float(raw.get("ts") or 0)
+        return age >= 0 and age < max_age_sec
+    except Exception:
+        return True
 
 
 def reset_shutdown_cleanup_for_tests() -> None:
@@ -89,7 +144,9 @@ def kill_other_agent_processes(
     return killed
 
 
-def perform_shutdown_cleanup(*, source: str = "shutdown") -> None:
+def perform_shutdown_cleanup(
+    *, source: str = "shutdown", skip_port_cleanup: bool = False
+) -> None:
     """Full teardown so Stop Agent leaves no rogue sessions or duplicate processes."""
     global _cleanup_done
     if _cleanup_done:
@@ -171,12 +228,13 @@ def perform_shutdown_cleanup(*, source: str = "shutdown") -> None:
     except Exception as e:
         log_engine(f"shutdown cleanup: lock release error (continuing): {e}")
 
-    try:
-        import main as _main
+    if not skip_port_cleanup:
+        try:
+            import main as _main
 
-        _main._force_cleanup_port()
-    except Exception as e:
-        log_engine(f"shutdown cleanup: port cleanup error (continuing): {e}")
+            _main._force_cleanup_port()
+        except Exception as e:
+            log_engine(f"shutdown cleanup: port cleanup error (continuing): {e}")
 
     log_engine("shutdown cleanup: complete")
 
@@ -304,6 +362,130 @@ def agent_fully_started(
         issues.append("stream_ready log check failed")
 
     return (len(issues) == 0, issues)
+
+
+def stopped_verification_checks(issues: list[str]) -> list[dict[str, object]]:
+    """Structured checklist matching scripts/confirm_stopped.py."""
+    mapping = [
+        ("No main.py process", "main.py still running"),
+        ("No watchdog process", "watchdog.sh still running"),
+        ("Port 8080 free", "port 8080 still bound"),
+        ("No instance lock", "instance lock file present"),
+        ("No watchdog.pid", "watchdog.pid present"),
+    ]
+    return [
+        {
+            "label": label,
+            "ok": issue_key not in issues,
+            "detail": issue_key if issue_key in issues else "",
+        }
+        for label, issue_key in mapping
+    ]
+
+
+def post_cleanup_shutdown_checks(*, exclude_pid: int) -> list[dict[str, object]]:
+    """Immediate checks after perform_shutdown_cleanup (before process exit)."""
+    checks: list[dict[str, object]] = []
+    pids = _list_main_py_pids()
+    only_self = not pids or pids == [exclude_pid]
+    checks.append(
+        {
+            "label": "Cleanup completed",
+            "ok": True,
+            "detail": "streams, IG session, DB checkpoint",
+        }
+    )
+    checks.append(
+        {
+            "label": "Trading process exiting",
+            "ok": only_self,
+            "detail": (
+                f"pid {exclude_pid} shutting down"
+                if exclude_pid in pids
+                else "no unexpected main.py"
+            ),
+        }
+    )
+    try:
+        from api.agent_health import _watchdog_active
+
+        watchdog_active = _watchdog_active()
+    except Exception:
+        watchdog_active = True
+    checks.append(
+        {
+            "label": "Watchdog stopped",
+            "ok": not watchdog_active,
+            "detail": "" if not watchdog_active else "watchdog still active",
+        }
+    )
+    port_bound = _port_bound()
+    checks.append(
+        {
+            "label": "Port 8080 released",
+            "ok": not port_bound,
+            "detail": "" if not port_bound else "port still bound",
+        }
+    )
+    lock = data_dir() / ".ig_agent_v25.lock"
+    checks.append(
+        {
+            "label": "Instance lock released",
+            "ok": not lock.is_file(),
+            "detail": "" if not lock.is_file() else "lock file present",
+        }
+    )
+    wd_pid = data_dir() / "watchdog.pid"
+    checks.append(
+        {
+            "label": "Watchdog PID cleared",
+            "ok": not wd_pid.is_file(),
+            "detail": "" if not wd_pid.is_file() else "watchdog.pid present",
+        }
+    )
+    return checks
+
+
+def spawn_post_shutdown_verifier(parent_pid: int) -> None:
+    """Detached process waits for agent exit then serves verify JSON on :8081."""
+    import sys
+
+    from system.paths import project_root
+
+    root = project_root()
+    script = root / "scripts" / "shutdown_verify_server.py"
+    if not script.is_file():
+        log_engine("shutdown verify: script missing — skipped")
+        return
+    try:
+        log_path = data_dir() / "logs" / "shutdown_verify_spawn.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as spawn_log:
+            spawn_log.write(
+                f"\n{time.strftime('%Y-%m-%d %H:%M:%S')} | spawn parent={parent_pid}\n"
+            )
+        err_log = data_dir() / "logs" / "shutdown_verify_stderr.log"
+        err_fh = err_log.open("a", encoding="utf-8")
+        subprocess.Popen(
+            [
+                sys.executable,
+                str(script),
+                "--parent-pid",
+                str(parent_pid),
+            ],
+            cwd=str(root),
+            env={
+                **dict(os.environ),
+                "PYTHONPATH": str(root / "src"),
+            },
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=err_fh,
+        )
+        log_engine(f"shutdown verify: spawned post-exit checker (parent={parent_pid})")
+    except Exception as e:
+        log_engine(f"shutdown verify: spawn failed: {type(e).__name__}: {e}")
 
 
 def agent_fully_stopped() -> tuple[bool, list[str]]:
