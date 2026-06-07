@@ -1,5 +1,35 @@
 # IG Agent v25 — Change Log
 
+## 2026-06-08 — v26 Phase 1: S1 shadow, feature store, expectancy
+
+- **`v26/strategies/s1_rules_v25.py`** — S1 parity from feeder `signal_eval`
+- **`v26/shadow/runner.py`** — writes `data_lake/shadow_v26/`
+- **`v26/research/feature_store.py`** + **`scripts/build_feature_store.py`**
+- **`v26/expectancy/engine.py`** + snapshot `data_lake/state/expectancy_snapshot.json`
+- **`scripts/shadow_compare.py`** — v25 vs v26 daily compare
+- **`v26/main.py`** — `--tail`, `--process-day`, `--expectancy`
+- **`tests/test_v26_phase1.py`**
+
+---
+
+## 2026-06-08 — v26 Phase 0: feeder event bus + shadow reader
+
+- **`src/feeder/event_bus.py`** — append-only JSONL to `data_lake/events/YYYY-MM-DD.jsonl`
+- **Hooks:** `trading_loop.py` (gates, signal_eval, bar_close, order_intent, quote/account samples), `learning_store.close_trade`, `trade_manager.open_trade`
+- **`v26/main.py --mode shadow`** — ingest summary from feeder lake
+- **`tests/test_feeder_event_bus.py`**, **`tests/test_v26_lake_reader.py`**
+- Disable feeder: `IG_AGENT_FEEDER=0`
+
+---
+
+## 2026-06-07 — v26 profitability specification (not yet implemented)
+
+- **`IG_Agent_v26_PROFITABILITY_SPEC.md`** — North-star: £10k capital, multiple trades/day, milestone path M1 (£100) → M4 (£1,000 stretch)
+- **`docs/V26_IMPLEMENTATION_PROCESS.md`** — Phased operator/dev checklist (v26.0–v26.5)
+- **`config/config_v26.json`** — Skeleton overlay (capital_envelope, expectancy, ml_veto, milestones); loader not wired
+
+---
+
 Every code change made by the AI agent is recorded here, oldest first.
 Each entry states the file changed, what was wrong, and what was fixed.
 The corresponding regression test lives in `tests/test_deployed_fixes.py`.

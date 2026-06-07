@@ -1,0 +1,84 @@
+{
+  "$schema": "./config_schema.json",
+  "$extends": "config_v25.json",
+  "version": "26.0.0",
+  "_profile": "50k_demo_certification",
+  "_note": "v26 strategic framework — merge with config_v25.json when loader wired",
+  "operating_mode": "DEMO",
+  "capital_envelope": {
+    "account_balance_gbp": 50000,
+    "max_margin_pct": 0.25,
+    "max_concurrent_risk_gbp": 6000,
+    "max_daily_risk_deployed_gbp": 15000,
+    "max_daily_loss_gbp": 2000,
+    "max_daily_profit_target_gbp": 1000,
+    "profit_cap_halt_new_entries": true,
+    "min_available_gbp": 5000,
+    "reserve_pct": 0.15
+  },
+  "portfolio": {
+    "enabled": false,
+    "max_concurrent_positions": 15,
+    "one_position_per_epic": true,
+    "correlation_penalty_enabled": true,
+    "strategy_weights": {
+      "S1_rules_v25": 0.35,
+      "S2_momentum": 0.25,
+      "S3_session_fx": 0.25,
+      "S4_ml_meta": 0.15
+    }
+  },
+  "universe": {
+    "mode": "dynamic",
+    "core_epics": [
+      "IX.D.NIKKEI.IFM.IP",
+      "IX.D.NASDAQ.IFM.IP",
+      "IX.D.DOW.IFM.IP",
+      "CS.D.CFPGOLD.CFP.IP"
+    ],
+    "max_active_epics": 20,
+    "probe_epic_cap": 4
+  },
+  "expectancy": {
+    "min_trades_per_setup": 20,
+    "ban_wr_below": 0.45,
+    "probe_until_trades": 30,
+    "active_wr_min": 0.52,
+    "rolling_days": 14
+  },
+  "ml_veto": {
+    "enabled": false,
+    "mode": "veto",
+    "min_labelled_rows": 500,
+    "min_probability": 0.58,
+    "setup_specific_thresholds": true
+  },
+  "regime": {
+    "enabled": false,
+    "calendar_enabled": true,
+    "calendar_file": "config/calendar.json"
+  },
+  "certification": {
+    "target": "L5",
+    "daily_target_gbp": 1000,
+    "replay_min_pct_days_at_target": 0.30,
+    "forward_min_days_at_target": 10,
+    "forward_window_days": 14,
+    "max_friction_pct_of_wins": 0.15
+  },
+  "milestones": {
+    "current": "M0",
+    "targets": {
+      "M1": 200,
+      "M2": 500,
+      "M3": 750,
+      "M4": 1000
+    }
+  },
+  "research": {
+    "feature_store_path": "src/data/feature_store",
+    "walk_forward_months": 6,
+    "replay_days": 90,
+    "friction_haircut_pct": 0.10
+  }
+}

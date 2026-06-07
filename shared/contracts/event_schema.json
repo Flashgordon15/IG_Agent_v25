@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "IG Agent v25→v26 feeder event",
+  "description": "Append-only events from v25 to data_lake for v26 learning",
+  "type": "object",
+  "required": ["contract_version", "event_type", "ts", "epic"],
+  "properties": {
+    "contract_version": { "type": "string", "const": "1.0" },
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "bar_close",
+        "quote_tick",
+        "signal_eval",
+        "gate_result",
+        "order_intent",
+        "fill_open",
+        "fill_close",
+        "account_snapshot",
+        "regime_snapshot"
+      ]
+    },
+    "ts": { "type": "string", "format": "date-time" },
+    "epic": { "type": "string" },
+    "market": { "type": "string" },
+    "session": { "type": "string" },
+    "payload": { "type": "object" }
+  },
+  "examples": [
+    {
+      "contract_version": "1.0",
+      "event_type": "signal_eval",
+      "ts": "2026-06-07T14:35:00Z",
+      "epic": "IX.D.NASDAQ.IFM.IP",
+      "market": "US Tech 100",
+      "session": "london_us_overlap",
+      "payload": {
+        "direction": "BUY",
+        "raw_score": 82.5,
+        "adjusted_score": 84.0,
+        "setup_key": "BUY|bull|london_us_overlap|atr30-60|rsimid|volnormal",
+        "would_fire": true,
+        "gates_passed": ["session_open", "environment_fitness"]
+      }
+    },
+    {
+      "contract_version": "1.0",
+      "event_type": "fill_close",
+      "ts": "2026-06-07T16:10:00Z",
+      "epic": "IX.D.NASDAQ.IFM.IP",
+      "market": "US Tech 100",
+      "payload": {
+        "deal_id": "DIAAA...",
+        "pnl_gbp": 127.5,
+        "pnl_points": 18.2,
+        "result": "WIN",
+        "exit_reason": "trail",
+        "setup_key": "BUY|bull|london_us_overlap|atr30-60|rsimid|volnormal",
+        "confidence": 86.0,
+        "risk_gbp": 150.0
+      }
+    }
+  ]
+}

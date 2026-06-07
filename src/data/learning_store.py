@@ -305,6 +305,52 @@ class LearningStore:
         self.conn.commit()
         self._rebuild_stats_for(row["setup_key"])
         try:
+            from feeder.event_bus import emit_fill_close
+
+            row_keys = row.keys() if hasattr(row, "keys") else []
+            notes_l = str(notes or "").lower()
+            if "trail" in notes_l:
+                exit_reason = "trail"
+            elif "partial" in notes_l:
+                exit_reason = "partial"
+            elif "session" in notes_l or "flatten" in notes_l:
+                exit_reason = "session_flatten"
+            elif "max age" in notes_l:
+                exit_reason = "max_age"
+            elif "friday" in notes_l:
+                exit_reason = "friday_close"
+            elif "stop" in notes_l or result == "LOSS":
+                exit_reason = "stop"
+            elif result == "BREAKEVEN":
+                exit_reason = "breakeven"
+            else:
+                exit_reason = "close"
+            pnl_gbp = (
+                float(ig_pnl_currency)
+                if ig_pnl_currency is not None
+                else float(pnl_points or 0.0)
+            )
+            emit_fill_close(
+                epic=str(row["epic"] if "epic" in row_keys else ""),
+                market=str(row["market"] if "market" in row_keys else ""),
+                trade_id=int(trade_id),
+                deal_id=str(row["ig_deal_id"] if "ig_deal_id" in row_keys else ""),
+                pnl_gbp=pnl_gbp,
+                pnl_points=float(pnl_points or 0.0),
+                result=str(result or ""),
+                exit_reason=exit_reason,
+                setup_key=str(row["setup_key"] if "setup_key" in row_keys else ""),
+                confidence=float(
+                    row["adjusted_confidence"]
+                    if "adjusted_confidence" in row_keys
+                    else row["confidence"]
+                    if "confidence" in row_keys
+                    else 0
+                ),
+            )
+        except Exception:
+            pass
+        try:
             row_keys = row.keys() if hasattr(row, "keys") else []
             row_epic = str(row["epic"]) if "epic" in row_keys else ""
             row_dry_run = (

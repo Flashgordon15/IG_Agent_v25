@@ -210,6 +210,7 @@ class TradingLoop:
         # trading-loop tick is never blocked by a REST call to /markets/{epic}.
         self._market_constraints_cache: dict[str, Any] = {}
         self._market_constraints_fetched: bool = False
+        self._feeder_last_bar_key: str | None = None
 
     @property
     def config(self) -> Config:
@@ -398,6 +399,7 @@ class TradingLoop:
 
         gates = self._evaluate_gates(quote)
         self._log_gate_check(quote, gates)
+        self._emit_feeder_telemetry(quote, gates)
         try:
             from system.gate_activity import record_gate_evaluation
 
@@ -447,6 +449,7 @@ class TradingLoop:
                         confidence = 0.0
                     break
             trade_size = self._trade_size_from_gates(gates, confidence)
+            self._emit_feeder_order_intent(gates, confidence, trade_size)
             log_engine(
                 f"ALL GATES PASSED — attempting trade "
                 f"market={self._market} epic={self._epic} "
@@ -508,6 +511,159 @@ class TradingLoop:
             return False, detail
         except Exception:
             return True, ""
+
+    def _feeder_session_name(self) -> str:
+        try:
+            from signals.indicators import session_name
+
+            return str(session_name())
+        except Exception:
+            return ""
+
+    def _emit_feeder_telemetry(self, quote: Quote, gates: list[GateResult]) -> None:
+        """v25→v26 feeder: gates, signal_eval, bar_close (non-blocking)."""
+        try:
+            from feeder.event_bus import (
+                emit,
+                emit_bar_close,
+                emit_gate_result,
+                emit_signal_eval,
+            )
+
+            session = self._feeder_session_name()
+            epic = self._epic
+            market = self._market
+            gates_passed = [g.name for g in gates if g.passed]
+
+            for g in gates:
+                val = g.value if isinstance(g.value, dict) else None
+                emit_gate_result(
+                    epic=epic,
+                    market=market,
+                    session=session,
+                    gate_name=g.name,
+                    passed=g.passed,
+                    detail=(g.detail or "")[:500],
+                    value=val,
+                )
+
+            sig_gate = next((g for g in gates if g.name == "signal_confidence"), None)
+            if sig_gate and isinstance(sig_gate.value, dict):
+                raw_sig = sig_gate.value.get("signal")
+                snap: dict[str, Any] = {}
+                direction = "WAIT"
+                raw_score = 0.0
+                adjusted = 0.0
+                setup_key = ""
+                reason = ""
+                if isinstance(raw_sig, SignalResult):
+                    direction = str(raw_sig.signal or "WAIT")
+                    raw_score = float(raw_sig.raw_confidence or 0)
+                    adjusted = float(raw_sig.adjusted_confidence or 0)
+                    setup_key = str(raw_sig.setup_key or "")
+                    reason = str(raw_sig.notes or "")
+                    snap = dict(raw_sig.snapshot or {})
+                ml_prob = sig_gate.value.get("ml_probability")
+                ml_f = float(ml_prob) if ml_prob is not None else None
+                emit_signal_eval(
+                    epic=epic,
+                    market=market,
+                    session=session,
+                    direction=direction,
+                    raw_score=raw_score,
+                    adjusted_score=float(sig_gate.value.get("confidence") or adjusted),
+                    setup_key=setup_key or str(sig_gate.value.get("setup") or ""),
+                    would_fire=bool(sig_gate.passed),
+                    reason=reason,
+                    gates_passed=gates_passed,
+                    ml_probability=ml_f,
+                )
+                last = snap.get("last") if isinstance(snap.get("last"), dict) else {}
+                bar_time = str(last.get("time") or snap.get("bar_time") or "")
+                if bar_time and last:
+                    bar_key = f"{epic}:{bar_time}"
+                    if bar_key != self._feeder_last_bar_key:
+                        self._feeder_last_bar_key = bar_key
+                        emit_bar_close(
+                            epic=epic,
+                            market=market,
+                            session=session,
+                            bar_time=bar_time,
+                            open_=float(last.get("open", last.get("price", 0)) or 0),
+                            high=float(last.get("high", last.get("price", 0)) or 0),
+                            low=float(last.get("low", last.get("price", 0)) or 0),
+                            close=float(last.get("close", last.get("price", 0)) or 0),
+                            volume=float(last.get("volume", 0) or 0),
+                        )
+
+            if self._tick_count % 60 == 0:
+                spread = max(0.0, float(quote.offer) - float(quote.bid))
+                emit(
+                    "quote_tick",
+                    epic=epic,
+                    market=market,
+                    session=session,
+                    payload={
+                        "bid": float(quote.bid),
+                        "offer": float(quote.offer),
+                        "spread_pts": spread,
+                    },
+                )
+                try:
+                    daily_pnl = float(self._daily_pnl_signed_gbp())
+                except Exception:
+                    daily_pnl = 0.0
+                emit(
+                    "account_snapshot",
+                    epic=epic,
+                    market=market,
+                    session=session,
+                    payload={
+                        "points_state": self._points.get_state(),
+                        "daily_pnl_gbp": daily_pnl,
+                        "open_epic": int(
+                            self._execution_loop.execution_engine.trade_tracker.count_open_for_epic(
+                                epic
+                            )
+                        ),
+                    },
+                )
+        except Exception:
+            pass
+
+    def _emit_feeder_order_intent(
+        self,
+        gates: list[GateResult],
+        confidence: float,
+        trade_size: float,
+    ) -> None:
+        try:
+            from feeder.event_bus import emit_order_intent
+
+            direction = "WAIT"
+            setup_key = ""
+            stop_pts = float(self._config.stop_distance_points)
+            risk_gbp = 0.0
+            for g in gates:
+                if g.name == "signal_confidence" and isinstance(g.value, dict):
+                    direction = str(g.value.get("direction") or "WAIT")
+                    setup_key = str(g.value.get("setup") or "")
+                if g.name == "risk_validation" and isinstance(g.value, dict):
+                    stop_pts = float(g.value.get("stop") or stop_pts)
+                    risk_gbp = float(g.value.get("risk_gbp") or 0)
+            emit_order_intent(
+                epic=self._epic,
+                market=self._market,
+                session=self._feeder_session_name(),
+                direction=direction,
+                size=float(trade_size),
+                confidence=float(confidence),
+                setup_key=setup_key,
+                risk_gbp=risk_gbp,
+                stop_points=stop_pts,
+            )
+        except Exception:
+            pass
 
     def _log_gate_check(self, quote: Quote, gates: list[GateResult]) -> None:
         sig_dir = "WAIT"

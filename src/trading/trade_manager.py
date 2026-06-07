@@ -192,6 +192,27 @@ class TradeManager:
                 record_trade_opened(epic)
             except Exception:
                 pass
+            try:
+                from feeder.event_bus import emit_fill_open
+
+                pv = float(cfg.get("ig_point_value_gbp", 1.0))
+                risk_gbp = float(stop) * float(size) * pv if stop and size else None
+                emit_fill_open(
+                    epic=epic,
+                    market=market,
+                    trade_id=int(trade_id),
+                    deal_id=str(ig_deal_id or ""),
+                    direction=side,
+                    entry=float(entry),
+                    size=float(size),
+                    stop=float(stop),
+                    target=float(target),
+                    confidence=float(adjusted_confidence),
+                    setup_key=str(setup_key or ""),
+                    risk_gbp=risk_gbp,
+                )
+            except Exception:
+                pass
         self._telegram_trade_opened(
             market=market,
             side=side,

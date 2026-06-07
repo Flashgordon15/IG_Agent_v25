@@ -48,6 +48,20 @@ def logs_dir() -> Path:
     return d
 
 
+def data_lake_dir() -> Path:
+    """v25→v26 shared lake (events, features, models)."""
+    d = project_root() / "data_lake"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def feeder_events_dir() -> Path:
+    """Append-only v25 feeder events for v26 (jsonl per day)."""
+    d = data_lake_dir() / "events"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def resolve_path(relative: str) -> Path:
     p = Path(relative)
     return p if p.is_absolute() else project_root() / p
@@ -61,7 +75,12 @@ def find_python_executable() -> str:
     import shutil
 
     root = project_root()
-    for rel in (".venv/bin/python3", "venv/bin/python3", ".venv/bin/python", "venv/bin/python"):
+    for rel in (
+        ".venv/bin/python3",
+        "venv/bin/python3",
+        ".venv/bin/python",
+        "venv/bin/python",
+    ):
         candidate = root / rel
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return str(candidate)

@@ -6,7 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 IG Agent v25 — automated CFD trading agent for the IG platform. Python backend (FastAPI + trading loop) served on `localhost:8080`, with a React/Vite dashboard in `dashboard/`.
 
-Full architecture spec: `IG_Agent_v25_COMPLETE_SPEC_v8.pdf` (source: `IG_Agent_v25_COMPLETE_SPEC_v8.md`)
+Operational spec (shipped): `IG_Agent_v25_COMPLETE_SPEC_v8.md`  
+v25→v26 strategy: `docs/V25_TO_V26_STRATEGY.md` + `docs/V26_VISION.md` (feeder + separate v26 agent)  
+v26 framework: `IG_Agent_v26_FRAMEWORK.md` (£50k, multi-strategy, certification ladder)  
+Live funds gate: `docs/LIVE_PROMOTION_CHECKLIST.md`
 
 ## Commands
 

@@ -18,4 +18,9 @@ src/data/ohlc_cache/
 src/data/state/
 src/data/replay_analysis.txt
 src/data/training_dataset.csv
+data_lake/events/*.jsonl
+data_lake/features/
+data_lake/models/
+data_lake/shadow_v26/*.jsonl
+data_lake/state/*.json
 .node-local/
