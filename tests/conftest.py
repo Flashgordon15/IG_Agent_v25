@@ -10,7 +10,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT / "v26"))
+# Append v26 so `import main` resolves to src/main.py, not v26/main.py
+if str(ROOT / "v26") not in sys.path:
+    sys.path.append(str(ROOT / "v26"))
 
 
 @pytest.fixture(autouse=True)

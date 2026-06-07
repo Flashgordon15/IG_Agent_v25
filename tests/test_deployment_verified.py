@@ -31,25 +31,22 @@ _RUNTIME_STATE = _SRC / "data" / "runtime_state.json"
 # ---------------------------------------------------------------------------
 
 
-def test_correlation_guard_cap_is_15() -> None:
-    """MAX_NEW_PER_DIRECTION must be 15.
+def test_correlation_guard_cap_is_5() -> None:
+    """MAX_NEW_PER_DIRECTION must be 5 (v25.6 profitability cap).
 
-    This constant limits how many new entries can be opened in the same
-    direction per session.  A value that is too high (e.g. unlimited) lets the
-    portfolio become a one-way correlated bet on a bad open; too low starves
-    genuine signals.  15 is the deliberately chosen safe maximum.
+    Limits same-direction entries per calendar day to reduce correlated
+    portfolio risk on a ~4-market book.
     """
     source = _GUARD_PY.read_text(encoding="utf-8")
-    assert "MAX_NEW_PER_DIRECTION = 15" in source, (
-        "correlation_guard.py must contain 'MAX_NEW_PER_DIRECTION = 15'; "
+    assert "MAX_NEW_PER_DIRECTION = 5" in source, (
+        "correlation_guard.py must contain 'MAX_NEW_PER_DIRECTION = 5'; "
         "the limit has been changed or removed — do NOT deploy."
     )
 
-    # Also verify the live module agrees at import time
     import execution.correlation_guard as cg
 
-    assert cg.MAX_NEW_PER_DIRECTION == 15, (
-        f"Imported value is {cg.MAX_NEW_PER_DIRECTION!r}; expected 15"
+    assert cg.MAX_NEW_PER_DIRECTION == 5, (
+        f"Imported value is {cg.MAX_NEW_PER_DIRECTION!r}; expected 5"
     )
 
 
@@ -229,12 +226,10 @@ def test_stale_port_killed_not_own_pid() -> None:
     mock_result = MagicMock()
     mock_result.stdout = "12345\n99999\n"
 
-    # _force_cleanup_port does `import subprocess as _sp` inside the function,
-    # so we patch subprocess.run on the actual module, plus os symbols via main.
     with (
         patch("subprocess.run", return_value=mock_result),
-        patch("main.os.getpid", return_value=12345),
-        patch("main.os.kill") as mock_kill,
+        patch("os.getpid", return_value=12345),
+        patch("os.kill") as mock_kill,
     ):
         _main._force_cleanup_port(port=8080)
 
