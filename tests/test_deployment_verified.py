@@ -816,6 +816,7 @@ def test_dashboard_safe_to_leave_button_and_api() -> None:
     assert "Safe to Leave" in header
     assert "/api/safe-to-leave" in header
     assert "api_safe_to_leave" in routes
+    assert "run_safe_to_leave" in routes
     assert "def run_safe_to_leave" in data
 
 

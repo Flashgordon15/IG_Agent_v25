@@ -311,7 +311,10 @@ def build_market_orchestrator(
     position_sync = None
     if rest_client is not None:
         from execution.trade_tracker import TradeTracker
-        from runtime.ig_transaction_sync import IgTransactionSync
+        from runtime.ig_transaction_sync import (
+            IgTransactionSync,
+            _set_transaction_sync_instance,
+        )
 
         tracker = TradeTracker(store, prefer_ig=True)
         managed_epics = frozenset(
@@ -334,12 +337,14 @@ def build_market_orchestrator(
                 display_hours=24.0,
             )
             txn_sync.start()
+            _set_transaction_sync_instance(txn_sync)
             log_engine("IG transaction sync started")
         except Exception as _txn_e:
             log_engine(
                 f"IG transaction sync start failed: {type(_txn_e).__name__}: {_txn_e}"
             )
             txn_sync = None
+            _set_transaction_sync_instance(None)
 
         position_sync = start_ig_position_sync(
             rest_client,

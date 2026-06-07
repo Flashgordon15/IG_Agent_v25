@@ -141,7 +141,15 @@ export default function Header({
     setSafeLeaveModal({ loading: true });
     try {
       const res = await fetch("/api/safe-to-leave", { method: "POST" });
-      const data = await res.json();
+      const text = await res.text();
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        throw new Error(
+          res.ok ? text.slice(0, 120) : `HTTP ${res.status}: ${text.slice(0, 120)}`,
+        );
+      }
       setSafeLeaveModal({ loading: false, ...data });
     } catch (e) {
       setSafeLeaveModal({

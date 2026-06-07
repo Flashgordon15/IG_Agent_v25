@@ -30,6 +30,7 @@ from api.dashboard_data import (
     get_system_info,
     read_version_state,
     run_e2e_execution_check,
+    run_safe_to_leave,
     run_system_tests,
 )
 from api.intelligence_data import (
