@@ -23,9 +23,13 @@ function fmtTs(ts) {
 function fmtLogTs(entry) {
   const ts = entry?.ts ?? entry?.timestamp ?? entry?.time;
   if (!ts) return "—";
+  const raw = String(ts);
+  if (/^\d{1,2}:\d{2}:\d{2}$/.test(raw)) return raw;
   try {
-    return new Date(ts).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-  } catch { return String(ts); }
+    const d = new Date(raw);
+    if (Number.isNaN(d.getTime())) return raw;
+    return d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  } catch { return raw; }
 }
 
 function fmtLogLine(entry) {
@@ -37,7 +41,10 @@ function fmtLogLine(entry) {
     const mkt = entry.market ? `[${entry.market}]` : "";
     const prob = `ML ${(entry.ml_prob * 100).toFixed(1)}%`;
     const rules = `rules ${entry.rules_conf?.toFixed(1) ?? "?"}%`;
-    const mode = entry.blended ? `→ blended ${entry.confidence?.toFixed(1) ?? "?"}%` : "(near-50%, rules used)";
+    const mode = entry.blend_note
+      ?? (entry.blended
+        ? `→ blended ${entry.confidence?.toFixed(1) ?? "?"}%`
+        : "(near-50%, rules used)");
     return [mkt, dir, prob, rules, mode].filter(Boolean).join(" · ");
   }
   const parts = [entry.decision, entry.action, entry.label, entry.setup, entry.direction].filter(Boolean);
@@ -324,15 +331,54 @@ function signalDot(conf) {
   return "bg-danger/50";
 }
 
+const LONDON_TZ = "Europe/London";
+
 function fmtNextOpen(isoStr) {
   if (!isoStr) return null;
   try {
-    return new Date(isoStr).toLocaleTimeString("en-GB", {
+    const open = new Date(isoStr);
+    const now = new Date();
+    const dayKey = (d) =>
+      d.toLocaleDateString("en-GB", {
+        timeZone: LONDON_TZ,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      });
+    const time = open.toLocaleTimeString("en-GB", {
       hour: "2-digit",
       minute: "2-digit",
-      timeZone: "Europe/London",
+      timeZone: LONDON_TZ,
     });
-  } catch { return null; }
+    if (dayKey(open) === dayKey(now)) {
+      return time;
+    }
+    const day = open.toLocaleDateString("en-GB", {
+      weekday: "short",
+      timeZone: LONDON_TZ,
+    });
+    return `${day} ${time}`;
+  } catch {
+    return null;
+  }
+}
+
+const MARKET_SHORT_LABELS = {
+  "IX.D.DOW.IFM.IP": "WALL ST",
+  "IX.D.NASDAQ.IFM.IP": "NASDAQ",
+  "CS.D.CFPGOLD.CFP.IP": "GOLD",
+  "IX.D.NIKKEI.IFM.IP": "NIKKEI",
+  "IX.D.DAX.IFM.IP": "DAX 40",
+  "CS.D.EURUSD.CFD.IP": "EUR/USD",
+  "CS.D.GBPUSD.CFD.IP": "GBP/USD",
+};
+
+function marketPillLabel(epic, name) {
+  if (MARKET_SHORT_LABELS[epic]) return MARKET_SHORT_LABELS[epic];
+  const n = String(name ?? "").trim();
+  if (!n) return epic;
+  if (n.length <= 12) return n.toUpperCase();
+  return n.split(/\s+/).slice(0, 2).join(" ").toUpperCase();
 }
 
 function marketStatusMeta(marketState, streamStatus) {
@@ -382,7 +428,7 @@ function MarketGrid({ rawState, selectedEpic, onSelectEpic }) {
             {/* Name + stream dot */}
             <div className="flex items-center justify-between gap-1 mb-1">
               <span className={`text-[10px] font-semibold uppercase tracking-wide truncate ${active ? "text-accent" : "text-foreground"}`}>
-                {name.length > 10 ? name.slice(0, 10) : name}
+                {marketPillLabel(epic, name)}
               </span>
               <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${status.dot}`} />
             </div>

@@ -7,7 +7,6 @@ the agent can be trusted to trade overnight without babysitting.
 
 Usage:
   PYTHONPATH=src python3 scripts/safe_to_leave.py
-  PYTHONPATH=src python3 scripts/safe_to_leave.py --require-telegram
 """
 
 from __future__ import annotations
@@ -67,9 +66,41 @@ def _watchdog_running() -> bool:
     return _watchdog_active()
 
 
-def _heartbeat_disabled() -> bool:
-    routes = (ROOT / "src" / "api" / "routes.py").read_text(encoding="utf-8")
-    return "auto-shutdown on browser disconnect is disabled" in routes
+def _heartbeat_auto_shutdown_disabled() -> tuple[bool, str]:
+    """Runtime check: heartbeat monitor must be a no-op (no browser-timeout shutdown)."""
+    try:
+        import inspect
+
+        from api.routes import _start_heartbeat_monitor
+
+        body = inspect.getsource(_start_heartbeat_monitor)
+        if "auto-shutdown on browser disconnect is disabled" not in body:
+            return False, "heartbeat monitor source may enforce browser timeout"
+        _start_heartbeat_monitor()
+        return True, "runtime no-op confirmed"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+def _on_ac_power() -> tuple[bool, str]:
+    """caffeinate -s only prevents sleep on AC; battery + lid close can still kill the agent."""
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            ["pmset", "-g", "batt"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        out = (result.stdout or "").lower()
+        if "battery power" in out or "on battery" in out:
+            return False, "on battery — plug in Mac for overnight (lid close may sleep)"
+        if "ac power" in out or "now drawing from 'ac power'" in out:
+            return True, "on AC power"
+        return True, "power source unknown — assume plugged in"
+    except Exception as e:
+        return True, f"power check skipped ({type(e).__name__})"
 
 
 def _on_ac_power() -> tuple[bool, str]:
@@ -115,11 +146,6 @@ def _telegram_configured() -> tuple[bool, str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="IG Agent v25 safe-to-leave check")
-    parser.add_argument(
-        "--require-telegram",
-        action="store_true",
-        help="Fail if Telegram is not configured",
-    )
     args = parser.parse_args()
 
     print()
@@ -128,22 +154,29 @@ def main() -> int:
 
     all_ok = True
 
-    # Static / source checks
-    all_ok &= _check("Heartbeat auto-shutdown disabled", _heartbeat_disabled())
+    hb_ok, hb_detail = _heartbeat_auto_shutdown_disabled()
+    all_ok &= _check("Heartbeat auto-shutdown disabled", hb_ok, hb_detail)
 
     deploy_ok, deploy_detail = _run_deployment_tests()
     all_ok &= _check("Deployment verification tests", deploy_ok, deploy_detail)
+
+    health = _fetch_health()
+    markets_open = int(health.get("markets_open_count") or 0) if health else -1
 
     for row in pre_flight_summary(
         run_all_pre_flight_checks(require_live_agent=True, max_gate_age_sec=120.0)
     )["results"]:
         if row["id"] in ("7.1", "7.2"):
             continue
+        if row["id"] == "7.4" and markets_open == 0:
+            print(
+                f"[SKIP] {row['description']} — no markets open (live ticks not required)"
+            )
+            continue
         ok = row["passed"]
         all_ok &= _check(row["description"], ok, row.get("reason") or "")
 
     # Live agent checks (duplicate gate/data checks for clear operator messaging)
-    health = _fetch_health()
     if health is None:
         all_ok &= _check("Agent responding on :8080", False, "cannot reach /api/health")
     else:
@@ -177,11 +210,7 @@ def main() -> int:
     all_ok &= _check("Mac on AC power (overnight sleep)", ac_ok, ac_detail)
 
     tg_ok, tg_detail = _telegram_configured()
-    if args.require_telegram:
-        all_ok &= _check("Telegram alerts configured", tg_ok, tg_detail)
-    else:
-        mark = "PASS" if tg_ok else "WARN"
-        print(f"[{mark}] Telegram alerts configured — {tg_detail}")
+    all_ok &= _check("Telegram alerts configured", tg_ok, tg_detail)
 
     print("=" * 48)
     if all_ok:

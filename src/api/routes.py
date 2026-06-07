@@ -11,7 +11,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 from fastapi.responses import JSONResponse
 
 from api.agent_control import (
@@ -30,6 +30,7 @@ from api.dashboard_data import (
     get_system_info,
     read_version_state,
     run_e2e_execution_check,
+    run_safe_to_leave,
     run_system_tests,
 )
 from api.intelligence_data import (
@@ -184,6 +185,12 @@ def api_system_tests() -> dict[str, Any]:
 def api_system_e2e() -> dict[str, Any]:
     """E2E execution check — mock pipeline + IG DEMO routing (no order)."""
     return run_e2e_execution_check()
+
+
+@router.post("/api/safe-to-leave")
+def api_safe_to_leave() -> dict[str, Any]:
+    """Run overnight trust gate (scripts/safe_to_leave.py)."""
+    return run_safe_to_leave()
 
 
 @router.post("/api/close/{deal_id}")
@@ -399,7 +406,8 @@ def _trigger_shutdown(source: str = "api") -> None:
         log_engine(f"telegram shutdown alert failed: {type(e).__name__}: {e}")
 
     def _exit() -> None:
-        time.sleep(2)
+        delay = 0.5 if source == "dashboard" else 2.0
+        time.sleep(delay)
         os.kill(os.getpid(), signal.SIGTERM)
 
     threading.Thread(target=_exit, name="shutdown-trigger", daemon=True).start()
@@ -456,23 +464,69 @@ def api_heartbeat() -> JSONResponse:
     return JSONResponse({"ok": True, "ts": _last_heartbeat})
 
 
-def _shutdown_cleanup(*, source: str = "dashboard") -> None:
-    """Full teardown before process exit — streams, IG session, watchdog, orphans."""
+def _finish_dashboard_shutdown() -> None:
+    """Run full teardown then exit — must not block the HTTP response."""
+    from system.engine_log import log_engine
     from system.shutdown_cleanup import perform_shutdown_cleanup
 
-    perform_shutdown_cleanup(source=source)
+    try:
+        perform_shutdown_cleanup(source="dashboard", skip_port_cleanup=True)
+        log_engine("shutdown: initiated via dashboard Stop button")
+        log_engine("shutdown: process exit")
+    except Exception as e:
+        log_engine(f"shutdown deferred cleanup failed: {type(e).__name__}: {e}")
+    os._exit(0)
+
+
+@router.get("/api/shutdown/verify-status")
+def api_shutdown_verify_status() -> dict[str, Any]:
+    """Fallback verify poll while :8081 is unavailable (reads last verify snapshot)."""
+    from system.paths import data_dir
+
+    path = data_dir() / "state" / "last_shutdown_verify.json"
+    if not path.is_file():
+        return {"ok": False, "status": "pending", "checks": [], "issues": []}
+    try:
+        import json
+
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {"ok": False, "status": "invalid"}
+    except Exception:
+        return {"ok": False, "status": "error", "checks": [], "issues": []}
 
 
 @router.post("/api/shutdown")
-def api_shutdown() -> JSONResponse:
+def api_shutdown(background_tasks: BackgroundTasks) -> JSONResponse:
     """Graceful agent shutdown — stop trading, clean port/lock, exit process."""
+    from api.agent_health import stop_watchdog
     from system.engine_log import log_engine
+    from system.shutdown_cleanup import mark_manual_stop, spawn_post_shutdown_verifier
 
     try:
-        _shutdown_cleanup(source="dashboard")
-        log_engine("shutdown: initiated via dashboard Stop button")
-        _trigger_shutdown(source="dashboard")
-        return JSONResponse({"ok": True, "status": "shutting_down"})
+        mark_manual_stop(source="dashboard")
+        stop_watchdog()
+        spawn_post_shutdown_verifier(os.getpid())
+        background_tasks.add_task(_finish_dashboard_shutdown)
+        return JSONResponse(
+            {
+                "ok": True,
+                "status": "shutting_down",
+                "cleanup_checks": [
+                    {
+                        "label": "Manual stop flagged",
+                        "ok": True,
+                        "detail": "watchdog will not auto-restart",
+                    },
+                    {
+                        "label": "Shutdown started",
+                        "ok": True,
+                        "detail": "cleanup running in background",
+                    },
+                ],
+                "verify_poll_url": "http://127.0.0.1:8081/shutdown-verify",
+                "verify_fallback_url": "/api/shutdown/verify-status",
+            }
+        )
     except Exception as e:
         log_engine(f"shutdown failed: {type(e).__name__}: {e}")
         raise HTTPException(status_code=500, detail=str(e)) from e

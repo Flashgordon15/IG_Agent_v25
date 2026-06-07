@@ -228,34 +228,44 @@ def build_market_orchestrator(
 
     # Quick self-test — run deployed-fixes regression suite to catch stale code
     try:
+        import os
         import subprocess
         import sys
 
         from system.paths import project_root
 
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pytest",
-                "tests/test_deployed_fixes.py",
-                "-x",
-                "-q",
-                "--tb=no",
-            ],
-            cwd=str(project_root()),
-            env={**__import__("os").environ, "PYTHONPATH": str(project_root() / "src")},
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        passed = result.returncode == 0
-        note = "all passed" if passed else f"FAILED — {result.stdout.strip()[-200:]}"
-        _startup_mark("self_test", note)
-        if not passed:
-            log_engine(f"startup self-test FAILED:\n{result.stdout[-400:]}")
+        if os.environ.get("IG_AGENT_SKIP_DEPLOY_CHECK") == "1":
+            _startup_mark("self_test", note="skipped watchdog restart")
+            log_engine("startup self-test skipped (IG_AGENT_SKIP_DEPLOY_CHECK=1)")
         else:
-            log_engine("startup self-test: all deployed-fixes checks passed")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pytest",
+                    "tests/test_deployed_fixes.py",
+                    "-x",
+                    "-q",
+                    "--tb=no",
+                ],
+                cwd=str(project_root()),
+                env={
+                    **__import__("os").environ,
+                    "PYTHONPATH": str(project_root() / "src"),
+                },
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            passed = result.returncode == 0
+            note = (
+                "all passed" if passed else f"FAILED — {result.stdout.strip()[-200:]}"
+            )
+            _startup_mark("self_test", note)
+            if not passed:
+                log_engine(f"startup self-test FAILED:\n{result.stdout[-400:]}")
+            else:
+                log_engine("startup self-test: all deployed-fixes checks passed")
     except Exception as e:
         _startup_mark("self_test", f"skipped: {type(e).__name__}")
         log_engine(f"startup self-test skipped: {type(e).__name__}: {e}")
@@ -301,7 +311,10 @@ def build_market_orchestrator(
     position_sync = None
     if rest_client is not None:
         from execution.trade_tracker import TradeTracker
-        from runtime.ig_transaction_sync import IgTransactionSync
+        from runtime.ig_transaction_sync import (
+            IgTransactionSync,
+            _set_transaction_sync_instance,
+        )
 
         tracker = TradeTracker(store, prefer_ig=True)
         managed_epics = frozenset(
@@ -324,12 +337,14 @@ def build_market_orchestrator(
                 display_hours=24.0,
             )
             txn_sync.start()
+            _set_transaction_sync_instance(txn_sync)
             log_engine("IG transaction sync started")
         except Exception as _txn_e:
             log_engine(
                 f"IG transaction sync start failed: {type(_txn_e).__name__}: {_txn_e}"
             )
             txn_sync = None
+            _set_transaction_sync_instance(None)
 
         position_sync = start_ig_position_sync(
             rest_client,

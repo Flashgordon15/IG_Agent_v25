@@ -6,25 +6,30 @@
 	<string>com.igagent.v25</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/Library/Frameworks/Python.framework/Versions/3.14/bin/python3</string>
-		<string>/Users/chrisgordon/Desktop/IG_Agent_v25/src/main.py</string>
+		<string>__PYTHON_BIN__</string>
+		<string>__IG_AGENT_ROOT__/src/main.py</string>
 	</array>
 	<key>WorkingDirectory</key>
-	<string>/Users/chrisgordon/Desktop/IG_Agent_v25</string>
+	<string>__IG_AGENT_ROOT__</string>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>
-	<false/>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>60</integer>
 	<key>StandardOutPath</key>
-	<string>/Users/chrisgordon/Desktop/IG_Agent_v25/src/data/logs/launchd_stdout.log</string>
+	<string>__IG_AGENT_ROOT__/src/data/logs/launchd_stdout.log</string>
 	<key>StandardErrorPath</key>
-	<string>/Users/chrisgordon/Desktop/IG_Agent_v25/src/data/logs/launchd_stderr.log</string>
+	<string>__IG_AGENT_ROOT__/src/data/logs/launchd_stderr.log</string>
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>PYTHONPATH</key>
-		<string>/Users/chrisgordon/Desktop/IG_Agent_v25/src</string>
+		<string>__IG_AGENT_ROOT__/src</string>
 		<key>IG_AGENT_ROOT</key>
-		<string>/Users/chrisgordon/Desktop/IG_Agent_v25</string>
+		<string>__IG_AGENT_ROOT__</string>
 	</dict>
 </dict>
 </plist>

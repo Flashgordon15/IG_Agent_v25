@@ -32,6 +32,35 @@ agent_alive() {
     lsof -iTCP:"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1 && [ -f "$LOCK_FILE" ]
 }
 
+manual_stop_active() {
+    local flag="$AGENT_DIR/src/data/state/manual_stop.json"
+    if [ ! -f "$flag" ]; then
+        return 1
+    fi
+    local PY="python3"
+    for candidate in \
+        "${AGENT_DIR}/.venv/bin/python3" \
+        "${AGENT_DIR}/venv/bin/python3" \
+        "$(command -v python3 2>/dev/null || true)"
+    do
+        if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+            PY="$candidate"
+            break
+        fi
+    done
+    "$PY" -c "
+import json, sys, time
+from pathlib import Path
+p = Path(sys.argv[1])
+try:
+    data = json.loads(p.read_text(encoding='utf-8'))
+    age = time.time() - float(data.get('ts') or 0)
+    sys.exit(0 if 0 <= age < 600 else 1)
+except Exception:
+    sys.exit(0)
+" "$flag"
+}
+
 trading_healthy() {
     local health_json
     health_json=$(curl -sf --max-time 3 "http://127.0.0.1:${PORT}/api/health" 2>/dev/null || true)
@@ -161,6 +190,11 @@ while true; do
     fi
 
     if (( need_restart )); then
+        if manual_stop_active; then
+            log "WATCHDOG: manual stop active — skipping auto-restart (${restart_reason})"
+            sleep "$CHECK_INTERVAL"
+            continue
+        fi
         log "WATCHDOG: restart required — ${restart_reason}"
 
         local_now=$(date +%s)

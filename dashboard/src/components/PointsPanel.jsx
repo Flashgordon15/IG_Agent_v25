@@ -19,7 +19,7 @@ function fmtPoints(v) {
   const n = Number(v);
   if (!Number.isFinite(n)) return "—";
   const sign = n > 0 ? "+" : "";
-  return `${sign}${Math.round(n)}`;
+  return `${sign}${n.toFixed(1)}`;
 }
 
 function pointsColor(v) {
@@ -109,9 +109,15 @@ function agentStateDescription(state, stateName) {
   const sig = state?.signal || {};
   const parts = [];
 
-  const mult = pts.size_multiplier ?? state?.size_multiplier;
+  let mult = pts.size_multiplier ?? state?.size_multiplier;
   if (mult != null && Number.isFinite(Number(mult))) {
-    parts.push(`max ${fmtMult(mult)} size`);
+    const multN = Number(mult);
+    if (s === "CAUTION" && multN === 0) {
+      mult = 0.5;
+      parts.push(`max ${fmtMult(mult)} size band (<80% conf gate)`);
+    } else {
+      parts.push(`max ${fmtMult(multN)} size`);
+    }
   }
 
   const configThr = sig.config_signal_threshold;
@@ -216,10 +222,13 @@ function Card({ title, children, className = "" }) {
   );
 }
 
-function ScoreCard({ label, value, description }) {
+function ScoreCard({ label, value, description, title }) {
   const color = pointsColor(value);
   return (
-    <div className="flex flex-col rounded-lg border border-border bg-card p-3 sm:p-4">
+    <div
+      className="flex flex-col rounded-lg border border-border bg-card p-3 sm:p-4"
+      title={title}
+    >
       <span className="label-caps">{label}</span>
       <span
         className={[
@@ -287,23 +296,32 @@ export default function PointsPanel({ state }) {
   return (
     <div className="mx-auto max-w-5xl space-y-3 px-1 pb-4">
       {/* 1. Score cards */}
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-3 sm:gap-3">
+      <div
+        className="grid grid-cols-1 gap-2 sm:grid-cols-3 sm:gap-3"
+        title="Points are the strategy score (stop-distance units), not £ P&L. The chart below tracks IG-confirmed £ profit."
+      >
         <ScoreCard
           label="Trade"
           value={pts ? lastTrade : null}
           description="Points from the last closed trade"
+          title="Last trade points — strategy score, not £"
         />
         <ScoreCard
           label="Session"
           value={pts ? session : null}
           description="Session cumulative points score"
+          title="Points earned this session"
         />
         <ScoreCard
           label="Cumulative"
           value={pts ? cumulative : null}
           description="Rolling cumulative points (tier driver)"
+          title="Rolling points total — drives HEALTHY / CAUTION tiers"
         />
       </div>
+      <p className="text-center text-[10px] text-muted">
+        Points = strategy score (not £). Cumulative P&amp;L chart below uses IG-confirmed £ only.
+      </p>
 
       {/* 2. Agent state */}
       <Card className="text-center">

@@ -274,7 +274,7 @@ class TradingLoop:
         log_engine(
             f"trading_loop thread starting epic={self._epic} — awaiting stream_ready"
         )
-        ready = wait_stream_ready(timeout=120.0)
+        ready = wait_stream_ready(timeout=120.0, epic=self._epic)
         log_engine(
             f"trading_loop thread epic={self._epic} stream_ready={ready} — entering tick loop"
         )
@@ -1250,6 +1250,11 @@ class TradingLoop:
                                 "rules_conf": round(rules_conf, 1),
                                 "confidence": round(conf, 1),
                                 "blended": blended,
+                                "blend_note": (
+                                    f"→ blended {conf:.1f}%"
+                                    if blended
+                                    else "near-50%, rules used"
+                                ),
                                 "setup": sig.setup_key,
                             }
                             self._ml_decision_log.append(entry)
@@ -1406,7 +1411,17 @@ class TradingLoop:
                 return int(tracker.count_open_for_epic(self._epic))
             except Exception:
                 pass
-        return 0
+        store = getattr(engine, "store", None) or self._store
+        if store is not None and hasattr(store, "count_open_trades"):
+            try:
+                return int(store.count_open_trades(self._epic))
+            except Exception:
+                pass
+        log_engine(
+            f"WARN: open position count unknown for {self._epic} — "
+            "sync/tracker/store unavailable"
+        )
+        return -1
 
     def _execute_flatten_close(self) -> int:
         if self._on_flatten is not None:
@@ -1420,9 +1435,10 @@ class TradingLoop:
         if store is None or rest is None:
             return 0
         closed = 0
-        rows = store.conn.execute(
-            "SELECT id, epic, side, size, ig_deal_id FROM trades WHERE closed_at IS NULL"
-        ).fetchall()
+        if not hasattr(store, "active_trades"):
+            log_engine("flatten: LearningStore.active_trades unavailable")
+            return 0
+        rows = store.active_trades()
         for row in rows:
             deal_id = str(row["ig_deal_id"] or "")
             if not deal_id:
@@ -1458,6 +1474,55 @@ class TradingLoop:
         if target is None:
             return {}
         return self._build_snapshot_payload(target)
+
+    def _snapshot_maintenance_flags(self) -> tuple[bool, bool]:
+        hub_maint = False
+        session_maint = False
+        try:
+            from system.market_data_hub import get_market_data_hub
+
+            hub_maint = get_market_data_hub().is_in_maintenance(self._epic)
+            session_maint = self._session.snapshot().phase == "MAINTENANCE"
+        except Exception:
+            pass
+        return hub_maint, session_maint
+
+    def _snapshot_stream_status(
+        self,
+        *,
+        spread: float,
+        hub_maint: bool,
+        session_maint: bool,
+        quote_ts: datetime,
+        tick_age_s: float,
+    ) -> tuple[str, float]:
+        stream_status = "DISCONNECTED"
+        if hub_maint or session_maint:
+            stream_status = "MAINTENANCE"
+        elif spread > 0:
+            try:
+                from system.market_data_hub import get_market_data_hub
+                from system.stream_ready import is_stream_ready
+
+                snap = get_market_data_hub().get_snapshot(self._epic)
+                cap_raw = self._config.get("stale_threshold_seconds")
+                try:
+                    stale_after = (
+                        float(cap_raw)
+                        if cap_raw is not None
+                        else float(self._config.refresh_seconds) * 2.0
+                    )
+                except (TypeError, ValueError):
+                    stale_after = float(self._config.refresh_seconds) * 2.0
+                if is_stream_ready():
+                    stale_after = max(stale_after, 60.0)
+                if snap and snap.age_seconds() <= stale_after:
+                    stream_status = "LIVE"
+                else:
+                    stream_status = "STALE"
+            except Exception:
+                stream_status = "LIVE"
+        return stream_status, tick_age_s
 
     def _build_snapshot_payload(self, ctx: TickContext) -> dict[str, Any]:
         quote = ctx.quote
@@ -1521,15 +1586,7 @@ class TradingLoop:
                 session_open = bool(g.passed)
                 break
 
-        hub_maint = False
-        session_maint = False
-        try:
-            from system.market_data_hub import get_market_data_hub
-
-            hub_maint = get_market_data_hub().is_in_maintenance(self._epic)
-            session_maint = self._session.snapshot().phase == "MAINTENANCE"
-        except Exception:
-            pass
+        hub_maint, session_maint = self._snapshot_maintenance_flags()
 
         if hub_maint or session_maint:
             market_state = "MAINTENANCE"
@@ -1561,32 +1618,13 @@ class TradingLoop:
             except Exception:
                 pass
 
-        stream_status = "DISCONNECTED"
-        if hub_maint or session_maint:
-            stream_status = "MAINTENANCE"
-        elif spread > 0:
-            try:
-                from system.market_data_hub import get_market_data_hub
-                from system.stream_ready import is_stream_ready
-
-                snap = get_market_data_hub().get_snapshot(self._epic)
-                cap_raw = self._config.get("stale_threshold_seconds")
-                try:
-                    stale_after = (
-                        float(cap_raw)
-                        if cap_raw is not None
-                        else float(self._config.refresh_seconds) * 2.0
-                    )
-                except (TypeError, ValueError):
-                    stale_after = float(self._config.refresh_seconds) * 2.0
-                if is_stream_ready():
-                    stale_after = max(stale_after, 60.0)
-                if snap and snap.age_seconds() <= stale_after:
-                    stream_status = "LIVE"
-                else:
-                    stream_status = "STALE"
-            except Exception:
-                stream_status = "LIVE"
+        stream_status, tick_age_s = self._snapshot_stream_status(
+            spread=spread,
+            hub_maint=hub_maint,
+            session_maint=session_maint,
+            quote_ts=quote_ts if isinstance(quote_ts, datetime) else self._clock(),
+            tick_age_s=tick_age_s,
+        )
 
         if stream_status == "STALE" and tick_age_s > 60.0:
             try:
@@ -1880,13 +1918,17 @@ class TradingLoop:
         try:
             if self._store is None or not hasattr(self._store, "recent_closed_trades"):
                 return []
-            from system.closed_trades_display import is_excluded_display_row
+            from system.closed_trades_display import (
+                deduplicate_ig_imports,
+                is_excluded_display_row,
+            )
 
             rows = self._store.recent_closed_trades(limit=100)
+            filtered = [r for r in rows if not is_excluded_display_row(r)]
+            deduped = deduplicate_ig_imports(filtered)
+            deduped.sort(key=lambda r: str(r.get("closed_at") or ""), reverse=True)
             out: list[dict[str, Any]] = []
-            for row in rows:
-                if is_excluded_display_row(row):
-                    continue
+            for row in deduped:
                 pnl_gbp = row.get("ig_pnl_currency")
                 pnl_pts = float(row.get("pnl_points") or 0)
                 if pnl_gbp is not None:
