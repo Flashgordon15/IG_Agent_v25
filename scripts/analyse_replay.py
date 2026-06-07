@@ -8,7 +8,6 @@ Analyse replay_results.jsonl — threshold, RSI, session, vol regime report.
 from __future__ import annotations
 
 import json
-import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -63,12 +62,17 @@ def _session_bucket(row: dict) -> str:
     return base or "unknown"
 
 
+def _row_label_3(row: dict) -> str:
+    """3-bar outcome label — batch replay writes label_3; sequential uses label_3bar."""
+    return str(row.get("label_3bar") or row.get("label_3") or "")
+
+
 def _stats_for_rows(rows: list[dict]) -> tuple[int, float, float]:
     """Return count, win_rate%, profit_factor (3-bar labels)."""
     if not rows:
         return 0, 0.0, 0.0
-    wins = sum(1 for r in rows if r.get("label_3bar") == "WIN")
-    losses = sum(1 for r in rows if r.get("label_3bar") == "LOSS")
+    wins = sum(1 for r in rows if _row_label_3(r) == "WIN")
+    losses = sum(1 for r in rows if _row_label_3(r) == "LOSS")
     decided = wins + losses
     win_rate = (100.0 * wins / decided) if decided else 0.0
     stop = float(rows[0].get("stop_pts") or 45)
@@ -131,9 +135,7 @@ def _build_report(rows: list[dict], total_bars: int) -> str:
     sells = [r for r in rows if r.get("direction") == "SELL" and r.get("fired")]
     for lo, hi in RSI_SELL_RANGES:
         bucket = [
-            r
-            for r in sells
-            if r.get("rsi") is not None and lo <= float(r["rsi"]) <= hi
+            r for r in sells if r.get("rsi") is not None and lo <= float(r["rsi"]) <= hi
         ]
         n, wr, _ = _stats_for_rows(bucket)
         lines.append(f"{lo:<7}  {hi:<7}  {n:<7}  {wr:5.1f}%")
@@ -150,11 +152,7 @@ def _build_report(rows: list[dict], total_bars: int) -> str:
     for window in SESSION_WINDOWS:
         bucket = [r for r in fired if _session_bucket(r) == window]
         n, wr, _ = _stats_for_rows(bucket)
-        avg = (
-            sum(float(r.get("adjusted_score") or 0) for r in bucket) / n
-            if n
-            else 0.0
-        )
+        avg = sum(float(r.get("adjusted_score") or 0) for r in bucket) / n if n else 0.0
         lines.append(f"{window:<13}  {n:<7}  {wr:5.1f}%     {avg:4.1f}")
         if n >= 3 and wr > session_best_wr:
             session_best_wr = wr
@@ -189,7 +187,9 @@ def main() -> int:
     cache = ROOT / "src" / "data" / "ohlc_cache" / "nikkei_5m.jsonl"
     total_bars = 0
     if cache.is_file():
-        total_bars = sum(1 for line in cache.read_text(encoding="utf-8").splitlines() if line.strip())
+        total_bars = sum(
+            1 for line in cache.read_text(encoding="utf-8").splitlines() if line.strip()
+        )
 
     report = _build_report(rows, total_bars)
     print(report)

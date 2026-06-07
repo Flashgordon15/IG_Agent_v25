@@ -6,6 +6,42 @@ The corresponding regression test lives in `tests/test_deployed_fixes.py`.
 
 ---
 
+## Session — 2026-06-07 (profitability improvements)
+
+- **`scripts/profitability_report.py`** — per-epic WR/P&L report; `--reconcile` backfills epic + tags legacy rows
+- **`scripts/analyse_replay.py`** — fix 0% WR: accept `label_3` from batch replay
+- **`scripts/replay_signals.py`** — write `label_3bar` alias in batch path
+- **`config/config_v25.json`** — Japan 85% threshold; US indices drop london_morning; `one_position_per_epic: true`; partial close enabled
+- **`correlation_guard.py`** — `MAX_NEW_PER_DIRECTION` 15 → 5
+- **`points_engine.py`** — HEALTHY cumulative >4 (was >6)
+- **`trading_loop.py`** — ML blend gated on ≥500 training records
+- **`signal_engine.py`** — soft ×0.9 penalty in high vol regime
+- **`trade_manager.py`** + **`config.py`** — `partial_close_enabled` config guard
+- **`tests/test_profitability_improvements.py`** — regression tests
+- **`docs/PROFITABILITY_ASSESSMENT_2026-06-07.md`** — assessment + changelog
+
+---
+
+## Session — 2026-06-07 (spec v8)
+
+- **`IG_Agent_v25_COMPLETE_SPEC_v8.md`** — New north-star spec reflecting shipped v25.5.0 (supersedes v7 PDF)
+- **`IG_Agent_v25_COMPLETE_SPEC_v8.pdf`** — Generated via `scripts/generate_spec_pdf.py`
+- **`CLAUDE.md`** — Architecture reference updated to v8
+
+---
+
+## Session — 2026-06-07 (v25.5.0 merge & shutdown)
+
+**Handoff:** `docs/SESSION_HANDOFF_2026-06-07.md`
+
+- Merged PR #4 → `main` @ `3ae5aa1` (lifecycle hardening, dashboard audit, overnight ops)
+- Resolved 9 merge conflicts; kept feature-branch lifecycle/shutdown work; integrated `safe_to_leave.py` from main
+- Post-merge: 56 tests pass; agent verified on 25.5.0; Safe to Leave 13/13
+- Full backup: `IG_Agent_v25_full_backup_20260607_082507.tar.gz`
+- End-of-session: graceful shutdown, watchdog killed, caffeinate launchd unloaded, manual-stop flagged
+
+---
+
 ## Session 1 — 2026-06-05 (pre-summary)
 
 ### Trading enhancements

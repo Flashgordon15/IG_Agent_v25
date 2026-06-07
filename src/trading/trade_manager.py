@@ -248,20 +248,21 @@ class TradeManager:
 
             prev_stop = stop
             prev_target = target
-            messages.extend(
-                self._apply_partial_close(
-                    market,
-                    side,
-                    trade_id,
-                    entry,
-                    size,
-                    px,
-                    entry_atr,
-                    adjusted_conf,
-                    ig_deal,
-                    epic,
+            if cfg.partial_close_enabled:
+                messages.extend(
+                    self._apply_partial_close(
+                        market,
+                        side,
+                        trade_id,
+                        entry,
+                        size,
+                        px,
+                        entry_atr,
+                        adjusted_conf,
+                        ig_deal,
+                        epic,
+                    )
                 )
-            )
             row_after_partial = self.store.conn.execute(
                 "SELECT size FROM trades WHERE id=?", (trade_id,)
             ).fetchone()
@@ -717,6 +718,8 @@ class TradeManager:
         ig_deal: str,
         epic: str,
     ) -> list[str]:
+        if not self._cfg.partial_close_enabled:
+            return []
         if entry_atr <= 0 or size <= 0:
             return []
         if self.store.is_partial_close_done(trade_id):

@@ -1200,7 +1200,27 @@ class TradingLoop:
                 from trading.ml_scorer import get_ml_scorer
 
                 scorer = get_ml_scorer()
-                if scorer.is_trained():
+                from data.ml_training_store import MLTrainingStore
+                from system.paths import data_dir
+
+                _ML_MIN_TRAINING_RECORDS = 500
+
+                def _ml_training_rows() -> int:
+                    live = MLTrainingStore().record_count()
+                    meta_path = data_dir() / "ml_model" / "training_meta.json"
+                    try:
+                        if meta_path.is_file():
+                            import json as _json
+
+                            meta = _json.loads(meta_path.read_text(encoding="utf-8"))
+                            replay = int(meta.get("labelled_rows") or 0)
+                            return max(live, replay)
+                    except Exception:
+                        pass
+                    return live
+
+                _ml_records = _ml_training_rows()
+                if scorer.is_trained() and _ml_records >= _ML_MIN_TRAINING_RECORDS:
                     snap = sig.snapshot or {}
                     last = snap.get("last")
                     _last = last if (last is not None and hasattr(last, "get")) else {}
@@ -1260,6 +1280,11 @@ class TradingLoop:
                             self._ml_decision_log.append(entry)
                             if len(self._ml_decision_log) > 20:
                                 self._ml_decision_log = self._ml_decision_log[-20:]
+                elif scorer.is_trained():
+                    log_engine(
+                        f"ML blend skipped: {_ml_records} training records "
+                        f"(need {_ML_MIN_TRAINING_RECORDS})"
+                    )
             except Exception as e:
                 log_engine(f"ML gate blend skipped: {type(e).__name__}: {e}")
         passed = sig.signal in ("BUY", "SELL") and conf >= threshold

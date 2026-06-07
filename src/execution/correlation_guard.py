@@ -25,7 +25,7 @@ _buy_count: int = 0
 _sell_count: int = 0
 _session_key: str = ""
 
-MAX_NEW_PER_DIRECTION = 15  # max new entries in the same direction per session
+MAX_NEW_PER_DIRECTION = 5  # max new entries in the same direction per calendar day
 _enabled: bool = True
 _STATE_FILE = data_dir() / "state" / "correlation_guard.json"
 

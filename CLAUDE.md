@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 IG Agent v25 — automated CFD trading agent for the IG platform. Python backend (FastAPI + trading loop) served on `localhost:8080`, with a React/Vite dashboard in `dashboard/`.
 
-Full architecture spec: `IG_Agent_v25_COMPLETE_SPEC_v7.pdf`
+Full architecture spec: `IG_Agent_v25_COMPLETE_SPEC_v8.pdf` (source: `IG_Agent_v25_COMPLETE_SPEC_v8.md`)
 
 ## Commands
 

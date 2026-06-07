@@ -44,21 +44,23 @@ class TestSession1SignalEngine:
 
 
 class TestSession1Config:
-    """london_morning must be in Wall Street and Nasdaq whitelists."""
+    """US indices trade overlap/afternoon only — london_morning removed (profitability)."""
 
-    def test_wall_street_has_london_morning(self):
+    def test_wall_street_excludes_london_morning(self):
         cfg = json.loads(CONFIG.read_text())
         ws = cfg["instruments"]["wall_street"]
-        assert "london_morning" in ws["trading_session_whitelist"], (
-            "wall_street is missing london_morning in trading_session_whitelist"
+        assert "london_morning" not in ws["trading_session_whitelist"], (
+            "wall_street must not trade london_morning — weak session for US indices"
         )
+        assert "london_us_overlap" in ws["trading_session_whitelist"]
 
-    def test_nasdaq_has_london_morning(self):
+    def test_nasdaq_excludes_london_morning(self):
         cfg = json.loads(CONFIG.read_text())
         nas = cfg["instruments"]["nasdaq_100"]
-        assert "london_morning" in nas["trading_session_whitelist"], (
-            "nasdaq_100 is missing london_morning in trading_session_whitelist"
+        assert "london_morning" not in nas["trading_session_whitelist"], (
+            "nasdaq_100 must not trade london_morning — weak session for US indices"
         )
+        assert "london_us_overlap" in nas["trading_session_whitelist"]
 
 
 class TestSession1GapClearBars:
@@ -430,11 +432,13 @@ class TestSession4PreLaunchValidation:
             engine.record_trade("WIN", confidence=90.0, pnl_pts=5.0)
 
         snap = engine.snapshot()
-        assert snap.cumulative > 6.0, (
-            f"After 8 wins cumulative={snap.cumulative:.1f} — expected > 6.0 (HEALTHY threshold)"
+        from trading.points_engine import HEALTHY_CUMULATIVE_MIN
+
+        assert snap.cumulative > HEALTHY_CUMULATIVE_MIN, (
+            f"After 8 wins cumulative={snap.cumulative:.1f} — expected > {HEALTHY_CUMULATIVE_MIN} (HEALTHY)"
         )
         assert engine.get_state() == "HEALTHY", (
-            f"State={engine.get_state()} — expected HEALTHY after cumulative > 6"
+            f"State={engine.get_state()} — expected HEALTHY after cumulative > {HEALTHY_CUMULATIVE_MIN}"
         )
 
     def test_points_engine_caution_size_multiplier_flat(self, tmp_path):
@@ -758,14 +762,14 @@ class TestSession6DynamicSizing:
         )
 
     def test_partial_close_keys_present(self):
-        """trailing_stop block must have partial_close_* keys (disabled by default)."""
+        """trailing_stop block must have partial_close_* keys (enabled for profitability)."""
         cfg = json.loads(CONFIG.read_text())
         ts = cfg.get("trailing_stop", {})
         assert "partial_close_enabled" in ts, (
             "trailing_stop missing partial_close_enabled"
         )
-        assert ts["partial_close_enabled"] is False, (
-            "partial_close_enabled should be False"
+        assert ts["partial_close_enabled"] is True, (
+            "partial_close_enabled should be True"
         )
         assert "partial_close_at_r" in ts, "trailing_stop missing partial_close_at_r"
         assert "partial_close_fraction" in ts, (

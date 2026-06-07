@@ -383,6 +383,18 @@ class Config:
         return int(self.trailing_stop.get("limit_extension_max_extensions", 2))
 
     @property
+    def partial_close_enabled(self) -> bool:
+        return bool(self.trailing_stop.get("partial_close_enabled", False))
+
+    @property
+    def partial_close_at_r(self) -> float:
+        return float(self.trailing_stop.get("partial_close_at_r", 1.5))
+
+    @property
+    def partial_close_fraction(self) -> float:
+        return float(self.trailing_stop.get("partial_close_fraction", 0.5))
+
+    @property
     def stop_distance_points(self) -> float:
         return float(
             self._data.get("stop_distance_points", self.default_stop_distance_points)

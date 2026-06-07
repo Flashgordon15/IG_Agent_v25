@@ -444,6 +444,10 @@ class SignalEngine:
         if vol_blocked:
             buy *= 0.5
             sell *= 0.5
+        elif current_regime == "high":
+            # Soft penalty in high vol — replay shows ~5pp lower WR vs normal regime.
+            buy *= 0.9
+            sell *= 0.9
         if not atr_ok:
             buy *= 0.65
             sell *= 0.65

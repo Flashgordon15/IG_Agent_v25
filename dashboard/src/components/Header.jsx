@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 import { fmtPrice } from "../utils/fmtPrice.js";
+import StrategyHelpModal from "./StrategyHelpModal.jsx";
 
 function isNil(v) {
   return v == null || v === "";
@@ -136,6 +137,7 @@ export default function Header({
   onStopAgent,
 }) {
   const [safeLeaveModal, setSafeLeaveModal] = useState(null);
+  const [helpOpen, setHelpOpen] = useState(false);
 
   const handleSafeToLeave = useCallback(async () => {
     setSafeLeaveModal({ loading: true });
@@ -277,8 +279,17 @@ export default function Header({
           ) : null;
         })()}
 
-        {/* Safe to leave + Stop Agent — right-most */}
+        {/* Help + Safe to leave + Stop Agent — right-most */}
         <div className="ml-auto flex shrink-0 flex-col items-stretch gap-1">
+          <button
+            type="button"
+            onClick={() => setHelpOpen(true)}
+            className="inline-flex items-center justify-center gap-1.5 rounded-md border border-border bg-card/80 px-2.5 py-1 text-[11px] font-semibold text-foreground transition-colors hover:bg-card active:scale-95"
+            title="Strategy, gates, sizing, points & ML reference"
+          >
+            <span className="text-[12px] leading-none" aria-hidden>?</span>
+            Strategy help
+          </button>
           <button
             type="button"
             onClick={handleSafeToLeave}
@@ -300,6 +311,8 @@ export default function Header({
           </button>
         </div>
       </div>
+
+      <StrategyHelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />
 
       {safeLeaveModal && !safeLeaveModal.loading && (
         <div

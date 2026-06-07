@@ -49,8 +49,11 @@ def set_points_state_path_for_tests(path: Path | str | None) -> None:
         _path_override = Path(path) if path else None
 
 
+HEALTHY_CUMULATIVE_MIN = 4.0  # was 6.0 — faster recovery to full size after drawdown
+
+
 def _nominal_state(cumulative: float) -> PointsStateName:
-    if cumulative > 6.0:
+    if cumulative > HEALTHY_CUMULATIVE_MIN:
         return "HEALTHY"
     if cumulative >= -5.0:
         return "CAUTION"
@@ -478,8 +481,8 @@ class PointsEngine:
                     tier_mult = 4.0  # EXCELLENT: cumulative > 50
                 elif cum > 25.0:
                     tier_mult = 2.5  # THRIVING:  cumulative > 25
-                elif cum > 6.0:
-                    tier_mult = 1.5  # HEALTHY:   cumulative > 6
+                elif cum > HEALTHY_CUMULATIVE_MIN:
+                    tier_mult = 1.5  # HEALTHY: above nominal floor
                 else:
                     tier_mult = 1.0
                 if band == "high":

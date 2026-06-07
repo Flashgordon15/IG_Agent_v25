@@ -11,7 +11,7 @@
   "learning_enabled": true,
   "trade_size": 1.0,
   "currency_code": "USD",
-  "one_position_per_epic": false,
+  "one_position_per_epic": true,
   "cooldown_seconds": 180,
   "adaptive_execution_enabled": true,
   "adaptive_min_adjusted_confidence": 80,
@@ -101,7 +101,7 @@
       "enabled": true,
       "epic": "IX.D.NIKKEI.IFM.IP",
       "name": "Japan 225",
-      "signal_threshold": 70,
+      "signal_threshold": 85,
       "max_spread_pts": 35,
       "stop_distance_points": 45,
       "adaptive_min_risk_points": 25,
@@ -196,7 +196,6 @@
       "stale_threshold_seconds": 15,
       "best_session": "13:30-21:00 BST",
       "trading_session_whitelist": [
-        "london_morning",
         "london_us_overlap",
         "us_afternoon"
       ]
@@ -225,6 +224,7 @@
     },
     "germany_40": {
       "enabled": false,
+      "_note": "Disabled: IG DEMO Lightstreamer rejects IX.D.DAX.IFM.IP — verify epic on account before enabling",
       "name": "Germany 40",
       "epic": "IX.D.DAX.IFM.IP",
       "best_session": "08:00-16:30 BST",
@@ -250,7 +250,6 @@
       "epic": "IX.D.NASDAQ.IFM.IP",
       "best_session": "14:30-21:00 BST",
       "trading_session_whitelist": [
-        "london_morning",
         "london_us_overlap",
         "us_afternoon"
       ],
@@ -337,7 +336,7 @@
     "limit_extension_trigger_atr_multiple": 1.5,
     "limit_extension_step_atr_multiple": 0.75,
     "limit_extension_max_extensions": 3,
-    "partial_close_enabled": false,
+    "partial_close_enabled": true,
     "partial_close_at_r": 1.5,
     "partial_close_fraction": 0.5
   },
