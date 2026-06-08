@@ -38,6 +38,10 @@ export function fetchLearningStatus() {
   return getJson("/api/learning/status");
 }
 
+export function fetchV26Profit() {
+  return getJson("/api/v26/profit");
+}
+
 export async function triggerReplay() {
   try {
     const res = await fetch(`${API_BASE}/api/replay/run`, {

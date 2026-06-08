@@ -226,6 +226,13 @@ def build_market_orchestrator(
     points_engine = PointsEngine(store)
     _startup_mark("database")
 
+    try:
+        from execution.portfolio_hooks import rehydrate_risk_guards_from_store
+
+        rehydrate_risk_guards_from_store(store, cfg=cfg)
+    except Exception as e:
+        log_engine(f"phase_b risk rehydrate skipped: {type(e).__name__}: {e}")
+
     # Quick self-test — run deployed-fixes regression suite to catch stale code
     try:
         import os

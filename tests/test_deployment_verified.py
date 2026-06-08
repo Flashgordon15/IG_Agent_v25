@@ -485,7 +485,7 @@ def test_api_shutdown_delegates_to_shutdown_cleanup() -> None:
     assert "from fastapi import APIRouter, BackgroundTasks, HTTPException" in routes
     assert "perform_shutdown_cleanup" in routes
     assert "shutdown: initiated via dashboard Stop button" in routes
-    assert "verify_fallback_url" in routes
+    assert "127.0.0.1:8081/shutdown-verify" in routes
 
 
 def test_confirm_stopped_script_exists() -> None:
@@ -514,8 +514,11 @@ def test_shutdown_verify_server_and_dashboard_integration() -> None:
     assert "BackgroundTasks" in routes_src
     main_src = _MAIN_PY.read_text(encoding="utf-8")
     assert "-sTCP:LISTEN" in main_src
+    verify_src = verify.read_text(encoding="utf-8")
+    assert '("0.0.0.0", VERIFY_PORT)' in verify_src
     app_src = app.read_text(encoding="utf-8")
     assert "pollShutdownVerify" in app_src
+    assert "127.0.0.1:8081/shutdown-verify" in app_src
     assert "Fully stopped — verified" in app_src
     confirm = (_ROOT / "scripts" / "confirm_stopped.py").read_text(encoding="utf-8")
     assert "agent_fully_stopped" in confirm
@@ -783,6 +786,49 @@ def test_dashboard_shows_agent_offline_banner() -> None:
     assert "/api/health" in app
     assert "agentAlive" in app
     assert "AGENT OFFLINE" in header
+
+
+def test_dashboard_mutes_alarm_when_agent_dead() -> None:
+    """Stale trading_paused/STOP must not beep after intentional shutdown or crash."""
+    app = (_ROOT / "dashboard" / "src" / "App.jsx").read_text(encoding="utf-8")
+    assert "!agentAlive" in app
+    assert 'shutdownState !== "idle" || !agentAlive' in app
+
+
+def test_dashboard_persists_deliberate_stop_in_session() -> None:
+    """Stop Agent must survive tab refresh via sessionStorage (10 min TTL)."""
+    app = (_ROOT / "dashboard" / "src" / "App.jsx").read_text(encoding="utf-8")
+    assert "ig_agent_deliberate_stop_ts" in app
+    assert "markDeliberateStop" in app
+    assert "clearDeliberateStop" in app
+    assert "isRecentDeliberateStop" in app
+    assert "600_000" in app
+    assert "markDeliberateStop();" in app
+
+
+def test_dashboard_recovers_stopped_screen_on_stale_tab() -> None:
+    """Stale tabs must auto-show the stopped screen after deliberate shutdown."""
+    app = (_ROOT / "dashboard" / "src" / "App.jsx").read_text(encoding="utf-8")
+    assert "recoverStoppedScreen" in app
+    assert 'data?.status === "done" && data?.ok === true' in app
+    assert "recovered_from_session" in app
+
+
+def test_dashboard_offline_overlay_when_agent_down() -> None:
+    """Crash or stale tab without deliberate stop shows calm offline message — no alarm."""
+    app = (_ROOT / "dashboard" / "src" / "App.jsx").read_text(encoding="utf-8")
+    assert "Agent is not running" in app
+    assert "relaunch from the desktop icon" in app
+    assert "agentOfflineChecked" in app
+
+
+def test_shutdown_verify_server_serves_long_after_done() -> None:
+    """Verifier must answer stale-tab polls for manual_stop TTL (600s)."""
+    verify = (_ROOT / "scripts" / "shutdown_verify_server.py").read_text(
+        encoding="utf-8"
+    )
+    assert "serve_deadline[0] = time.monotonic() + 600.0" in verify
+    assert "thread.join(timeout=605.0)" in verify
 
 
 def test_safe_to_leave_runtime_heartbeat_check() -> None:

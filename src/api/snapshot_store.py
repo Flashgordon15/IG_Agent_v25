@@ -60,13 +60,20 @@ def set_snapshot_path_for_tests(path: Path | str | None) -> None:
 
 
 def reset_snapshot_store_for_tests() -> None:
-    global _cached, _cached_mtime, _subscribers
+    global \
+        _cached, \
+        _cached_mtime, \
+        _subscribers, \
+        _last_hub_push_ts, \
+        _hub_push_min_interval
     global _cached_uptime, _cached_position_sync_status, _cached_ohlc_markets_cached
     with _lock:
         _path_override = None
         _cached = build_default_tick()
         _cached_mtime = 0.0
         _subscribers.clear()
+        _last_hub_push_ts = 0.0
+        _hub_push_min_interval = 0.25
         _cached_uptime = None
         _cached_position_sync_status = None
         _cached_ohlc_markets_cached = None

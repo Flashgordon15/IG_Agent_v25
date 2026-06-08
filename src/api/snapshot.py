@@ -21,7 +21,10 @@ GATE_NAMES: tuple[str, ...] = (
     "environment_fitness",
     "points_state",
     "risk_validation",
+    "expectancy_ok",
+    "calendar_ok",
     "signal_confidence",
+    "ml_veto",
     "execution",
 )
 
@@ -196,7 +199,10 @@ def enrich_signal_thresholds(tick: dict[str, Any]) -> None:
 def _log_signal_keys_once(tick: dict[str, Any]) -> None:
     """One-time debug line to launcher.log — confirms normalize_tick signal shape."""
     global _DEBUG_SIGNAL_KEYS_LOGGED
-    if _DEBUG_SIGNAL_KEYS_LOGGED or os.environ.get("IG_AGENT_PYTEST", "").strip() == "1":
+    if (
+        _DEBUG_SIGNAL_KEYS_LOGGED
+        or os.environ.get("IG_AGENT_PYTEST", "").strip() == "1"
+    ):
         return
     _DEBUG_SIGNAL_KEYS_LOGGED = True
     signal = tick.get("signal")

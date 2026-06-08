@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -121,6 +122,19 @@ class ApiServerTests(unittest.TestCase):
         register_close_handler(_missing)
         r = self.client.post("/api/close/UNKNOWN")
         self.assertEqual(r.status_code, 404)
+
+    def test_shutdown_post_returns_ok_not_422(self) -> None:
+        with (
+            patch("api.routes.os._exit"),
+            patch("system.shutdown_cleanup.spawn_post_shutdown_verifier"),
+            patch("system.shutdown_cleanup.mark_manual_stop"),
+            patch("api.agent_health.stop_watchdog"),
+        ):
+            r = self.client.post("/api/shutdown")
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertTrue(body.get("ok"))
+        self.assertEqual(body.get("status"), "shutting_down")
 
     def test_snapshot_persisted_to_disk(self) -> None:
         tick = build_default_tick()

@@ -20,20 +20,58 @@
     "active_wr_min": 0.52,
     "rolling_days": 14
   },
+  "s2_momentum": {
+    "default_min_range_pct": 0.0008,
+    "epic_overrides": {}
+  },
+  "s4_ml_meta": {
+    "enabled": true,
+    "models_dir": "data_lake/models/s4",
+    "min_decided_rows": 30,
+    "min_val_wr": 0.52,
+    "val_holdout_pct": 0.2
+  },
   "ml_veto": {
-    "enabled": false,
+    "enabled": true,
+    "use_s4_models": true,
     "mode": "veto",
+    "_note": "EUR/USD only — S4 veto-eligible after 6-bar label refresh (val WR 54.0%). Whitelist via per_epic.",
     "min_labelled_rows": 500,
     "min_probability": 0.58,
     "min_probability_high_conf": 0.55,
     "setup_specific_thresholds": true,
-    "blend_fallback": false
+    "blend_fallback": false,
+    "per_epic": {
+      "CS.D.EURUSD.CFD.IP": {
+        "enabled": true,
+        "min_probability": 0.53
+      }
+    }
+  },
+  "shadow_service": {
+    "enabled": true,
+    "tail_poll_sec": 2.0,
+    "snapshot_refresh_minutes": 60,
+    "skip_in_pytest": true,
+    "catch_up_on_start": true,
+    "persist_offsets": true
+  },
+  "learning": {
+    "label_horizon": "6bar"
+  },
+  "s1_rules": {
+    "independent_enabled": true,
+    "independent_threshold": 72
+  },
+  "portfolio_gate": {
+    "enabled": true
   },
   "regime": {
-    "calendar_enabled": false,
+    "calendar_enabled": true,
     "calendar_file": "config/calendar.json",
     "atr_percentile_block_above": 95,
-    "same_direction_soft_cap": 3
+    "same_direction_soft_cap": 3,
+    "max_same_direction_risk_gbp": 400
   },
   "milestones": {
     "current": "M0",
@@ -45,5 +83,14 @@
       "M3": 500,
       "M4": 1000
     }
+  },
+  "certification": {
+    "l4_window_days": 14,
+    "l4_median_daily_gbp": 100,
+    "l4_min_profit_factor": 1.2,
+    "l4_min_trading_days": 7,
+    "l5_window_days": 14,
+    "l5_days_required": 10,
+    "l5_daily_target_gbp": 250
   }
 }

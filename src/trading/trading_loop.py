@@ -105,6 +105,44 @@ def signal_gate_explanation(sig: SignalResult, threshold: float) -> tuple[str, s
     return f"WAIT — no tradable direction ({conf:.1f}%)", "no BUY/SELL on closed bar"
 
 
+def _feeder_bar_from_snapshot(
+    snap: dict[str, Any],
+) -> tuple[str, dict[str, float]] | None:
+    """Extract closed-bar OHLC for feeder ``bar_close`` (handles pandas Series)."""
+    last_raw = snap.get("last")
+    last: dict[str, Any] = {}
+    if isinstance(last_raw, dict):
+        last = last_raw
+    elif last_raw is not None:
+        try:
+            import pandas as pd
+
+            if isinstance(last_raw, pd.Series):
+                last = last_raw.to_dict()
+            elif hasattr(last_raw, "to_dict"):
+                last = last_raw.to_dict()
+        except Exception:
+            return None
+    bar_time = str(last.get("time") or snap.get("bar_time") or "").strip()
+    if not bar_time or not last:
+        return None
+
+    def _f(key: str, alt: str | None = None) -> float:
+        try:
+            val = last.get(key) if alt is None else last.get(key, last.get(alt))
+            return float(val or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    return bar_time, {
+        "open": _f("open", "price"),
+        "high": _f("high", "price"),
+        "low": _f("low", "price"),
+        "close": _f("close", "price"),
+        "volume": _f("volume"),
+    }
+
+
 def _atr_from_signal_snapshot(snapshot: dict[str, Any] | None) -> float:
     if not snapshot:
         return 0.0
@@ -211,6 +249,8 @@ class TradingLoop:
         self._market_constraints_cache: dict[str, Any] = {}
         self._market_constraints_fetched: bool = False
         self._feeder_last_bar_key: str | None = None
+        self._last_ml_prob: float | None = None
+        self._last_sig_direction: str = "WAIT"
 
     @property
     def config(self) -> Config:
@@ -578,9 +618,9 @@ class TradingLoop:
                     gates_passed=gates_passed,
                     ml_probability=ml_f,
                 )
-                last = snap.get("last") if isinstance(snap.get("last"), dict) else {}
-                bar_time = str(last.get("time") or snap.get("bar_time") or "")
-                if bar_time and last:
+                bar_payload = _feeder_bar_from_snapshot(snap)
+                if bar_payload is not None:
+                    bar_time, ohlc = bar_payload
                     bar_key = f"{epic}:{bar_time}"
                     if bar_key != self._feeder_last_bar_key:
                         self._feeder_last_bar_key = bar_key
@@ -589,12 +629,44 @@ class TradingLoop:
                             market=market,
                             session=session,
                             bar_time=bar_time,
-                            open_=float(last.get("open", last.get("price", 0)) or 0),
-                            high=float(last.get("high", last.get("price", 0)) or 0),
-                            low=float(last.get("low", last.get("price", 0)) or 0),
-                            close=float(last.get("close", last.get("price", 0)) or 0),
-                            volume=float(last.get("volume", 0) or 0),
+                            open_=ohlc["open"],
+                            high=ohlc["high"],
+                            low=ohlc["low"],
+                            close=ohlc["close"],
+                            volume=ohlc["volume"],
                         )
+
+            if self._tick_count % 12 == 0:
+                from feeder.event_bus import emit_regime_snapshot
+
+                fit_gate = next(
+                    (g for g in gates if g.name == "environment_fitness"), None
+                )
+                pts_gate = next((g for g in gates if g.name == "points_state"), None)
+                fitness = None
+                if fit_gate and isinstance(fit_gate.value, (int, float)):
+                    fitness = float(fit_gate.value)
+                elif fit_gate and isinstance(fit_gate.value, dict):
+                    fitness = fit_gate.value.get("fitness")
+                vol_regime = ""
+                if sig_gate and isinstance(sig_gate.value, dict):
+                    raw_sig = sig_gate.value.get("signal")
+                    if isinstance(raw_sig, SignalResult):
+                        snap = raw_sig.snapshot or {}
+                        vol_regime = str(snap.get("vol_regime") or "")
+                points_state = ""
+                if pts_gate and isinstance(pts_gate.value, dict):
+                    points_state = str(pts_gate.value.get("state") or "")
+                spread = max(0.0, float(quote.offer) - float(quote.bid))
+                emit_regime_snapshot(
+                    epic=epic,
+                    market=market,
+                    session=session,
+                    fitness=float(fitness) if fitness is not None else None,
+                    vol_regime=vol_regime,
+                    points_state=points_state,
+                    spread=spread,
+                )
 
             if self._tick_count % 60 == 0:
                 spread = max(0.0, float(quote.offer) - float(quote.bid))
@@ -837,8 +909,14 @@ class TradingLoop:
                     results.append(self._gate_points_state())
                 elif name == "risk_validation":
                     results.append(self._gate_risk_validation(quote))
+                elif name == "expectancy_ok":
+                    results.append(self._gate_expectancy_ok())
+                elif name == "calendar_ok":
+                    results.append(self._gate_calendar_ok())
                 elif name == "signal_confidence":
                     results.append(self._gate_signal_confidence())
+                elif name == "ml_veto":
+                    results.append(self._gate_ml_veto())
                 elif name == "execution":
                     prior_ok = bool(results) and all(r.passed for r in results)
                     rate_ok, rate_detail = self._rate_limit_gate_status()
@@ -1170,36 +1248,15 @@ class TradingLoop:
     def _dynamic_max_per_epic(
         self, base_cap: int, open_count: int, tracker: Any
     ) -> tuple[int, str]:
-        """Scale the per-epic position cap above base_cap when conditions are favourable.
+        from trading.position_ladder import dynamic_max_per_epic
 
-        Tiers (all require points state = HEALTHY):
-          base_cap + 1: all open positions on this epic have pnl_gbp > 0
-          base_cap + 2: same AND oldest open position is >= 20 minutes old
-
-        The age guard prevents stacking into a brand-new position that happens
-        to be briefly green. The "all profitable" guard prevents adding to a
-        losing move. Returns (effective_max, reason_string).
-        """
-        if self._points.get_state() != "HEALTHY":
-            return base_cap, f"base ({self._points.get_state()})"
-        if open_count == 0:
-            return base_cap, "base"
-
-        snap = tracker.snapshot()
-        epic_pos = [p for p in snap.get("positions", []) if p.get("epic") == self._epic]
-        if not epic_pos:
-            return base_cap, "base"
-
-        pnl_values = [p.get("pnl_gbp") for p in epic_pos]
-        all_profitable = all(v is not None and float(v) > 0 for v in pnl_values)
-        if not all_profitable:
-            return base_cap, "not all positions profitable"
-
-        open_mins_vals = [float(p.get("open_mins") or 0) for p in epic_pos]
-        oldest_mins = max(open_mins_vals)
-        if oldest_mins >= 20:
-            return base_cap + 2, f"all profitable, oldest {oldest_mins:.0f}m"
-        return base_cap + 1, f"all profitable, oldest {oldest_mins:.0f}m"
+        return dynamic_max_per_epic(
+            epic=self._epic,
+            base_cap=base_cap,
+            open_count=open_count,
+            points_state=self._points.get_state(),
+            tracker=tracker,
+        )
 
     def _gate_risk_validation(self, quote: Quote) -> GateResult:
         from execution.market_suspension import gate_detail, is_blocked
@@ -1286,7 +1343,17 @@ class TradingLoop:
         risk_gbp = stop * actual_size * point_value
         risk_ok = risk_gbp <= risk_cap
 
-        passed = spread_ok and position_ok and risk_ok
+        portfolio_ok = True
+        portfolio_detail = ""
+        try:
+            from system.portfolio_envelope import can_allocate, portfolio_gate_enabled
+
+            if portfolio_gate_enabled():
+                portfolio_ok, portfolio_detail = can_allocate(risk_gbp)
+        except Exception:
+            portfolio_ok = True
+
+        passed = spread_ok and position_ok and risk_ok and portfolio_ok
         if not spread_ok:
             detail = (
                 f"spread {spread:.1f} > {spread_cap:.1f} "
@@ -1310,6 +1377,8 @@ class TradingLoop:
                 f"(stop {stop:.1f} × size {actual_size:.2g} × £/pt {point_value:.2f}"
                 f"{', IG min' if actual_size > effective_size else ''})"
             )
+        elif not portfolio_ok:
+            detail = f"portfolio envelope: {portfolio_detail}"
         else:
             clip_note = f", clipped to {actual_size:.3g}" if size_was_clipped else ""
             detail = (
@@ -1342,6 +1411,64 @@ class TradingLoop:
                 "risk_cap_gbp": risk_cap,
                 "points_state": self._points.get_state(),
             },
+            detail=detail,
+        )
+
+    def _gate_calendar_ok(self) -> GateResult:
+        from system.calendar_gate import is_calendar_blocked
+        from system.v26_config import calendar_settings
+
+        cfg = calendar_settings()
+        if not cfg.get("enabled"):
+            return GateResult(
+                name="calendar_ok",
+                passed=True,
+                value="off",
+                detail="calendar guard disabled (config_v26.json)",
+            )
+        blocked, reason = is_calendar_blocked(str(getattr(self, "_epic", "") or ""))
+        return GateResult(
+            name="calendar_ok",
+            passed=not blocked,
+            value={"blocked": blocked},
+            detail=reason if blocked else "no high-impact event window",
+        )
+
+    def _gate_expectancy_ok(self) -> GateResult:
+        from system.setup_registry import (
+            is_gate_enabled,
+            is_setup_banned,
+            setup_status,
+        )
+
+        if not is_gate_enabled():
+            return GateResult(
+                name="expectancy_ok",
+                passed=True,
+                value="off",
+                detail="setup registry inactive (no banned setups)",
+            )
+        sig = self._signal_engine.evaluate(self._market)
+        setup_key = str(sig.setup_key or "")
+        if not setup_key:
+            return GateResult(
+                name="expectancy_ok",
+                passed=True,
+                value="—",
+                detail="no setup key yet",
+            )
+        status = setup_status(setup_key)
+        banned = is_setup_banned(setup_key)
+        passed = not banned
+        detail = (
+            f"setup BANNED (14d E£/WR): {setup_key[:56]}"
+            if banned
+            else f"setup {status}: {setup_key[:56]}"
+        )
+        return GateResult(
+            name="expectancy_ok",
+            passed=passed,
+            value=status,
             detail=detail,
         )
 
@@ -1443,8 +1570,13 @@ class TradingLoop:
                     )
             except Exception as e:
                 log_engine(f"ML gate blend skipped: {type(e).__name__}: {e}")
+        self._last_ml_prob = ml_prob
+        self._last_sig_direction = str(sig.signal or "WAIT")
         passed = sig.signal in ("BUY", "SELL") and conf >= threshold
         detail, block_reason = signal_gate_explanation(sig, threshold)
+        pts_state = self._points.get_state()
+        if pts_state == "WARNING" and threshold >= 90.0:
+            detail = f"{detail} (points {pts_state} — need >={threshold:.0f}%)"
         snap = sig.snapshot or {}
         return GateResult(
             name="signal_confidence",
@@ -1467,6 +1599,94 @@ class TradingLoop:
                 "setup": sig.setup_key,
             },
             detail=detail,
+        )
+
+    def _gate_ml_veto(self) -> GateResult:
+        from system.v26_config import (
+            epic_min_probability,
+            epic_ml_veto_enabled,
+            ml_veto_settings,
+        )
+
+        cfg = ml_veto_settings()
+        if not cfg.get("enabled"):
+            return GateResult(
+                name="ml_veto",
+                passed=True,
+                value="off",
+                detail="ml_veto disabled (config_v26.json)",
+            )
+        epic = str(getattr(self, "_epic", "") or "")
+        if epic and not epic_ml_veto_enabled(epic):
+            return GateResult(
+                name="ml_veto",
+                passed=True,
+                value="epic_off",
+                detail=f"ml_veto off for {epic}",
+            )
+        direction = self._last_sig_direction
+        if direction not in ("BUY", "SELL"):
+            return GateResult(
+                name="ml_veto",
+                passed=True,
+                value="WAIT",
+                detail="no directional signal",
+            )
+        ml_prob = self._last_ml_prob
+        ml_source = "v25_blend"
+        if cfg.get("use_s4_models"):
+            try:
+                from trading.v26_ml_scorer import get_v26_ml_scorer
+
+                v26 = get_v26_ml_scorer()
+                if epic and v26.is_eligible(epic):
+                    sig = self._signal_engine.evaluate(self._market)
+                    snap = sig.snapshot or {}
+                    _last_raw = snap.get("last")
+                    last = (
+                        _last_raw
+                        if (_last_raw is not None and hasattr(_last_raw, "get"))
+                        else {}
+                    )
+                    stop = max(1.0, float(self._config.stop_distance_points))
+                    atr = float(last.get("atr", 0) or 0)
+                    feats = {
+                        "adjusted_score": float(sig.adjusted_confidence),
+                        "rsi": float(last.get("rsi", 0) or 0),
+                        "atr_ratio": atr / stop,
+                    }
+                    s4_prob = v26.score(epic, feats, timeout_s=0.5)
+                    if s4_prob is not None:
+                        ml_prob = s4_prob
+                        ml_source = "s4_v26"
+            except Exception as e:
+                log_engine(f"ml_veto S4 scorer skipped: {type(e).__name__}: {e}")
+        if ml_prob is None:
+            return GateResult(
+                name="ml_veto",
+                passed=True,
+                value=None,
+                detail="ML unavailable — veto skipped",
+            )
+        min_p = (
+            epic_min_probability(epic)
+            if epic
+            else float(cfg.get("min_probability") or 0.58)
+        )
+        passed = float(ml_prob) >= min_p
+        return GateResult(
+            name="ml_veto",
+            passed=passed,
+            value={
+                "ml_probability": ml_prob,
+                "min_probability": min_p,
+                "source": ml_source,
+            },
+            detail=(
+                f"{ml_source} prob {ml_prob:.3f} ≥ {min_p:.3f}"
+                if passed
+                else f"{ml_source} prob {ml_prob:.3f} < {min_p:.3f} (veto)"
+            ),
         )
 
     def _daily_loss_gbp(self) -> float:

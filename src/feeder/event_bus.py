@@ -149,6 +149,34 @@ def emit_signal_eval(
     )
 
 
+def emit_regime_snapshot(
+    *,
+    epic: str,
+    market: str,
+    session: str,
+    fitness: float | None = None,
+    vol_regime: str = "",
+    points_state: str = "",
+    spread: float | None = None,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "fitness": fitness,
+        "vol_regime": vol_regime,
+        "points_state": points_state,
+        "spread": spread,
+    }
+    if extra:
+        payload.update(extra)
+    emit(
+        "regime_snapshot",
+        epic=epic,
+        market=market,
+        session=session,
+        payload=payload,
+    )
+
+
 def emit_gate_result(
     *,
     epic: str,

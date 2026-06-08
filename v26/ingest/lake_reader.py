@@ -31,6 +31,18 @@ def events_dir() -> Path:
     return _project_root() / "data_lake" / "events"
 
 
+def utc_today() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def event_utc_day(row: dict[str, Any]) -> str:
+    """UTC calendar day for a feeder row (from ``ts``), else today."""
+    ts = str(row.get("ts") or "").strip()
+    if len(ts) >= 10 and ts[4] == "-" and ts[7] == "-":
+        return ts[:10]
+    return utc_today()
+
+
 def iter_events(
     *,
     day: str | None = None,

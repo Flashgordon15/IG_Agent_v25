@@ -11,7 +11,7 @@
   "learning_enabled": true,
   "trade_size": 1.0,
   "currency_code": "USD",
-  "one_position_per_epic": true,
+  "one_position_per_epic": false,
   "cooldown_seconds": 180,
   "adaptive_execution_enabled": true,
   "adaptive_min_adjusted_confidence": 80,
@@ -117,7 +117,8 @@
       ]
     },
     "eur_usd": {
-      "enabled": false,
+      "enabled": true,
+      "_note": "v26 S3 shadow + demo evaluation (London/overlap sessions)",
       "execution_priority": 50,
       "epic": "CS.D.EURUSD.CFD.IP",
       "name": "EUR/USD",
@@ -138,7 +139,8 @@
       ]
     },
     "gbp_usd": {
-      "enabled": false,
+      "enabled": true,
+      "_note": "v26 S3 shadow + demo evaluation (London/overlap sessions)",
       "execution_priority": 50,
       "epic": "CS.D.GBPUSD.CFD.IP",
       "name": "GBP/USD",

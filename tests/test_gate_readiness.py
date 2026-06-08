@@ -1,4 +1,4 @@
-"""Tests for aggregate trade readiness across the 7 gates."""
+"""Tests for aggregate trade readiness across entry gates."""
 
 from __future__ import annotations
 
@@ -121,11 +121,19 @@ class TestComputeTradeReadiness(unittest.TestCase):
     def test_dict_gates_from_snapshot(self) -> None:
         gates = [
             {"name": "session_open", "pass": True, "value": True},
-            {"name": "cold_start_gap", "pass": False, "value": {"cold": True, "gap": False, "bars": 6}},
+            {
+                "name": "cold_start_gap",
+                "pass": False,
+                "value": {"cold": True, "gap": False, "bars": 6},
+            },
             {"name": "environment_fitness", "pass": False, "value": {"score": 40}},
             {"name": "points_state", "pass": False},
             {"name": "risk_validation", "pass": False},
-            {"name": "signal_confidence", "pass": False, "value": {"confidence": 80, "threshold": 80}},
+            {
+                "name": "signal_confidence",
+                "pass": False,
+                "value": {"confidence": 80, "threshold": 80},
+            },
             {"name": "execution", "pass": False},
         ]
         # session=1.0, cold(bars=6)=1.0, env(40/55)=0.727, points=0, risk=0, sig(80/80)=1.0, exec=0

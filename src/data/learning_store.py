@@ -651,6 +651,23 @@ class LearningStore:
                 log_engine(
                     f"ml_training_store exit hook failed: {type(e).__name__}: {e}"
                 )
+            try:
+                from execution.portfolio_hooks import record_portfolio_exit_for_deal
+
+                side_row = self.conn.execute(
+                    "SELECT side FROM trades WHERE id=?", (row["id"],)
+                ).fetchone()
+                record_portfolio_exit_for_deal(
+                    str(deal_id or deal_reference),
+                    pnl_gbp=float(ig_pnl or 0),
+                    direction=str(side_row["side"] or "") if side_row else "",
+                )
+            except Exception as e:
+                from system.engine_log import log_engine
+
+                log_engine(
+                    f"portfolio_envelope exit hook failed: {type(e).__name__}: {e}"
+                )
         return ok
 
     def _rebuild_stats_for(self, setup_key: str) -> None:

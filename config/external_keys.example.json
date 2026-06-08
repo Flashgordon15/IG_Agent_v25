@@ -1,0 +1,5 @@
+{
+  "_note": "Copy to config/external_keys.json (gitignored) or export env vars instead.",
+  "finnhub_api_key": "YOUR_FINNHUB_KEY",
+  "alphavantage_api_key": "YOUR_ALPHA_VANTAGE_KEY"
+}

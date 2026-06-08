@@ -193,11 +193,21 @@ class LiveExecutor:
             )
 
         size = float(execution_params.get("size", cfg.trade_size))
+        stop_pts = float(
+            execution_params.get("risk")
+            or execution_params.get("stop_distance")
+            or execution_params.get("stop_pts")
+            or 0
+        )
+        point_value = float(cfg.get("ig_point_value_gbp", 1.0))
+        proposed_risk_gbp = (
+            stop_pts * size * point_value if stop_pts > 0 and size > 0 else 0.0
+        )
 
         try:
             from execution.correlation_guard import check_and_record as _cg_check
 
-            cg_ok, cg_reason = _cg_check(signal.direction)
+            cg_ok, cg_reason = _cg_check(signal.direction, risk_gbp=proposed_risk_gbp)
             if not cg_ok:
                 update_demo_diagnostics(last_rejection=cg_reason)
                 trace_execution(
@@ -720,6 +730,28 @@ class LiveExecutor:
                     f"ml_training_store entry skipped deal={deal_id}: "
                     f"{type(e).__name__}: {e}"
                 )
+            try:
+                from execution.portfolio_hooks import record_portfolio_entry_from_signal
+
+                record_portfolio_entry_from_signal(
+                    deal_id,
+                    signal,
+                    execution_params,
+                    config=cfg,
+                )
+            except Exception as e:
+                log_engine(
+                    f"portfolio_envelope entry skipped deal={deal_id}: "
+                    f"{type(e).__name__}: {e}"
+                )
+            try:
+                from execution.correlation_guard import confirm_direction_risk
+
+                entry_risk = stop_pts * size * point_value
+                if entry_risk > 0:
+                    confirm_direction_risk(signal.direction, entry_risk)
+            except Exception:
+                pass
         if deal_id and hasattr(self._client, "ensure_protective_stops"):
             self._client.ensure_protective_stops(
                 deal_id,

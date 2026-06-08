@@ -30,6 +30,32 @@ from trading.ohlc_cache_paths import ohlc_cache_path
 OUTPUT_PATH = ROOT / "src" / "data" / "replay_results.jsonl"
 WARMUP_BARS = 4
 
+# Yahoo seeder assigns 15.0 to all non-FX indices; that exceeds max_spread for US
+# indices and triggers a 50% score penalty in SignalEngine (scores cap at ~50).
+_REPLAY_DEFAULT_SPREADS: dict[str, float] = {
+    "IX.D.DOW.IFM.IP": 3.0,
+    "IX.D.NASDAQ.IFM.IP": 2.0,
+    "IX.D.NIKKEI.IFM.IP": 8.0,
+    "IX.D.DAX.IFM.IP": 2.0,
+}
+
+
+def _effective_spread(epic: str, bar: dict, cfg: Any | None = None) -> float:
+    """Spread for replay scoring — replaces Yahoo placeholder when above max_spread."""
+    try:
+        h = float(bar.get("h") or 0)
+        lo = float(bar.get("l") or 0)
+        c = float(bar.get("c") or 0)
+    except (TypeError, ValueError):
+        h = lo = c = 0.0
+    raw = float(bar.get("spread") or max(1.0, h - lo))
+    max_sp = (
+        float(getattr(cfg, "max_spread_points", 0) or 0) if cfg is not None else 0.0
+    )
+    if max_sp > 0 and raw > max_sp:
+        return float(_REPLAY_DEFAULT_SPREADS.get(str(epic or "").upper(), max_sp * 0.5))
+    return raw
+
 
 def _load_bars(path: Path) -> list[dict]:
     if not path.is_file():
@@ -47,14 +73,18 @@ def _load_bars(path: Path) -> list[dict]:
     return bars
 
 
-def _bar_to_quote(bar: dict) -> Quote | None:
+def _bar_to_quote(bar: dict, *, spread_override: float | None = None) -> Quote | None:
     try:
         c = float(bar.get("c") or 0)
         h = float(bar.get("h") or 0)
         low = float(bar.get("l") or 0)
         if c <= 0 or h <= 0 or low <= 0:
             return None
-        spread = float(bar.get("spread") or max(1.0, h - low))
+        spread = (
+            float(spread_override)
+            if spread_override is not None
+            else float(bar.get("spread") or max(1.0, h - low))
+        )
         bid = c - spread / 2.0
         offer = c + spread / 2.0
         t = _parse_bar_time(str(bar.get("t") or ""))
@@ -71,6 +101,28 @@ def _forward_extremes(bars: list[dict], idx: int, n: int) -> tuple[float, float,
     lows = [float(b.get("l") or b.get("c") or 0) for b in window]
     closes = [float(b.get("c") or 0) for b in window]
     return max(highs), min(lows), closes[-1]
+
+
+def _stop_price_delta(epic: str, stop_pts: float) -> float:
+    """Convert IG ``stop_distance_points`` to price units for forward labels."""
+    if stop_pts <= 0:
+        return 0.0
+    key = str(epic or "").upper()
+    # FX CFDs: stop_distance_points are pip-style (1 pt = 0.0001 on 5dp majors).
+    if any(
+        token in key
+        for token in (
+            "EURUSD",
+            "GBPUSD",
+            "AUDUSD",
+            "USDJPY",
+            "EURGBP",
+            "USDCAD",
+            "NZDUSD",
+        )
+    ):
+        return stop_pts * 1e-4
+    return stop_pts
 
 
 def _label_direction(
@@ -135,7 +187,7 @@ def _replay_batch(
             c = float(b.get("c") or 0)
             h = float(b.get("h") or c)
             lo = float(b.get("l") or c)
-            sp = float(b.get("spread") or max(1.0, h - lo))
+            sp = _effective_spread(epic, b, cfg)
             if c <= 0:
                 continue
             rows.append(
@@ -371,11 +423,12 @@ def _replay_batch(
         if fired:
             fired_count += 1
 
+        stop_delta = _stop_price_delta(epic, stop_pts)
         label_3 = _label_direction(
-            direction, entry, fwd_high=fh3, fwd_low=fl3, stop_pts=stop_pts
+            direction, entry, fwd_high=fh3, fwd_low=fl3, stop_pts=stop_delta
         )
         label_6 = _label_direction(
-            direction, entry, fwd_high=fh6, fwd_low=fl6, stop_pts=stop_pts
+            direction, entry, fwd_high=fh6, fwd_low=fl6, stop_pts=stop_delta
         )
         if fired:
             labels_3[label_3] = labels_3.get(label_3, 0) + 1
@@ -470,7 +523,7 @@ def replay_one(
     labels_3: dict[str, int] = {"WIN": 0, "LOSS": 0, "BREAKEVEN": 0}
 
     for i, bar in enumerate(bars):
-        quote = _bar_to_quote(bar)
+        quote = _bar_to_quote(bar, spread_override=_effective_spread(epic, bar, cfg))
         if quote is None:
             continue
         engine.add_quote(market, quote)
@@ -516,11 +569,12 @@ def replay_one(
             atr_series = c5i["atr"]
         regime = str(snap.get("vol_regime") or vol_regime(atr_series))
 
+        stop_delta = _stop_price_delta(epic, stop_pts)
         label_3 = _label_direction(
-            direction, entry, fwd_high=fh3, fwd_low=fl3, stop_pts=stop_pts
+            direction, entry, fwd_high=fh3, fwd_low=fl3, stop_pts=stop_delta
         )
         label_6 = _label_direction(
-            direction, entry, fwd_high=fh6, fwd_low=fl6, stop_pts=stop_pts
+            direction, entry, fwd_high=fh6, fwd_low=fl6, stop_pts=stop_delta
         )
         if fired:
             labels_3[label_3] = labels_3.get(label_3, 0) + 1
@@ -536,7 +590,7 @@ def replay_one(
                 "adjusted_score": round(adj_score, 1),
                 "rsi": round(rsi_val, 1) if rsi_val is not None else None,
                 "atr": round(atr_val, 4) if atr_val is not None else None,
-                "spread": round(float(bar.get("spread") or quote.spread), 4),
+                "spread": round(_effective_spread(epic, bar, cfg), 4),
                 "vol_regime": regime,
                 "setup_key": sig.setup_key,
                 "fired": fired,
@@ -581,6 +635,11 @@ def _parse_args() -> argparse.Namespace:
         default=300,
         help="Sliding quote window size for replay (default: 300, overrides max_live_quotes). "
         "Smaller = faster; 300 is enough for EMA/RSI/ATR calculations.",
+    )
+    parser.add_argument(
+        "--batch",
+        action="store_true",
+        help="Fast vectorised replay (may under-score vs live engine; default uses SignalEngine)",
     )
     return parser.parse_args()
 
@@ -629,14 +688,24 @@ def main() -> int:
         threshold = float(cfg.signal_threshold)
         stop_pts = float(getattr(cfg, "stop_distance_points", 45) or 45)
 
-        records, summary = _replay_batch(
-            epic=epic,
-            market=market,
-            bars=bars,
-            cfg=cfg,
-            stop_pts=stop_pts,
-            threshold=threshold,
-        )
+        if args.batch:
+            records, summary = _replay_batch(
+                epic=epic,
+                market=market,
+                bars=bars,
+                cfg=cfg,
+                stop_pts=stop_pts,
+                threshold=threshold,
+            )
+        else:
+            records, summary = replay_one(
+                epic=epic,
+                market=market,
+                cache_path=cache_path,
+                base_cfg=base_cfg,
+                inst=inst,
+                window=args.window,
+            )
         summary["cache"] = str(cache_path)
 
         mode = "a" if OUTPUT_PATH.stat().st_size > 0 else "w"

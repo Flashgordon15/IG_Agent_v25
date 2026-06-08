@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from ingest.lake_reader import summarize_day
+from ingest.lake_reader import event_utc_day, summarize_day, utc_today
 
 
 def test_summarize_day(tmp_path: Path, monkeypatch) -> None:
@@ -40,3 +40,13 @@ def test_summarize_day(tmp_path: Path, monkeypatch) -> None:
     assert s.would_fire == 1
     assert s.fill_closes == 1
     assert s.fill_pnl_gbp == 50.0
+
+
+def test_event_utc_day_from_ts() -> None:
+    row = {"ts": "2026-06-08T01:20:03Z", "event_type": "signal_eval"}
+    assert event_utc_day(row) == "2026-06-08"
+
+
+def test_utc_today_format() -> None:
+    assert len(utc_today()) == 10
+    assert utc_today()[4] == "-"

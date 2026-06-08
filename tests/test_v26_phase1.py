@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from shadow.runner import process_day_events, reset_shadow_state, shadow_dir
 from strategies.s1_rules_v25 import S1RulesV25
+from strategies.s2_momentum import S2Momentum
 
 
 @pytest.fixture
@@ -43,6 +44,27 @@ def test_s1_mirrors_signal_eval_would_fire() -> None:
     assert intent is not None
     assert intent.would_trade is True
     assert intent.strategy_id == "S1_rules_v25"
+
+
+def test_s2_bar_close_breakout() -> None:
+    s2 = S2Momentum()
+    row = {
+        "event_type": "bar_close",
+        "ts": "2026-06-08T14:00:00Z",
+        "epic": "IX.D.NASDAQ.IFM.IP",
+        "market": "US Tech 100",
+        "session": "us_afternoon",
+        "payload": {
+            "open": 20000.0,
+            "high": 20100.0,
+            "low": 19950.0,
+            "close": 20100.0,
+        },
+    }
+    intent = s2.evaluate_feeder_event(row)
+    assert intent is not None
+    assert intent.would_trade is True
+    assert intent.strategy_id == "S2_momentum"
 
 
 def test_shadow_runner_writes_jsonl(lake_layout) -> None:

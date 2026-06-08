@@ -1,7 +1,7 @@
 """
 End-to-end execution pipeline tests (mocked broker).
 
-Proves: all 7 orchestrator gates pass -> execution process_tick -> execute_trade.
+Proves: all orchestrator gates pass -> execution process_tick -> execute_trade.
 Does NOT place real IG orders (safe for CI).
 
 For live DEMO routing validation (no order), run:
@@ -22,7 +22,8 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from data.models import Quote
 from execution.order_validator import ValidationResult
-from execution.trading_loop import TickOutcome, TradingLoop as ExecutionTickLoop
+from execution.trading_loop import TickOutcome
+from execution.trading_loop import TradingLoop as ExecutionTickLoop
 from execution.types import ExecutionMode, ExecutionResult, TradeSignal
 from signals.signal_engine import SignalResult
 from trading.trading_loop import TradingLoop as OrchestratorLoop
@@ -47,6 +48,7 @@ def _buy_signal(conf: float = 92.0) -> SignalResult:
 def _make_orchestrator(**overrides) -> OrchestratorLoop:
     try:
         from system.rate_limit_manager import get_rate_limit_manager
+
         get_rate_limit_manager().reset_for_tests()
     except Exception:
         pass
@@ -135,13 +137,18 @@ def _make_orchestrator(**overrides) -> OrchestratorLoop:
 
 
 class OrchestratorPipelineTests(unittest.TestCase):
-    @patch("system.market_watch.japan225_session.japan225_strategy_paused", return_value=(False, ""))
-    def test_all_seven_gates_pass_then_process_tick(self, _j225: MagicMock) -> None:
+    @patch(
+        "system.market_watch.japan225_session.japan225_strategy_paused",
+        return_value=(False, ""),
+    )
+    def test_all_gates_pass_then_process_tick(self, _j225: MagicMock) -> None:
         loop = _make_orchestrator()
         ctx = loop.run_once()
         assert ctx is not None
         self.assertTrue(ctx.all_passed)
-        self.assertEqual(len(ctx.gates), 7)
+        self.assertEqual(len(ctx.gates), 10)
+        self.assertIn("calendar_ok", [g.name for g in ctx.gates])
+        self.assertIn("ml_veto", [g.name for g in ctx.gates])
         self.assertTrue(all(g.passed for g in ctx.gates))
         loop._execution_loop.process_tick.assert_called_once()
         call = loop._execution_loop.process_tick.call_args
@@ -182,8 +189,12 @@ class ExecutionTickPipelineTests(unittest.TestCase):
             "system.market_watch.japan225_session.japan225_strategy_paused",
             return_value=(False, ""),
         ):
-            with patch("execution.live_executor.epic_has_pending_open", return_value=False):
-                outcome = tick_loop.process_tick("Japan 225", "IX.D.NIKKEI.IFM.IP", _quote())
+            with patch(
+                "execution.live_executor.epic_has_pending_open", return_value=False
+            ):
+                outcome = tick_loop.process_tick(
+                    "Japan 225", "IX.D.NIKKEI.IFM.IP", _quote()
+                )
 
         self.assertIsNotNone(outcome.execution)
         self.assertTrue(outcome.execution.success)
@@ -201,7 +212,9 @@ class ExecutionTickPipelineTests(unittest.TestCase):
         exec_engine.mode = ExecutionMode.DEMO
         exec_engine.config.max_positions_per_epic = 1
         exec_engine.update_positions.return_value = []
-        exec_engine.validate_only.return_value = ValidationResult(allowed=True, reasons=[], checks={})
+        exec_engine.validate_only.return_value = ValidationResult(
+            allowed=True, reasons=[], checks={}
+        )
         exec_engine.margin_preflight.return_value = (True, "")
         exec_engine.trade_tracker.count_open_for_epic.return_value = 0
 

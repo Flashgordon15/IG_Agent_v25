@@ -23,11 +23,23 @@ from system.paths import data_dir
 _lock = threading.Lock()
 _buy_count: int = 0
 _sell_count: int = 0
+_buy_risk_gbp: float = 0.0
+_sell_risk_gbp: float = 0.0
 _session_key: str = ""
 
 MAX_NEW_PER_DIRECTION = 5  # max new entries in the same direction per calendar day
 _enabled: bool = True
 _STATE_FILE = data_dir() / "state" / "correlation_guard.json"
+
+
+def _max_same_direction_risk_gbp() -> float:
+    try:
+        from system.v26_config import load_v26_overlay
+
+        regime = load_v26_overlay().get("regime") or {}
+        return float(regime.get("max_same_direction_risk_gbp") or 0)
+    except Exception:
+        return 0.0
 
 
 def _session_date_key() -> str:
@@ -52,6 +64,8 @@ def _persist_state() -> None:
                 {
                     "buy": _buy_count,
                     "sell": _sell_count,
+                    "buy_risk_gbp": round(_buy_risk_gbp, 2),
+                    "sell_risk_gbp": round(_sell_risk_gbp, 2),
                     "session": _session_key,
                 }
             ),
@@ -62,7 +76,7 @@ def _persist_state() -> None:
 
 
 def _load_state() -> None:
-    global _buy_count, _sell_count, _session_key
+    global _buy_count, _sell_count, _buy_risk_gbp, _sell_risk_gbp, _session_key
     if not _STATE_FILE.is_file():
         return
     try:
@@ -70,8 +84,11 @@ def _load_state() -> None:
         _session_key = str(raw.get("session") or "")
         _buy_count = int(raw.get("buy") or 0)
         _sell_count = int(raw.get("sell") or 0)
+        _buy_risk_gbp = float(raw.get("buy_risk_gbp") or 0)
+        _sell_risk_gbp = float(raw.get("sell_risk_gbp") or 0)
         log_engine(
             f"correlation_guard: restored buy={_buy_count} sell={_sell_count} "
+            f"buy_£={_buy_risk_gbp:.0f} sell_£={_sell_risk_gbp:.0f} "
             f"session={_session_key}"
         )
     except Exception as e:
@@ -83,11 +100,13 @@ _load_state()
 
 def reset_correlation_guard_for_tests() -> None:
     """Clear in-memory and on-disk guard state between pytest cases."""
-    global _buy_count, _sell_count, _session_key
+    global _buy_count, _sell_count, _buy_risk_gbp, _sell_risk_gbp, _session_key
     with _lock:
         _session_key = ""
         _buy_count = 0
         _sell_count = 0
+        _buy_risk_gbp = 0.0
+        _sell_risk_gbp = 0.0
     try:
         _STATE_FILE.unlink(missing_ok=True)
     except Exception:
@@ -95,17 +114,19 @@ def reset_correlation_guard_for_tests() -> None:
 
 
 def reset_session(*, key: str | None = None) -> None:
-    global _buy_count, _sell_count, _session_key
+    global _buy_count, _sell_count, _buy_risk_gbp, _sell_risk_gbp, _session_key
     with _lock:
         _session_key = key or _session_date_key()
         _buy_count = 0
         _sell_count = 0
+        _buy_risk_gbp = 0.0
+        _sell_risk_gbp = 0.0
         _persist_state()
     log_engine(f"correlation_guard: session reset key={_session_key}")
 
 
 def _maybe_auto_reset() -> None:
-    global _buy_count, _sell_count, _session_key
+    global _buy_count, _sell_count, _buy_risk_gbp, _sell_risk_gbp, _session_key
     today = _session_date_key()
     if not _session_key:
         _session_key = today
@@ -117,10 +138,59 @@ def _maybe_auto_reset() -> None:
         _session_key = today
         _buy_count = 0
         _sell_count = 0
+        _buy_risk_gbp = 0.0
+        _sell_risk_gbp = 0.0
         _persist_state()
 
 
-def check_and_record(direction: str) -> tuple[bool, str]:
+def rehydrate_direction_risk(
+    *,
+    buy_risk_gbp: float = 0.0,
+    sell_risk_gbp: float = 0.0,
+) -> None:
+    """Set open-position £ heat by direction (agent restart)."""
+    global _buy_risk_gbp, _sell_risk_gbp
+    with _lock:
+        _buy_risk_gbp = max(0.0, float(buy_risk_gbp))
+        _sell_risk_gbp = max(0.0, float(sell_risk_gbp))
+        _persist_state()
+    log_engine(
+        f"correlation_guard: rehydrated open risk "
+        f"BUY=£{_buy_risk_gbp:.0f} SELL=£{_sell_risk_gbp:.0f}"
+    )
+
+
+def confirm_direction_risk(direction: str, risk_gbp: float) -> None:
+    """Add open £ risk after a fill confirms (check_and_record only reserves count)."""
+    global _buy_risk_gbp, _sell_risk_gbp
+    risk = max(0.0, float(risk_gbp))
+    if risk <= 0:
+        return
+    with _lock:
+        d = str(direction or "").upper()
+        if d == "BUY":
+            _buy_risk_gbp += risk
+        elif d == "SELL":
+            _sell_risk_gbp += risk
+        _persist_state()
+
+
+def release_direction_risk(direction: str, risk_gbp: float) -> None:
+    """Release open £ risk when a position closes."""
+    global _buy_risk_gbp, _sell_risk_gbp
+    risk = max(0.0, float(risk_gbp))
+    if risk <= 0:
+        return
+    with _lock:
+        d = str(direction or "").upper()
+        if d == "BUY":
+            _buy_risk_gbp = max(0.0, _buy_risk_gbp - risk)
+        elif d == "SELL":
+            _sell_risk_gbp = max(0.0, _sell_risk_gbp - risk)
+        _persist_state()
+
+
+def check_and_record(direction: str, *, risk_gbp: float = 0.0) -> tuple[bool, str]:
     """
     Return (allowed, reason).
 
@@ -130,6 +200,8 @@ def check_and_record(direction: str) -> tuple[bool, str]:
     global _buy_count, _sell_count
     if not _enabled:
         return True, ""
+    proposed = max(0.0, float(risk_gbp))
+    max_heat = _max_same_direction_risk_gbp()
     with _lock:
         _maybe_auto_reset()
         d = str(direction or "").upper()
@@ -140,6 +212,13 @@ def check_and_record(direction: str) -> tuple[bool, str]:
                     f"correlation guard: {_buy_count} BUY entries this session "
                     f"(max {MAX_NEW_PER_DIRECTION})",
                 )
+            if max_heat > 0 and proposed > 0:
+                if _buy_risk_gbp + proposed > max_heat:
+                    return (
+                        False,
+                        f"correlation guard: BUY £{_buy_risk_gbp:.0f}+£{proposed:.0f} "
+                        f"> £{max_heat:.0f} same-direction cap",
+                    )
             _buy_count += 1
         elif d == "SELL":
             if _sell_count >= MAX_NEW_PER_DIRECTION:
@@ -148,6 +227,13 @@ def check_and_record(direction: str) -> tuple[bool, str]:
                     f"correlation guard: {_sell_count} SELL entries this session "
                     f"(max {MAX_NEW_PER_DIRECTION})",
                 )
+            if max_heat > 0 and proposed > 0:
+                if _sell_risk_gbp + proposed > max_heat:
+                    return (
+                        False,
+                        f"correlation guard: SELL £{_sell_risk_gbp:.0f}+£{proposed:.0f} "
+                        f"> £{max_heat:.0f} same-direction cap",
+                    )
             _sell_count += 1
         _persist_state()
         return True, ""
@@ -170,6 +256,9 @@ def snapshot() -> dict[str, object]:
         return {
             "buy": _buy_count,
             "sell": _sell_count,
+            "buy_risk_gbp": round(_buy_risk_gbp, 2),
+            "sell_risk_gbp": round(_sell_risk_gbp, 2),
             "max": MAX_NEW_PER_DIRECTION,
+            "max_same_direction_risk_gbp": _max_same_direction_risk_gbp(),
             "session": _session_key,
         }

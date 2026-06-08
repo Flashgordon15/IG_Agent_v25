@@ -34,18 +34,19 @@ function pct2(n) {
   return String(Math.min(99, Math.max(0, Math.round(Number(n)))));
 }
 
-/** Backend gate evaluation order — gates 1–7 fixed in UI. */
+/** Backend gate evaluation order — gates 1–8 fixed in UI. */
 const GATE_ORDER = [
   "session_open",
   "cold_start_gap",
   "environment_fitness",
   "points_state",
   "risk_validation",
+  "expectancy_ok",
   "signal_confidence",
   "execution",
 ];
 
-/** Always render gates 1–7 in GATE_ORDER (no fail-first sort). */
+/** Always render gates 1–8 in GATE_ORDER (no fail-first sort). */
 function orderGates(gates) {
   const byName = Object.fromEntries((gates || []).map((g) => [g.name, g]));
   return GATE_ORDER.map(

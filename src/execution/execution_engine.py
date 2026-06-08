@@ -74,6 +74,7 @@ class ExecutionEngine:
             store=store,
             points_engine=points_engine,
         )
+        self._validator.attach_trade_tracker(self._tracker)
         self._risk = RiskManager(config, store)
         skip_ig_exits = mode.uses_broker()
         self._trade_manager = TradeManager(
@@ -469,18 +470,31 @@ class ExecutionEngine:
         if sync is None:
             return False, ""
         try:
-            max_pos = max(1, int(self.config.max_positions_per_epic))
-            if self.config.one_position_per_epic:
-                max_pos = 1
+            from trading.position_ladder import effective_max_per_epic
+
+            local = int(self._tracker.count_open_for_epic(signal.epic))
+            max_pos, _ = effective_max_per_epic(
+                cfg=self.config,
+                epic=signal.epic,
+                open_count=local,
+                points_engine=self._points,
+                tracker=self._tracker,
+            )
             max_total = max(1, int(self.config.max_open_positions))
             ig = int(sync.count_for_epic(signal.epic))
-            local = int(self._tracker.count_open_for_epic(signal.epic))
             total = int(self._tracker.count_open_total())
             if ig != local and hasattr(sync, "sync_once"):
                 sync.sync_once()
                 ig = int(sync.count_for_epic(signal.epic))
                 local = int(self._tracker.count_open_for_epic(signal.epic))
                 total = int(self._tracker.count_open_total())
+                max_pos, _ = effective_max_per_epic(
+                    cfg=self.config,
+                    epic=signal.epic,
+                    open_count=local,
+                    points_engine=self._points,
+                    tracker=self._tracker,
+                )
             if ig >= max_pos:
                 return True, (
                     f"IG confirms {ig} open on {signal.epic} (max {max_pos} per epic)"

@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "description": "High-impact events — shadow/news guard; timed events merged with data_lake/external/finnhub_economic_calendar.json via ingest_finnhub_calendar.py",
+  "block_minutes_before": 30,
+  "block_minutes_after": 30,
+  "events": [
+    {
+      "id": "us_nfp",
+      "title": "US Non-Farm Payrolls",
+      "schedule": "first_friday_1330_utc",
+      "impact": "high",
+      "markets": ["IX.D.DOW.IFM.IP", "IX.D.NASDAQ.IFM.IP", "CS.D.EURUSD.CFD.IP"]
+    },
+    {
+      "id": "us_cpi",
+      "title": "US CPI",
+      "schedule": "monthly_1330_utc",
+      "impact": "high",
+      "markets": ["IX.D.DOW.IFM.IP", "IX.D.NASDAQ.IFM.IP", "CS.D.CFPGOLD.CFP.IP"]
+    },
+    {
+      "id": "fomc",
+      "title": "FOMC rate decision",
+      "schedule": "scheduled_1900_utc",
+      "impact": "high",
+      "markets": ["IX.D.DOW.IFM.IP", "IX.D.NASDAQ.IFM.IP", "CS.D.EURUSD.CFD.IP", "CS.D.CFPGOLD.CFP.IP"]
+    }
+  ]
+}

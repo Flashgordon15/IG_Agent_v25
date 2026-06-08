@@ -35,6 +35,10 @@ class OrderValidator:
         self.cooldown = cooldown or CooldownTracker(config.cooldown_seconds)
         self._store = store
         self._points = points_engine
+        self._trade_tracker: Any | None = None
+
+    def attach_trade_tracker(self, tracker: Any) -> None:
+        self._trade_tracker = tracker
 
     @property
     def config(self) -> Config:
@@ -119,23 +123,32 @@ class OrderValidator:
         if pending_open:
             reasons.append("Entry already in flight — awaiting IG confirm")
 
-        max_pos = cfg.max_positions_per_epic
-        if cfg.one_position_per_epic:
-            max_pos = 1
-
         count = 0
         if open_position_count:
             count = int(open_position_count(signal.epic))
         elif has_open_position and has_open_position(signal.epic):
             count = 1
         elif store_has_position and store_has_position(signal.epic):
-            count = max(count, self._store_count_fallback(store_has_position, signal.epic))
+            count = max(
+                count, self._store_count_fallback(store_has_position, signal.epic)
+            )
+
+        from trading.position_ladder import base_max_per_epic, effective_max_per_epic
+
+        trade_tracker = getattr(self, "_trade_tracker", None)
+        max_pos, ladder_reason = effective_max_per_epic(
+            cfg=cfg,
+            epic=signal.epic,
+            open_count=count,
+            points_engine=self._points,
+            tracker=trade_tracker,
+        )
 
         pos_ok = count < max_pos
         if not pos_ok:
-            reasons.append(
-                f"Max positions reached ({count}/{max_pos})"
-            )
+            base_cap = base_max_per_epic(cfg)
+            suffix = f", ladder: {ladder_reason}" if max_pos > base_cap else ""
+            reasons.append(f"Max positions reached ({count}/{max_pos}){suffix}")
         checks["position_limit"] = pos_ok
 
         max_total = max(1, int(cfg.max_open_positions))
@@ -146,9 +159,7 @@ class OrderValidator:
                 total_count = int(total_raw)
         total_ok = total_count < max_total
         if not total_ok:
-            reasons.append(
-                f"Total open positions reached ({total_count}/{max_total})"
-            )
+            reasons.append(f"Total open positions reached ({total_count}/{max_total})")
         checks["total_position_limit"] = total_ok
 
         # Cooldown: when max_positions > 1, allow stacking up to the cap without
@@ -241,7 +252,10 @@ class OrderValidator:
     def check_spread(self, signal: TradeSignal) -> tuple[bool, str]:
         spread = float(signal.quote.spread)
         if spread > self._cfg.adaptive_max_entry_spread:
-            return False, f"Spread {spread:.1f} > max {self._cfg.adaptive_max_entry_spread:.1f}"
+            return (
+                False,
+                f"Spread {spread:.1f} > max {self._cfg.adaptive_max_entry_spread:.1f}",
+            )
         return True, ""
 
     def check_atr(self, signal: TradeSignal) -> tuple[bool, str]:
@@ -260,12 +274,19 @@ class OrderValidator:
         return True, ""
 
     @staticmethod
-    def _store_count_fallback(store_has_position: Callable[[str], bool], epic: str) -> int:
+    def _store_count_fallback(
+        store_has_position: Callable[[str], bool], epic: str
+    ) -> int:
         return 1 if store_has_position(epic) else 0
 
-    def check_cooldown(self, epic: str, direction: str | None = None) -> tuple[bool, str]:
+    def check_cooldown(
+        self, epic: str, direction: str | None = None
+    ) -> tuple[bool, str]:
         if self.cooldown.is_active(epic, direction):
-            return False, f"Cooldown ({self.cooldown.format_remaining(epic, direction)})"
+            return (
+                False,
+                f"Cooldown ({self.cooldown.format_remaining(epic, direction)})",
+            )
         return True, ""
 
     def check_circuit_breaker(self) -> tuple[bool, str]:
@@ -284,7 +305,9 @@ class OrderValidator:
             tripped_at = self._store.get_runtime_state("circuit_breaker_tripped_at")
             now = datetime.now()
             if not tripped_at:
-                self._store.set_runtime_state("circuit_breaker_tripped_at", now.isoformat(timespec="seconds"))
+                self._store.set_runtime_state(
+                    "circuit_breaker_tripped_at", now.isoformat(timespec="seconds")
+                )
                 return (
                     False,
                     f"Circuit breaker: {consecutive} consecutive losses "

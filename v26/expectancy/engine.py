@@ -135,4 +135,29 @@ def write_snapshot(*, days: int = 14) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     path = root / "expectancy_snapshot.json"
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    write_setup_registry(setups=setups, days=days)
     return path
+
+
+def write_setup_registry(
+    *,
+    setups: list[SetupStats] | None = None,
+    days: int = 14,
+) -> Path:
+    """Mirror banned setups into v25 live gate file."""
+    if setups is None:
+        fills = collect_fills(days=days)
+        setups = compute_setup_stats(fills)
+    import sys
+
+    src_root = Path(__file__).resolve().parents[2] / "src"
+    if str(src_root) not in sys.path:
+        sys.path.insert(0, str(src_root))
+    from system.setup_registry import write_registry_from_stats
+
+    banned_n = sum(1 for s in setups if s.status == "BANNED")
+    return write_registry_from_stats(
+        setups,
+        rolling_days=days,
+        enabled=banned_n > 0,
+    )

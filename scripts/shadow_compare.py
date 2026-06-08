@@ -14,7 +14,10 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "v26"))
+
+from collections import defaultdict
 
 from expectancy.engine import (
     collect_fills,
@@ -22,8 +25,28 @@ from expectancy.engine import (
     portfolio_summary,
     write_snapshot,
 )
+from expectancy.shadow_attribution import (
+    attribute_fills,
+    load_fill_closes,
+    load_shadow_would_trades,
+    summarize_strategy_pnl,
+    write_strategy_pnl_snapshot,
+)
 from ingest.lake_reader import iter_events, summarize_day
 from shadow.runner import process_day_events, shadow_dir
+
+
+def _strategy_breakdown(shadows: list[dict]) -> dict[str, dict[str, int]]:
+    by: dict[str, dict[str, int]] = defaultdict(
+        lambda: {"intents": 0, "would_trade": 0}
+    )
+    for s in shadows:
+        sid = str(s.get("strategy_id") or "unknown")
+        payload = s.get("payload") or {}
+        by[sid]["intents"] += 1
+        if payload.get("would_trade"):
+            by[sid]["would_trade"] += 1
+    return dict(by)
 
 
 def _load_shadow_intents(day: str) -> list[dict]:
@@ -44,7 +67,7 @@ def main() -> int:
     parser.add_argument(
         "--process",
         action="store_true",
-        help="Run S1 shadow processor on feeder events before compare",
+        help="Run v26 shadow processor on feeder events before compare",
     )
     parser.add_argument(
         "--expectancy", action="store_true", help="Write expectancy_snapshot.json"
@@ -75,9 +98,18 @@ def main() -> int:
     print(f"  order_intents:         {v25.order_intents}")
     print(f"  fill_closes:           {v25.fill_closes}")
     print(f"  fill_pnl_gbp:          {v25.fill_pnl_gbp:+.2f}")
-    print("v26 shadow (S1_rules_v25):")
+    print("v26 shadow (all strategies):")
     print(f"  shadow_intents:        {len(shadows)}")
     print(f"  would_trade:           {shadow_trades}")
+
+    by_strat = _strategy_breakdown(shadows)
+    if by_strat:
+        print("\n  by strategy:")
+        for sid in sorted(by_strat):
+            row = by_strat[sid]
+            print(
+                f"    {sid:20} intents={row['intents']:6}  would_trade={row['would_trade']:5}"
+            )
 
     if v25.would_fire > 0:
         parity = shadow_trades / v25.would_fire * 100.0
@@ -102,9 +134,34 @@ def main() -> int:
                 f"WR={s.wr:.0%} [{s.status}]"
             )
 
+    shadows_trade = load_shadow_would_trades(days=args.days)
+    fills_all = load_fill_closes(days=args.days)
+    attributed = attribute_fills(fills_all, shadows_trade)
+    if fills_all:
+        print(
+            f"\nShadow P&L attribution ({args.days}d, {len(attributed)}/{len(fills_all)} fills matched):"
+        )
+        strat_pnl = summarize_strategy_pnl(attributed)
+        if strat_pnl:
+            for sid in sorted(strat_pnl):
+                row = strat_pnl[sid]
+                print(
+                    f"  {sid:20} n={int(row['n']):3}  WR={row['wr']:.0%}  "
+                    f"E£={row['e_gbp']:+.2f}  total={row['total_pnl_gbp']:+.2f}"
+                )
+        else:
+            print("  (no fills matched to shadow would_trade intents)")
+
     if args.expectancy:
         path = write_snapshot(days=args.days)
         print(f"\nWrote {path}")
+        from system.setup_registry import registry_path
+
+        rp = registry_path()
+        if rp.is_file():
+            print(f"Wrote {rp}")
+        sp_path = write_strategy_pnl_snapshot(days=args.days)
+        print(f"Wrote {sp_path}")
 
     return 0 if v25.total_events > 0 else 1
 

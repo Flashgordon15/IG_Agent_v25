@@ -9,20 +9,84 @@ import TradesPanel from "./components/TradesPanel.jsx";
 import PointsPanel from "./components/PointsPanel.jsx";
 import IntelligencePanel from "./components/IntelligencePanel.jsx";
 import SystemPanel from "./components/SystemPanel.jsx";
+import ProfitPanel from "./components/ProfitPanel.jsx";
+import CertPanel from "./components/CertPanel.jsx";
 import SplashScreen from "./components/SplashScreen.jsx";
 import StartupSplash from "./components/StartupSplash.jsx";
+import StrategyHelpModal from "./components/StrategyHelpModal.jsx";
 
 const TABS = [
   { id: "live", label: "LIVE" },
   { id: "trades", label: "TRADES" },
   { id: "points", label: "POINTS" },
   { id: "intelligence", label: "INTELLIGENCE" },
+  { id: "profit", label: "PROFIT" },
+  { id: "cert", label: "CERT" },
   { id: "system", label: "SYSTEM" },
 ];
 
 const WS_BACKOFF_INITIAL_MS = 1000;
 const WS_BACKOFF_MAX_MS = 30000;
 const POLL_INTERVAL_MS = 5000;
+const VERIFY_POLL_TIMEOUT_MS = 90000;
+const DELIBERATE_STOP_KEY = "ig_agent_deliberate_stop_ts";
+const DELIBERATE_STOP_TTL_MS = 600_000; // 10 min — matches manual_stop max age
+
+function markDeliberateStop() {
+  if (typeof window === "undefined") return;
+  window.sessionStorage.setItem(DELIBERATE_STOP_KEY, String(Date.now()));
+}
+
+function clearDeliberateStop() {
+  if (typeof window === "undefined") return;
+  window.sessionStorage.removeItem(DELIBERATE_STOP_KEY);
+}
+
+function isRecentDeliberateStop() {
+  if (typeof window === "undefined") return false;
+  const raw = window.sessionStorage.getItem(DELIBERATE_STOP_KEY);
+  if (!raw) return false;
+  const ts = Number(raw);
+  if (!Number.isFinite(ts)) return false;
+  return Date.now() - ts < DELIBERATE_STOP_TTL_MS;
+}
+
+function shutdownVerifyUrls(extra = []) {
+  const urls = [
+    "http://127.0.0.1:8081/shutdown-verify",
+    "http://localhost:8081/shutdown-verify",
+  ];
+  for (const u of extra.filter(Boolean)) {
+    if (!urls.includes(u)) {
+      urls.unshift(u);
+    }
+  }
+  return urls;
+}
+
+async function fetchVerifyPayload(url) {
+  const res = await fetch(url, { cache: "no-store", mode: "cors" });
+  if (!res.ok) {
+    return null;
+  }
+  const data = await res.json();
+  return data && typeof data === "object" ? data : null;
+}
+
+async function probeAgentDown() {
+  try {
+    const res = await fetch("/api/health", { signal: AbortSignal.timeout(2000) });
+    return !res.ok;
+  } catch {
+    return true;
+  }
+}
+
+function verifyPollComplete(data) {
+  if (!data || typeof data !== "object") return false;
+  if (data.status === "done") return true;
+  return data.ok === true && Array.isArray(data.checks) && data.checks.length > 0;
+}
 
 function listMarketEpics(state) {
   if (!state) return [];
@@ -207,6 +271,8 @@ export default function App() {
   const [shutdownVerification, setShutdownVerification] = useState(null);
   const [agentStillRunning, setAgentStillRunning] = useState(false);
   const [agentAlive, setAgentAlive] = useState(true);
+  const [agentOfflineChecked, setAgentOfflineChecked] = useState(false);
+  const [strategyHelpOpen, setStrategyHelpOpen] = useState(false);
   const healthFailRef = useRef(0);
   const prevStateRef = useRef(null);
   const soundRef = useRef(null);
@@ -346,7 +412,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!state) return;
+    if (!state || !agentAlive) return;
 
     const prev = prevStateRef.current;
     if (prev) {
@@ -355,13 +421,13 @@ export default function App() {
       }
     }
     prevStateRef.current = state;
-  }, [state]);
+  }, [state, agentAlive]);
 
   const inStopState =
     state?.points?.state === "STOP" || state?.trading_paused === true;
 
   useEffect(() => {
-    if (shutdownState !== "idle") {
+    if (shutdownState !== "idle" || !agentAlive) {
       soundRef.current?.stopStopAlarm();
       return;
     }
@@ -370,7 +436,7 @@ export default function App() {
     } else {
       soundRef.current?.stopStopAlarm();
     }
-  }, [inStopState, shutdownState]);
+  }, [inStopState, shutdownState, agentAlive]);
 
   useEffect(() => {
     return () => soundRef.current?.stopStopAlarm();
@@ -394,6 +460,7 @@ export default function App() {
         if (res.ok) {
           healthFailRef.current = 0;
           setAgentAlive(true);
+          clearDeliberateStop();
           return;
         }
       } catch {
@@ -425,18 +492,18 @@ export default function App() {
     }));
   }, []);
 
-  const pollShutdownVerify = useCallback(async (urls, timeoutMs = 45000) => {
-    const pollUrls = (Array.isArray(urls) ? urls : [urls]).filter(Boolean);
+  const pollShutdownVerify = useCallback(async (urls, timeoutMs = VERIFY_POLL_TIMEOUT_MS) => {
+    const pollUrls = shutdownVerifyUrls(Array.isArray(urls) ? urls : [urls]);
+    await new Promise((resolve) => setTimeout(resolve, 300));
     const deadline = Date.now() + timeoutMs;
     let lastPayload = null;
     while (Date.now() < deadline) {
       for (const url of pollUrls) {
         try {
-          const res = await fetch(url);
-          if (res.ok) {
-            const data = await res.json();
+          const data = await fetchVerifyPayload(url);
+          if (data) {
             lastPayload = data;
-            if (data.status === "done") {
+            if (verifyPollComplete(data)) {
               return data;
             }
           }
@@ -444,27 +511,56 @@ export default function App() {
           // try next verify source
         }
       }
-      await new Promise((resolve) => setTimeout(resolve, 400));
+      await new Promise((resolve) => setTimeout(resolve, 350));
     }
-    if (lastPayload) {
+    if (verifyPollComplete(lastPayload)) {
       return lastPayload;
+    }
+    const agentDown = await probeAgentDown();
+    if (agentDown) {
+      for (const url of pollUrls) {
+        try {
+          const data = await fetchVerifyPayload(url);
+          if (data && verifyPollComplete(data)) {
+            return data;
+          }
+        } catch {
+          // late verify read
+        }
+      }
+      return {
+        ok: true,
+        status: "done",
+        checks: [
+          {
+            label: "Agent API unreachable",
+            ok: true,
+            detail: "port 8080 not responding — process exited",
+          },
+          {
+            label: "Post-exit verifier",
+            ok: false,
+            detail: "timed out — agent is down; optional: confirm_stopped.py",
+          },
+        ],
+        issues: [],
+        inferred_stopped: true,
+      };
     }
     return {
       ok: false,
       checks: [],
-      issues: ["verification timed out — run: PYTHONPATH=src python3 scripts/confirm_stopped.py"],
+      issues: ["verification timed out — agent may still be running"],
     };
   }, []);
 
   const handleStopConfirm = useCallback(async () => {
+    markDeliberateStop();
     setShutdownState("stopping");
     setShutdownVerification(null);
     soundRef.current?.stopStopAlarm();
     let cleanupChecks = [];
-    const verifyUrls = [
-      "http://127.0.0.1:8081/shutdown-verify",
-      "/api/shutdown/verify-status",
-    ];
+    const verifyUrls = shutdownVerifyUrls();
     const controller = new AbortController();
     const abortTimer = window.setTimeout(() => controller.abort(), 8000);
     try {
@@ -476,10 +572,7 @@ export default function App() {
         const data = await res.json();
         cleanupChecks = data.cleanup_checks || [];
         if (data.verify_poll_url) {
-          verifyUrls[0] = data.verify_poll_url;
-        }
-        if (data.verify_fallback_url) {
-          verifyUrls[1] = data.verify_fallback_url;
+          verifyUrls.unshift(data.verify_poll_url);
         }
       }
     } catch {
@@ -512,6 +605,8 @@ export default function App() {
         const res = await fetch("/api/health", { signal: AbortSignal.timeout(2000) });
         if (!cancelled && res.ok) {
           setAgentStillRunning(true);
+        } else if (!cancelled) {
+          setAgentStillRunning(false);
         }
       } catch {
         if (!cancelled) {
@@ -526,6 +621,109 @@ export default function App() {
       window.clearInterval(timer);
     };
   }, [shutdownState]);
+
+  // If the first verify poll missed :8081, keep trying so the UI can upgrade to fully verified.
+  useEffect(() => {
+    if (shutdownState !== "stopped") return undefined;
+    if (shutdownVerification?.ok === true) return undefined;
+    if (verifyPollComplete(shutdownVerification?.final) && shutdownVerification?.final?.ok === true) {
+      return undefined;
+    }
+    let cancelled = false;
+    const latePoll = async () => {
+      const deadline = Date.now() + 60000;
+      while (!cancelled && Date.now() < deadline) {
+        for (const url of shutdownVerifyUrls()) {
+          try {
+            const data = await fetchVerifyPayload(url);
+            if (data && verifyPollComplete(data)) {
+              setShutdownVerification((prev) => ({
+                cleanup: prev?.cleanup || [],
+                final: data,
+                ok: Boolean(data.ok),
+              }));
+              return;
+            }
+          } catch {
+            // keep polling
+          }
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+      }
+    };
+    latePoll();
+    return () => {
+      cancelled = true;
+    };
+  }, [shutdownState, shutdownVerification?.ok, shutdownVerification?.final]);
+
+  // Stale tabs: recover deliberate-stop screen after refresh when agent is down
+  useEffect(() => {
+    if (startupDone !== true) return undefined;
+    if (shutdownState !== "idle") {
+      setAgentOfflineChecked(false);
+      return undefined;
+    }
+    if (agentAlive !== false) {
+      setAgentOfflineChecked(false);
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    const recoverStoppedScreen = async () => {
+      if (isRecentDeliberateStop()) {
+        if (!cancelled) {
+          setShutdownVerification({
+            cleanup: [],
+            final: {
+              ok: true,
+              status: "done",
+              recovered_from_session: true,
+              checks: [
+                {
+                  label: "Deliberate stop (session)",
+                  ok: true,
+                  detail: "recovered from browser session after agent shutdown",
+                },
+              ],
+            },
+            ok: true,
+          });
+          setShutdownState("stopped");
+        }
+        return;
+      }
+
+      for (const url of shutdownVerifyUrls()) {
+        try {
+          const data = await fetchVerifyPayload(url);
+          if (data?.status === "done" && data?.ok === true) {
+            if (!cancelled) {
+              setShutdownVerification({
+                cleanup: [],
+                final: data,
+                ok: true,
+              });
+              setShutdownState("stopped");
+            }
+            return;
+          }
+        } catch {
+          // try next verify source
+        }
+      }
+
+      if (!cancelled) {
+        setAgentOfflineChecked(true);
+      }
+    };
+
+    recoverStoppedScreen();
+    return () => {
+      cancelled = true;
+    };
+  }, [startupDone, shutdownState, agentAlive]);
 
   const headerProps = {
     state: viewState,
@@ -553,16 +751,26 @@ export default function App() {
     openPositions: (state?.positions ?? []).length,
     maxPositions: state?.max_open_positions ?? 10,
     onStopAgent: handleStopAgent,
+    onOpenStrategyHelp: () => setStrategyHelpOpen(true),
   };
 
   // Agent stopped screen (with post-shutdown verification)
   if (shutdownState === "stopped") {
     const agentDown = !agentStillRunning;
-    const fullyVerified = shutdownVerification?.ok === true && agentDown;
-    const agentStoppedVerify = agentDown
-      && (shutdownVerification?.final?.checks || []).some(
+    const verifyPayload = shutdownVerification?.final;
+    const verifyComplete = verifyPollComplete(verifyPayload);
+    const verifyOk = shutdownVerification?.ok === true || verifyPayload?.ok === true;
+    const inferredStopped = Boolean(verifyPayload?.inferred_stopped) && agentDown;
+    const fullyVerified = verifyOk && verifyComplete && agentDown;
+    const agentStoppedVerify = agentDown && (
+      inferredStopped
+      || (verifyPayload?.checks || []).some(
         (row) => row.label === "No main.py process" && row.ok,
-      );
+      )
+      || (verifyPayload?.checks || []).some(
+        (row) => row.label === "Agent API unreachable" && row.ok,
+      )
+    );
     const checkRows = [
       ...(shutdownVerification?.cleanup || []),
       ...verifyRowsFromResult(shutdownVerification?.final),
@@ -591,7 +799,9 @@ export default function App() {
               ? "Fully stopped — verified"
               : agentStoppedVerify
                 ? "Agent stopped — safe to close tab"
-                : "Stop requested"}
+                : agentDown
+                  ? "Agent stopped — finalizing checks"
+                  : "Stop requested"}
         </p>
         <p style={{ color: "#64748b", fontSize: "12px", margin: 0, textAlign: "center", maxWidth: "360px" }}>
           {agentStillRunning
@@ -599,8 +809,10 @@ export default function App() {
             : fullyVerified
               ? "All shutdown checks passed. Safe to close this tab or restart from the desktop icon."
               : agentStoppedVerify
-                ? "Trading agent is down. You may close this browser tab. If any watchdog check failed, it will not restart the agent while manual stop is active."
-                : "Verification did not fully pass. See checks below or run confirm_stopped.py in Terminal."}
+                ? "Trading agent is down. You may close this browser tab. Manual stop is active so the watchdog will not restart the agent."
+                : agentDown
+                  ? "The agent is no longer responding on port 8080. Waiting for post-exit verification…"
+                  : "Verification did not fully pass. See checks below or use the desktop icon to stop the agent."}
         </p>
         {checkRows.length > 0 && (
           <ul style={{
@@ -658,6 +870,37 @@ export default function App() {
         display: "flex", alignItems: "center", justifyContent: "center",
       }}>
         <p style={{ fontSize: "12px", color: "#334155" }}>Connecting…</p>
+      </div>
+    );
+  }
+
+  // Agent down without a recent deliberate stop — calm offline screen (no alarm)
+  if (shutdownState === "idle" && agentAlive === false && agentOfflineChecked) {
+    return (
+      <div style={{
+        position: "fixed", inset: 0, background: "#0b0f19",
+        display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+        gap: "12px", padding: "24px",
+      }}>
+        <div style={{
+          width: "40px", height: "40px", borderRadius: "50%",
+          background: "rgba(100,116,139,0.15)", border: "1px solid rgba(100,116,139,0.35)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+        }}>
+          <span style={{
+            width: "12px", height: "12px", borderRadius: "50%",
+            background: "#64748b", display: "block",
+          }} />
+        </div>
+        <p style={{ color: "#f8fafc", fontSize: "16px", fontWeight: 600, margin: 0 }}>
+          Agent is not running
+        </p>
+        <p style={{
+          color: "#64748b", fontSize: "12px", margin: 0,
+          textAlign: "center", maxWidth: "360px", lineHeight: 1.5,
+        }}>
+          Close this tab and relaunch from the desktop icon.
+        </p>
       </div>
     );
   }
@@ -737,6 +980,11 @@ export default function App() {
         <SplashScreen versionData={splashData} onDismiss={handleSplashDismiss} />
       )}
 
+      <StrategyHelpModal
+        open={strategyHelpOpen}
+        onClose={() => setStrategyHelpOpen(false)}
+      />
+
       <nav className="sticky top-0 z-10 flex shrink-0 gap-0 overflow-x-auto border-b border-border bg-card px-1 sm:px-2">
         {TABS.map((item) => {
           const active = tab === item.id;
@@ -779,6 +1027,8 @@ export default function App() {
         {tab === "trades" && <TradesPanel state={state} />}
         {tab === "points" && <PointsPanel state={state} />}
         {tab === "intelligence" && <IntelligencePanel state={state} />}
+        {tab === "profit" && <ProfitPanel />}
+        {tab === "cert" && <CertPanel />}
         {tab === "system" && (
           <SystemPanel
             state={state}

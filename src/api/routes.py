@@ -166,6 +166,22 @@ def api_shadow_today() -> dict[str, Any]:
     return shadow_today()
 
 
+@router.get("/api/v26/profit")
+def api_v26_profit() -> dict[str, Any]:
+    """v26 PROFIT tab — read-only expectancy + shadow strategy attribution."""
+    from api.v26_profit import build_profit_payload
+
+    return build_profit_payload()
+
+
+@router.get("/api/v26/cert")
+def api_v26_cert() -> dict[str, Any]:
+    """v26 CERT tab — L0–L5 certification ladder."""
+    from api.v26_cert import build_cert_payload
+
+    return build_cert_payload()
+
+
 @router.get("/api/learning/status")
 def api_learning_status() -> dict[str, Any]:
     return learning_status()
@@ -523,8 +539,8 @@ def api_shutdown(background_tasks: BackgroundTasks) -> JSONResponse:
                         "detail": "cleanup running in background",
                     },
                 ],
+                # Always IPv4 loopback — verify server may not be reachable via localhost→::1.
                 "verify_poll_url": "http://127.0.0.1:8081/shutdown-verify",
-                "verify_fallback_url": "/api/shutdown/verify-status",
             }
         )
     except Exception as e:

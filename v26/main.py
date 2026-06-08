@@ -16,7 +16,13 @@ import time
 from datetime import datetime, timezone
 
 from expectancy.engine import write_snapshot
-from ingest.lake_reader import events_dir, iter_events, summarize_day
+from ingest.lake_reader import (
+    event_utc_day,
+    events_dir,
+    iter_events,
+    summarize_day,
+    utc_today,
+)
 from shadow.runner import process_day_events
 
 
@@ -39,13 +45,13 @@ def _print_summary(day: str) -> int:
     return 0
 
 
-def _shadow_tail_loop(day: str) -> None:
+def _shadow_tail_loop() -> None:
     from ingest.tail import tail_events
     from shadow.runner import process_event
 
-    print(f"v26 S1 shadow tail — {day} (feeder → shadow_v26/)")
-    for event in tail_events(day):
-        process_event(event, day=day)
+    print("v26 S1+S2+S3 shadow tail — following UTC day (feeder → shadow_v26/)")
+    for event in tail_events(follow_utc_rollover=True):
+        process_event(event, day=event_utc_day(event))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -80,8 +86,23 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.mode == "trade":
-        print("v26 --mode trade not wired yet; use v25 feeder until L5 certification.")
-        return 2
+        from research.l4_forward import format_forward_status, write_forward_cert
+
+        path = write_forward_cert()
+        print("v26 demo forward certification (v25 executes — this tracks P&L only)")
+        print(f"  snapshot: {path}")
+        print(f"  {format_forward_status()}")
+        if args.watch:
+            print("  watch: refresh every 5m (Ctrl+C to stop)")
+            try:
+                while True:
+                    time.sleep(300)
+                    write_forward_cert()
+                    print("---")
+                    print(format_forward_status())
+            except KeyboardInterrupt:
+                return 0
+        return 0
     if args.mode == "research":
         print("Run: python3 scripts/build_feature_store.py --days 7")
         return 0
@@ -99,13 +120,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.watch and args.tail:
-        t = threading.Thread(target=_shadow_tail_loop, args=(day,), daemon=True)
+        t = threading.Thread(target=_shadow_tail_loop, daemon=True)
         t.start()
-        print(f"v26 watch+tail — day={day}")
+        print("v26 watch+tail — UTC day rolls automatically at midnight")
         try:
             while True:
                 print("---")
-                _print_summary(day)
+                _print_summary(utc_today())
                 time.sleep(30)
         except KeyboardInterrupt:
             return 0

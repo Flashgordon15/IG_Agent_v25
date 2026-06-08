@@ -1,0 +1,31 @@
+{
+  "ingested_at": "2026-06-08T11:21:21Z",
+  "days": 60,
+  "series": {
+    "dxy": {
+      "symbol": "DX-Y.NYB",
+      "bars": 49,
+      "path": "data_lake/external/dxy_daily.jsonl"
+    },
+    "vix": {
+      "symbol": "^VIX",
+      "bars": 59,
+      "path": "data_lake/external/vix_daily.jsonl"
+    },
+    "us10y": {
+      "symbol": "^TNX",
+      "bars": 58,
+      "path": "data_lake/external/us10y_daily.jsonl"
+    },
+    "gold_spot": {
+      "symbol": "GC=F",
+      "bars": 49,
+      "path": "data_lake/external/gold_spot_daily.jsonl"
+    },
+    "wti": {
+      "symbol": "CL=F",
+      "bars": 49,
+      "path": "data_lake/external/wti_daily.jsonl"
+    }
+  }
+}

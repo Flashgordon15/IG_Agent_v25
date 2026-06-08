@@ -65,6 +65,14 @@ def _default_spread(yahoo_symbol: str, close: float) -> float:
         return 0.0002
     if sym == "GC=F":
         return 0.5
+    if sym == "^DJI":
+        return 3.0
+    if sym == "NQ=F":
+        return 2.0
+    if sym == "^N225":
+        return 8.0
+    if sym == "^GDAXI":
+        return 2.0
     return 15.0
 
 

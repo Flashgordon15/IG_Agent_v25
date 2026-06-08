@@ -225,7 +225,11 @@ class TradeManagerExtensionTests(unittest.TestCase):
             tid, confidence_band="high", entry_atr=20.0, trail_distance=35.0
         )
         mgr = TradeManager(
-            _cfg(breakeven_enabled=False, adaptive_trailing_stop_enabled=False),
+            _cfg(
+                breakeven_enabled=False,
+                adaptive_trailing_stop_enabled=False,
+                trailing_stop={"partial_close_enabled": True},
+            ),
             self.store,
             skip_ig_synced_exits=True,
             points_engine=self.points,

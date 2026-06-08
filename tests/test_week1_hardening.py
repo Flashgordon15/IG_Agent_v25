@@ -6,6 +6,7 @@ Tests for Week-1 24/7 hardening changes:
   - US Oil disabled (config)
   - Log rotation on startup (main)
 """
+
 from __future__ import annotations
 
 import sys
@@ -114,7 +115,9 @@ class TestFridayAutoClose:
         with patch("trading.trade_manager.datetime") as mock_dt:
             mock_dt.utcnow.return_value = datetime(2026, 6, 1, 20, 30)
             mock_dt.fromisoformat = datetime.fromisoformat
-            result = tm._check_friday_close("Gold", "SELL", 1, 4480.0, 4475.0, "", "epic", {})
+            result = tm._check_friday_close(
+                "Gold", "SELL", 1, 4480.0, 4475.0, "", "epic", {}
+            )
         assert result == []
 
     def test_friday_before_cutoff_no_close(self):
@@ -122,7 +125,9 @@ class TestFridayAutoClose:
         with patch("trading.trade_manager.datetime") as mock_dt:
             mock_dt.utcnow.return_value = datetime(2026, 6, 5, 20, 29)
             mock_dt.fromisoformat = datetime.fromisoformat
-            result = tm._check_friday_close("Gold", "SELL", 1, 4480.0, 4475.0, "", "epic", {})
+            result = tm._check_friday_close(
+                "Gold", "SELL", 1, 4480.0, 4475.0, "", "epic", {}
+            )
         assert result == []
 
     def test_friday_at_cutoff_closes(self):
@@ -136,7 +141,9 @@ class TestFridayAutoClose:
         with patch("trading.trade_manager.datetime") as mock_dt:
             mock_dt.utcnow.return_value = datetime(2026, 6, 5, 20, 30)
             mock_dt.fromisoformat = datetime.fromisoformat
-            msgs = tm._check_friday_close("Gold", "SELL", 1, 4480.0, 4475.0, "", "epic", tr)
+            msgs = tm._check_friday_close(
+                "Gold", "SELL", 1, 4480.0, 4475.0, "", "epic", tr
+            )
 
         assert len(msgs) == 1
         assert "FRIDAY AUTO-CLOSE" in msgs[0]
@@ -174,7 +181,9 @@ class TestMaxPositionAge:
         tm = self._make_manager(480)
         opened = datetime.utcnow() - timedelta(hours=4)
         tr = self._make_tr(opened)
-        result = tm._check_max_position_age("Gold", "SELL", 99, 4480.0, 4475.0, "", "epic", tr)
+        result = tm._check_max_position_age(
+            "Gold", "SELL", 99, 4480.0, 4475.0, "", "epic", tr
+        )
         assert result == []
 
     def test_old_position_closed(self):
@@ -184,7 +193,9 @@ class TestMaxPositionAge:
         tm._telegram_alert = MagicMock()
         opened = datetime.utcnow() - timedelta(hours=9)
         tr = self._make_tr(opened)
-        msgs = tm._check_max_position_age("Gold", "SELL", 99, 4480.0, 4475.0, "", "epic", tr)
+        msgs = tm._check_max_position_age(
+            "Gold", "SELL", 99, 4480.0, 4475.0, "", "epic", tr
+        )
         assert len(msgs) == 1
         assert "MAX AGE CLOSE" in msgs[0]
 
@@ -197,7 +208,9 @@ class TestMaxPositionAge:
         tm._cfg = cfg
         opened = datetime.utcnow() - timedelta(hours=999)
         tr = self._make_tr(opened)
-        result = tm._check_max_position_age("Gold", "SELL", 99, 4480.0, 4475.0, "", "epic", tr)
+        result = tm._check_max_position_age(
+            "Gold", "SELL", 99, 4480.0, 4475.0, "", "epic", tr
+        )
         assert result == []
 
 
@@ -209,13 +222,14 @@ class TestMaxPositionAge:
 class TestWeek1Config:
     def _load(self):
         import json
+
         p = Path(__file__).parent.parent / "config" / "config_v25.json"
         with open(p) as f:
             return json.load(f)
 
-    def test_nikkei_threshold_70(self):
+    def test_nikkei_threshold_85(self):
         cfg = self._load()
-        assert cfg["instruments"]["japan_225"]["signal_threshold"] == 70
+        assert cfg["instruments"]["japan_225"]["signal_threshold"] == 85
 
     def test_oil_disabled(self):
         cfg = self._load()
@@ -249,9 +263,11 @@ class TestLogRotation:
         big_log.write_bytes(b"x" * (25 * 1024 * 1024))  # 25 MB
 
         import main as m
+
         original_logs_dir = None
         try:
             import system.paths as paths_mod
+
             original_logs_dir = paths_mod.logs_dir
 
             def fake_logs_dir():
@@ -276,6 +292,7 @@ class TestLogRotation:
 
         import main as m
         import system.paths as paths_mod
+
         original = paths_mod.logs_dir
 
         def fake_logs_dir():

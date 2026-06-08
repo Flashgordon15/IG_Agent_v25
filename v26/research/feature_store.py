@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from expectancy.shadow_attribution import _direction_from_payload
 from ingest.lake_reader import iter_events
 
 
@@ -43,6 +44,7 @@ def _flatten_fill(row: dict[str, Any]) -> dict[str, Any]:
         "ts": row.get("ts"),
         "epic": row.get("epic"),
         "market": row.get("market"),
+        "direction": _direction_from_payload(p) or None,
         "setup_key": p.get("setup_key"),
         "pnl_gbp": p.get("pnl_gbp"),
         "pnl_points": p.get("pnl_points"),

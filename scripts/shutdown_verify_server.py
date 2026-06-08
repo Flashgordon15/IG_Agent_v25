@@ -105,15 +105,17 @@ def main() -> int:
     _free_listen_port(VERIFY_PORT)
 
     try:
-        server = HTTPServer(("127.0.0.1", VERIFY_PORT), Handler)
+        # Bind all interfaces so localhost (IPv4/IPv6) and 127.0.0.1 both reach the verifier.
+        server = HTTPServer(("0.0.0.0", VERIFY_PORT), Handler)
         server.timeout = 0.5
     except OSError as e:
         _log(f"verify server bind failed: {type(e).__name__}: {e}")
         return 1
 
+    serve_deadline = [time.monotonic() + 90.0]
+
     def _serve() -> None:
-        deadline = time.monotonic() + 60.0
-        while time.monotonic() < deadline:
+        while time.monotonic() < serve_deadline[0]:
             server.handle_request()
 
     thread = threading.Thread(target=_serve, name="shutdown-verify-http", daemon=True)
@@ -151,7 +153,9 @@ def main() -> int:
 
     _write_state(final)
     _log(f"verify complete ok={ok}")
-    thread.join(timeout=35.0)
+    # Keep answering dashboard polls after the agent process has exited (match manual_stop TTL).
+    serve_deadline[0] = time.monotonic() + 600.0
+    thread.join(timeout=605.0)
     server.server_close()
     return 0 if ok else 1
 
