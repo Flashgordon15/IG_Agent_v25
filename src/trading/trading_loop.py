@@ -1138,7 +1138,16 @@ class TradingLoop:
             )
             score = float(SAFE_DEFAULT_SCORE)
         score_int = int(round(score))
-        passed = score >= GATE_PASS_MIN
+        fitness_min = GATE_PASS_MIN
+        try:
+            from system.gate_relaxation import effective_fitness_min
+
+            fitness_min = effective_fitness_min(
+                self._epic, points_state=self._points.get_state()
+            )
+        except Exception:
+            fitness_min = GATE_PASS_MIN
+        passed = score >= fitness_min
         sent = {}
         if hasattr(self._env, "get_sentiment_factor"):
             try:
@@ -1146,7 +1155,9 @@ class TradingLoop:
             except Exception:
                 sent = {}
         sent_label = str(sent.get("label") or "")
-        detail = f"fitness {score_int}% (need >={int(GATE_PASS_MIN)}%)"
+        detail = f"fitness {score_int}% (need >={int(fitness_min)}%)"
+        if fitness_min < GATE_PASS_MIN:
+            detail += " (v26 relaxed)"
         if sent_label and sent_label != "neutral":
             detail += f" — {sent_label}"
         factors_payload = self._fitness_factors_payload()

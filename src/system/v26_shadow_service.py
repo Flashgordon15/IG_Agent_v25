@@ -177,6 +177,14 @@ def _refresh_loop() -> None:
                 log_engine(
                     f"v26_shadow_service: forward cert: {type(exc).__name__}: {exc}"
                 )
+            try:
+                from research.gate_relaxation_report import write_gate_relaxation_report
+
+                write_gate_relaxation_report(days=7)
+            except Exception as exc:
+                log_engine(
+                    f"v26_shadow_service: gate relaxation: {type(exc).__name__}: {exc}"
+                )
             day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             root = project_root()
             import subprocess

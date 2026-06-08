@@ -84,6 +84,16 @@
       "M4": 1000
     }
   },
+  "gate_relaxations": {
+    "enabled": true,
+    "fitness_min": 52,
+    "epics": [
+      "IX.D.DOW.IFM.IP",
+      "IX.D.NASDAQ.IFM.IP"
+    ],
+    "require_points_healthy": true,
+    "_note": "Approved 2026-06-08: 7d shadow near-miss on indices; fitness 55% blocked borderline scores"
+  },
   "certification": {
     "l4_window_days": 14,
     "l4_median_daily_gbp": 100,

@@ -47,8 +47,17 @@ def main() -> int:
 
     from ingest.lake_reader import summarize_day
     from research.gate_blockers import build_gate_blocker_report, report_to_dict
+    from research.gate_relaxation_report import (
+        recommend_relaxations,
+        rollup_gate_blockers,
+        write_gate_relaxation_report,
+    )
     from research.l1_replay import replay_days
     from research.shadow_expectancy import analyze_near_miss, near_miss_to_dict
+
+    write_gate_relaxation_report(days=args.days)
+    rollup = rollup_gate_blockers(days=args.days)
+    recs = recommend_relaxations(rollup)
 
     lines = [
         f"# v26 Weekly Pack — {label}",
@@ -146,13 +155,29 @@ def main() -> int:
             )
         lines.append("")
 
+    lines.extend(["", "## Gate blocker rollup", ""])
+    totals = rollup.get("totals") or {}
+    lines.append(
+        f"- Near-miss evals: {totals.get('near_miss_evals', 0)} | "
+        f"shadow match: {totals.get('shadow_would_trade', 0)} | "
+        f"est E£: {totals.get('estimated_counterfactual_e_gbp', 0)}"
+    )
+    lines.append("")
+    for row in (rollup.get("ranked_blockers") or [])[:6]:
+        lines.append(f"- **{row['gate']}**: {row['fail_count']} fails")
+    lines.extend(["", "## Relaxation recommendations", ""])
+    for r in recs:
+        flag = "✓" if r.get("safe") else "?"
+        lines.append(f"- [{flag}] {r.get('action', '')}")
     lines.extend(
         [
+            "",
             "## Operator notes",
             "",
             "- v25 live trades this window: see fills column above",
             "- On low-confidence days, prioritize `v26_progress.py` over fill P&L",
             "- Enable `ml_veto` only after replay + shadow agree within 5% WR",
+            "- Active relaxations: see `config_v26.json` → `gate_relaxations`",
             "",
         ]
     )

@@ -8,6 +8,7 @@ AGENT_PLIST="com.igagent.v25.plist"
 CAFF_PLIST="com.igagent.v25.caffeinate.plist"
 WATCHDOG_PLIST="com.igagent.v25.watchdog.plist"
 PROFIT_PLIST="com.igagent.v25.profitability.plist"
+V26_WEEKLY_PLIST="com.igagent.v25.v26weekly.plist"
 
 mkdir -p "${ROOT}/src/data/logs"
 mkdir -p "${LAUNCH_AGENTS}"
@@ -39,16 +40,19 @@ install_plist "${AGENT_PLIST}"
 install_plist "${CAFF_PLIST}"
 install_plist "${WATCHDOG_PLIST}"
 install_plist "${PROFIT_PLIST}"
+install_plist "${V26_WEEKLY_PLIST}"
 
 launchctl bootout "gui/$(id -u)/${AGENT_PLIST}" 2>/dev/null || true
 launchctl bootout "gui/$(id -u)/${CAFF_PLIST}" 2>/dev/null || true
 launchctl bootout "gui/$(id -u)/${WATCHDOG_PLIST}" 2>/dev/null || true
 launchctl bootout "gui/$(id -u)/${PROFIT_PLIST}" 2>/dev/null || true
+launchctl bootout "gui/$(id -u)/${V26_WEEKLY_PLIST}" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "${LAUNCH_AGENTS}/${AGENT_PLIST}"
 launchctl bootstrap "gui/$(id -u)" "${LAUNCH_AGENTS}/${CAFF_PLIST}"
 launchctl bootstrap "gui/$(id -u)" "${LAUNCH_AGENTS}/${WATCHDOG_PLIST}"
 launchctl bootstrap "gui/$(id -u)" "${LAUNCH_AGENTS}/${PROFIT_PLIST}"
+launchctl bootstrap "gui/$(id -u)" "${LAUNCH_AGENTS}/${V26_WEEKLY_PLIST}"
 
-echo "Installed ${AGENT_PLIST}, ${CAFF_PLIST}, ${WATCHDOG_PLIST}, and ${PROFIT_PLIST} to ${LAUNCH_AGENTS}"
+echo "Installed ${AGENT_PLIST}, ${CAFF_PLIST}, ${WATCHDOG_PLIST}, ${PROFIT_PLIST}, and ${V26_WEEKLY_PLIST} to ${LAUNCH_AGENTS}"
 echo "Watchdog keeper: KeepAlive=true — relaunches watchdog after restart-storm exit"
 echo "Logs: ${ROOT}/src/data/logs/launchd_stdout.log"
