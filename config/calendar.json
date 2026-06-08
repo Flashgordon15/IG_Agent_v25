@@ -1,8 +1,8 @@
 {
   "version": 1,
   "description": "High-impact events — shadow/news guard; timed events merged with data_lake/external/finnhub_economic_calendar.json via ingest_finnhub_calendar.py",
-  "block_minutes_before": 30,
-  "block_minutes_after": 30,
+  "block_minutes_before": 15,
+  "block_minutes_after": 15,
   "events": [
     {
       "id": "us_nfp",

@@ -605,18 +605,35 @@ class TradingLoop:
                     snap = dict(raw_sig.snapshot or {})
                 ml_prob = sig_gate.value.get("ml_probability")
                 ml_f = float(ml_prob) if ml_prob is not None else None
+                eval_conf = float(sig_gate.value.get("confidence") or adjusted)
+                try:
+                    from system.risk_bands import threshold_pass_map
+
+                    thresh_map = threshold_pass_map(eval_conf, direction)
+                except Exception:
+                    thresh_map = {}
+                pilot = False
+                try:
+                    from system.v26_config import pilot_settings
+
+                    pilot = epic == pilot_settings().get("primary_epic")
+                except Exception:
+                    pass
                 emit_signal_eval(
                     epic=epic,
                     market=market,
                     session=session,
                     direction=direction,
                     raw_score=raw_score,
-                    adjusted_score=float(sig_gate.value.get("confidence") or adjusted),
+                    adjusted_score=eval_conf,
                     setup_key=setup_key or str(sig_gate.value.get("setup") or ""),
                     would_fire=bool(sig_gate.passed),
                     reason=reason,
                     gates_passed=gates_passed,
                     ml_probability=ml_f,
+                    threshold_pass=thresh_map or None,
+                    risk_band=str(sig_gate.value.get("risk_band") or ""),
+                    pilot_epic=pilot,
                 )
                 bar_payload = _feeder_bar_from_snapshot(snap)
                 if bar_payload is not None:
@@ -1310,14 +1327,26 @@ class TradingLoop:
         stop = float(self._config.stop_distance_points)
         base_size = float(self._config.trade_size)
         point_value = float(self._config.get("ig_point_value_gbp", 1.0))
-        # Plan with points-tier minimum size (CAUTION → 0.5× at 80%+).
         from trading.points_engine import CONF_MARGINAL_MIN
 
-        planning_conf = max(
-            CONF_MARGINAL_MIN,
-            float(self._points.trade_confidence_threshold(self._config)),
-        )
+        sig_for_risk = self._signal_engine.evaluate(self._market)
+        sizing_conf = float(sig_for_risk.adjusted_confidence or 0)
+        threshold_floor = float(self._points.trade_confidence_threshold(self._config))
+        if sizing_conf <= 0:
+            try:
+                from system.risk_bands import bands_enabled, entry_confidence_floor
+
+                sizing_conf = (
+                    entry_confidence_floor()
+                    if bands_enabled()
+                    else max(CONF_MARGINAL_MIN, threshold_floor)
+                )
+            except Exception:
+                sizing_conf = max(CONF_MARGINAL_MIN, threshold_floor)
+        planning_conf = max(threshold_floor, sizing_conf)
         size_mult = float(self._points.get_size_multiplier(planning_conf))
+        risk_band_label = ""
+        risk_band_note = ""
         effective_size = max(
             float(self._config.adaptive_min_trade_size),
             min(
@@ -1351,8 +1380,31 @@ class TradingLoop:
                 # else: even min size exceeds cap — leave actual_size as-is so the
                 # risk check below fires with a clear log message.
 
+        try:
+            from system.risk_bands import apply_risk_band_to_size, bands_enabled
+
+            if bands_enabled() and sizing_conf > 0:
+                banded, risk_band_label, risk_band_note = apply_risk_band_to_size(
+                    actual_size,
+                    confidence=sizing_conf,
+                    stop_pts=stop,
+                    point_value_gbp=point_value,
+                    epic_risk_cap_gbp=risk_cap,
+                )
+                if banded > 0:
+                    actual_size = max(banded, ig_min_size)
+        except Exception:
+            pass
+
         risk_gbp = stop * actual_size * point_value
         risk_ok = risk_gbp <= risk_cap
+        if risk_band_label == "probe":
+            try:
+                from system.risk_bands import probe_risk_target_gbp
+
+                risk_ok = risk_gbp <= probe_risk_target_gbp(sizing_conf) * 1.05
+            except Exception:
+                risk_ok = risk_gbp <= 80.0
 
         portfolio_ok = True
         portfolio_detail = ""
@@ -1392,9 +1444,10 @@ class TradingLoop:
             detail = f"portfolio envelope: {portfolio_detail}"
         else:
             clip_note = f", clipped to {actual_size:.3g}" if size_was_clipped else ""
+            band_note = f", {risk_band_note}" if risk_band_note else ""
             detail = (
                 f"OK — spread {spread:.1f} pts (normal {normal:.1f}, max {spread_cap:.1f}), "
-                f"flat, risk £{risk_gbp:.0f} (cap £{risk_cap:.0f}){clip_note}"
+                f"flat, risk £{risk_gbp:.0f} (cap £{risk_cap:.0f}){clip_note}{band_note}"
             )
         return GateResult(
             name="risk_validation",
@@ -1421,6 +1474,8 @@ class TradingLoop:
                 "spread_cap": round(spread_cap, 1),
                 "risk_cap_gbp": risk_cap,
                 "points_state": self._points.get_state(),
+                "risk_band": risk_band_label,
+                "sizing_confidence": round(sizing_conf, 1),
             },
             detail=detail,
         )
@@ -1486,6 +1541,16 @@ class TradingLoop:
     def _gate_signal_confidence(self) -> GateResult:
         sig = self._signal_engine.evaluate(self._market)
         threshold = float(self._points.trade_confidence_threshold(self._config))
+        try:
+            from system.gate_relaxation import effective_trade_confidence_threshold
+
+            threshold = effective_trade_confidence_threshold(
+                threshold,
+                points_state=self._points.get_state(),
+                instrument_threshold=float(self._config.signal_threshold),
+            )
+        except Exception:
+            pass
         conf = float(sig.adjusted_confidence)
         rules_conf = conf
         ml_prob: float | None = None
@@ -1583,12 +1648,37 @@ class TradingLoop:
                 log_engine(f"ML gate blend skipped: {type(e).__name__}: {e}")
         self._last_ml_prob = ml_prob
         self._last_sig_direction = str(sig.signal or "WAIT")
+        snap = sig.snapshot or {}
+        vol_penalty_mult = 1.0
+        vol_penalty_detail = ""
+        try:
+            from system.live_regime_gate import momentum_vol_penalty
+
+            vol_penalty_mult, vol_penalty_detail = momentum_vol_penalty(
+                str(getattr(self, "_epic", "") or ""),
+                snap,
+                signal_engine=self._signal_engine,
+                market=self._market,
+            )
+            if vol_penalty_mult < 1.0:
+                conf = max(0.0, min(100.0, conf * vol_penalty_mult))
+        except Exception:
+            pass
         passed = sig.signal in ("BUY", "SELL") and conf >= threshold
         detail, block_reason = signal_gate_explanation(sig, threshold)
+        if vol_penalty_detail:
+            detail = f"{detail} | vol soft: {vol_penalty_detail}"
         pts_state = self._points.get_state()
         if pts_state == "WARNING" and threshold >= 90.0:
             detail = f"{detail} (points {pts_state} — need >={threshold:.0f}%)"
-        snap = sig.snapshot or {}
+        risk_band_label = ""
+        try:
+            from system.risk_bands import bands_enabled, risk_band_for_confidence
+
+            if bands_enabled():
+                risk_band_label = risk_band_for_confidence(conf)
+        except Exception:
+            pass
         return GateResult(
             name="signal_confidence",
             passed=passed,
@@ -1599,6 +1689,9 @@ class TradingLoop:
                 "confidence": conf,
                 "rules_confidence": rules_conf,
                 "ml_probability": ml_prob,
+                "vol_penalty_mult": vol_penalty_mult,
+                "vol_penalty_detail": vol_penalty_detail,
+                "risk_band": risk_band_label,
                 "threshold": threshold,
                 "config_signal_threshold": float(self._config.signal_threshold),
                 "points_confidence_floor": float(self._points.get_threshold()),
@@ -2103,6 +2196,33 @@ class TradingLoop:
         except Exception:
             pass
 
+        risk_band = ""
+        probe_risk_target: float | None = None
+        sizing_risk_gbp: float | None = None
+        for g in ctx.gates:
+            if g.name == "signal_confidence" and isinstance(g.value, dict):
+                risk_band = str(g.value.get("risk_band") or risk_band)
+            if g.name == "risk_validation" and isinstance(g.value, dict):
+                risk_band = str(g.value.get("risk_band") or risk_band)
+                try:
+                    sizing_risk_gbp = float(g.value.get("risk_gbp"))
+                except (TypeError, ValueError):
+                    sizing_risk_gbp = None
+        threshold_pass: dict[str, bool] = {}
+        try:
+            from system.risk_bands import (
+                bands_enabled,
+                probe_risk_target_gbp,
+                threshold_pass_map,
+            )
+
+            if bands_enabled():
+                threshold_pass = threshold_pass_map(confidence, direction)
+                if risk_band == "probe":
+                    probe_risk_target = probe_risk_target_gbp(confidence)
+        except Exception:
+            pass
+
         return {
             "type": "tick",
             "epic": self._epic,
@@ -2163,6 +2283,16 @@ class TradingLoop:
                 "setup": setup,
                 "countdown": countdown,
                 "price_trend": price_trend,
+                "risk_band": risk_band or None,
+                "threshold_pass": threshold_pass or None,
+                "probe_risk_gbp_target": (
+                    round(probe_risk_target, 0)
+                    if probe_risk_target is not None
+                    else None
+                ),
+                "sizing_risk_gbp": (
+                    round(sizing_risk_gbp, 0) if sizing_risk_gbp is not None else None
+                ),
             },
             "price_trend": price_trend,
             "trade_eligibility": countdown,
@@ -2471,6 +2601,7 @@ class TradingLoop:
         return journal
 
     def _positions_payload(self, quote: Quote | None = None) -> list[dict[str, Any]]:
+        # Legacy GBP fallback; USD epics use INSTRUMENT_PNL_SPEC + FX in open_position_view.
         point_value = float(self._config.get("ig_point_value_gbp", 1.0))
         raw: list[dict[str, Any]] = []
 

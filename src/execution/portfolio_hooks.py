@@ -11,36 +11,7 @@ from system.engine_log import log_engine
 _deal_risk_gbp: dict[str, float] = {}
 
 
-def _point_value_for_epic(epic: str, cfg: Any | None) -> float:
-    if cfg is None:
-        return 1.0
-    try:
-        instruments = cfg.get("instruments") or {}
-        if isinstance(instruments, dict):
-            for inst in instruments.values():
-                if isinstance(inst, dict) and str(inst.get("epic") or "") == epic:
-                    return float(inst.get("ig_point_value_gbp") or 1.0)
-    except (TypeError, ValueError, AttributeError):
-        pass
-    return 1.0
-
-
-def risk_gbp_from_trade_row(row: Any, *, cfg: Any | None = None) -> float:
-    """Approximate £ risk for an open trade row (entry/stop/size × point value)."""
-    try:
-        entry = float(row["entry"] or 0)
-        stop = float(row["stop"] or 0)
-        size = float(row["size"] or 0)
-    except (TypeError, ValueError, KeyError):
-        return 0.0
-    if size <= 0:
-        return 0.0
-    stop_dist = abs(entry - stop)
-    if stop_dist <= 0:
-        return 0.0
-    epic = str(row["epic"] or "")
-    point_value = _point_value_for_epic(epic, cfg)
-    return stop_dist * size * point_value
+from execution.trade_risk import risk_gbp_from_row as risk_gbp_from_trade_row
 
 
 def reset_portfolio_hooks_for_tests() -> None:

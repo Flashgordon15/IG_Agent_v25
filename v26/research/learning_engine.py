@@ -9,6 +9,7 @@ from typing import Any
 
 from ingest.lake_reader import events_dir, utc_today
 from research.bar_analyzer import analyze_bars, bar_report_to_dict
+from research.cert_config import max_soak_days
 from research.gate_blockers import build_gate_blocker_report, report_to_dict
 from research.l1_certification import evaluate_l1
 from research.l1_replay import replay_days
@@ -26,6 +27,17 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def _load_trail_tune() -> dict[str, Any]:
+    path = _project_root() / "data_lake" / "state" / "trail_epic_overrides.json"
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
 def _load_ohlc_replay() -> dict[str, Any]:
     path = _project_root() / "data_lake" / "state" / "v26_ohlc_replay.json"
     if not path.is_file():
@@ -37,7 +49,8 @@ def _load_ohlc_replay() -> dict[str, Any]:
         return {}
 
 
-def list_event_days(*, max_days: int = 90) -> list[str]:
+def list_event_days(*, max_days: int | None = None) -> list[str]:
+    cap = max_days if max_days is not None else max_soak_days()
     root = events_dir()
     if not root.is_dir():
         return []
@@ -45,15 +58,16 @@ def list_event_days(*, max_days: int = 90) -> list[str]:
         (p.stem for p in root.glob("*.jsonl") if p.is_file()),
         reverse=True,
     )
-    return days[:max_days]
+    return days[:cap]
 
 
 def build_learning_snapshot(
     *,
     days: list[str] | None = None,
-    max_days: int = 90,
+    max_days: int | None = None,
 ) -> dict[str, Any]:
-    day_list = days if days is not None else list_event_days(max_days=max_days)
+    soak = max_days if max_days is not None else max_soak_days()
+    day_list = days if days is not None else list_event_days(max_days=soak)
     if not day_list:
         day_list = [utc_today()]
 
@@ -65,7 +79,8 @@ def build_learning_snapshot(
     shadow = summarize_shadow_days(day_list)
     l1 = evaluate_l1(day_list)
     ohlc = _load_ohlc_replay()
-    trade_learning = build_trade_learning_report(live_days=min(len(day_list) * 7, 90))
+    trail_tune = _load_trail_tune()
+    trade_learning = build_trade_learning_report(live_days=min(len(day_list) * 7, soak))
     allocator = (
         PortfolioAllocator.from_config().snapshot()
         if PortfolioAllocator is not None
@@ -83,10 +98,11 @@ def build_learning_snapshot(
         "near_miss_latest": near_miss,
         "shadow_summary": shadow,
         "ohlc_replay": ohlc,
+        "trail_tune": trail_tune,
         "portfolio_envelope": allocator,
         "trade_learning": trade_learning,
         "learning_focus": _learning_focus(
-            gates, bars, shadow, l1, ohlc, trade_learning
+            gates, bars, shadow, l1, ohlc, trade_learning, trail_tune
         ),
     }
 
@@ -98,6 +114,7 @@ def _learning_focus(
     l1: dict[str, Any],
     ohlc: dict[str, Any] | None = None,
     trade_learning: dict[str, Any] | None = None,
+    trail_tune: dict[str, Any] | None = None,
 ) -> list[str]:
     tips: list[str] = []
     buckets = gates.get("confidence_buckets") or {}
@@ -117,7 +134,7 @@ def _learning_focus(
             f"S3 FX active ({s3.get('would_trade')} would_trade) — "
             "compare vs S1 on same sessions."
         )
-    if l1.get("days_available", 0) < l1.get("days_required", 90):
+    if l1.get("days_available", 0) < l1.get("days_required", max_soak_days()):
         tips.append(
             f"L1 cert: {l1.get('days_available')}/{l1.get('days_required')} days — "
             "keep feeder running daily."
@@ -135,6 +152,16 @@ def _learning_focus(
     tl = trade_learning or {}
     for tip in (tl.get("learning_tips") or [])[:2]:
         tips.append(tip)
+    tt = trail_tune or {}
+    for epic, row in list((tt.get("by_epic") or {}).items())[:2]:
+        cap = row.get("median_capture_ratio")
+        if cap is not None:
+            tips.append(
+                f"Trail tune {row.get('market')}: "
+                f"trigger={row.get('trail_trigger_atr_multiple')}×ATR "
+                f"distance={row.get('trail_distance_atr_multiple')}×ATR "
+                f"(capture {float(cap):.0%})"
+            )
     if not tips:
         tips.append("Continue shadow tail + daily v26_learning_pack.")
     return tips
@@ -143,7 +170,7 @@ def _learning_focus(
 def write_learning_snapshot(
     *,
     days: list[str] | None = None,
-    max_days: int = 90,
+    max_days: int | None = None,
 ) -> Path:
     payload = build_learning_snapshot(days=days, max_days=max_days)
     out_dir = _project_root() / "data_lake" / "state"

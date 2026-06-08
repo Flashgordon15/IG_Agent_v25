@@ -74,6 +74,29 @@ def calendar_settings() -> dict[str, Any]:
     }
 
 
+def calendar_block_minutes() -> tuple[int, int]:
+    """High-impact macro veto window (minutes before/after event)."""
+    block = load_v26_overlay().get("regime") or {}
+    try:
+        before = int(block.get("calendar_block_minutes_before") or 0)
+    except (TypeError, ValueError):
+        before = 0
+    try:
+        after = int(block.get("calendar_block_minutes_after") or 0)
+    except (TypeError, ValueError):
+        after = 0
+    return before, after
+
+
+def pilot_settings() -> dict[str, Any]:
+    block = load_v26_overlay().get("pilot") or {}
+    return {
+        "primary_epic": str(block.get("primary_epic") or ""),
+        "target_wr": float(block.get("target_wr") or 0.60),
+        "target_rrr": float(block.get("target_rrr") or 2.5),
+    }
+
+
 def s1_settings() -> dict[str, Any]:
     block = load_v26_overlay().get("s1_rules") or {}
     return {

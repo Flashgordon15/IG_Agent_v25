@@ -439,13 +439,33 @@ class LearningStore:
             self.conn.commit()
             return True
 
+        from execution.trade_risk import infer_epic_from_row, resolve_stop_price
+
         market = str(row.get("market") or "")
-        epic = str(row.get("epic") or "")
         side = str(row.get("side") or "BUY")
         entry = float(row.get("entry") or 0)
         exit_px = float(row.get("exit") or 0)
         size = float(row.get("size") or 1)
         notes = str(row.get("notes") or "IG transaction history")
+        cfg = None
+        try:
+            from system.config_loader import get_config
+
+            cfg = get_config()
+        except Exception:
+            pass
+        epic = str(row.get("epic") or "").strip()
+        if not epic:
+            epic = infer_epic_from_row(
+                {"epic": "", "entry": entry, "market": market}, cfg
+            )
+        stop_px = resolve_stop_price(
+            entry=entry,
+            side=side,
+            stop_level=0.0,
+            epic=epic,
+            cfg=cfg,
+        )
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(trades)").fetchall()}
         source_col = "'ig_import'" if "source" in cols else None
         if "ig_pnl_currency" in cols and "ig_deal_id" in cols:
@@ -469,8 +489,8 @@ class LearningStore:
                     entry,
                     exit_px,
                     size,
-                    0.0,
-                    0.0,
+                    stop_px,
+                    stop_px,
                     ig_pnl,
                     result,
                     0.0,
@@ -504,8 +524,8 @@ class LearningStore:
                     entry,
                     exit_px,
                     size,
-                    0.0,
-                    0.0,
+                    stop_px,
+                    stop_px,
                     ig_pnl,
                     result,
                     0.0,
@@ -918,8 +938,38 @@ class LearningStore:
         stop_level: float = 0.0,
         limit_level: float = 0.0,
     ) -> int:
-        stop = float(stop_level) if float(stop_level) > 0 else float(entry)
-        target = float(limit_level) if float(limit_level) > 0 else float(entry)
+        from execution.trade_risk import resolve_stop_price, stop_price_from_distance
+
+        cfg = None
+        try:
+            from system.config_loader import get_config
+
+            cfg = get_config()
+        except Exception:
+            pass
+        epic_s = str(epic or "").strip()
+        if not epic_s:
+            raise ValueError("import_ig_position requires non-empty epic")
+        stop = resolve_stop_price(
+            entry=float(entry),
+            side=str(side or "BUY"),
+            stop_level=float(stop_level or 0),
+            epic=epic_s,
+            cfg=cfg,
+        )
+        if stop <= 0:
+            stop = float(entry)
+        dist = float(limit_level) if float(limit_level) > 0 else 0.0
+        if dist > 0 and abs(dist - float(entry)) <= 500:
+            target = dist
+        elif dist > 0:
+            target = stop_price_from_distance(
+                entry=float(entry),
+                side=str(side or "BUY"),
+                stop_distance_pts=dist,
+            )
+        else:
+            target = float(entry)
         cur = self.conn.cursor()
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(trades)").fetchall()}
         src_clause = ", source" if "source" in cols else ""

@@ -23,7 +23,7 @@ def _run(cmd: list[str], label: str) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="v26 full learning pack")
-    parser.add_argument("--max-days", type=int, default=90)
+    parser.add_argument("--max-days", type=int, default=14)
     parser.add_argument("--weekly", action="store_true")
     parser.add_argument(
         "--skip-ohlc",
@@ -74,6 +74,10 @@ def main() -> int:
                 (
                     "S2 per-epic threshold tune",
                     [py, str(ROOT / "scripts" / "v26_s2_tune.py")],
+                ),
+                (
+                    "Trail MFE/MAE tune (Japan + Gold)",
+                    [py, str(ROOT / "scripts" / "v26_trail_tune.py")],
                 ),
                 (
                     "S4 offline retrain",

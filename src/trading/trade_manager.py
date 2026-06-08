@@ -175,7 +175,7 @@ class TradeManager:
         )
         trail_distance = float(
             execution.get("trail_distance")
-            or self.get_trail_distance(adjusted_confidence, entry_atr)
+            or self._resolve_trail_distance(adjusted_confidence, entry_atr, epic=epic)
         )
         if entry_atr > 0 and trail_distance > 0:
             self.store.set_v25_entry_meta(
@@ -311,7 +311,7 @@ class TradeManager:
                 trail_dist = trail_distance
                 if trail_dist <= 0:
                     trail_dist = float(cfg.trailing_stop_step_points)
-                trail_trigger = self._effective_trail_trigger(entry_atr)
+                trail_trigger = self._effective_trail_trigger(entry_atr, epic=epic)
                 messages.extend(
                     self._apply_trailing(
                         market,
@@ -507,6 +507,7 @@ class TradeManager:
         self, tr: Any, adjusted_confidence: float
     ) -> tuple[float, float, str]:
         keys = tr.keys()
+        epic = str(tr["epic"] or "") if "epic" in keys else ""
         entry_atr = (
             float(tr["entry_atr"])
             if "entry_atr" in keys and tr["entry_atr"] is not None
@@ -523,8 +524,25 @@ class TradeManager:
             else self.confidence_band(adjusted_confidence)
         )
         if trail_distance <= 0 and entry_atr > 0:
-            trail_distance = self.get_trail_distance(adjusted_confidence, entry_atr)
+            trail_distance = self._resolve_trail_distance(
+                adjusted_confidence, entry_atr, epic=epic
+            )
         return entry_atr, trail_distance, band
+
+    def _resolve_trail_distance(
+        self, confidence: float, entry_atr: float, *, epic: str = ""
+    ) -> float:
+        if entry_atr > 0 and epic:
+            try:
+                from trading.trail_config import get_trail_overrides_for_epic
+
+                overrides = get_trail_overrides_for_epic(epic)
+                dist_mult = overrides.get("trail_distance_atr_multiple")
+                if dist_mult is not None:
+                    return float(dist_mult) * entry_atr
+            except Exception:
+                pass
+        return self.get_trail_distance(confidence, entry_atr)
 
     def _profit_points(self, side: str, entry: float, px: float) -> float:
         return (px - entry) if side == "BUY" else (entry - px)
@@ -802,9 +820,20 @@ class TradeManager:
             self.on_alert(msg)
         return [msg]
 
-    def _effective_trail_trigger(self, entry_atr: float) -> float:
+    def _effective_trail_trigger(
+        self, entry_atr: float, *, epic: str | None = None
+    ) -> float:
         """ATR-scaled trailing trigger when entry_atr known; falls back to config points."""
         mult = float(getattr(self._cfg, "trail_trigger_atr_multiple", 0.0))
+        if epic:
+            try:
+                from trading.trail_config import get_trail_overrides_for_epic
+
+                overrides = get_trail_overrides_for_epic(epic)
+                if overrides.get("trail_trigger_atr_multiple") is not None:
+                    mult = float(overrides["trail_trigger_atr_multiple"])
+            except Exception:
+                pass
         if mult > 0 and entry_atr > 0:
             return mult * entry_atr
         return float(self._cfg.trailing_stop_trigger_points)

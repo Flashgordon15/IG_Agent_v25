@@ -14,6 +14,7 @@ from execution.portfolio_hooks import (
     record_portfolio_entry_from_signal,
     record_portfolio_exit_for_deal,
     reset_portfolio_hooks_for_tests,
+    risk_gbp_from_trade_row,
 )
 from execution.types import TradeSignal
 from system.portfolio_envelope import snapshot
@@ -52,6 +53,29 @@ class PortfolioHooksTests(unittest.TestCase):
             snap2 = snapshot()
             self.assertEqual(snap2["concurrent_risk_gbp"], 0.0)
             self.assertEqual(snap2["daily_pnl_gbp"], 5.0)
+
+    def test_rehydrate_ignores_missing_stop_level(self) -> None:
+        """stop=0 must not use entry price as stop distance (portfolio gate bug)."""
+        cfg = MagicMock()
+        cfg.get = lambda k, d=None: (
+            {
+                "japan": {
+                    "epic": "IX.D.NIKKEI.IFM.IP",
+                    "ig_point_value_gbp": 1.0,
+                    "stop_distance_points": 45,
+                }
+            }
+            if k == "instruments"
+            else d
+        )
+        row = {
+            "entry": 63663.6,
+            "stop": 0.0,
+            "size": 0.5,
+            "epic": "IX.D.NIKKEI.IFM.IP",
+        }
+        risk = risk_gbp_from_trade_row(row, cfg=cfg)
+        self.assertAlmostEqual(risk, 22.5)
 
 
 if __name__ == "__main__":

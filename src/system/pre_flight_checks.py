@@ -269,12 +269,57 @@ def check_startup_stream_gate_log(*, within_minutes: float = 10.0) -> PreFlightR
     )
 
 
+def check_gate_coherence() -> PreFlightResult:
+    """Config/rules alignment — portfolio caps, points, sessions, ml_veto."""
+    try:
+        from data.learning_store import LearningStore
+        from system.config_loader import ConfigLoader
+        from system.gate_coherence import audit_trading_readiness
+        from system.paths import data_dir
+        from trading.points_engine import PointsEngine
+
+        cfg = ConfigLoader().load()
+        store = LearningStore(str(data_dir() / "learning_db.sqlite3"))
+        store.connect()
+        points = PointsEngine(store)
+        report = audit_trading_readiness(
+            cfg,
+            store,
+            points_state=points.get_state(),
+            repair_db=True,
+        )
+        store.close()
+        if report.critical:
+            first = report.critical[0]
+            return PreFlightResult(
+                "7.0",
+                "Gate coherence (config/rules aligned)",
+                False,
+                reason=f"{first.code}: {first.message}",
+            )
+        warn = report.warnings[0].message if report.warnings else ""
+        return PreFlightResult(
+            "7.0",
+            "Gate coherence (config/rules aligned)",
+            True,
+            reason=warn or f"{len(report.issues)} checks ok",
+        )
+    except Exception as e:
+        return PreFlightResult(
+            "7.0",
+            "Gate coherence (config/rules aligned)",
+            False,
+            reason=f"{type(e).__name__}: {e}",
+        )
+
+
 def run_all_pre_flight_checks(
     *,
     require_live_agent: bool = False,
     max_gate_age_sec: float = 60.0,
 ) -> list[PreFlightResult]:
     results = [
+        check_gate_coherence(),
         check_anti_mock_session_summaries(),
         check_session_summary_integrity(),
     ]

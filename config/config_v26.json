@@ -24,6 +24,12 @@
     "default_min_range_pct": 0.0008,
     "epic_overrides": {}
   },
+  "trailing_stop": {
+    "trail_trigger_atr_multiple": 0.75,
+    "trail_distance_atr_multiple": 1.5,
+    "epic_overrides": {},
+    "_note": "Per-epic values from scripts/v26_trail_tune.py → data_lake/state/trail_epic_overrides.json"
+  },
   "s4_ml_meta": {
     "enabled": true,
     "models_dir": "data_lake/models/s4",
@@ -66,12 +72,37 @@
   "portfolio_gate": {
     "enabled": true
   },
+  "risk_bands": {
+    "enabled": true,
+    "entry_confidence_floor": 72,
+    "probe_max_confidence": 80,
+    "full_size_min_confidence": 85,
+    "probe_risk_gbp_min": 50,
+    "probe_risk_gbp_max": 80,
+    "core_size_multiplier": 0.65,
+    "_note": "Probe 72–80% → £50–80 risk; core 80–85% → 0.65×; full ≥85%"
+  },
   "regime": {
     "calendar_enabled": true,
     "calendar_file": "config/calendar.json",
+    "calendar_block_minutes_before": 15,
+    "calendar_block_minutes_after": 15,
+    "live_vol_soft_gate": true,
     "atr_percentile_block_above": 95,
+    "index_epics": [
+      "IX.D.DOW.IFM.IP",
+      "IX.D.NASDAQ.IFM.IP"
+    ],
+    "extreme_vol_confidence_penalty_pct": 15,
     "same_direction_soft_cap": 3,
     "max_same_direction_risk_gbp": 400
+  },
+  "pilot": {
+    "primary_epic": "IX.D.DOW.IFM.IP",
+    "target_wr": 0.6,
+    "target_rrr": 2.5,
+    "review_days": 7,
+    "_note": "DOW pilot — track via feeder threshold_pass + feature store"
   },
   "milestones": {
     "current": "M0",
@@ -87,20 +118,31 @@
   "gate_relaxations": {
     "enabled": true,
     "fitness_min": 52,
+    "warning_confidence_cap": 85,
+    "warning_use_instrument_threshold": true,
     "epics": [
       "IX.D.DOW.IFM.IP",
       "IX.D.NASDAQ.IFM.IP"
     ],
-    "require_points_healthy": true,
-    "_note": "Approved 2026-06-08: 7d shadow near-miss on indices; fitness 55% blocked borderline scores"
+    "require_points_healthy": false,
+    "_note": "14d demo soak: fitness 52% on indices; WARNING cap 85% (not 92%); fitness relax applies in WARNING too"
   },
   "certification": {
+    "max_soak_days": 14,
+    "l1_window_days": 14,
+    "l1_min_days": 14,
+    "l1_median_daily_gbp": 100,
+    "l1_min_pct_stretch_days": 0.21,
+    "l1_stretch_day_gbp": 250,
+    "l1_max_drawdown_gbp": 500,
+    "l1_ohlc_wr_min": 0.52,
     "l4_window_days": 14,
     "l4_median_daily_gbp": 100,
     "l4_min_profit_factor": 1.2,
     "l4_min_trading_days": 7,
     "l5_window_days": 14,
     "l5_days_required": 10,
-    "l5_daily_target_gbp": 250
+    "l5_daily_target_gbp": 250,
+    "_note": "Max 14d soak — historical edge from OHLC replay (L2), not a 90d calendar wait"
   }
 }

@@ -59,6 +59,13 @@ def main() -> int:
     rollup = rollup_gate_blockers(days=args.days)
     recs = recommend_relaxations(rollup)
 
+    try:
+        from research.trail_tuner import write_trail_tune_snapshot
+
+        write_trail_tune_snapshot()
+    except Exception as exc:
+        print(f"Warning: trail tune skipped: {exc}", file=sys.stderr)
+
     lines = [
         f"# v26 Weekly Pack — {label}",
         "",

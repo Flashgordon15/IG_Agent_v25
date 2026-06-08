@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ingest.lake_reader import summarize_day
+from research.cert_config import max_soak_days
 from research.l1_certification import collect_daily_metrics
 from research.learning_engine import list_event_days
 
@@ -28,18 +29,7 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def _load_cert_config() -> dict[str, Any]:
-    cfg = _read_json(_project_root() / "config" / "config_v26.json")
-    cert = dict(cfg.get("certification") or {})
-    milestones = cfg.get("milestones") or {}
-    targets = milestones.get("targets") or {}
-    cert.setdefault("l4_window_days", 14)
-    cert.setdefault("l4_median_daily_gbp", float(targets.get("M1") or 100))
-    cert.setdefault("l4_min_profit_factor", 1.2)
-    cert.setdefault("l4_min_trading_days", 7)
-    cert.setdefault("l5_window_days", int(milestones.get("prove_days") or 14))
-    cert.setdefault("l5_days_required", 10)
-    cert.setdefault("l5_daily_target_gbp", float(targets.get("M2") or 250))
-    return cert
+    return load_cert_config()
 
 
 @dataclass
@@ -88,7 +78,7 @@ def _median(values: list[float]) -> float:
 def evaluate_l4_forward(*, window_days: int | None = None) -> dict[str, Any]:
     cert = _load_cert_config()
     window = int(window_days or cert.get("l4_window_days") or 14)
-    all_days = list_event_days(max_days=max(window, 90))
+    all_days = list_event_days(max_days=max(window, max_soak_days()))
     recent = all_days[-window:] if len(all_days) > window else all_days
     rows = collect_forward_days(recent)
     pnls = [r.fill_pnl_gbp for r in rows]
@@ -160,7 +150,7 @@ def evaluate_l5_prove(*, window_days: int | None = None) -> dict[str, Any]:
     required = int(cert.get("l5_days_required") or 10)
     target = float(cert.get("l5_daily_target_gbp") or 250)
 
-    all_days = list_event_days(max_days=max(window, 90))
+    all_days = list_event_days(max_days=max(window, max_soak_days()))
     recent = all_days[-window:] if len(all_days) > window else all_days
     rows = collect_forward_days(recent)
     pnls = [r.fill_pnl_gbp for r in rows]

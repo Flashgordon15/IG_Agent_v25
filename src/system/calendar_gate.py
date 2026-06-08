@@ -68,6 +68,16 @@ def is_calendar_blocked(
     cfg = _calendar_config()
     before = int(cfg.get("block_minutes_before") or 30)
     after = int(cfg.get("block_minutes_after") or 30)
+    try:
+        from system.v26_config import calendar_block_minutes
+
+        v26_before, v26_after = calendar_block_minutes()
+        if v26_before > 0:
+            before = v26_before
+        if v26_after > 0:
+            after = v26_after
+    except Exception:
+        pass
     window_before = timedelta(minutes=before)
     window_after = timedelta(minutes=after)
 

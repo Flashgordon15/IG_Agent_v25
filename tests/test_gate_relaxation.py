@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from system.gate_relaxation import (
     effective_fitness_min,
+    effective_trade_confidence_threshold,
     relaxation_enabled,
     reset_gate_relaxation_cache_for_tests,
 )
@@ -46,7 +47,7 @@ class GateRelaxationTests(unittest.TestCase):
                 52.0,
             )
 
-    def test_warning_keeps_55(self) -> None:
+    def test_warning_keeps_55_when_require_healthy(self) -> None:
         with patch(
             "system.gate_relaxation._relaxation_block",
             return_value={
@@ -59,6 +60,38 @@ class GateRelaxationTests(unittest.TestCase):
             self.assertEqual(
                 effective_fitness_min("IX.D.DOW.IFM.IP", points_state="WARNING"),
                 55.0,
+            )
+
+    def test_warning_gets_52_when_relax_all_states(self) -> None:
+        with patch(
+            "system.gate_relaxation._relaxation_block",
+            return_value={
+                "enabled": True,
+                "fitness_min": 52,
+                "epics": ["IX.D.DOW.IFM.IP"],
+                "require_points_healthy": False,
+            },
+        ):
+            self.assertEqual(
+                effective_fitness_min("IX.D.DOW.IFM.IP", points_state="WARNING"),
+                52.0,
+            )
+
+    def test_warning_uses_instrument_threshold(self) -> None:
+        with patch(
+            "system.gate_relaxation._relaxation_block",
+            return_value={
+                "enabled": True,
+                "warning_use_instrument_threshold": True,
+            },
+        ):
+            self.assertEqual(
+                effective_trade_confidence_threshold(
+                    92.0,
+                    points_state="WARNING",
+                    instrument_threshold=70.0,
+                ),
+                70.0,
             )
 
     def test_non_listed_epic_unchanged(self) -> None:

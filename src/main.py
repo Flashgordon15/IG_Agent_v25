@@ -607,9 +607,13 @@ class AgentRuntime:
 
                 start_replay_daily_scheduler()
                 start_trading_health_monitor()
+                from system.gate_coherence_scheduler import (
+                    start_gate_coherence_scheduler,
+                )
                 from system.v26_shadow_service import start_v26_shadow_service
 
                 start_v26_shadow_service()
+                start_gate_coherence_scheduler()
                 _start_session_refresh_watchdog(rest)
                 log_engine("orchestrator trading loop started (background)")
                 try:

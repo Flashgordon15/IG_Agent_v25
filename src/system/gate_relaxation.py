@@ -30,6 +30,32 @@ def relaxation_enabled() -> bool:
     return bool(_relaxation_block().get("enabled"))
 
 
+def effective_trade_confidence_threshold(
+    base_threshold: float,
+    *,
+    points_state: str,
+    instrument_threshold: float | None = None,
+) -> float:
+    """Cap points WARNING 92% bar during demo soak (config gate_relaxations)."""
+    block = _relaxation_block()
+    if not block.get("enabled"):
+        return base_threshold
+    if points_state != "WARNING":
+        return base_threshold
+    floor = float(instrument_threshold or 0)
+    if block.get("warning_use_instrument_threshold") and floor > 0:
+        return min(base_threshold, floor)
+    try:
+        cap = float(block.get("warning_confidence_cap") or 0)
+    except (TypeError, ValueError):
+        cap = 0.0
+    if cap <= 0:
+        return base_threshold
+    if floor > 0:
+        return min(base_threshold, max(cap, floor))
+    return min(base_threshold, cap)
+
+
 def effective_fitness_min(epic: str, *, points_state: str) -> float:
     """Return fitness gate floor for this epic (default 55%)."""
     from trading.environment_scorer import GATE_PASS_MIN
@@ -58,6 +84,7 @@ def relaxation_snapshot() -> dict[str, Any]:
     return {
         "enabled": bool(block.get("enabled")),
         "fitness_min": block.get("fitness_min"),
+        "warning_confidence_cap": block.get("warning_confidence_cap"),
         "epics": list(block.get("epics") or []),
         "require_points_healthy": bool(block.get("require_points_healthy", True)),
         "note": str(block.get("_note") or ""),

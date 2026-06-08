@@ -102,9 +102,59 @@ function buildSignalStatusLine(signal) {
     return `${dir} blocked — ${shortenBlockReason(signal.block_reason)}`;
   }
   if (dir && signal.confidence != null) {
-    return `${dir} ${pct2(signal.confidence)}% — watching`;
+    const band =
+      signal.risk_band && signal.risk_band !== "below_floor"
+        ? ` · ${String(signal.risk_band).toUpperCase()}`
+        : "";
+    return `${dir} ${pct2(signal.confidence)}%${band} — watching`;
   }
   return "WAIT — watching";
+}
+
+const RISK_BAND_STYLES = {
+  probe: "bg-amber/20 text-amber border-amber/40",
+  core: "bg-blue/20 text-blue border-blue/40",
+  full: "bg-green/20 text-green border-green/40",
+};
+
+function riskBandLabel(band, signal) {
+  const b = String(band || "").toLowerCase();
+  if (b === "probe") {
+    const target = signal.probe_risk_gbp_target;
+    const sized = signal.sizing_risk_gbp;
+    const risk =
+      sized != null
+        ? `£${Math.round(Number(sized))} risk`
+        : target != null
+          ? `~£${Math.round(Number(target))} target`
+          : "£50–£80";
+    return `PROBE · ${risk}`;
+  }
+  if (b === "core") return "CORE · 0.65× size";
+  if (b === "full") return "FULL · ≥85% size";
+  return b ? b.toUpperCase() : "—";
+}
+
+function ThresholdPassRow({ thresholdPass }) {
+  const keys = [">=70", ">=75", ">=80", ">=85"];
+  const map = thresholdPass && typeof thresholdPass === "object" ? thresholdPass : {};
+  return (
+    <div className="flex flex-wrap gap-1 mt-1.5">
+      {keys.map((k) => {
+        const on = Boolean(map[k]);
+        return (
+          <span
+            key={k}
+            className={`px-1.5 py-0.5 rounded text-[10px] font-medium border ${
+              on ? "bg-green/15 text-green border-green/30" : "bg-bg text-muted border-border"
+            }`}
+          >
+            {k.replace(">=", "≥")}
+          </span>
+        );
+      })}
+    </div>
+  );
 }
 
 function formatGateValue(gate) {
@@ -127,10 +177,12 @@ function formatGateValue(gate) {
     const spread = value.spread;
     const open = value.open_count;
     const risk = value.risk_gbp;
+    const band = value.risk_band;
     const parts = [];
+    if (band) parts.push(String(band).toUpperCase());
     if (spread != null) parts.push(`spread ${Number(spread).toFixed(1)} pts`);
     if (open != null) parts.push(open === 0 ? "flat (0 open)" : `${open} open`);
-    if (risk != null) parts.push(`~£${Math.round(risk)} at risk/trade`);
+    if (risk != null) parts.push(`~£${Math.round(risk)} risk/trade`);
     return parts.length ? parts.join(" · ") : "—";
   }
 
@@ -352,6 +404,20 @@ export default function LiveTab({ tick }) {
                       </span>
                     </li>
                   </ul>
+                )}
+                {label === "Confidence" && signal.risk_band && (
+                  <div className="mt-2 pt-2 border-t border-border">
+                    <p className="text-[10px] text-muted mb-1">Expectancy sizing</p>
+                    <span
+                      className={`inline-block px-2 py-0.5 rounded text-[11px] font-semibold border ${
+                        RISK_BAND_STYLES[String(signal.risk_band).toLowerCase()] ||
+                        "bg-bg text-muted border-border"
+                      }`}
+                    >
+                      {riskBandLabel(signal.risk_band, signal)}
+                    </span>
+                    <ThresholdPassRow thresholdPass={signal.threshold_pass} />
+                  </div>
                 )}
                 {factorRows && (
                   <ul className="mt-1 space-y-0.5 text-[10px] text-muted font-mono">

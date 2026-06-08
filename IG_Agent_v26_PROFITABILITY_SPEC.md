@@ -10,7 +10,7 @@
 | Capital assumption | **~£10,000** total account value |
 | Trade style | **Multiple trades/day** across uncorrelated markets |
 | Ultimate target | **£1,000 net/day** (stretch); staged milestones below |
-| Status | **SPECIFICATION** — not yet fully implemented |
+| Status | **PARTIALLY IMPLEMENTED** — M0 calibration window active (see §16 + Appendix) |
 
 ---
 
@@ -97,6 +97,8 @@ v26 closes the gap by **concentrating edge**, **expanding qualified opportunity*
 | **No trade** | STOP / negative EV / event block | £0 | — |
 
 Risk bands are chosen by **Expectancy Engine** (Section 5), not static config alone.
+
+**Implemented (June 2026 — confidence bands, live):** `config_v26.json` → `risk_bands` drives **Probe / Core / Full** sizing by **entry confidence** (not yet per `setup_key`). Module: `src/system/risk_bands.py`; wired in `trading_loop._gate_risk_validation`, `execution_engine`, `points_engine`. See **Current Calibration Appendix**.
 
 ### 2.3 Structural alignment (v25 incoherence fixed in v26)
 
@@ -273,15 +275,15 @@ Per-epic thresholds loaded from `src/data/ml_model/thresholds.json` (walk-forwar
 
 ### 5.5 Regime Filter (Phase 2)
 
-**NEW module:** `src/signals/regime_filter.py`
+**NEW module:** `src/signals/regime_filter.py` (full unified filter — still Phase 4 target)
 
 Inputs (v26.2+):
 
-| Input | Source | Effect |
-|-------|--------|--------|
-| ATR percentile (20d) | OHLC cache | High vol → −10% score or block marginal |
-| Economic calendar | **NEW** `config/calendar.json` or API | Block ±30 min around high-impact |
-| Cross-market direction | Open positions snapshot | Reduce size when 3+ same direction |
+| Input | Source | Effect | Live status |
+|-------|--------|--------|-------------|
+| ATR percentile (rolling 5m) | Signal engine candles | Extreme vol → confidence penalty on indices | **Implemented/Live** — `src/system/live_regime_gate.py`; soft −15% on DOW/NASDAQ at ≥95th ATR percentile (not hard block) |
+| Economic calendar | `config/calendar.json` + Finnhub ingest | Block around high-impact events | **Implemented/Live** — `calendar_gate` ±15 min; nightly `v26_nightly.py` + `com.igagent.v25.v26nightly` launchd |
+| Cross-market direction | Open positions snapshot | Reduce size when 3+ same direction | **Research/Shadow** — `v26/regime/router.py` shadow only |
 
 ---
 
@@ -289,17 +291,18 @@ Inputs (v26.2+):
 
 ### 6.1 Gate flow (v26 = nine checks, seven dashboard groups)
 
-| # | Gate | v26 change |
-|---|------|------------|
-| 1–4 | session, gap, fitness, points | Unchanged |
-| **5a** | risk_validation | Unchanged |
-| **5b** | **`expectancy_ok`** | **NEW** — setup not BANNED; band assigned |
-| **5c** | **`capital_budget`** | **NEW** — portfolio heat OK |
-| 6a | signal_confidence | Unchanged |
-| **6b** | **`ml_veto`** | **NEW** — prob ≥ threshold |
-| 7 | execution | Correlation guard uses **£ heat** not just count |
+| # | Gate | v26 change | Live status |
+|---|------|------------|-------------|
+| 1–4 | session, gap, fitness, points | Unchanged | v25 core |
+| **5a** | risk_validation | Applies **risk_band** clip (probe £50–£80) | **Implemented/Live** |
+| **5b** | **`expectancy_ok`** | Setup not **BANNED** when registry enabled | **Implemented/Live** (gate wired); registry **`enabled: false`** during calibration — see Appendix |
+| **5c** | **`capital_budget`** | Portfolio heat OK | **Partial** — `portfolio_gate` + `capital_envelope` live; full allocator Phase 3 |
+| 5d | **`calendar_ok`** | Macro veto | **Implemented/Live** |
+| 6a | signal_confidence | Vol soft penalty on indices | **Implemented/Live** (Tier 2 soft gate) |
+| **6b** | **`ml_veto`** | prob ≥ threshold | **Partial** — EUR/USD S4 veto live |
+| 7 | execution | Correlation guard uses **£ heat** not just count | **Partial** — correlation guard + envelope live |
 
-Dashboard LIVE tab: show 5b/5c/6b as sub-rows under parent gates (no tab clutter).
+Dashboard LIVE tab: **risk_band** badge + **threshold_pass** chips (≥70–≥85) on confidence panel; gate coherence snapshot 4×/day.
 
 ### 6.2 Exit optimisation (v26.1)
 
@@ -486,19 +489,23 @@ v26 **does not promise** 10% daily returns. It **engineers** the path and stops 
 
 ## 13. Implementation Backlog (ordered)
 
-| Priority | Item | Phase |
-|----------|------|-------|
-| P0 | `expectancy_engine.py` read-only + snapshot | 0 |
-| P0 | `profitability_report.py --expectancy --milestones` | 0 |
-| P0 | PROFIT dashboard tab (read-only) | 0 |
-| P1 | `setup_registry.py` + gate `expectancy_ok` | 1 |
-| P1 | `ml_veto` gate + config | 1 |
-| P1 | `config/config_v26.json` skeleton | 1 |
-| P2 | `capital_budget.py` + gate | 3 |
-| P2 | `shadow_expectancy.py` | 2 |
-| P2 | Per-epic trail from MFE/MAE replay | 2 |
-| P3 | `regime_filter.py` + calendar | 4 |
-| P3 | Weekly auto pack + approve UI | 5 |
+| Priority | Item | Phase | Status |
+|----------|------|-------|--------|
+| P0 | `expectancy_engine.py` read-only + snapshot | 0 | **Done** — `v26/expectancy/engine.py` + `expectancy_snapshot.json` |
+| P0 | `profitability_report.py --expectancy --milestones` | 0 | Partial |
+| P0 | PROFIT dashboard tab (read-only) | 0 | Partial — `ProfitPanel.jsx` |
+| P1 | `setup_registry.py` + gate `expectancy_ok` | 1 | **Done** (gate live; registry **off** for calibration) |
+| P1 | `ml_veto` gate + config | 1 | **Partial** — EUR/USD |
+| P1 | `config/config_v26.json` skeleton | 1 | **Done** |
+| P1 | **Risk bands / probe sizing** (`risk_bands.py`) | 1 | **Done — Live** |
+| P1 | **Live vol soft gate** (`live_regime_gate.py`) | 2 | **Done — Live** (indices) |
+| P1 | Gate coherence audit (4×/day + per-market) | 1 | **Done** — `gate_coherence.py`, launchd |
+| P1 | Feeder `threshold_pass` + feature store | 0 | **Done** |
+| P2 | `capital_budget.py` + gate | 3 | Pending |
+| P2 | `shadow_expectancy.py` | 2 | Partial — shadow v26 stack |
+| P2 | Per-epic trail from MFE/MAE replay | 2 | **Done** — `trail_tuner.py` |
+| P3 | `regime_filter.py` (unified) + calendar | 4 | Calendar **live**; unified filter pending |
+| P3 | Weekly auto pack + approve UI | 5 | Partial — `v26_weekly_pack.py` launchd |
 
 ---
 
@@ -524,6 +531,61 @@ v26 ships **incrementally** (v26.0, v26.1, …). App `version` in config bumps p
 6. **Regime** — Calendar and vol filter reduce friction.  
 7. **Milestone** — M1 → M2 → M3 → M4; **14 days each** before advance.  
 8. **Autonomy** — Weekly AI proposals; human approves until trust established.
+
+---
+
+## 16. Implemented Layers (bidirectional sync — June 2026)
+
+Status of v26 modules that bridge shadow/research and **live v25 execution**. Core profit equation, milestones (§1.1), and measurement gates (§4) are **unchanged**.
+
+| Layer | Module / config | Was | Now | Notes |
+|-------|-----------------|-----|-----|-------|
+| **Risk bands / probe sizing** | `src/system/risk_bands.py`, `config_v26.risk_bands` | Research/Shadow | **Implemented/Live** | Confidence-based Probe/Core/Full; not yet setup_key-driven |
+| **Live volatility soft gate** | `src/system/live_regime_gate.py`, `config_v26.regime.live_vol_soft_gate` | Research/Shadow (`v26/regime/router.py`) | **Implemented/Live** | −15% confidence on DOW/NASDAQ at extreme ATR; WARNING-tier, not hard block |
+| **Macro calendar gate** | `src/system/calendar_gate.py`, Finnhub ingest | Partial / ±30m spec | **Implemented/Live** | ±15 min hard block; nightly `v26_nightly` @ 22:30 |
+| **Setup registry / expectancy_ok** | `src/system/setup_registry.py`, gate in `trading_loop` | Spec only | **Implemented/Live** (inactive) | Gate wired; `enabled: false` until n≥20 ban baseline |
+| **Portfolio envelope** | `src/system/portfolio_envelope.py` | Spec | **Implemented/Live** | Concurrent + daily deploy caps |
+| **Gate coherence** | `src/system/gate_coherence.py` | — | **Implemented/Live** | 4×/day per-market alignment audit |
+| **ML veto (S4)** | `ml_veto` config | Partial | **Partial/Live** | EUR/USD whitelist |
+| **Capital budget allocator** | §5.3 | Spec | Research/Shadow | Phase 3 |
+| **Unified regime filter** | §5.5 `regime_filter.py` | Spec | Research/Shadow | Shadow router only for strategy selection |
+
+**Code audit — files touched in calibration sprint (representative):**
+
+| Area | Paths |
+|------|-------|
+| Risk bands | `src/system/risk_bands.py`, `src/trading/trading_loop.py`, `src/execution/execution_engine.py`, `src/trading/points_engine.py` |
+| Vol soft gate | `src/system/live_regime_gate.py`, `src/trading/trading_loop.py` (`_gate_signal_confidence`) |
+| Config | `config/config_v25.json`, `config/config_v26.json`, `config/calendar.json` |
+| Calendar / ops | `src/system/calendar_gate.py`, `scripts/v26_nightly.py`, `scripts/com.igagent.v25.v26nightly.plist`, `scripts/install_launchd.sh` |
+| Measurement | `src/feeder/event_bus.py`, `v26/research/feature_store.py`, `dashboard/src/tabs/LiveTab.jsx` |
+| Coherence | `src/system/gate_coherence.py`, `scripts/run_gate_coherence_check.py` |
+| Tests | `tests/test_risk_bands.py`, `tests/test_live_regime_gate.py`, `tests/test_setup_registry.py` |
+
+---
+
+## Current Calibration Appendix
+
+**Active from:** June 2026 restart · **Duration:** 7-day data-gathering window (M0) · **Milestone:** `current: M0` in `config_v26.json`
+
+| Parameter | Live value | Config / code |
+|-----------|------------|---------------|
+| **Entry confidence floor** | **72%** | `config_v25.confidence_floor`, `config_v26.risk_bands.entry_confidence_floor` |
+| **Probe band** | **72%–&lt;80%** confidence | `probe_max_confidence: 80` |
+| **Probe risk bounds** | **£50–£80** linear vs confidence | `probe_risk_gbp_min` / `probe_risk_gbp_max`; `apply_risk_band_to_size()` |
+| **Core band** | **80%–&lt;85%** | `core_size_multiplier: 0.65` |
+| **Full size** | **≥85%** confidence | `full_size_min_confidence: 85` |
+| **Live vol soft gate** | **−15%** confidence penalty | DOW + NASDAQ when ATR ≥ **95th** percentile (`atr_percentile_block_above: 95`) |
+| **Macro calendar veto** | **±15 minutes** | High-impact Finnhub + `calendar.json` events; `calendar_block_minutes_before/after: 15` |
+| **DOW pilot epic** | `IX.D.DOW.IFM.IP` | `config_v26.pilot.primary_epic` |
+| **DOW pilot RRR target** | **2.5R** | `instruments.wall_street.reward_multiple: 2.5` |
+| **DOW pilot WR target (review)** | **60%** | `config_v26.pilot.target_wr: 0.6` (measurement only) |
+| **Setup registry** | **`enabled: false`** | `src/data/state/setup_registry.json` — bans require **n ≥ 20** per `setup_key`; gate passes all while off |
+| **Expectancy gate behaviour** | Pass (inactive) | `expectancy_ok` detail: *setup registry inactive* |
+| **Dashboard surfacing** | Live tick | `signal.risk_band`, `signal.threshold_pass` (≥70/75/80/85), `probe_risk_gbp_target` |
+| **Nightly ops** | 22:30 local | `bash scripts/install_launchd.sh --ops-only` → Finnhub + feature store (`build_feature_store.py --days 7`) |
+
+**Operator pre-flight:** Live tab → `expectancy ok` = PASS · `setup registry inactive` · probe badge visible on 72–79% signals before restart completes calibration logging.
 
 ---
 

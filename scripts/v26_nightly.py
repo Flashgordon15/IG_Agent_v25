@@ -30,6 +30,10 @@ def main() -> int:
             [py, str(ROOT / "scripts" / "v26_ml_veto_promote.py")],
             "ml_veto promote",
         ),
+        (
+            [py, str(ROOT / "scripts" / "build_feature_store.py"), "--days", "7"],
+            "feature store (7d threshold replay)",
+        ),
     ]
     env = {**dict(__import__("os").environ), "PYTHONPATH": "src:v26"}
     for cmd, label in cmds:

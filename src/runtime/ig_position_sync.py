@@ -212,6 +212,15 @@ class IgPositionSync:
             return None
 
     def _position_to_dict(self, p: SyncedPosition) -> dict[str, Any]:
+        from trading.open_position_view import (
+            instrument_pnl_spec,
+            pnl_currency_amount_to_gbp,
+        )
+
+        spec = instrument_pnl_spec(p.epic)
+        currency = str(p.currency or spec["currency"]).upper()
+        point_value = float(spec["point_value"])
+        pnl_gbp = round(pnl_currency_amount_to_gbp(float(p.upl), currency), 2)
         return {
             "deal_id": p.deal_id,
             "epic": p.epic,
@@ -221,7 +230,8 @@ class IgPositionSync:
             "level": p.level,
             "entry": p.level,
             "upl": p.upl,
-            "pnl_gbp": p.upl,
+            "pnl_currency": float(p.upl),
+            "pnl_gbp": pnl_gbp,
             "market_name": p.market_name,
             "deal_reference": p.deal_reference,
             "stop_level": p.stop_level,
@@ -231,7 +241,8 @@ class IgPositionSync:
             "bid": p.bid,
             "offer": p.offer,
             "current": p.bid if p.direction == "BUY" else p.offer,
-            "currency": p.currency,
+            "currency": currency,
+            "point_value": point_value,
             "open_mins": self._open_mins_for_deal(p.deal_id),
         }
 
@@ -485,10 +496,16 @@ class IgPositionSync:
             deal_id = str(pos.get("dealId") or pos.get("dealID") or "")
             if not deal_id:
                 continue
+            epic = str(mkt.get("epic") or "")
+            from trading.open_position_view import instrument_pnl_spec
+
+            spec = instrument_pnl_spec(epic)
+            broker_ccy = str(pos.get("currency") or mkt.get("currency") or "").upper()
+            currency = broker_ccy or str(spec["currency"])
             out.append(
                 SyncedPosition(
                     deal_id=deal_id,
-                    epic=str(mkt.get("epic") or ""),
+                    epic=epic,
                     direction=str(pos.get("direction") or "").upper(),
                     size=size,
                     level=float(pos.get("level") or 0),
@@ -501,7 +518,7 @@ class IgPositionSync:
                     limit_level=float(pos.get("limitLevel") or 0),
                     bid=float(mkt.get("bid") or 0),
                     offer=float(mkt.get("offer") or 0),
-                    currency=str(pos.get("currency") or mkt.get("currency") or ""),
+                    currency=currency,
                 )
             )
         return out
@@ -898,6 +915,11 @@ class IgPositionSync:
             if ig_pos.deal_reference and self._store.find_open_by_deal_reference(
                 ig_pos.deal_reference
             ):
+                continue
+            if not str(ig_pos.epic or "").strip():
+                log_engine(
+                    f"IG sync skip import deal={deal_id}: missing epic on broker position"
+                )
                 continue
             tid = self._store.import_ig_position(
                 epic=ig_pos.epic,

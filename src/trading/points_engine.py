@@ -463,8 +463,16 @@ class PointsEngine:
                 return 0.0
 
             conf = float(confidence)
+            entry_min = CONF_MARGINAL_MIN
+            try:
+                from system.risk_bands import bands_enabled, entry_confidence_floor
+
+                if bands_enabled():
+                    entry_min = entry_confidence_floor()
+            except Exception:
+                pass
             if state in ("HEALTHY", "CAUTION"):
-                if conf < CONF_MARGINAL_MIN:
+                if conf < entry_min:
                     return 0.0
             elif state == "WARNING":
                 if conf < CONF_HIGH:
@@ -485,6 +493,27 @@ class PointsEngine:
                     tier_mult = 1.5  # HEALTHY: above nominal floor
                 else:
                     tier_mult = 1.0
+                try:
+                    from system.risk_bands import (
+                        bands_enabled,
+                        core_size_multiplier,
+                        risk_band_for_confidence,
+                    )
+
+                    if bands_enabled():
+                        rb = risk_band_for_confidence(conf)
+                        if rb == "probe":
+                            return tier_mult * 0.25
+                        if rb == "core":
+                            core = core_size_multiplier()
+                            if band == "high":
+                                return tier_mult * core
+                            if band == "standard":
+                                return tier_mult * 0.5 * core
+                            if band == "marginal":
+                                return tier_mult * 0.25 * core
+                except Exception:
+                    pass
                 if band == "high":
                     return tier_mult
                 if band == "standard":
@@ -494,8 +523,20 @@ class PointsEngine:
                 return 0.0
 
             if state == "CAUTION":
+                try:
+                    from system.risk_bands import (
+                        bands_enabled,
+                        risk_band_for_confidence,
+                    )
+
+                    if bands_enabled() and risk_band_for_confidence(conf) == "probe":
+                        return 0.25
+                except Exception:
+                    pass
                 if conf >= CONF_MARGINAL_MIN:
                     return 0.5
+                if conf >= entry_min:
+                    return 0.25
                 return 0.0
 
             if state == "WARNING":

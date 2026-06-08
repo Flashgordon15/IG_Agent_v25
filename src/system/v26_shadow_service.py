@@ -170,6 +170,14 @@ def _refresh_loop() -> None:
 
             write_trade_learning_snapshot()
             try:
+                from research.learning_engine import write_learning_snapshot
+
+                write_learning_snapshot()
+            except Exception as exc:
+                log_engine(
+                    f"v26_shadow_service: learning snapshot: {type(exc).__name__}: {exc}"
+                )
+            try:
                 from research.l4_forward import write_forward_cert
 
                 write_forward_cert()

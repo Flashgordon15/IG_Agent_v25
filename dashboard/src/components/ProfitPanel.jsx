@@ -191,7 +191,7 @@ export default function ProfitPanel() {
                 {l1.status}
               </span>
               <span className="ml-2 text-muted">
-                {l1.days_available ?? 0}/{l1.days_required ?? 90} UTC days
+                {l1.days_available ?? 0}/{l1.days_required ?? 14} UTC days
               </span>
             </p>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">

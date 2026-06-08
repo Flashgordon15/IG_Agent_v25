@@ -28,7 +28,7 @@ def _event_days(max_days: int) -> list[str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="v26 L1 replay + learning snapshot")
-    parser.add_argument("--max-days", type=int, default=90)
+    parser.add_argument("--max-days", type=int, default=14)
     parser.add_argument("--skip-features", action="store_true")
     parser.add_argument(
         "--write", action="store_true", help="Write v26_learning_snapshot.json"

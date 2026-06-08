@@ -41,6 +41,7 @@ _INSTRUMENT_CFG_KEYS = (
     "ig_point_value_gbp",
     "trade_size",
     "risk_cap_gbp",
+    "reward_multiple",
     "stale_threshold_seconds",
 )
 
@@ -53,6 +54,20 @@ def _config_for_instrument(cfg: Config, inst: dict[str, Any]) -> Config:
                 data["max_spread_points"] = float(inst[key])
             else:
                 data[key] = inst[key]
+    epic = str(inst.get("epic") or "")
+    if epic:
+        try:
+            from trading.trail_config import get_trail_overrides_for_epic
+
+            trail_overrides = get_trail_overrides_for_epic(epic)
+            if trail_overrides:
+                ts = data.setdefault("trailing_stop", {})
+                if not isinstance(ts, dict):
+                    ts = {}
+                    data["trailing_stop"] = ts
+                ts.update(trail_overrides)
+        except Exception:
+            pass
     merged = apply_config_defaults(data)
     return Config(_data=merged)
 
@@ -232,6 +247,40 @@ def build_market_orchestrator(
         rehydrate_risk_guards_from_store(store, cfg=cfg)
     except Exception as e:
         log_engine(f"phase_b risk rehydrate skipped: {type(e).__name__}: {e}")
+
+    try:
+        from system.gate_coherence import (
+            audit_trading_readiness,
+            format_report,
+            write_coherence_snapshot,
+        )
+
+        pts_state = points_engine.get_state()
+        coherence = audit_trading_readiness(
+            cfg, store, points_state=pts_state, repair_db=True, per_market=True
+        )
+        try:
+            write_coherence_snapshot(coherence)
+        except Exception:
+            pass
+        for issue in coherence.critical:
+            log_engine(f"GATE COHERENCE CRITICAL [{issue.code}]: {issue.message}")
+        for issue in coherence.warnings:
+            log_engine(f"GATE COHERENCE WARN [{issue.code}]: {issue.message}")
+        if coherence.critical:
+            try:
+                from system.telegram_notifier import send_critical_alert
+
+                send_critical_alert(
+                    "Gate coherence CRITICAL — trading may be blocked; "
+                    + coherence.critical[0].message[:120]
+                )
+            except Exception:
+                pass
+        elif coherence.warnings:
+            log_engine(format_report(coherence))
+    except Exception as e:
+        log_engine(f"gate coherence audit skipped: {type(e).__name__}: {e}")
 
     # Quick self-test — run deployed-fixes regression suite to catch stale code
     try:

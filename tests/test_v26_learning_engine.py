@@ -83,7 +83,7 @@ def test_learning_snapshot_has_focus(tmp_path: Path, monkeypatch) -> None:
     import research.learning_engine as le
 
     monkeypatch.setattr(lr, "events_dir", lambda: events)
-    monkeypatch.setattr(le, "list_event_days", lambda max_days=90: [day])
+    monkeypatch.setattr(le, "list_event_days", lambda max_days=14: [day])
     snap = build_learning_snapshot(days=[day])
     assert snap["latest_day"] == day
     assert isinstance(snap.get("learning_focus"), list)

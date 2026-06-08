@@ -144,8 +144,14 @@ class TradeManagerExtensionTests(unittest.TestCase):
             TradeManager, "_is_friday_close_window", return_value=False
         )
         self._friday_patch.start()
+        self._trail_patch = patch(
+            "trading.trail_config.get_trail_overrides_for_epic",
+            return_value={},
+        )
+        self._trail_patch.start()
 
     def tearDown(self) -> None:
+        self._trail_patch.stop()
         self._friday_patch.stop()
         self.store.close()
         self.tmp.cleanup()

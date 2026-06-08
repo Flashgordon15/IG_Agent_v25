@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+from datetime import date
 from functools import lru_cache
 from typing import Any
 
@@ -13,6 +14,7 @@ _lock = threading.RLock()
 _concurrent_risk_gbp: float = 0.0
 _daily_deployed_gbp: float = 0.0
 _daily_pnl_gbp: float = 0.0
+_envelope_utc_day: str = ""
 
 
 @lru_cache(maxsize=1)
@@ -44,13 +46,25 @@ def portfolio_gate_enabled() -> bool:
 
 
 def reset_portfolio_envelope_for_tests() -> None:
-    global _concurrent_risk_gbp, _daily_deployed_gbp, _daily_pnl_gbp
+    global _concurrent_risk_gbp, _daily_deployed_gbp, _daily_pnl_gbp, _envelope_utc_day
     with _lock:
         _concurrent_risk_gbp = 0.0
         _daily_deployed_gbp = 0.0
         _daily_pnl_gbp = 0.0
+        _envelope_utc_day = ""
     _envelope_config.cache_clear()
     _gate_config.cache_clear()
+
+
+def _maybe_roll_utc_day() -> None:
+    """Reset daily deploy/P&L counters at UTC midnight (in-memory envelope)."""
+    global _daily_deployed_gbp, _daily_pnl_gbp, _envelope_utc_day
+    today = date.today().isoformat()
+    with _lock:
+        if _envelope_utc_day and _envelope_utc_day != today:
+            _daily_deployed_gbp = 0.0
+            _daily_pnl_gbp = 0.0
+        _envelope_utc_day = today
 
 
 def rehydrate(
@@ -82,6 +96,7 @@ def record_exit(risk_gbp: float, *, pnl_gbp: float = 0.0) -> None:
 
 
 def can_allocate(risk_gbp: float) -> tuple[bool, str]:
+    _maybe_roll_utc_day()
     env = _envelope_config()
     max_concurrent = float(env.get("max_concurrent_risk_gbp") or 1200)
     max_daily = float(env.get("max_daily_risk_deployed_gbp") or 2500)

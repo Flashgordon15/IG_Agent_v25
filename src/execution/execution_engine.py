@@ -240,6 +240,36 @@ class ExecutionEngine:
                 if notes
                 else f"conf-tier ×{tier_mult:.2f}"
             )
+        try:
+            from system.risk_bands import apply_risk_band_to_size, bands_enabled
+
+            if bands_enabled():
+                conf = float(signal.adjusted_confidence)
+                stop_pts = float(
+                    settings.get("risk") or self.config.stop_distance_points
+                )
+                pv = float(self.config.get("ig_point_value_gbp", 1.0))
+                cap = float(self.config.get("risk_cap_gbp") or 0)
+                sized, band, note = apply_risk_band_to_size(
+                    float(settings.get("size", self.config.trade_size)),
+                    confidence=conf,
+                    stop_pts=stop_pts,
+                    point_value_gbp=pv,
+                    epic_risk_cap_gbp=cap,
+                )
+                if sized > 0 and note:
+                    cfg = self.config
+                    settings["size"] = max(
+                        cfg.adaptive_min_trade_size,
+                        min(cfg.adaptive_max_trade_size, sized),
+                    )
+                    notes = str(settings.get("notes") or "")
+                    settings["notes"] = (
+                        f"{notes}, {band} {note}" if notes else f"{band} {note}"
+                    )
+                    settings["risk_band"] = band
+        except Exception:
+            pass
         if self._env_scorer is not None:
             try:
                 settings["fitness_score"] = float(

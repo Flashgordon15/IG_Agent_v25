@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.igagent.v25.v26nightly</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>__PYTHON_BIN__</string>
+		<string>__IG_AGENT_ROOT__/scripts/v26_nightly.py</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>__IG_AGENT_ROOT__</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PYTHONPATH</key>
+		<string>__IG_AGENT_ROOT__/src:__IG_AGENT_ROOT__/v26</string>
+	</dict>
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>22</integer>
+		<key>Minute</key>
+		<integer>30</integer>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>__IG_AGENT_ROOT__/src/data/logs/v26_nightly.log</string>
+	<key>StandardErrorPath</key>
+	<string>__IG_AGENT_ROOT__/src/data/logs/v26_nightly.log</string>
+</dict>
+</plist>

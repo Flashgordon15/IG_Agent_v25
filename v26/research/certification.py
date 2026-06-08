@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from research.cert_config import max_soak_days
 from research.l1_certification import evaluate_l1
 from research.learning_engine import list_event_days
 
@@ -41,14 +42,20 @@ def _level_l0() -> dict[str, Any]:
 def _level_l1(days: list[str]) -> dict[str, Any]:
     l1 = evaluate_l1(days)
     n = int(l1.get("days_available") or 0)
-    req = int(l1.get("days_required") or 90)
+    req = int(l1.get("days_required") or max_soak_days())
+    window = int(l1.get("window_days") or req)
     pct = min(100, int(100 * n / req)) if req else 0
+    ohlc_wr = (l1.get("metrics") or {}).get("ohlc_replay_wr")
+    ohlc_note = f" · OHLC {ohlc_wr:.0%}" if ohlc_wr is not None else ""
     return {
         "id": "L1",
-        "name": "Replay 90d",
+        "name": f"Soak {window}d",
         "status": l1.get("status") or "INSUFFICIENT",
         "pct": pct,
-        "detail": f"{n}/{req} UTC days · median £{l1.get('metrics', {}).get('median_daily_gbp', 0)}",
+        "detail": (
+            f"{n}/{req} soak days · median £"
+            f"{l1.get('metrics', {}).get('median_daily_gbp', 0)}{ohlc_note}"
+        ),
         "metrics": l1.get("metrics"),
     }
 
@@ -143,8 +150,9 @@ def _level_l5() -> dict[str, Any]:
     }
 
 
-def build_certification_payload(*, max_days: int = 90) -> dict[str, Any]:
-    days = list_event_days(max_days=max_days)
+def build_certification_payload(*, max_days: int | None = None) -> dict[str, Any]:
+    window = max_days if max_days is not None else max_soak_days()
+    days = list_event_days(max_days=window)
     levels = [
         _level_l0(),
         _level_l1(days),

@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.igagent.v25.gatecoherence</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>__PYTHON_BIN__</string>
+		<string>__IG_AGENT_ROOT__/scripts/run_gate_coherence_check.py</string>
+		<string>--no-repair</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>__IG_AGENT_ROOT__</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PYTHONPATH</key>
+		<string>__IG_AGENT_ROOT__/src:__IG_AGENT_ROOT__/v26</string>
+	</dict>
+	<key>StartCalendarInterval</key>
+	<array>
+		<dict>
+			<key>Hour</key>
+			<integer>0</integer>
+			<key>Minute</key>
+			<integer>30</integer>
+		</dict>
+		<dict>
+			<key>Hour</key>
+			<integer>6</integer>
+			<key>Minute</key>
+			<integer>30</integer>
+		</dict>
+		<dict>
+			<key>Hour</key>
+			<integer>12</integer>
+			<key>Minute</key>
+			<integer>30</integer>
+		</dict>
+		<dict>
+			<key>Hour</key>
+			<integer>18</integer>
+			<key>Minute</key>
+			<integer>30</integer>
+		</dict>
+	</array>
+	<key>StandardOutPath</key>
+	<string>__IG_AGENT_ROOT__/src/data/logs/gate_coherence.log</string>
+	<key>StandardErrorPath</key>
+	<string>__IG_AGENT_ROOT__/src/data/logs/gate_coherence.log</string>
+</dict>
+</plist>

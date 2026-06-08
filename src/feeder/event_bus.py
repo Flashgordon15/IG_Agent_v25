@@ -125,6 +125,9 @@ def emit_signal_eval(
     snapshot: dict[str, Any] | None = None,
     gates_passed: list[str] | None = None,
     ml_probability: float | None = None,
+    threshold_pass: dict[str, bool] | None = None,
+    risk_band: str = "",
+    pilot_epic: bool = False,
 ) -> None:
     payload: dict[str, Any] = {
         "direction": direction,
@@ -138,6 +141,12 @@ def emit_signal_eval(
         payload["gates_passed"] = gates_passed
     if ml_probability is not None:
         payload["ml_probability"] = ml_probability
+    if threshold_pass:
+        payload["threshold_pass"] = threshold_pass
+    if risk_band:
+        payload["risk_band"] = risk_band
+    if pilot_epic:
+        payload["pilot"] = True
     if snapshot:
         payload["snapshot"] = snapshot
     emit(

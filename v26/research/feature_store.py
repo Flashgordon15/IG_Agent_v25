@@ -35,6 +35,12 @@ def _flatten_signal(row: dict[str, Any]) -> dict[str, Any]:
         "setup_key": p.get("setup_key"),
         "ml_probability": p.get("ml_probability"),
         "gates_passed_n": len(p.get("gates_passed") or []),
+        "risk_band": p.get("risk_band"),
+        "pilot": p.get("pilot"),
+        "pass_70": (p.get("threshold_pass") or {}).get(">=70"),
+        "pass_75": (p.get("threshold_pass") or {}).get(">=75"),
+        "pass_80": (p.get("threshold_pass") or {}).get(">=80"),
+        "pass_85": (p.get("threshold_pass") or {}).get(">=85"),
     }
 
 

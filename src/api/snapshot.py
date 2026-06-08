@@ -164,12 +164,39 @@ def enrich_signal_thresholds(tick: dict[str, Any]) -> None:
             "config_signal_threshold",
             "points_confidence_floor",
             "min_size_threshold",
+            "risk_band",
+            "threshold_pass",
+            "probe_risk_gbp_target",
+            "sizing_risk_gbp",
         ):
+            if key == "threshold_pass":
+                if isinstance(gate.get(key), dict):
+                    signal[key] = dict(gate[key])
+                continue
+            if key == "risk_band":
+                if gate.get(key):
+                    signal[key] = str(gate[key])
+                continue
             pct = _int_pct(gate.get(key))
             if pct is not None:
                 signal[key] = pct
         if gate.get("points_state"):
             signal["points_state"] = str(gate["points_state"])
+
+    for g in (tick.get("health") or {}).get("gates") or []:
+        if not isinstance(g, dict) or g.get("name") != "risk_validation":
+            continue
+        val = g.get("value")
+        if not isinstance(val, dict):
+            continue
+        if not signal.get("risk_band") and val.get("risk_band"):
+            signal["risk_band"] = str(val["risk_band"])
+        if signal.get("sizing_risk_gbp") is None and val.get("risk_gbp") is not None:
+            try:
+                signal["sizing_risk_gbp"] = int(round(float(val["risk_gbp"])))
+            except (TypeError, ValueError):
+                pass
+        break
 
     if signal.get("config_signal_threshold") is None:
         try:

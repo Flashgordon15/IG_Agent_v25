@@ -237,15 +237,16 @@ class PointsEngineThresholdSizeTests(unittest.TestCase):
         self._set_state(15.0)
         self.assertEqual(self.engine.get_size_multiplier(93.0), 1.5)
         self.assertEqual(self.engine.get_size_multiplier(88.0), 0.75)
-        self.assertEqual(self.engine.get_size_multiplier(82.0), 0.375)
-        self.assertEqual(self.engine.get_size_multiplier(75.0), 0.0)
+        # Core band 80–85% applies 0.65× on marginal tier
+        self.assertAlmostEqual(self.engine.get_size_multiplier(82.0), 0.24375)
+        # Probe band (72–80%): tier_mult × 0.25
+        self.assertAlmostEqual(self.engine.get_size_multiplier(75.0), 0.375)
 
     def test_size_multiplier_caution_bands(self) -> None:
-        # CAUTION now uses flat 0.5× for all conf >= CONF_MARGINAL_MIN (80)
         self._set_state(0.0)
         self.assertEqual(self.engine.get_size_multiplier(89.0), 0.5)
         self.assertEqual(self.engine.get_size_multiplier(82.0), 0.5)
-        self.assertEqual(self.engine.get_size_multiplier(79.0), 0.0)
+        self.assertEqual(self.engine.get_size_multiplier(79.0), 0.25)
 
     def test_size_multiplier_spec_matrix(self) -> None:
         # CAUTION (cum=0.0 → -5 <= cum <= 10): flat 0.5× for all conf >= 80
