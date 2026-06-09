@@ -70,7 +70,7 @@ def atr_percentile_rank(atr_values: Any) -> float | None:
 
 def _atr_percentile_from_engine(signal_engine: Any, market: str) -> float | None:
     try:
-        _, c5, _ = signal_engine.candle_frames(market)
+        _, c5, _, _ = signal_engine.candle_frames(market)
         c5i = signal_engine.add_indicators(c5)
         if "atr" not in c5i.columns:
             return None

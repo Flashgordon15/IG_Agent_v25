@@ -35,6 +35,14 @@ def get_transaction_sync_instance() -> "IgTransactionSync | None":
     return _instance
 
 
+def force_immediate_transaction_sync(*, reason: str = "operator") -> bool:
+    """Schedule an immediate IG transaction history sync (force=True)."""
+    sync = get_transaction_sync_instance()
+    if sync is None:
+        return False
+    return sync.request_sync(force=True, reason=reason)
+
+
 def _set_transaction_sync_instance(sync: "IgTransactionSync | None") -> None:
     global _instance
     _instance = sync

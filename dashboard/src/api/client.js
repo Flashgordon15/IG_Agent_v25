@@ -43,4 +43,11 @@ export const api = {
   learningStatus: () => fetchJson("/api/learning/status"),
   replayRun: () => fetchJson("/api/replay/run", { method: "POST" }),
   runE2eCheck: () => fetchJson("/api/system/e2e", { method: "POST" }),
+  sentinelDiagnostics: (limit = 60) =>
+    fetchJson(`/api/v27/sentinel/diagnostics?limit=${limit}`),
+  approveStrategyProposal: (proposalId) =>
+    fetchJson("/api/v27/sentinel/approve", {
+      method: "POST",
+      body: JSON.stringify({ proposal_id: proposalId }),
+    }),
 };

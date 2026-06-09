@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api/client.js";
 import { fmtPrice } from "../utils/fmtPrice.js";
+import SentinelDiagnosticConsole from "./SentinelDiagnosticConsole.jsx";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -714,6 +715,9 @@ export default function LivePanel({ state, rawState, selectedEpic, onSelectEpic,
         <SignalConfidenceBreakdown signal={signal} state={state} pointsState={state.points?.state} />
         <Gauge label="ML confidence" value={mlProb} max={1} disabled={mlDisabled} disabledLabel="ML disabled" formatValue={(v) => v.toFixed(2)} />
       </div>
+
+      {/* 6b. v27 sentinel diagnostic console */}
+      <SentinelDiagnosticConsole />
 
       {/* 7. Environment fitness */}
       {signal.fitness_factors && typeof signal.fitness_factors === "object" && (

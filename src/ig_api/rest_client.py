@@ -907,6 +907,16 @@ class IGRestClient:
                 headers=self._auth_headers("1"),
             )
             if r.status_code != 200:
+                try:
+                    from trading.ohlc_bootstrap import (
+                        is_ig_historical_allowance_error,
+                        mark_historical_allowance_lockout,
+                    )
+
+                    if is_ig_historical_allowance_error(r.status_code, r.text):
+                        mark_historical_allowance_lockout(source="fetch_price_history")
+                except Exception:
+                    pass
                 return []
             body = r.json()
             prices = body.get("prices") or body.get("allowance") or []

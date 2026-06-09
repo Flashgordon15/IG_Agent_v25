@@ -20,6 +20,7 @@ GATE_NAMES: tuple[str, ...] = (
     "cold_start_gap",
     "environment_fitness",
     "points_state",
+    "correlation_ok",
     "risk_validation",
     "expectancy_ok",
     "calendar_ok",

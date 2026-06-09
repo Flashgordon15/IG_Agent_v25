@@ -293,6 +293,17 @@ class ExecutionEngine:
     def execute_trade(
         self, signal: TradeSignal, *, prevalidated: bool = False
     ) -> ExecutionResult:
+        from ai.operational.profiler_hooks import probe_hot_path
+
+        with probe_hot_path(
+            "probe_execution_process_tick",
+            epic=str(getattr(signal, "epic", "") or ""),
+        ):
+            return self._execute_trade_body(signal, prevalidated=prevalidated)
+
+    def _execute_trade_body(
+        self, signal: TradeSignal, *, prevalidated: bool = False
+    ) -> ExecutionResult:
         try:
             get_rate_limit_manager().check_rest_allowed()
         except RateLimitError as e:

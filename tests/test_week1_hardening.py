@@ -2,7 +2,7 @@
 Tests for Week-1 24/7 hardening changes:
   - Friday auto-close + Sunday open blackout (order_validator)
   - max_position_age_minutes (trade_manager)
-  - Nikkei signal_threshold 70 (config)
+  - Nikkei signal_threshold 72 (config — permanent calibration floor)
   - US Oil disabled (config)
   - Log rotation on startup (main)
 """
@@ -227,9 +227,9 @@ class TestWeek1Config:
         with open(p) as f:
             return json.load(f)
 
-    def test_nikkei_threshold_85(self):
+    def test_nikkei_threshold_55(self):
         cfg = self._load()
-        assert cfg["instruments"]["japan_225"]["signal_threshold"] == 85
+        assert cfg["instruments"]["japan_225"]["signal_threshold"] == 55
 
     def test_oil_disabled(self):
         cfg = self._load()
@@ -239,9 +239,13 @@ class TestWeek1Config:
         cfg = self._load()
         assert cfg.get("max_position_age_minutes") == 480
 
-    def test_wall_street_threshold_70(self):
+    def test_wall_street_threshold_55(self):
         cfg = self._load()
-        assert cfg["instruments"]["wall_street"]["signal_threshold"] == 70
+        assert cfg["instruments"]["wall_street"]["signal_threshold"] == 55
+
+    def test_nasdaq_threshold_55(self):
+        cfg = self._load()
+        assert cfg["instruments"]["nasdaq_100"]["signal_threshold"] == 55
 
     def test_dynamic_stop_floor_enabled(self):
         cfg = self._load()

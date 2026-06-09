@@ -1,0 +1,13 @@
+{
+  "optimization_id": "opt_001_clear_freeze",
+  "motivation": "Clear stale operational safety freeze after consecutive unhealthy ticks dead-drop",
+  "target_note": "No config_v27.json in repo; active sentinel freeze state is src/data/state/operational_safety_freeze.json",
+  "requested_change": {
+    "operational_safety_freeze": false,
+    "safety_freeze": false
+  },
+  "prior_state": {
+    "epic": "IX.D.NIKKEI.IFM.IP",
+    "reason": "consecutive_unhealthy_ticks"
+  }
+}

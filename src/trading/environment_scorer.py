@@ -175,13 +175,18 @@ class EnvironmentScorer:
         market: str,
         *,
         quote_df: pd.DataFrame | None = None,
-    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         if self._engine is None:
             raise ValueError("signal_engine required")
         if isinstance(self._engine, SignalEngine):
             return self._engine.candle_frames(market, quote_df=quote_df)
         df = self._quote_df(market, quote_df)
-        return df, self._engine.candles(df, 5), self._engine.candles(df, 15)
+        return (
+            df,
+            self._engine.candles(df, 5),
+            self._engine.candles(df, 15),
+            self._engine.candles(df, 60),
+        )
 
     def fetch_sentiment(self, epic: str | None = None) -> float:
         """Fetch IG client sentiment once per session; cache until reset."""
@@ -268,7 +273,7 @@ class EnvironmentScorer:
         if self._engine is None:
             return 0
         try:
-            _, c5, _ = self._candle_frames(market)
+            _, c5, _, _ = self._candle_frames(market)
             return max(0, len(c5) - 1)
         except Exception:
             return 0
@@ -294,7 +299,7 @@ class EnvironmentScorer:
 
         cfg = self._config or self._engine.config
         key = self._primary_market or market
-        df, c5, c15 = self._candle_frames(key, quote_df=quote_df)
+        df, c5, c15, _c60 = self._candle_frames(key, quote_df=quote_df)
         if len(c5) < 2 or len(c15) < 2:
             seed_n = (
                 int(self._engine.ohlc_seed_count(key))

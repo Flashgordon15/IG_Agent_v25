@@ -698,7 +698,7 @@ class LearningStore:
                 """
                 SELECT pnl_points, ig_pnl_currency, result FROM trades
                 WHERE setup_key=? AND closed_at IS NOT NULL
-                  AND (source IS NULL OR source = 'strategy')
+                  AND (source IS NULL OR source IN ('strategy', 'shadow'))
                 """,
                 (setup_key,),
             )
@@ -1010,6 +1010,103 @@ class LearningStore:
             "SELECT * FROM setup_stats WHERE setup_key=?", (setup_key,)
         ).fetchone()
         return dict(row) if row else None
+
+    @_locked
+    def ingest_shadow_counterfactual(
+        self,
+        *,
+        setup_key: str,
+        market: str,
+        epic: str,
+        side: str,
+        pnl_points: float,
+        result: str,
+        shadow_ts: str,
+        confidence: float = 0.0,
+        entry: float = 0.0,
+        ref_tag: str = "",
+    ) -> bool:
+        """Record a labelled shadow counterfactual for setup_stats learning."""
+        setup_key = str(setup_key or "").strip()
+        if not setup_key or setup_key.startswith("WAIT"):
+            return False
+        side_u = str(side or "").upper()
+        if side_u not in ("BUY", "SELL"):
+            return False
+        result_u = str(result or "").upper()
+        if result_u not in ("WIN", "LOSS", "BREAKEVEN"):
+            return False
+        tag = str(ref_tag or "").strip()
+        ref = f"SHADOW-{tag}{shadow_ts}-{epic}-{setup_key[:48]}"
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(trades)").fetchall()}
+        existing = self.conn.execute(
+            """
+            SELECT id FROM trades
+            WHERE deal_reference=? AND closed_at IS NOT NULL
+            """,
+            (ref,),
+        ).fetchone()
+        if existing:
+            return False
+        closed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        src_clause = ", source" if "source" in cols else ""
+        src_val = ", 'shadow'" if "source" in cols else ""
+        self.conn.execute(
+            f"""
+            INSERT INTO trades(
+                opened_at, closed_at, market, epic, side, entry, exit, size,
+                stop, target, pnl_points, result, confidence, adjusted_confidence,
+                setup_key, dry_run, deal_reference, notes{src_clause}
+            )
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?{src_val})
+            """,
+            (
+                shadow_ts or closed_at,
+                closed_at,
+                market,
+                epic,
+                side_u,
+                float(entry or 0),
+                float(entry or 0),
+                1.0,
+                0.0,
+                0.0,
+                float(pnl_points),
+                result_u,
+                float(confidence),
+                float(confidence),
+                setup_key,
+                1,
+                ref,
+                "shadow counterfactual (performance_reviewer pipeline)",
+            ),
+        )
+        self.conn.commit()
+        self._rebuild_stats_for(setup_key)
+        return True
+
+    @_locked
+    def refresh_setup_stats_for_day(self, day: str | None = None) -> int:
+        """Rebuild setup_stats for every setup_key with closes on *day* (YYYY-MM-DD)."""
+        d = day or date.today().isoformat()
+        rows = self.conn.execute(
+            """
+            SELECT DISTINCT setup_key FROM trades
+            WHERE closed_at IS NOT NULL
+              AND substr(closed_at, 1, 10) = ?
+              AND setup_key IS NOT NULL
+              AND TRIM(setup_key) != ''
+            """,
+            (d,),
+        ).fetchall()
+        count = 0
+        for row in rows:
+            key = str(row["setup_key"] or "").strip()
+            if not key:
+                continue
+            self._rebuild_stats_for(key)
+            count += 1
+        return count
 
     def _realised_pnl_expr(self) -> str:
         """

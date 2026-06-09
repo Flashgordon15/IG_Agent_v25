@@ -2,16 +2,16 @@
   "$schema": "./config_schema.json",
   "$extends": "config_v25.json",
   "version": "26.0.0",
-  "_note": "v26 profitability overlay — merge with config_v25.json at load time (not yet wired in v25.6)",
+  "_note": "v26 profitability overlay \u2014 merge with config_v25.json at load time (not yet wired in v25.6)",
   "capital_envelope": {
     "account_balance_gbp": 10000,
-    "max_margin_pct": 0.20,
+    "max_margin_pct": 0.2,
     "max_concurrent_risk_gbp": 1200,
     "max_daily_risk_deployed_gbp": 2500,
     "max_daily_loss_gbp": 500,
     "max_daily_profit_target_gbp": 1000,
     "min_available_gbp": 100,
-    "reserve_pct": 0.10
+    "reserve_pct": 0.1
   },
   "expectancy": {
     "min_trades_per_setup": 20,
@@ -28,7 +28,7 @@
     "trail_trigger_atr_multiple": 0.75,
     "trail_distance_atr_multiple": 1.5,
     "epic_overrides": {},
-    "_note": "Per-epic values from scripts/v26_trail_tune.py → data_lake/state/trail_epic_overrides.json"
+    "_note": "Per-epic values from scripts/v26_trail_tune.py \u2192 data_lake/state/trail_epic_overrides.json"
   },
   "s4_ml_meta": {
     "enabled": true,
@@ -41,7 +41,7 @@
     "enabled": true,
     "use_s4_models": true,
     "mode": "veto",
-    "_note": "EUR/USD only — S4 veto-eligible after 6-bar label refresh (val WR 54.0%). Whitelist via per_epic.",
+    "_note": "EUR/USD only \u2014 S4 veto-eligible after 6-bar label refresh (val WR 54.0%). Whitelist via per_epic.",
     "min_labelled_rows": 500,
     "min_probability": 0.58,
     "min_probability_high_conf": 0.55,
@@ -74,13 +74,21 @@
   },
   "risk_bands": {
     "enabled": true,
-    "entry_confidence_floor": 72,
+    "entry_confidence_floor": 55,
     "probe_max_confidence": 80,
     "full_size_min_confidence": 85,
     "probe_risk_gbp_min": 50,
     "probe_risk_gbp_max": 80,
     "core_size_multiplier": 0.65,
-    "_note": "Probe 72–80% → £50–80 risk; core 80–85% → 0.65×; full ≥85%"
+    "_note": "Probe 55–80% → £50–80 risk; core 80–85% → 0.65×; full ≥85% (operator override floor 55%)"
+  },
+  "correlation_guard": {
+    "max_concurrent_us_index_shorts": 1,
+    "max_open_positions_global": 2,
+    "us_index_epics": [
+      "IX.D.DOW.IFM.IP",
+      "IX.D.NASDAQ.IFM.IP"
+    ]
   },
   "regime": {
     "calendar_enabled": true,
@@ -94,7 +102,7 @@
       "IX.D.NASDAQ.IFM.IP"
     ],
     "extreme_vol_confidence_penalty_pct": 15,
-    "same_direction_soft_cap": 3,
+    "same_direction_soft_cap": 1,
     "max_same_direction_risk_gbp": 400
   },
   "pilot": {
@@ -102,7 +110,7 @@
     "target_wr": 0.6,
     "target_rrr": 2.5,
     "review_days": 7,
-    "_note": "DOW pilot — track via feeder threshold_pass + feature store"
+    "_note": "DOW pilot \u2014 track via feeder threshold_pass + feature store"
   },
   "milestones": {
     "current": "M0",
@@ -143,6 +151,6 @@
     "l5_window_days": 14,
     "l5_days_required": 10,
     "l5_daily_target_gbp": 250,
-    "_note": "Max 14d soak — historical edge from OHLC replay (L2), not a 90d calendar wait"
+    "_note": "Max 14d soak \u2014 historical edge from OHLC replay (L2), not a 90d calendar wait"
   }
 }

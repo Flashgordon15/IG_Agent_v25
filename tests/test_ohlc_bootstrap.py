@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import unittest
 from datetime import datetime, timedelta
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from data.models import Quote
 from signals.signal_engine import SignalEngine
 from system.config import Config
-from trading.ohlc_bootstrap import _parse_bar_time, bootstrap_ohlc_for_session
+from trading.ohlc_bootstrap import (
+    MIN_CACHE_BARS_FOR_BOOTSTRAP,
+    _parse_bar_time,
+    bootstrap_ohlc_for_session,
+    clear_historical_allowance_lockout_for_tests,
+    mark_historical_allowance_lockout,
+)
 
 
 class OhlcBootstrapTests(unittest.TestCase):
@@ -44,7 +50,10 @@ class OhlcBootstrapTests(unittest.TestCase):
                 "close": 97.0,
             },
         ]
-        n = bootstrap_ohlc_for_session(rest, engine, "IX.D.NIKKEI.IFM.IP", "japan_225", prefer_cache=False)
+        with patch("trading.ohlc_bootstrap.local_cache_ready", return_value=False):
+            n = bootstrap_ohlc_for_session(
+                rest, engine, "IX.D.NIKKEI.IFM.IP", "japan_225", prefer_cache=False
+            )
         self.assertEqual(n, 2)
         self.assertEqual(engine.ohlc_seed_count("japan_225"), 2)
         df = engine.quote_df("japan_225")
@@ -113,9 +122,10 @@ class OhlcBootstrapTests(unittest.TestCase):
                 "close": 106.0,
             },
         ]
-        bootstrap_ohlc_for_session(
-            rest, engine, "IX.D.NIKKEI.IFM.IP", "Japan 225", prefer_cache=False
-        )
+        with patch("trading.ohlc_bootstrap.local_cache_ready", return_value=False):
+            bootstrap_ohlc_for_session(
+                rest, engine, "IX.D.NIKKEI.IFM.IP", "Japan 225", prefer_cache=False
+            )
         self.assertEqual(engine.ohlc_seed_count("IX.D.NIKKEI.IFM.IP"), 2)
         c5 = engine.candles(engine.quote_df("IX.D.NIKKEI.IFM.IP"), 5)
         self.assertGreaterEqual(len(c5), 2)
@@ -146,9 +156,10 @@ class OhlcBootstrapTests(unittest.TestCase):
         rest.fetch_price_history.return_value = bars
         n = bootstrap_ohlc_for_session(rest, engine, "EPIC", "Japan 225")
         self.assertEqual(n, 100)
-        _, c5, c15 = engine.candle_frames("Japan 225")
+        _, c5, c15, c60 = engine.candle_frames("Japan 225")
         self.assertGreaterEqual(len(c5), 20)
         self.assertGreaterEqual(len(c15), 6)
+        self.assertGreaterEqual(len(c60), 1)
 
     def test_ohlc_seed_survives_live_tick_trim(self) -> None:
         cfg = MagicMock(spec=Config)
@@ -176,9 +187,63 @@ class OhlcBootstrapTests(unittest.TestCase):
         rest.fetch_price_history.return_value = bars
         bootstrap_ohlc_for_session(rest, engine, "EPIC", "mkt")
         for j in range(200):
-            engine.add_quote("mkt", Quote(datetime(2026, 5, 28, 12, 0, j % 60), 100.0, 101.0))
+            engine.add_quote(
+                "mkt", Quote(datetime(2026, 5, 28, 12, 0, j % 60), 100.0, 101.0)
+            )
         c5 = engine.candles(engine.quote_df("mkt"), 5)
         self.assertGreaterEqual(len(c5), 10)
+
+    def test_historical_lockout_uses_local_cache_without_ig(self) -> None:
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        cfg = MagicMock(spec=Config)
+        cfg.max_live_quotes = 5000
+        cfg.fast_ema = 9
+        cfg.slow_ema = 21
+        cfg.rsi_period = 14
+        cfg.atr_period = 14
+        engine = SignalEngine(cfg)
+        clear_historical_allowance_lockout_for_tests()
+        bars = []
+        base = datetime(2026, 5, 27, 10, 0)
+        for i in range(120):
+            t = base + timedelta(minutes=5 * i)
+            bars.append(
+                {
+                    "t": t.isoformat(),
+                    "o": 100.0 + i,
+                    "h": 101.0 + i,
+                    "l": 99.0 + i,
+                    "c": 100.5 + i,
+                    "v": 1.0,
+                    "spread": 1.0,
+                }
+            )
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp) / "nikkei_5m.jsonl"
+            cache.write_text(
+                "\n".join(json.dumps(b) for b in bars) + "\n", encoding="utf-8"
+            )
+            with patch("trading.ohlc_bootstrap.ohlc_cache_path", return_value=cache):
+                mark_historical_allowance_lockout(source="test")
+                rest = MagicMock()
+                rest.fetch_price_history.return_value = []
+                n = bootstrap_ohlc_for_session(
+                    rest,
+                    engine,
+                    "IX.D.NIKKEI.IFM.IP",
+                    "Japan 225",
+                    prefer_cache=True,
+                )
+        clear_historical_allowance_lockout_for_tests()
+        self.assertGreaterEqual(n, MIN_CACHE_BARS_FOR_BOOTSTRAP)
+        c5 = engine.candles(engine.quote_df("Japan 225"), 5)
+        ind = engine.add_indicators(c5)
+        self.assertGreater(float(ind.iloc[-1]["fast_ema"]), 0)
+        rest.fetch_price_history.assert_not_called()
 
     def test_bar_count_positive_after_bootstrap(self) -> None:
         cfg = MagicMock(spec=Config)

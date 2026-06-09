@@ -268,18 +268,31 @@ def _tick_for_readers(tick: dict[str, Any]) -> dict[str, Any]:
     # so the dashboard TradesPanel always has a flat list to render.
     markets = out.get("markets")
     if isinstance(markets, dict):
+        from trading.open_position_view import epic_market_label, normalize_epic
+
         all_positions: list[dict] = []
         for epic_key, mslice in markets.items():
             if not isinstance(mslice, dict):
                 continue
+            slice_epic = normalize_epic(epic_key)
+            slice_market = str(
+                mslice.get("market_name")
+                or mslice.get("market")
+                or epic_market_label(slice_epic)
+                or slice_epic
+            )
             for pos in mslice.get("positions") or []:
                 if isinstance(pos, dict):
                     enriched = dict(pos)
-                    enriched.setdefault("epic", epic_key)
-                    enriched.setdefault(
-                        "market",
-                        mslice.get("market_name") or mslice.get("market") or epic_key,
+                    pos_epic = normalize_epic(str(enriched.get("epic") or slice_epic))
+                    enriched["epic"] = pos_epic or slice_epic
+                    enriched["market"] = str(
+                        enriched.get("market")
+                        or slice_market
+                        or epic_market_label(enriched["epic"])
                     )
+                    if pos_epic and slice_epic and pos_epic != slice_epic:
+                        continue
                     all_positions.append(enriched)
         if all_positions:
             out["positions"] = all_positions

@@ -1,0 +1,8 @@
+{
+  "operational_safety_freeze": false,
+  "safety_freeze": false,
+  "ts": "2026-06-09T19:15:00.000Z",
+  "reason": "ciao_staged_clear_opt_001",
+  "cleared_by": "opt_001_clear_freeze",
+  "previous_exit_reason": "operational_dead_drop"
+}

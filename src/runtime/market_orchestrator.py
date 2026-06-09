@@ -243,14 +243,38 @@ class MarketOrchestrator:
         markets = self._markets_for_dashboard()
         if not markets:
             return
+        from trading.open_position_view import epic_market_label
+
         primary = markets.get(self._primary_epic) or next(iter(markets.values()))
         merged = dict(primary)
         merged["markets"] = markets
-        merged["enabled_epics"] = list(self._enabled_epics or markets.keys())
+        enabled = list(self._enabled_epics or markets.keys())
+        merged["enabled_epics"] = enabled
         merged["instrument_labels"] = {
-            epic: str((self._instrument_meta.get(epic) or {}).get("name") or epic)
-            for epic in merged["enabled_epics"]
+            epic: epic_market_label(epic) for epic in enabled
         }
+        # Union epic-scoped closed trades from each slice (dedupe by deal_id).
+        closed_union: list[dict[str, Any]] = []
+        seen_closed: set[str] = set()
+        for epic_key in enabled:
+            mslice = markets.get(epic_key) or {}
+            for row in mslice.get("closed_trades") or []:
+                if not isinstance(row, dict):
+                    continue
+                deal_key = str(
+                    row.get("deal_id")
+                    or row.get("ig_deal_id")
+                    or f"{row.get('epic')}-{row.get('closed_at')}"
+                )
+                if deal_key in seen_closed:
+                    continue
+                seen_closed.add(deal_key)
+                closed_union.append(row)
+        closed_union.sort(
+            key=lambda r: str(r.get("closed_at") or r.get("time") or ""),
+            reverse=True,
+        )
+        merged["closed_trades"] = closed_union[:100]
         merged["selected_epic"] = self._primary_epic
         merged["orchestrator"] = {
             "loop_count": len(self._loops),

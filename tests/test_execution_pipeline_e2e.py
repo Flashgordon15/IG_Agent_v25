@@ -146,7 +146,7 @@ class OrchestratorPipelineTests(unittest.TestCase):
         ctx = loop.run_once()
         assert ctx is not None
         self.assertTrue(ctx.all_passed)
-        self.assertEqual(len(ctx.gates), 10)
+        self.assertEqual(len(ctx.gates), 11)
         self.assertIn("calendar_ok", [g.name for g in ctx.gates])
         self.assertIn("ml_veto", [g.name for g in ctx.gates])
         self.assertTrue(all(g.passed for g in ctx.gates))

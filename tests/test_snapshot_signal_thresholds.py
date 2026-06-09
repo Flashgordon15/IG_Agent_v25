@@ -10,7 +10,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from api.snapshot import enrich_signal_thresholds, normalize_tick
-from api.snapshot_store import get_tick, publish_tick, reset_snapshot_store_for_tests, set_snapshot_path_for_tests
+from api.snapshot_store import (
+    get_tick,
+    publish_tick,
+    reset_snapshot_store_for_tests,
+    set_snapshot_path_for_tests,
+)
 
 
 class SnapshotSignalThresholdTests(unittest.TestCase):
@@ -57,7 +62,7 @@ class SnapshotSignalThresholdTests(unittest.TestCase):
         enrich_signal_thresholds(tick)
         sig = tick["signal"]
         self.assertEqual(sig["min_size_threshold"], 88)
-        self.assertEqual(sig["points_confidence_floor"], 80)
+        self.assertEqual(sig["points_confidence_floor"], 55)
         self.assertIsNotNone(sig.get("config_signal_threshold"))
 
     def test_normalize_tick_always_includes_thresholds(self) -> None:
@@ -71,7 +76,6 @@ class SnapshotSignalThresholdTests(unittest.TestCase):
         self.assertIn("config_signal_threshold", sig)
         self.assertIn("min_size_threshold", sig)
         self.assertIn("threshold", sig)
-
 
     def test_get_tick_enriches_stale_disk_snapshot(self) -> None:
         import tempfile

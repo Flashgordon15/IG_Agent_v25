@@ -22,16 +22,17 @@ class RiskBandTests(unittest.TestCase):
     def tearDown(self) -> None:
         reset_risk_bands_cache_for_tests()
 
-    def test_probe_band_72_to_80(self) -> None:
-        self.assertEqual(risk_band_for_confidence(71.0), "below_floor")
+    def test_probe_band_55_to_80(self) -> None:
+        self.assertEqual(risk_band_for_confidence(54.0), "below_floor")
+        self.assertEqual(risk_band_for_confidence(59.0), "probe")
         self.assertEqual(risk_band_for_confidence(75.0), "probe")
         self.assertEqual(risk_band_for_confidence(79.0), "probe")
         self.assertEqual(risk_band_for_confidence(82.0), "core")
         self.assertEqual(risk_band_for_confidence(88.0), "full")
 
     def test_probe_risk_interpolates(self) -> None:
-        lo = probe_risk_target_gbp(72.0)
-        mid = probe_risk_target_gbp(76.0)
+        lo = probe_risk_target_gbp(55.0)
+        mid = probe_risk_target_gbp(67.5)
         hi = probe_risk_target_gbp(80.0)
         self.assertAlmostEqual(lo, 50.0, delta=1.0)
         self.assertGreater(mid, lo)

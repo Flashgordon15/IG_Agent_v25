@@ -56,6 +56,7 @@ def _make_loop(**overrides) -> TradingLoop:
     # Ensure persisted rate-limit state from production runs doesn't leak into tests.
     try:
         from system.rate_limit_manager import get_rate_limit_manager
+
         get_rate_limit_manager().reset_for_tests()
     except Exception:
         pass
@@ -106,12 +107,18 @@ def _make_loop(**overrides) -> TradingLoop:
     signal_engine = MagicMock()
     signal_engine.evaluate.return_value = _wait_signal()
     signal_engine.quote_df.return_value = None
+    signal_engine.last_snapshot = {}
 
     exec_engine = MagicMock()
     exec_engine.trade_tracker.count_open_for_epic.return_value = 0
     exec_engine.trade_tracker.count_open_total.return_value = 0
     exec_engine.trade_tracker.snapshot.return_value = {"positions": []}
     exec_engine.update_positions = MagicMock()
+    adaptive = MagicMock()
+    adaptive.settings.side_effect = lambda *a, **k: {
+        "risk": float(config.stop_distance_points)
+    }
+    exec_engine._adaptive = adaptive
 
     execution_loop = MagicMock()
     execution_loop.execution_engine = exec_engine
@@ -217,7 +224,10 @@ class TradingLoopTests(unittest.TestCase):
         self.assertIn("55%", env_gate.detail)
         self.assertNotIn("scorer unavailable", env_gate.detail)
 
-    @patch("system.market_watch.japan225_session.japan225_strategy_paused", return_value=(False, ""))
+    @patch(
+        "system.market_watch.japan225_session.japan225_strategy_paused",
+        return_value=(False, ""),
+    )
     def test_process_tick_when_all_gates_pass(self, _j225: MagicMock) -> None:
         loop = _make_loop()
         loop._signal_engine.evaluate.return_value = _buy_signal(92.0)
@@ -275,7 +285,9 @@ class TradingLoopTests(unittest.TestCase):
             "profit_loss": -12.5,
             "available": 9_500.0,
         }
-        rest.maybe_refresh_account_summary.return_value = rest.get_cached_account_summary.return_value
+        rest.maybe_refresh_account_summary.return_value = (
+            rest.get_cached_account_summary.return_value
+        )
         loop._execution_loop.execution_engine._rest_client = rest
         loop._store.recent_closed_trades.return_value = [
             {"result": "WIN"},
@@ -338,7 +350,10 @@ class RiskValidationGateTests(unittest.TestCase):
         rest.fetch_market_constraints.return_value = {"min_deal_size": 10.0}
         loop._execution_loop.execution_engine._rest_client = rest
 
-        with patch("system.market_data_hub.get_market_data_hub") as hub_mock:
+        with (
+            patch("system.market_data_hub.get_market_data_hub") as hub_mock,
+            patch("system.risk_bands.bands_enabled", return_value=False),
+        ):
             hub_mock.return_value.normal_spread.return_value = 1.0
             gate = loop._gate_risk_validation(_quote())
 
@@ -490,7 +505,9 @@ class DynamicMaxPerEpicTests(unittest.TestCase):
         loop._execution_loop.execution_engine.trade_tracker.count_open_for_epic.return_value = 1
         loop._execution_loop.execution_engine.trade_tracker.count_open_total.return_value = 1
         loop._execution_loop.execution_engine.trade_tracker.snapshot.return_value = {
-            "positions": [{"epic": "CS.D.CFPGOLD.CFP.IP", "pnl_gbp": 12.0, "open_mins": 25.0}]
+            "positions": [
+                {"epic": "CS.D.CFPGOLD.CFP.IP", "pnl_gbp": 12.0, "open_mins": 25.0}
+            ]
         }
         rest = MagicMock()
         rest.fetch_market_constraints.return_value = {"min_deal_size": 1.0}

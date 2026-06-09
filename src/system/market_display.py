@@ -82,18 +82,22 @@ def _epic_to_label(epic: str) -> str:
     if not ep:
         return ""
     try:
-        from system.config_loader import get_config
+        from trading.open_position_view import epic_market_label
 
-        cfg = get_config()
-        if ep == str(cfg.epic or ""):
-            name = str(cfg.market_search or "").strip()
+        label = epic_market_label(ep)
+        if label and label != ep:
+            return label
+    except Exception:
+        pass
+    try:
+        from system.config_loader import get_config
+        from trading.instrument_registry import InstrumentRegistry
+
+        inst = InstrumentRegistry(get_config().as_dict()).get_by_epic(ep)
+        if inst:
+            name = str(inst.get("name") or "").strip()
             if name:
-                return name
-        for item in cfg.get("markets") or []:
-            if isinstance(item, dict) and str(item.get("epic") or "") == ep:
-                name = str(item.get("name") or item.get("market") or "").strip()
-                if name:
-                    return format_market_display_name(name, epic=ep)
+                return format_market_display_name(name, epic=ep)
     except Exception:
         pass
     return ""

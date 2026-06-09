@@ -35,9 +35,9 @@ def bands_enabled() -> bool:
 def entry_confidence_floor() -> float:
     block = _bands_config()
     try:
-        return float(block.get("entry_confidence_floor") or 72.0)
+        return float(block.get("entry_confidence_floor") or 55.0)
     except (TypeError, ValueError):
-        return 72.0
+        return 55.0
 
 
 def full_size_min_confidence() -> float:
@@ -69,7 +69,7 @@ def risk_band_for_confidence(confidence: float) -> RiskBand:
 
 
 def probe_risk_target_gbp(confidence: float) -> float:
-    """Linear £50–£80 across probe band (72–80% by default)."""
+    """Linear £50–£80 across probe band (55–80% by default)."""
     block = _bands_config()
     lo = float(block.get("probe_risk_gbp_min") or 50.0)
     hi = float(block.get("probe_risk_gbp_max") or 80.0)

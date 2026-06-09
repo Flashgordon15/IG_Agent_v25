@@ -16,9 +16,10 @@ from unittest.mock import MagicMock, patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from data.models import Quote
 from data.learning_store import LearningStore
-from execution.trading_loop import TickOutcome, TradingLoop as ExecutionTickLoop
+from data.models import Quote
+from execution.trading_loop import TickOutcome
+from execution.trading_loop import TradingLoop as ExecutionTickLoop
 from signals.signal_engine import SignalEngine
 from system.config_loader import ConfigLoader
 from trading.environment_scorer import GATE_PASS_MIN, EnvironmentScorer
@@ -57,6 +58,7 @@ class OrchestratorPostBootstrapGatesTests(unittest.TestCase):
         set_points_state_path_for_tests(Path(self._tmp.name) / "points.json")
         try:
             from system.rate_limit_manager import get_rate_limit_manager
+
             get_rate_limit_manager().reset_for_tests()
         except Exception:
             pass
@@ -94,12 +96,27 @@ class OrchestratorPostBootstrapGatesTests(unittest.TestCase):
 
         rest = MagicMock()
         rest.fetch_price_history.return_value = _ohlc_bars(100)
-        injected = bootstrap_ohlc_for_session(
-            rest, signal_engine, epic, market, environment_scorer=env_scorer, prefer_cache=False
-        )
+        with (
+            patch(
+                "trading.ohlc_bootstrap.is_historical_allowance_lockout",
+                return_value=False,
+            ),
+            patch(
+                "trading.ohlc_bootstrap.strict_local_cache_first", return_value=False
+            ),
+            patch("trading.ohlc_bootstrap.local_cache_ready", return_value=False),
+        ):
+            injected = bootstrap_ohlc_for_session(
+                rest,
+                signal_engine,
+                epic,
+                market,
+                environment_scorer=env_scorer,
+                prefer_cache=False,
+            )
         self.assertEqual(injected, 100)
 
-        _, c5, c15 = signal_engine.candle_frames(market)
+        _, c5, c15, _c60 = signal_engine.candle_frames(market)
         self.assertGreaterEqual(len(c5), 20)
         self.assertGreaterEqual(len(c15), 2)
 
@@ -129,18 +146,17 @@ class OrchestratorPostBootstrapGatesTests(unittest.TestCase):
             tick_interval_sec=0.05,
         )
 
-        with patch.object(session, "is_session_open", return_value=True), patch.object(
-            session, "is_cold_start", return_value=False
-        ), patch.object(session, "check_gap_open", return_value=False), patch.object(
-            session, "bars_since_open", return_value=10
-        ), patch.object(
-            session, "is_entry_blocked_near_session_end", return_value=(False, None)
-        ), patch.object(
-            session, "should_flatten", return_value=False
-        ), patch.object(
-            session, "should_run_flatten_attempt", return_value=False
-        ), patch.object(
-            session, "snapshot", return_value=MagicMock(phase="OPEN")
+        with (
+            patch.object(session, "is_session_open", return_value=True),
+            patch.object(session, "is_cold_start", return_value=False),
+            patch.object(session, "check_gap_open", return_value=False),
+            patch.object(session, "bars_since_open", return_value=10),
+            patch.object(
+                session, "is_entry_blocked_near_session_end", return_value=(False, None)
+            ),
+            patch.object(session, "should_flatten", return_value=False),
+            patch.object(session, "should_run_flatten_attempt", return_value=False),
+            patch.object(session, "snapshot", return_value=MagicMock(phase="OPEN")),
         ):
             gates = loop._evaluate_gates(q)
 

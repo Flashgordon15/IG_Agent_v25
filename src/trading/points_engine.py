@@ -31,7 +31,7 @@ RAPID_DRAWDOWN_COOLDOWN_SEC = 300.0
 
 CONF_HIGH = 92.0
 CONF_STANDARD_MIN = 85.0
-CONF_MARGINAL_MIN = 80.0
+CONF_MARGINAL_MIN = 55.0
 
 _lock = threading.RLock()
 _path_override: Path | None = None
@@ -405,7 +405,7 @@ class PointsEngine:
     def trade_confidence_threshold(self, cfg: Any) -> float:
         """Effective entry bar for CAUTION/HEALTHY.
 
-        Uses cfg.confidence_floor (configurable, default 80) as the tier floor,
+        Uses cfg.confidence_floor (configurable, default 55) as the tier floor,
         boosted by bootstrap_wins * recovery_per_win toward CONF_MARGINAL_MIN.
         """
         try:
@@ -418,7 +418,7 @@ class PointsEngine:
             recovery = float(getattr(cfg, "confidence_floor_recovery_per_win", 1.0))
             with _lock:
                 bootstrap_wins = self._bootstrap_wins
-            # Floor rises with each win; caps at CONF_MARGINAL_MIN (80)
+            # Floor rises with each win; caps at CONF_MARGINAL_MIN (55)
             effective_floor = min(
                 cfg_floor + bootstrap_wins * recovery, CONF_MARGINAL_MIN
             )

@@ -182,6 +182,31 @@ def api_v26_cert() -> dict[str, Any]:
     return build_cert_payload()
 
 
+@router.get("/api/v27/sentinel/diagnostics")
+def api_v27_sentinel_diagnostics(limit: int = 80) -> dict[str, Any]:
+    """v27 Autonomous Sentinel — terminal diagnostic stream payload."""
+    from api.v27_sentinel import build_sentinel_diagnostics
+
+    return build_sentinel_diagnostics(limit=min(200, max(1, limit)))
+
+
+@router.post("/api/v27/sentinel/approve")
+async def api_v27_sentinel_approve(request: Request) -> dict[str, Any]:
+    """Human approval of strategy proposal → Operational AI e2e validation (§19)."""
+    from api.v27_sentinel import approve_strategy_proposal
+
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="invalid JSON body") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+    proposal_id = str(body.get("proposal_id") or body.get("id") or "").strip()
+    if not proposal_id:
+        raise HTTPException(status_code=400, detail="proposal_id required")
+    return approve_strategy_proposal(proposal_id)
+
+
 @router.get("/api/learning/status")
 def api_learning_status() -> dict[str, Any]:
     return learning_status()

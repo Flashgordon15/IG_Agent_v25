@@ -20,6 +20,47 @@ _GBPUSD_EPIC = "CS.D.GBPUSD.CFD.IP"
 _USD_GBP_PEG = 0.78
 
 
+def normalize_epic(epic: str) -> str:
+    """Canonical IG epic string for slice keys and position rows."""
+    return str(epic or "").strip()
+
+
+def epic_market_label(epic: str) -> str:
+    """Configured short market name for dashboard labels."""
+    ep = normalize_epic(epic)
+    if not ep:
+        return "Market"
+    try:
+        from system.config_loader import get_config
+        from trading.instrument_registry import InstrumentRegistry
+
+        inst = InstrumentRegistry(get_config().as_dict()).get_by_epic(ep)
+        if inst:
+            name = str(inst.get("name") or "").strip()
+            if name:
+                return name
+    except Exception:
+        pass
+    try:
+        from system.market_display import format_market_display_name
+
+        return format_market_display_name(epic=ep)
+    except Exception:
+        return ep
+
+
+def row_belongs_to_epic(row: dict[str, Any], epic: str) -> bool:
+    """True when a trade row belongs on this market's dashboard slice."""
+    target = normalize_epic(epic)
+    row_epic = normalize_epic(str(row.get("epic") or ""))
+    if row_epic:
+        return row_epic == target
+    market = str(row.get("market") or "").strip()
+    if market:
+        return market == epic_market_label(target)
+    return False
+
+
 def instrument_pnl_spec(epic: str) -> dict[str, float | str]:
     spec = INSTRUMENT_PNL_SPEC.get(str(epic or "").strip())
     if spec:

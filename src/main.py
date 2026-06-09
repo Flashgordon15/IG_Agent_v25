@@ -614,6 +614,13 @@ class AgentRuntime:
 
                 start_v26_shadow_service()
                 start_gate_coherence_scheduler()
+                try:
+                    from ai.operational.system_monitor import get_system_monitor
+
+                    get_system_monitor().run_background()
+                    log_engine("v27 sentinel monitor started (background)")
+                except Exception as e:
+                    log_engine(f"v27 sentinel monitor failed: {type(e).__name__}: {e}")
                 _start_session_refresh_watchdog(rest)
                 log_engine("orchestrator trading loop started (background)")
                 try:

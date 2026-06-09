@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import threading
 from datetime import datetime
+from typing import Any
 
 from system.engine_log import log_engine
 from system.paths import data_dir
@@ -30,6 +31,141 @@ _session_key: str = ""
 MAX_NEW_PER_DIRECTION = 5  # max new entries in the same direction per calendar day
 _enabled: bool = True
 _STATE_FILE = data_dir() / "state" / "correlation_guard.json"
+_DEFAULT_US_INDEX_EPICS = frozenset(
+    {
+        "IX.D.DOW.IFM.IP",
+        "IX.D.NASDAQ.IFM.IP",
+        "IX.D.SP500.IFM.IP",
+    }
+)
+
+
+def _correlation_guard_config() -> dict[str, Any]:
+    try:
+        from system.config_loader import get_config
+
+        cfg = get_config()
+        raw = getattr(cfg, "correlation_guard", None)
+        if isinstance(raw, dict):
+            return raw
+        if hasattr(cfg, "get"):
+            block = cfg.get("correlation_guard")
+            if isinstance(block, dict):
+                return block
+    except Exception:
+        pass
+    try:
+        from system.v26_config import load_v26_overlay
+
+        block = load_v26_overlay().get("correlation_guard") or {}
+        if isinstance(block, dict):
+            return block
+    except Exception:
+        pass
+    return {}
+
+
+def _us_index_epics() -> frozenset[str]:
+    cfg = _correlation_guard_config()
+    raw = cfg.get("us_index_epics")
+    if isinstance(raw, list) and raw:
+        return frozenset(str(x).strip() for x in raw if str(x).strip())
+    try:
+        from system.v26_config import load_v26_overlay
+
+        regime = load_v26_overlay().get("regime") or {}
+        idx = regime.get("index_epics")
+        if isinstance(idx, list) and idx:
+            return frozenset(str(x).strip() for x in idx if str(x).strip())
+    except Exception:
+        pass
+    return _DEFAULT_US_INDEX_EPICS
+
+
+def _max_open_positions_global() -> int:
+    cfg = _correlation_guard_config()
+    try:
+        cap = int(cfg.get("max_open_positions_global") or 0)
+        if cap > 0:
+            return cap
+    except (TypeError, ValueError):
+        pass
+    try:
+        from system.config_loader import get_config
+
+        return max(1, int(get_config().max_open_positions))
+    except Exception:
+        return 2
+
+
+def _max_concurrent_us_index_shorts() -> int:
+    cfg = _correlation_guard_config()
+    try:
+        return max(0, int(cfg.get("max_concurrent_us_index_shorts") or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _position_epic(row: dict[str, Any]) -> str:
+    return str(row.get("epic") or row.get("instrument_epic") or "").strip()
+
+
+def _position_side(row: dict[str, Any]) -> str:
+    side = str(row.get("side") or row.get("direction") or "").upper()
+    if side in ("BUY", "SELL"):
+        return side
+    try:
+        size = float(row.get("size") or row.get("deal_size") or 0)
+        if size > 0:
+            return "BUY"
+        if size < 0:
+            return "SELL"
+    except (TypeError, ValueError):
+        pass
+    return ""
+
+
+def check_open_book_limits(
+    epic: str,
+    direction: str,
+    open_positions: list[dict[str, Any]] | None,
+) -> tuple[bool, str]:
+    """
+    Block new entries when global open book or US-index short stack is at cap.
+    """
+    if not _enabled:
+        return True, ""
+    direction_u = str(direction or "").upper()
+    if direction_u not in ("BUY", "SELL"):
+        return True, ""
+
+    positions = [p for p in (open_positions or []) if isinstance(p, dict)]
+    epic_s = str(epic or "").strip()
+    open_on_epic = any(_position_epic(p) == epic_s for p in positions)
+    open_total = len(positions)
+    max_global = _max_open_positions_global()
+
+    if not open_on_epic and open_total >= max_global:
+        return (
+            False,
+            f"correlation guard: global open book {open_total} >= max {max_global}",
+        )
+
+    us_epics = _us_index_epics()
+    max_us_short = _max_concurrent_us_index_shorts()
+    if direction_u == "SELL" and epic_s in us_epics and max_us_short > 0:
+        us_shorts = sum(
+            1
+            for p in positions
+            if _position_epic(p) in us_epics and _position_side(p) == "SELL"
+        )
+        if not open_on_epic and us_shorts >= max_us_short:
+            return (
+                False,
+                f"correlation guard: US index shorts {us_shorts} >= max {max_us_short}",
+            )
+
+    return True, ""
 
 
 def _max_same_direction_risk_gbp() -> float:
@@ -260,5 +396,8 @@ def snapshot() -> dict[str, object]:
             "sell_risk_gbp": round(_sell_risk_gbp, 2),
             "max": MAX_NEW_PER_DIRECTION,
             "max_same_direction_risk_gbp": _max_same_direction_risk_gbp(),
+            "max_open_positions_global": _max_open_positions_global(),
+            "max_concurrent_us_index_shorts": _max_concurrent_us_index_shorts(),
+            "us_index_epics": sorted(_us_index_epics()),
             "session": _session_key,
         }

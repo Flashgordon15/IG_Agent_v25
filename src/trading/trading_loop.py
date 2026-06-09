@@ -251,6 +251,7 @@ class TradingLoop:
         self._feeder_last_bar_key: str | None = None
         self._last_ml_prob: float | None = None
         self._last_sig_direction: str = "WAIT"
+        self._gate_signal_cache: SignalResult | None = None
 
     @property
     def config(self) -> Config:
@@ -324,6 +325,7 @@ class TradingLoop:
                 try:
                     self._run_tick()
                 except Exception as e:
+                    self._sentinel_on_tick(loop_error=e)
                     self._session_tracker.record_error()
                     log_engine(
                         f"trading_loop tick error (continuing): {type(e).__name__}: {e}"
@@ -386,11 +388,127 @@ class TradingLoop:
             )
             self._stop.set()
 
+    def _sentinel_stream_disconnected(self) -> bool:
+        try:
+            from system.stream_ready import is_stream_ready
+
+            if not is_stream_ready():
+                return True
+            from system.market_data_hub import get_market_data_hub
+
+            snap = get_market_data_hub().get_snapshot(self._epic)
+            if snap is None or snap.bid <= 0 or snap.offer <= 0:
+                return True
+            return False
+        except Exception:
+            return False
+
+    def _sentinel_quote_stale(self) -> bool:
+        try:
+            from system.market_data_hub import get_market_data_hub
+
+            snap = get_market_data_hub().get_snapshot(self._epic)
+            if snap is None:
+                return True
+            return float(snap.age_seconds()) > 45.0
+        except Exception:
+            return False
+
+    def _sentinel_on_tick(self, *, loop_error: Exception | None = None) -> None:
+        """Feed live loop health into v27 Operational AI monitor (§17)."""
+        try:
+            from ai.operational.system_monitor import get_system_monitor
+
+            get_system_monitor().on_loop_tick(
+                self._epic,
+                loop_error=loop_error is not None,
+                stream_disconnected=(
+                    True
+                    if loop_error is not None
+                    else self._sentinel_stream_disconnected()
+                ),
+                quote_stale=(
+                    False if loop_error is not None else self._sentinel_quote_stale()
+                ),
+            )
+        except Exception:
+            pass
+
     def _run_tick(self) -> TickContext | None:
         import time
 
         self._last_tick_mono = time.monotonic()
         self._silence_alert_sent = False
+        try:
+            from ai.operational.profiler import get_operational_profiler
+
+            _prof = get_operational_profiler()
+        except Exception:
+            _prof = None
+        _tick_t0 = time.perf_counter()
+        _ctx: TickContext | None = None
+        try:
+            _ctx = self._run_tick_core()
+            return _ctx
+        finally:
+            if _prof is not None:
+                _prof.record_probe(
+                    "probe_trading_loop_tick",
+                    (time.perf_counter() - _tick_t0) * 1000.0,
+                    epic=self._epic,
+                )
+                if _ctx is not None:
+                    self._feed_profiler_session(_prof, _ctx)
+
+    def _feed_profiler_session(self, prof: Any, ctx: TickContext) -> None:
+        try:
+            session_open = any(
+                g.name == "session_open" and g.passed for g in (ctx.gates or [])
+            )
+            min_atr = float(getattr(self._config, "min_atr_points", 0) or 0)
+            atr_cleared = False
+            gate_fails: dict[str, int] = {}
+            for g in ctx.gates or []:
+                if g.name == "environment_fitness":
+                    val = g.value if isinstance(g.value, dict) else {}
+                    factors = (
+                        val.get("factors", {})
+                        if isinstance(val.get("factors"), dict)
+                        else {}
+                    )
+                    atr_pts = float(factors.get("atr") or 0)
+                    if atr_pts > 0:
+                        atr_cleared = atr_pts >= min_atr if min_atr > 0 else True
+                if not g.passed:
+                    gate_fails[g.name] = gate_fails.get(g.name, 0) + 1
+            dominant = (
+                max(gate_fails.items(), key=lambda kv: kv[1])[0] if gate_fails else ""
+            )
+            traded = bool(
+                ctx.outcome and ctx.outcome.execution and ctx.outcome.execution.success
+            )
+            prof.update_session_activity(
+                self._epic,
+                session_open=session_open,
+                trade_executed=traded,
+                atr_filter_cleared=atr_cleared,
+                gate_failures=gate_fails,
+                dominant_gate_block=dominant,
+            )
+        except Exception:
+            pass
+
+    def _reset_gate_signal_cache(self) -> None:
+        self._gate_signal_cache = None
+
+    def _get_gate_signal(self) -> SignalResult:
+        """Single signal evaluation per tick — reused across gate stack (§20 latency)."""
+        if getattr(self, "_gate_signal_cache", None) is None:
+            self._gate_signal_cache = self._signal_engine.evaluate(self._market)
+        return self._gate_signal_cache
+
+    def _run_tick_core(self) -> TickContext | None:
+
         quote = self._quote_source()
         if quote is None:
             ctx = TickContext(
@@ -411,9 +529,11 @@ class TradingLoop:
             self._publish_snapshot(ctx)
             with self._lock:
                 self._last_context = ctx
+            self._sentinel_on_tick()
             return ctx
 
         self._tick_count += 1
+        self._reset_gate_signal_cache()
         try:
             from system.market_data_hub import get_market_data_hub
 
@@ -536,6 +656,7 @@ class TradingLoop:
         self._publish_snapshot(ctx)
         with self._lock:
             self._last_context = ctx
+        self._sentinel_on_tick()
         return ctx
 
     def _rate_limit_gate_status(self) -> tuple[bool, str]:
@@ -913,6 +1034,12 @@ class TradingLoop:
         return gates
 
     def _evaluate_gates(self, quote: Quote) -> list[GateResult]:
+        from ai.operational.profiler_hooks import probe_hot_path
+
+        with probe_hot_path("probe_gate_evaluation", epic=self._epic):
+            return self._evaluate_gates_core(quote)
+
+    def _evaluate_gates_core(self, quote: Quote) -> list[GateResult]:
         results: list[GateResult] = []
         for name in GATE_NAMES:
             try:
@@ -924,6 +1051,8 @@ class TradingLoop:
                     results.append(self._gate_environment_fitness(quote))
                 elif name == "points_state":
                     results.append(self._gate_points_state())
+                elif name == "correlation_ok":
+                    results.append(self._gate_correlation_ok())
                 elif name == "risk_validation":
                     results.append(self._gate_risk_validation(quote))
                 elif name == "expectancy_ok":
@@ -1286,6 +1415,74 @@ class TradingLoop:
             tracker=tracker,
         )
 
+    def _gate_correlation_ok(self) -> GateResult:
+        from execution.correlation_guard import check_open_book_limits
+
+        sig = self._get_gate_signal()
+        direction = str(sig.signal or "WAIT").upper()
+        if direction not in ("BUY", "SELL"):
+            return GateResult(
+                name="correlation_ok",
+                passed=True,
+                value="no_signal",
+                detail="no directional signal",
+            )
+        tracker = self._execution_loop.execution_engine.trade_tracker
+        snap = tracker.snapshot() if tracker is not None else {}
+        positions = snap.get("positions") if isinstance(snap, dict) else []
+        if not isinstance(positions, list):
+            positions = []
+        ok, detail = check_open_book_limits(
+            self._epic,
+            direction,
+            positions,
+        )
+        return GateResult(
+            name="correlation_ok",
+            passed=ok,
+            value={
+                "direction": direction,
+                "open_total": len(positions),
+            },
+            detail=detail or "correlation limits OK",
+        )
+
+    def _execution_stop_distance(
+        self,
+        *,
+        setup_key: str,
+        planning_conf: float,
+        snapshot: dict[str, Any],
+    ) -> tuple[float, str]:
+        """Match LiveExecutor stopDistance — AdaptiveEngine ATR risk when enabled."""
+        stop_source = "config_fallback"
+        stop = 0.0
+        try:
+            adaptive = self._execution_loop.execution_engine._adaptive
+            exec_settings = adaptive.settings(
+                str(setup_key or ""),
+                float(planning_conf),
+                snapshot if snapshot else None,
+            )
+            stop = float(exec_settings.get("risk") or 0)
+            if stop > 0:
+                stop_source = "adaptive_atr"
+            elif getattr(self._config, "adaptive_atr_risk_enabled", False):
+                atr_val = float(exec_settings.get("atr") or 0)
+                mult = float(getattr(self._config, "atr_multiplier", 2.5) or 2.5)
+                if atr_val > 0 and mult > 0:
+                    stop = atr_val * mult
+                    stop_source = "adaptive_atr_direct"
+        except (AttributeError, TypeError, ValueError):
+            pass
+        if stop <= 0:
+            stop = float(
+                self._config.default_stop_distance_points
+                or self._config.stop_distance_points
+            )
+            stop_source = "config_fallback"
+        return stop, stop_source
+
     def _gate_risk_validation(self, quote: Quote) -> GateResult:
         from execution.market_suspension import gate_detail, is_blocked
         from system.market_data_hub import get_market_data_hub
@@ -1315,6 +1512,12 @@ class TradingLoop:
             max_open_total = max(1, int(self._config.max_open_positions))
         except (TypeError, ValueError):
             max_open_total = max_per_epic
+        try:
+            from execution.correlation_guard import _max_open_positions_global
+
+            max_open_total = min(max_open_total, _max_open_positions_global())
+        except Exception:
+            pass
         total_raw = tracker.count_open_total()
         if isinstance(total_raw, (int, float)):
             open_total = max(open_count, int(total_raw))
@@ -1324,12 +1527,9 @@ class TradingLoop:
         total_slot_ok = open_total < max_open_total
         position_ok = epic_slot_ok and total_slot_ok
 
-        stop = float(self._config.stop_distance_points)
-        base_size = float(self._config.trade_size)
-        point_value = float(self._config.get("ig_point_value_gbp", 1.0))
         from trading.points_engine import CONF_MARGINAL_MIN
 
-        sig_for_risk = self._signal_engine.evaluate(self._market)
+        sig_for_risk = self._get_gate_signal()
         sizing_conf = float(sig_for_risk.adjusted_confidence or 0)
         threshold_floor = float(self._points.trade_confidence_threshold(self._config))
         if sizing_conf <= 0:
@@ -1344,6 +1544,16 @@ class TradingLoop:
             except Exception:
                 sizing_conf = max(CONF_MARGINAL_MIN, threshold_floor)
         planning_conf = max(threshold_floor, sizing_conf)
+
+        snapshot = dict(self._signal_engine.last_snapshot.get(self._market) or {})
+        stop, stop_source = self._execution_stop_distance(
+            setup_key=str(sig_for_risk.setup_key or ""),
+            planning_conf=planning_conf,
+            snapshot=snapshot,
+        )
+
+        base_size = float(self._config.trade_size)
+        point_value = float(self._config.get("ig_point_value_gbp", 1.0))
         size_mult = float(self._points.get_size_multiplier(planning_conf))
         risk_band_label = ""
         risk_band_note = ""
@@ -1470,6 +1680,7 @@ class TradingLoop:
                 "ig_min_deal_size": round(ig_min_size, 3),
                 "size_multiplier": round(size_mult, 3),
                 "stop_points": round(stop, 1),
+                "stop_source": stop_source,
                 "point_value_gbp": round(point_value, 3),
                 "spread_cap": round(spread_cap, 1),
                 "risk_cap_gbp": risk_cap,
@@ -1514,7 +1725,7 @@ class TradingLoop:
                 value="off",
                 detail="setup registry inactive (no banned setups)",
             )
-        sig = self._signal_engine.evaluate(self._market)
+        sig = self._get_gate_signal()
         setup_key = str(sig.setup_key or "")
         if not setup_key:
             return GateResult(
@@ -1539,7 +1750,7 @@ class TradingLoop:
         )
 
     def _gate_signal_confidence(self) -> GateResult:
-        sig = self._signal_engine.evaluate(self._market)
+        sig = self._get_gate_signal()
         threshold = float(self._points.trade_confidence_threshold(self._config))
         try:
             from system.gate_relaxation import effective_trade_confidence_threshold
@@ -1744,7 +1955,7 @@ class TradingLoop:
 
                 v26 = get_v26_ml_scorer()
                 if epic and v26.is_eligible(epic):
-                    sig = self._signal_engine.evaluate(self._market)
+                    sig = self._get_gate_signal()
                     snap = sig.snapshot or {}
                     _last_raw = snap.get("last")
                     last = (
@@ -1964,14 +2175,17 @@ class TradingLoop:
         return closed
 
     def _publish_snapshot(self, ctx: TickContext) -> None:
-        try:
-            payload = self._build_snapshot_payload(ctx)
-            if self._on_snapshot is not None:
-                self._on_snapshot(payload)
-            elif self._publish_snapshots:
-                publish_tick(payload)
-        except Exception as e:
-            log_engine(f"publish_tick failed: {type(e).__name__}: {e}")
+        from ai.operational.profiler_hooks import probe_hot_path
+
+        with probe_hot_path("probe_snapshot_publish", epic=self._epic):
+            try:
+                payload = self._build_snapshot_payload(ctx)
+                if self._on_snapshot is not None:
+                    self._on_snapshot(payload)
+                elif self._publish_snapshots:
+                    publish_tick(payload)
+            except Exception as e:
+                log_engine(f"publish_tick failed: {type(e).__name__}: {e}")
 
     def build_snapshot_payload(self, ctx: TickContext | None = None) -> dict[str, Any]:
         """Build dashboard tick payload (orchestrator merge / tests)."""
@@ -2223,10 +2437,14 @@ class TradingLoop:
         except Exception:
             pass
 
+        from trading.open_position_view import epic_market_label
+
+        market_label = epic_market_label(self._epic)
         return {
             "type": "tick",
             "epic": self._epic,
-            "market": self._market,
+            "market": market_label,
+            "market_name": market_label,
             "instrument_id": self._instrument_id or None,
             "ts": _iso_ts(quote_ts),
             "watchdog_failed": watchdog_banner,
@@ -2470,7 +2688,15 @@ class TradingLoop:
             deduped = deduplicate_ig_imports(filtered)
             deduped.sort(key=lambda r: str(r.get("closed_at") or ""), reverse=True)
             out: list[dict[str, Any]] = []
+            from trading.open_position_view import (
+                epic_market_label,
+                row_belongs_to_epic,
+            )
+
             for row in deduped:
+                if not row_belongs_to_epic(row, self._epic):
+                    continue
+                row_epic = str(row.get("epic") or self._epic or "").strip()
                 pnl_gbp = row.get("ig_pnl_currency")
                 pnl_pts = float(row.get("pnl_points") or 0)
                 if pnl_gbp is not None:
@@ -2488,8 +2714,8 @@ class TradingLoop:
                 out.append(
                     {
                         "deal_id": row.get("deal_id") or row.get("ig_deal_id"),
-                        "market": row.get("market") or row.get("epic"),
-                        "epic": row.get("epic"),
+                        "market": epic_market_label(row_epic),
+                        "epic": row_epic,
                         "side": row.get("side") or row.get("direction"),
                         "direction": row.get("side") or row.get("direction"),
                         "entry_price": row.get("entry_price") or row.get("entry"),

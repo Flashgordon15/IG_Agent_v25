@@ -1,7 +1,8 @@
-"""Seed SignalEngine quote history from IG REST OHLC on session open."""
+"""Seed SignalEngine quote history from local JSONL cache or IG REST OHLC."""
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from datetime import datetime
@@ -10,6 +11,8 @@ from typing import TYPE_CHECKING, Any
 from data.models import Quote
 from signals.signal_engine import SignalEngine
 from system.engine_log import log_engine
+from system.paths import data_dir
+from trading.ohlc_cache_paths import ohlc_cache_path
 
 if TYPE_CHECKING:
     from trading.environment_scorer import EnvironmentScorer
@@ -18,6 +21,17 @@ if TYPE_CHECKING:
 _IG_SNAPSHOT_TIME = re.compile(
     r"^(\d{4})[/-](\d{1,2})[/-](\d{1,2})[T:\s](\d{1,2}):(\d{2})(?::(\d{2}))?"
 )
+
+IG_HISTORICAL_ALLOWANCE_ERROR = (
+    "error.public-api.exceeded-account-historical-data-allowance"
+)
+_HISTORICAL_LOCKOUT_PATH = data_dir() / "state" / "ohlc_historical_lockout.json"
+_HISTORICAL_LOCKOUT_TTL_SEC = 45 * 60
+
+MIN_CACHE_BARS_FOR_BOOTSTRAP = 100
+
+# Minimum seconds between REST OHLC fetches — keeps burst safely under 3/min cap
+_OHLC_REST_STAGGER_SEC = 22.0
 
 
 def _parse_bar_time(raw: str) -> datetime:
@@ -43,36 +57,130 @@ def _parse_bar_time(raw: str) -> datetime:
     return dt
 
 
+def is_ig_historical_allowance_error(status_code: int, body: str | None) -> bool:
+    """True when IG rejects price-history due to account historical allowance."""
+    if status_code not in (403, 429):
+        return False
+    text = str(body or "")
+    try:
+        data = json.loads(text)
+        if str(data.get("errorCode", "")) == IG_HISTORICAL_ALLOWANCE_ERROR:
+            return True
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return IG_HISTORICAL_ALLOWANCE_ERROR in text
+
+
+def mark_historical_allowance_lockout(*, source: str = "ig_rest") -> None:
+    """Persist lockout so restarts stay on local cache until TTL expires."""
+    try:
+        _HISTORICAL_LOCKOUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _HISTORICAL_LOCKOUT_PATH.write_text(
+            json.dumps(
+                {
+                    "ts": time.time(),
+                    "error": IG_HISTORICAL_ALLOWANCE_ERROR,
+                    "source": source,
+                }
+            ),
+            encoding="utf-8",
+        )
+        log_engine(
+            "OHLC bootstrap: IG historical data allowance exceeded — "
+            "local-cache-only mode active"
+        )
+    except Exception as e:
+        log_engine(f"OHLC lockout state write failed: {type(e).__name__}: {e}")
+
+
+def clear_historical_allowance_lockout_for_tests() -> None:
+    """Reset lockout flag between pytest cases."""
+    try:
+        _HISTORICAL_LOCKOUT_PATH.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def is_historical_allowance_lockout() -> bool:
+    """True while recent IG historical-data allowance block is in effect."""
+    if not _HISTORICAL_LOCKOUT_PATH.is_file():
+        return False
+    try:
+        raw = json.loads(_HISTORICAL_LOCKOUT_PATH.read_text(encoding="utf-8"))
+        age = time.time() - float(raw.get("ts") or 0)
+        return 0 <= age < _HISTORICAL_LOCKOUT_TTL_SEC
+    except Exception:
+        return True
+
+
+def strict_local_cache_first() -> bool:
+    try:
+        from system.config_loader import get_config
+
+        return bool(getattr(get_config(), "ohlc_strict_local_cache_first", True))
+    except Exception:
+        return True
+
+
+def local_cache_max_bars() -> int:
+    try:
+        from system.config_loader import get_config
+
+        return max(
+            MIN_CACHE_BARS_FOR_BOOTSTRAP,
+            int(getattr(get_config(), "ohlc_local_cache_max_bars", 5000)),
+        )
+    except Exception:
+        return 5000
+
+
+def local_cache_bar_count(epic: str, market: str = "") -> int:
+    path = ohlc_cache_path(epic, market=market)
+    if not path.is_file():
+        return 0
+    try:
+        count = 0
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                count += 1
+        return count
+    except OSError:
+        return 0
+
+
+def local_cache_ready(epic: str, market: str = "") -> bool:
+    return local_cache_bar_count(epic, market) >= MIN_CACHE_BARS_FOR_BOOTSTRAP
+
+
 def _bootstrap_from_cache(
     epic: str,
     market: str,
     signal_engine: SignalEngine,
     environment_scorer: Any | None,
     num_points: int,
+    *,
+    max_bars: int | None = None,
 ) -> int:
     """Seed SignalEngine from local JSONL cache when IG REST is unavailable."""
-    import json
-
-    from trading.ohlc_cache_paths import ohlc_cache_path
-
     cache_path = ohlc_cache_path(epic, market=market)
     if not cache_path.is_file():
         log_engine(f"OHLC bootstrap: no local cache at {cache_path}")
         return 0
+    cap = max_bars if max_bars is not None else local_cache_max_bars()
+    cap = max(cap, num_points)
     try:
-        lines = cache_path.read_text(encoding="utf-8").splitlines()
-        # Take the last num_points bars
-        tail = lines[-num_points:] if len(lines) >= num_points else lines
-        if not tail:
+        lines = [
+            ln
+            for ln in cache_path.read_text(encoding="utf-8").splitlines()
+            if ln.strip()
+        ]
+        if not lines:
             log_engine("OHLC bootstrap: local cache is empty")
             return 0
+        tail = lines[-cap:] if len(lines) >= cap else lines
         seeded: list[Quote] = []
         for line in tail:
-            line = line.strip()
-            if not line:
-                continue
             bar = json.loads(line)
-            # Cache schema: t, o, h, l, c, v, spread
             high = float(bar.get("h") or 0)
             low = float(bar.get("l") or 0)
             close = float(bar.get("c") or 0)
@@ -107,9 +215,6 @@ def _bootstrap_from_cache(
         return 0
 
 
-MIN_CACHE_BARS_FOR_BOOTSTRAP = 100
-
-
 def bootstrap_ohlc_for_session(
     rest_client: Any,
     signal_engine: SignalEngine,
@@ -125,31 +230,83 @@ def bootstrap_ohlc_for_session(
     try:
         if signal_engine is None:
             return 0
-        if prefer_cache:
+
+        max_cache = local_cache_max_bars()
+        lockout = is_historical_allowance_lockout()
+        strict = strict_local_cache_first()
+
+        cache_first = lockout or (
+            (prefer_cache or strict) and local_cache_ready(epic, market)
+        )
+        if cache_first:
             cached = _bootstrap_from_cache(
-                epic, market, signal_engine, environment_scorer, num_points
+                epic,
+                market,
+                signal_engine,
+                environment_scorer,
+                num_points,
+                max_bars=max_cache,
             )
             if cached >= MIN_CACHE_BARS_FOR_BOOTSTRAP:
                 return cached
+            if lockout:
+                if cached > 0:
+                    log_engine(
+                        f"OHLC bootstrap: local cache partial ({cached} bars) — "
+                        f"continuing without IG REST for {epic}"
+                    )
+                    return cached
+                log_engine(
+                    f"OHLC bootstrap: no usable local cache for {epic} "
+                    f"(historical lockout — IG REST skipped)"
+                )
+                return 0
+
         if rest_client is None:
             return _bootstrap_from_cache(
-                epic, market, signal_engine, environment_scorer, num_points
+                epic,
+                market,
+                signal_engine,
+                environment_scorer,
+                num_points,
+                max_bars=max_cache,
             )
+
         fetch = getattr(rest_client, "fetch_price_history", None)
         if not callable(fetch):
             log_engine("OHLC bootstrap: fetch_price_history unavailable")
-            return 0
+            return _bootstrap_from_cache(
+                epic,
+                market,
+                signal_engine,
+                environment_scorer,
+                num_points,
+                max_bars=max_cache,
+            )
+
         from system.rest_api_budget import ohlc_bootstrap_rest_window
 
         with ohlc_bootstrap_rest_window():
             bars = fetch(epic, resolution=resolution, num_points=num_points)
+
         if not bars:
-            log_engine(
-                f"OHLC bootstrap: no bars from IG REST for {epic} — trying local cache"
-            )
+            if lockout or is_historical_allowance_lockout():
+                log_engine(
+                    f"OHLC bootstrap: IG historical lockout — using local cache for {epic}"
+                )
+            else:
+                log_engine(
+                    f"OHLC bootstrap: no bars from IG REST for {epic} — trying local cache"
+                )
             return _bootstrap_from_cache(
-                epic, market, signal_engine, environment_scorer, num_points
+                epic,
+                market,
+                signal_engine,
+                environment_scorer,
+                num_points,
+                max_bars=max_cache,
             )
+
         seeded: list[Quote] = []
         for bar in bars:
             high = float(bar.get("high") or 0)
@@ -173,7 +330,14 @@ def bootstrap_ohlc_for_session(
         count = signal_engine.seed_ohlc_history(market, seeded, aliases=[epic])
         if count <= 0:
             log_engine(f"OHLC bootstrap: no valid bars for {epic}")
-            return 0
+            return _bootstrap_from_cache(
+                epic,
+                market,
+                signal_engine,
+                environment_scorer,
+                num_points,
+                max_bars=max_cache,
+            )
         if environment_scorer is not None:
             environment_scorer.on_ohlc_bootstrapped(market)
         log_engine(
@@ -183,11 +347,14 @@ def bootstrap_ohlc_for_session(
         return count
     except Exception as e:
         log_engine(f"OHLC bootstrap warning: {type(e).__name__}: {e}")
-        return 0
-
-
-# Minimum seconds between REST OHLC fetches — keeps burst safely under 3/min cap
-_OHLC_REST_STAGGER_SEC = 22.0
+        return _bootstrap_from_cache(
+            epic,
+            market,
+            signal_engine,
+            environment_scorer,
+            num_points,
+            max_bars=local_cache_max_bars(),
+        )
 
 
 def bootstrap_ohlc_parallel(
@@ -198,9 +365,9 @@ def bootstrap_ohlc_parallel(
 ) -> None:
     """Bootstrap OHLC for all trading loops.
 
-    Cache-first: markets with a warm local cache are seeded instantly without
-    consuming REST budget.  Markets that need a live REST fetch run sequentially
-    with a 22-second stagger to stay safely under the 3-calls/min hard cap.
+    Strict local-cache-first: markets with a warm local cache are seeded from
+    JSONL (up to ohlc_local_cache_max_bars) without IG REST.  When IG historical
+    allowance is exceeded, all markets use local cache only — no Yahoo fallback.
     """
     if not loops:
         return
@@ -218,25 +385,18 @@ def bootstrap_ohlc_parallel(
     if not open_loops:
         return
 
-    # Split into cache-serviced vs REST-needed based on local cache presence
     cached_loops: list[Any] = []
     rest_loops: list[Any] = []
     for loop in open_loops:
-        try:
-            from system.paths import data_dir
-
-            slug = loop._epic.replace(".", "_").replace("/", "_")
-            cache_path = data_dir() / "ohlc_cache" / f"{slug}_5m.jsonl"
-            if cache_path.exists() and cache_path.stat().st_size > 1024:
-                cached_loops.append(loop)
-            else:
-                rest_loops.append(loop)
-        except Exception:
+        if (
+            local_cache_ready(loop._epic, loop._market)
+            or is_historical_allowance_lockout()
+        ):
+            cached_loops.append(loop)
+        else:
             rest_loops.append(loop)
 
     def _bootstrap_one(loop: Any) -> int:
-        if rest_client is None:
-            return 0
         return bootstrap_ohlc_for_session(
             rest_client,
             loop._signal_engine,
@@ -246,7 +406,6 @@ def bootstrap_ohlc_parallel(
             prefer_cache=True,
         )
 
-    # Cached markets: parallel, no REST calls, no rate-limit risk
     if cached_loops:
         workers = min(max(1, int(max_workers)), len(cached_loops))
         with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -257,7 +416,6 @@ def bootstrap_ohlc_parallel(
                 except Exception as e:
                     log_engine(f"OHLC bootstrap error: {type(e).__name__}: {e}")
 
-    # REST-needed markets: sequential with stagger to avoid rate-limit burst
     for i, loop in enumerate(rest_loops):
         if i > 0:
             log_engine(

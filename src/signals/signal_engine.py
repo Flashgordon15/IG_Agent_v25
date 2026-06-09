@@ -127,10 +127,10 @@ class SignalEngine:
 
     def candle_frames(
         self, market: str, *, quote_df: pd.DataFrame | None = None
-    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        """Return (quote_df, 5m candles, 15m candles) from seed + live quotes."""
+    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        """Return (quote_df, 5m, 15m, 60m candles) from seed + live quotes."""
         df = quote_df if quote_df is not None else self.quote_df(market)
-        return df, self.candles(df, 5), self.candles(df, 15)
+        return df, self.candles(df, 5), self.candles(df, 15), self.candles(df, 60)
 
     def candles(self, df: pd.DataFrame, minutes: int) -> pd.DataFrame:
         if df.empty:
@@ -311,6 +311,7 @@ class SignalEngine:
         df = self.quote_df(market)
         c5 = self.candles(df, 5)
         c15 = self.candles(df, 15)
+        c60 = self.candles(df, 60)
 
         # Need at least 4 5m bars so we have 3 confirmed closed bars (iloc[-4..-2])
         # plus one currently-open bar (iloc[-1]) that is excluded from signal logic.
@@ -331,6 +332,7 @@ class SignalEngine:
 
         c5i = self.add_indicators(c5)
         c15i = self.add_indicators(c15)
+        c60i = self.add_indicators(c60)
 
         # Use confirmed closed bars only — iloc[-2] is the last fully closed 5m bar.
         # iloc[-1] is the currently open bar and is intentionally excluded so that
@@ -339,6 +341,13 @@ class SignalEngine:
         prev = c5i.iloc[-3]
         prev2 = c5i.iloc[-4]
         trend15 = c15i.iloc[-2]
+        trend60 = c60i.iloc[-2] if len(c60i) >= 2 else None
+        h1_bearish = trend60 is not None and float(trend60["fast_ema"]) < float(
+            trend60["slow_ema"]
+        )
+        h1_bullish = trend60 is not None and float(trend60["fast_ema"]) > float(
+            trend60["slow_ema"]
+        )
 
         # Suppress duplicate signals that already fired on this closed bar.
         # Include the close price in the key so that re-evaluating after quotes are
@@ -496,6 +505,7 @@ class SignalEngine:
                 snapshot = {
                     "last": last,
                     "trend15": trend15,
+                    "trend60": trend60,
                     "setup_key": setup,
                     "raw_signal": raw_sig,
                     "raw_confidence": raw_conf,
@@ -504,6 +514,8 @@ class SignalEngine:
                     "buy_score": buy,
                     "sell_score": sell,
                     "rsi_block": rsi_block,
+                    "h1_bearish": h1_bearish,
+                    "h1_bullish": h1_bullish,
                 }
                 self.last_snapshot[market] = snapshot
                 return SignalResult(
@@ -520,6 +532,41 @@ class SignalEngine:
             side_score = buy if candidate == "BUY" else sell
             delta, learn_note = self.learning_adjustment(setup)
             adjusted = max(0, min(99, side_score + delta))
+            if candidate == "SELL" and (trend60 is None or not h1_bearish):
+                h1_note = (
+                    "1h EMA not bearish (fast >= slow)"
+                    if trend60 is not None
+                    else "1h data collecting"
+                )
+                notes = (
+                    f"raw={raw_sig}, buy_score={buy:.1f}, sell_score={sell:.1f}, "
+                    f"threshold={threshold:.0f}, blocked: {h1_note}, {learn_note}"
+                )
+                snapshot = {
+                    "last": last,
+                    "trend15": trend15,
+                    "trend60": trend60,
+                    "setup_key": setup,
+                    "raw_signal": raw_sig,
+                    "raw_confidence": raw_conf,
+                    "adjusted_confidence": adjusted,
+                    "learning_delta": delta,
+                    "buy_score": buy,
+                    "sell_score": sell,
+                    "h1_block": h1_note,
+                    "h1_bearish": h1_bearish,
+                    "h1_bullish": h1_bullish,
+                }
+                self.last_snapshot[market] = snapshot
+                return SignalResult(
+                    "WAIT",
+                    float(raw_conf),
+                    float(adjusted),
+                    float(delta),
+                    setup,
+                    notes,
+                    snapshot,
+                )
             if adjusted >= threshold:
                 signal = candidate
                 raw_conf = side_score
@@ -540,6 +587,7 @@ class SignalEngine:
         snapshot = {
             "last": last,
             "trend15": trend15,
+            "trend60": trend60,
             "setup_key": setup,
             "raw_signal": raw_sig,
             "raw_confidence": raw_conf,
@@ -548,8 +596,19 @@ class SignalEngine:
             "buy_score": buy,
             "sell_score": sell,
             "vol_regime": current_regime,
+            "h1_bearish": h1_bearish,
+            "h1_bullish": h1_bullish,
         }
         self.last_snapshot[market] = snapshot
+
+        if signal == "SELL" and (trend60 is None or not h1_bearish):
+            signal = "WAIT"
+            h1_note = (
+                "1h EMA not bearish (fast >= slow)"
+                if trend60 is not None
+                else "1h data collecting"
+            )
+            notes = f"{notes} | blocked: {h1_note}"
 
         if (
             cfg.vol_regime_filter_enabled

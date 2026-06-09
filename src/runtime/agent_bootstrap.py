@@ -395,6 +395,31 @@ def build_market_orchestrator(
             txn_sync.start()
             _set_transaction_sync_instance(txn_sync)
             log_engine("IG transaction sync started")
+            if os.environ.get("IG_AGENT_PYTEST") != "1":
+                try:
+                    from ai.strategy.performance_reviewer import (
+                        force_shadow_learning_pipeline,
+                    )
+
+                    shadow_result = force_shadow_learning_pipeline(store)
+                    log_engine(f"Risk hardening: {shadow_result.detail}")
+                except Exception as exc:
+                    log_engine(
+                        f"shadow learning pipeline failed: {type(exc).__name__}: {exc}"
+                    )
+                try:
+                    from runtime.ig_transaction_sync import (
+                        force_immediate_transaction_sync,
+                    )
+
+                    if force_immediate_transaction_sync(reason="risk_hardening_boot"):
+                        log_engine(
+                            "Risk hardening: IG transaction sync scheduled (force)"
+                        )
+                except Exception as exc:
+                    log_engine(
+                        f"transaction sync force failed: {type(exc).__name__}: {exc}"
+                    )
         except Exception as _txn_e:
             log_engine(
                 f"IG transaction sync start failed: {type(_txn_e).__name__}: {_txn_e}"
@@ -437,6 +462,19 @@ def build_market_orchestrator(
     def _background_yahoo_seed(loops_ref: list) -> None:
         """Fetch missing OHLC caches from Yahoo in the background after startup."""
         try:
+            from trading.ohlc_bootstrap import (
+                is_historical_allowance_lockout,
+                local_cache_ready,
+                strict_local_cache_first,
+            )
+
+            if strict_local_cache_first() or is_historical_allowance_lockout():
+                log_engine(
+                    "OHLC background seed: skipped — strict local-cache-first "
+                    "(no Yahoo fallback during IG historical lockout)"
+                )
+                return
+
             from data.ohlc_yahoo_seeder import EPIC_YAHOO_MAP, fetch_yahoo_ohlc_for_epic
             from system.paths import data_dir as _data_dir
 
@@ -444,6 +482,9 @@ def build_market_orchestrator(
             _ohlc_dir.mkdir(parents=True, exist_ok=True)
             for loop in loops_ref:
                 _epic = loop._epic
+                _market = getattr(loop, "_market", "")
+                if local_cache_ready(_epic, _market):
+                    continue
                 if _epic not in EPIC_YAHOO_MAP:
                     continue
                 _slug = _epic.replace(".", "_").replace("/", "_")

@@ -31,7 +31,10 @@ OPTIONAL_DEFAULTS: dict[str, Any] = {
     "max_daily_loss_gbp": 200.0,
     "max_open_positions": 1,
     "cooldown_seconds": 180,
+    "ohlc_strict_local_cache_first": True,
+    "ohlc_local_cache_max_bars": 5000,
 }
+
 
 def _present(config: dict[str, Any], keys: tuple[str, ...]) -> str | None:
     for key in keys:
@@ -94,8 +97,10 @@ def apply_config_defaults(config: dict[str, Any]) -> dict[str, Any]:
     """Return a copy with optional defaults applied (does not validate)."""
     out = dict(config)
     for key, default in OPTIONAL_DEFAULTS.items():
-        if key not in out or out[key] is None or (
-            isinstance(out[key], str) and not str(out[key]).strip()
+        if (
+            key not in out
+            or out[key] is None
+            or (isinstance(out[key], str) and not str(out[key]).strip())
         ):
             out[key] = default
     if "max_daily_loss" not in out or out.get("max_daily_loss") in (None, "", 0):
@@ -122,9 +127,7 @@ def validate_config(config: dict[str, Any]) -> tuple[bool, list[str]]:
     valid = True
 
     if emergency_stop_lock_present():
-        msg = (
-            "Emergency stop lock present — delete emergency_stop.lock to restart"
-        )
+        msg = "Emergency stop lock present — delete emergency_stop.lock to restart"
         messages.append(f"ERROR: {msg}")
         log_engine(f"config_validator: {msg}")
         valid = False

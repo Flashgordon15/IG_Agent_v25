@@ -1,0 +1,17 @@
+{
+  "optimization_id": "opt_002_confidence_blocked",
+  "status": "aborted_verification_failed",
+  "created_at": "2026-06-09T20:00:04.465Z",
+  "patches": [
+    {
+      "relative_target": "config/config_v25.json",
+      "patch_file": "patch/config_v25_patch.json"
+    }
+  ],
+  "evidence": {
+    "blocked_expectation": "OperationalBoundaryError frozen keys"
+  },
+  "updated_at": "2026-06-09T20:00:04.510Z",
+  "abort_reason": "\u00a721 staging blocked write to frozen key 'confidence_floor' in config/config_v25.json",
+  "warning_code": "aborted_verification_failed"
+}
