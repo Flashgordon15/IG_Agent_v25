@@ -12,6 +12,7 @@ config/external_keys.json
 
 # Runtime data — never commit
 src/data/*.jsonl
+src/data/*.jsonl.bak
 src/data/*.csv
 src/data/autopsy/
 src/data/ml_model/
@@ -19,9 +20,19 @@ src/data/ohlc_cache/
 src/data/state/
 src/data/replay_analysis.txt
 src/data/training_dataset.csv
+src/data/.ig_agent*.lock
+src/data/watchdog*.pid
+*.sqlite3-wal
+*.sqlite3-shm
 data_lake/events/*.jsonl
 data_lake/features/
 data_lake/models/
 data_lake/shadow_v26/*.jsonl
 data_lake/state/*.json
+data_lake/state/*.jsonl
+data_lake/state/rca_diagnostics/
+data_lake/backups/config_snapshot*.json
+# macOS "Keep Both" duplicate copies
+**/* 2
+**/* 2.*
 .node-local/
