@@ -126,31 +126,39 @@ function agentStateMeta(stateName) {
   }
 }
 
+/** Whole-number 0–100; never throws on null/undefined/stale ticks. */
+function safePct(value, fallback = 0) {
+  if (value == null || value === "" || Number.isNaN(Number(value))) return fallback;
+  return Math.min(100, Math.max(0, Math.round(Number(value))));
+}
+
 function resolveSignalConfidence(state) {
   const raw = state?.signal?.confidence ?? state?.signal_strength ??
     state?.health?.gates?.find((g) => g.name === "signal_confidence")?.value?.confidence;
   if (raw == null || Number.isNaN(Number(raw))) return null;
-  return Math.min(100, Math.max(0, Math.round(Number(raw))));
+  return safePct(raw, 0);
 }
 
 function resolveSignalDirection(signal) {
-  return String(signal?.direction ?? "WAIT").toUpperCase();
+  const raw = signal?.direction;
+  if (raw == null || raw === "") return "WAIT";
+  return String(raw).toUpperCase();
 }
 
 function resolveSignalCoreScore(signal, state) {
-  const fromSig = signal?.signal_core_score;
-  if (fromSig != null && !Number.isNaN(Number(fromSig))) {
-    return Math.min(100, Math.max(0, Math.round(Number(fromSig))));
+  const direct = signal?.signal_core_score;
+  if (direct != null && !Number.isNaN(Number(direct))) {
+    return safePct(direct, 0);
   }
   const rules = signal?.rules_confidence;
   if (rules != null && !Number.isNaN(Number(rules))) {
-    return Math.min(100, Math.max(0, Math.round(Number(rules))));
+    return safePct(rules, 0);
   }
   const gateConf = state?.health?.gates?.find((g) => g.name === "signal_confidence")?.value?.confidence;
   if (gateConf != null && !Number.isNaN(Number(gateConf))) {
-    return Math.min(100, Math.max(0, Math.round(Number(gateConf))));
+    return safePct(gateConf, 0);
   }
-  return null;
+  return safePct(signal?.signal_core_score, 0);
 }
 
 function resolveMlProbability(state) {
@@ -262,7 +270,7 @@ function GateRow({ gate }) {
   );
 }
 
-function SignalConfidenceBreakdown({ signal, state, pointsState }) {
+function SignalConfidenceBreakdown({ signal = {}, state, pointsState }) {
   const sigGate = (state?.health?.gates || []).find((g) => g.name === "signal_confidence");
   const gate = sigGate?.value;
   const direction = resolveSignalDirection(signal);
@@ -292,9 +300,7 @@ function SignalConfidenceBreakdown({ signal, state, pointsState }) {
       value: primaryDial,
       highlight: true,
     },
-    ...(coreScore != null
-      ? [{ label: "Signal core score", value: coreScore, diagnostic: true }]
-      : []),
+    { label: "Signal core score", value: coreScore, diagnostic: true },
   ];
 
   return (
@@ -316,16 +322,20 @@ function SignalConfidenceBreakdown({ signal, state, pointsState }) {
             >
               <span>{label}</span>
               <span className={diagnostic ? "font-mono text-blue-400/90" : ""}>
-                {n != null ? `${Math.round(n)}%` : "—"}
+                {diagnostic
+                  ? `${safePct(value, 0)}%`
+                  : n != null
+                    ? `${Math.round(n)}%`
+                    : "—"}
               </span>
             </li>
           );
         })}
       </ul>
-      {isWait && coreScore != null && primaryDial != null && (
+      {isWait && (
         <p className="mt-2 text-[10px] leading-snug text-muted">
           Core momentum{" "}
-          <span className="font-mono text-blue-400/90">{Math.round(coreScore)}%</span>
+          <span className="font-mono text-blue-400/90">{coreScore}%</span>
           {" "}— gates blocking entry; dial shows aggregate readiness.
         </p>
       )}
@@ -338,14 +348,15 @@ function SignalConfidenceBreakdown({ signal, state, pointsState }) {
   );
 }
 
-function SignalHeroDial({ signal, state }) {
+function SignalHeroDial({ signal = {}, state }) {
   const direction = resolveSignalDirection(signal);
   const isWait = direction === "WAIT";
+  const isBuy = direction === "BUY";
+  const isSell = direction === "SELL";
   const displayValue = resolveSignalConfidence(state);
   const coreScore = resolveSignalCoreScore(signal, state);
   const max = 100;
-  const pct =
-    displayValue == null ? 0 : Math.min(100, Math.max(0, (Number(displayValue) / max) * 100));
+  const pct = safePct(displayValue, 0);
   const r = 44;
   const c = 2 * Math.PI * r;
   const offset = c - (pct / 100) * c;
@@ -354,11 +365,11 @@ function SignalHeroDial({ signal, state }) {
   let valueClass = "text-foreground";
   let ringClass = "border-border";
   if (!isWait) {
-    if (direction === "BUY") {
+    if (isBuy) {
       strokeClass = "stroke-success";
       valueClass = "text-success";
       ringClass = "border-success/40 bg-success/5";
-    } else if (direction === "SELL") {
+    } else if (isSell) {
       strokeClass = "stroke-danger";
       valueClass = "text-danger";
       ringClass = "border-danger/40 bg-danger/5";
@@ -376,11 +387,11 @@ function SignalHeroDial({ signal, state }) {
     <div className={`flex flex-col items-center rounded-lg border p-4 ${ringClass}`}>
       <div className="flex w-full flex-col items-center gap-1">
         <p className="label-caps">{dialLabel}</p>
-        {!isWait && (
+        {!isWait && (isBuy || isSell) && (
           <span
             className={[
               "inline-flex rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide",
-              direction === "BUY"
+              isBuy
                 ? "border-success/50 bg-success/15 text-success"
                 : "border-danger/50 bg-danger/15 text-danger",
             ].join(" ")}
@@ -392,7 +403,7 @@ function SignalHeroDial({ signal, state }) {
       <div className="relative my-3 h-[112px] w-[112px]">
         <svg viewBox="0 0 112 112" className="h-full w-full -rotate-90">
           <circle cx="56" cy="56" r={r} fill="none" className="stroke-border" strokeWidth="9" />
-          {displayValue != null && (
+          {(displayValue != null || isWait) && (
             <circle
               cx="56"
               cy="56"
@@ -408,21 +419,19 @@ function SignalHeroDial({ signal, state }) {
         </svg>
         <div className="absolute inset-0 flex flex-col items-center justify-center">
           <span className={`font-mono text-3xl font-semibold tabular-nums leading-none ${valueClass}`}>
-            {displayValue != null ? `${displayValue}%` : "—"}
+            {displayValue != null ? `${safePct(displayValue, 0)}%` : "—"}
           </span>
         </div>
       </div>
-      {coreScore != null && (
-        <div
-          className="mt-1 inline-flex items-center gap-1.5 rounded-md border border-border/80 bg-surface/60 px-2.5 py-1 text-[10px] text-muted"
-          title="Raw momentum score before gate blocking — diagnostic only"
-        >
-          <span className="uppercase tracking-wide">Signal Core Score</span>
-          <span className="font-mono font-semibold tabular-nums text-blue-400/90">
-            {coreScore}%
-          </span>
-        </div>
-      )}
+      <div
+        className="mt-1 inline-flex items-center gap-1.5 rounded-md border border-border/80 bg-surface/60 px-2.5 py-1 text-[10px] text-muted"
+        title="Raw momentum score before gate blocking — diagnostic only"
+      >
+        <span className="uppercase tracking-wide">Signal Core Score</span>
+        <span className="font-mono font-semibold tabular-nums text-blue-400/90">
+          {coreScore}%
+        </span>
+      </div>
       {isWait && (
         <p className="mt-2 text-center text-[10px] leading-snug text-muted">
           Aggregate gate readiness — not an imminent entry signal.
@@ -553,10 +562,11 @@ function MarketGrid({ rawState, selectedEpic, onSelectEpic }) {
         const m = markets?.[epic] || {};
         const name = m.market || labels[epic] || epic;
         const bid  = m.bid;
-        const conf = m.signal?.confidence ?? m.signal_strength;
+        const isOpen = String(m.market_state ?? "").toUpperCase() === "OPEN";
+        const conf = safePct(m.signal?.confidence ?? m.signal_strength, 0);
+        const showConf = isOpen && (m.signal?.confidence != null || m.signal_strength != null);
         const active = epic === selectedEpic;
         const status = marketStatusMeta(m.market_state, m.stream_status);
-        const isOpen = String(m.market_state ?? "").toUpperCase() === "OPEN";
         const rotationRank = activeEpicRank(activeEpics, epic);
         const rotationMuted = isEpicRotationMuted(activeEpics, epic);
         const sessionGateVal = (m.health?.gates || []).find((g) => g.name === "session_open")?.value;
@@ -604,9 +614,9 @@ function MarketGrid({ rawState, selectedEpic, onSelectEpic }) {
               <span className={`text-[9px] font-bold uppercase tracking-wider ${status.color}`}>
                 {status.label}
               </span>
-              {isOpen && conf != null && (
+              {showConf && (
                 <span className={`text-[10px] tabular-nums ${signalDot(conf) === "bg-success" ? "text-success" : signalDot(conf) === "bg-warning" ? "text-warning" : "text-muted"}`}>
-                  {Math.round(Number(conf))}%
+                  {conf}%
                 </span>
               )}
             </div>
@@ -710,7 +720,7 @@ export default function LivePanel({ state, rawState, selectedEpic, onSelectEpic,
   const epic      = state?.epic ?? state?.selected_epic ?? selectedEpic ?? "";
   const maxPos    = rawState?.max_open_positions ?? 10;
   const health    = state?.health || {};
-  const signal    = state?.signal || {};
+  const signal    = state?.signal && typeof state.signal === "object" ? state.signal : {};
   const agentState = resolveAgentState(state);
   const agent     = agentStateMeta(agentState);
   const positions = resolvePositions(state);
