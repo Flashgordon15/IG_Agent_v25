@@ -328,6 +328,20 @@ class MarketOrchestrator:
             return []
         return _ORCHESTRATOR_REF.get_active_epics()
 
+    @staticmethod
+    def hot_reload_config(config: Config | None = None) -> int:
+        """Push reloaded Config into orchestrator + all trading loops (in-memory)."""
+        global _ORCHESTRATOR_REF
+        if _ORCHESTRATOR_REF is None:
+            return 0
+        from system.config_loader import get_config
+
+        cfg = config or get_config(reload=True)
+        _ORCHESTRATOR_REF._config = cfg
+        for loop in _ORCHESTRATOR_REF._loops:
+            loop._config = cfg
+        return len(_ORCHESTRATOR_REF._loops)
+
     def start(self) -> None:
         if self._running:
             return

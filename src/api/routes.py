@@ -11,7 +11,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from api.agent_control import (
@@ -153,7 +153,51 @@ def api_signals(limit: int = 50) -> dict[str, Any]:
 
 @router.get("/api/system")
 def api_system() -> dict[str, Any]:
-    return get_system_info()
+    info = get_system_info()
+    try:
+        from trading.strictness_resolver import strictness_payload
+
+        info["trading_strictness"] = strictness_payload()
+    except Exception:
+        pass
+    return info
+
+
+@router.get("/api/config/strictness")
+def api_get_strictness() -> dict[str, Any]:
+    from trading.strictness_resolver import strictness_payload
+
+    return {"ok": True, **strictness_payload()}
+
+
+@router.post("/api/config/strictness")
+async def api_set_strictness(request: Request) -> JSONResponse:
+    from system.engine_log import log_engine
+    from trading.strictness_resolver import set_strictness_profile
+
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="invalid JSON body") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+
+    profile = body.get("profile")
+    if not profile:
+        raise HTTPException(
+            status_code=400, detail="profile required (loose, firm, strict)"
+        )
+    try:
+        payload = set_strictness_profile(
+            str(profile),
+            hot_reload=bool(body.get("hot_reload", True)),
+        )
+        return JSONResponse({"ok": True, **payload})
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        log_engine(f"api/config/strictness failed: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/api/replay/summary")

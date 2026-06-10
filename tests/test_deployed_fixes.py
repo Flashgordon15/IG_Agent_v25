@@ -408,6 +408,35 @@ class TestSession3StartupCleanup:
 # ---------------------------------------------------------------------------
 
 
+class _StubLoopConfig:
+    """Minimal config for TradingLoop gate unit stubs."""
+
+    def __init__(self, **overrides: object) -> None:
+        self._data = {
+            "enforce_environment_fitness_filter": True,
+            "trading_strictness_profile": "firm",
+            **overrides,
+        }
+
+    def get(self, key: str, default: object = None) -> object:
+        return self._data.get(key, default)
+
+    def as_dict(self) -> dict:
+        return dict(self._data)
+
+
+def _fitness_gate_loop_stub(*, market: str, env, signal_engine) -> object:
+    from trading.trading_loop import TradingLoop
+
+    loop = object.__new__(TradingLoop)
+    loop._market = market
+    loop._epic = market
+    loop._env = env
+    loop._signal_engine = signal_engine
+    loop._config = _StubLoopConfig()
+    return loop
+
+
 class TestSession4PreLaunchValidation:
     """Pre-launch validation for Session 4 changes: trailing stop ATR scaling,
     CAUTION size multiplier, position laddering, dashboard positions aggregation,
@@ -650,10 +679,11 @@ class TestSession4PreLaunchValidation:
             def quote_df(self, market):
                 return pd.DataFrame()
 
-        loop = object.__new__(TradingLoop)
-        loop._market = "EPIC1"
-        loop._env = _WeakEnv()
-        loop._signal_engine = _MockSignalEngine()
+        loop = _fitness_gate_loop_stub(
+            market="EPIC1",
+            env=_WeakEnv(),
+            signal_engine=_MockSignalEngine(),
+        )
 
         quote = Quote(datetime.now(), 100.0, 101.0)
         result = loop._gate_environment_fitness(quote)
@@ -694,10 +724,11 @@ class TestSession4PreLaunchValidation:
             def quote_df(self, market):
                 return pd.DataFrame()
 
-        loop = object.__new__(TradingLoop)
-        loop._market = "EPIC2"
-        loop._env = _LowFitnessEnv()
-        loop._signal_engine = _MockSignalEngine()
+        loop = _fitness_gate_loop_stub(
+            market="EPIC2",
+            env=_LowFitnessEnv(),
+            signal_engine=_MockSignalEngine(),
+        )
 
         quote = Quote(datetime.now(), 100.0, 101.0)
         result = loop._gate_environment_fitness(quote)

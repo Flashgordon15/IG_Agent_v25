@@ -1,4 +1,5 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { api } from "../api/client.js";
 import { postEmergencyStop } from "../api.js";
 import resolveSupervisionAlert from "../utils/supervision.js";
 
@@ -147,6 +148,160 @@ function StatusRow({ label, children }) {
       <dt className="shrink-0 text-muted">{label}</dt>
       <dd className="min-w-0 text-right">{children}</dd>
     </div>
+  );
+}
+
+const STRICTNESS_OPTIONS = [
+  {
+    id: "loose",
+    label: "Loose",
+    hint: "Fitness ≥30 · RSI wide open",
+  },
+  {
+    id: "firm",
+    label: "Firm",
+    hint: "Fitness ≥45 · cert baseline",
+  },
+  {
+    id: "strict",
+    label: "Strict",
+    hint: "Fitness ≥55 · defensive",
+  },
+];
+
+function StrictnessControls() {
+  const [profile, setProfile] = useState("firm");
+  const [limits, setLimits] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    api
+      .getStrictness()
+      .then((data) => {
+        if (cancelled) return;
+        const active = String(data?.profile || "firm").toLowerCase();
+        setProfile(active);
+        setLimits(data);
+        setError("");
+      })
+      .catch((e) => {
+        if (!cancelled) setError(String(e?.message || e));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const applyProfile = async (next) => {
+    const key = String(next || "").toLowerCase();
+    if (!STRICTNESS_OPTIONS.some((o) => o.id === key) || saving) return;
+    setSaving(true);
+    setMessage("");
+    setError("");
+    try {
+      const data = await api.setStrictness(key, true);
+      setProfile(String(data?.profile || key).toLowerCase());
+      setLimits(data);
+      setMessage(
+        data?.previous_profile && data.previous_profile !== data.profile
+          ? `Applied ${data.profile} — fitness/RSI gates update on next tick.`
+          : `Already on ${data?.profile || key}.`,
+      );
+    } catch (e) {
+      setError(String(e?.message || e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const activeLimits =
+    limits?.profiles?.[profile] ||
+    (limits
+      ? {
+          fitness_floor: limits.fitness_floor,
+          rsi_sell_min: limits.rsi_sell_min,
+          rsi_buy_max: limits.rsi_buy_max,
+        }
+      : null);
+
+  return (
+    <Card title="Trading strictness">
+      <p className="mb-3 text-[11px] leading-snug text-muted">
+        Manual override for environment fitness floor and RSI boundary filters.
+        Does not change sizing, margin, or drawdown limits.
+      </p>
+      <div className="flex flex-wrap gap-2">
+        {STRICTNESS_OPTIONS.map(({ id, label, hint }) => {
+          const active = profile === id;
+          return (
+            <button
+              key={id}
+              type="button"
+              disabled={loading || saving}
+              onClick={() => applyProfile(id)}
+              className={[
+                "min-w-[5.5rem] flex-1 rounded-lg border px-3 py-2 text-left transition-colors sm:max-w-[10rem]",
+                active
+                  ? "border-accent bg-accent/15 text-foreground ring-1 ring-accent/40"
+                  : "border-border bg-surface/50 text-muted hover:border-accent/30 hover:text-foreground",
+                loading || saving ? "opacity-60" : "",
+              ].join(" ")}
+            >
+              <span className="block text-[11px] font-bold uppercase tracking-wide">
+                {label}
+              </span>
+              <span className="mt-0.5 block text-[10px] leading-snug opacity-80">
+                {hint}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+      {activeLimits && (
+        <dl className="mt-3 grid grid-cols-3 gap-2 rounded-md border border-border/80 bg-bg/40 px-2 py-2 text-[10px]">
+          <div>
+            <dt className="text-muted">Fitness floor</dt>
+            <dd className="font-mono font-semibold text-foreground">
+              ≥{Math.round(Number(activeLimits.fitness_floor ?? 0))}%
+            </dd>
+          </div>
+          <div>
+            <dt className="text-muted">RSI sell min</dt>
+            <dd className="font-mono font-semibold text-foreground">
+              {Math.round(Number(activeLimits.rsi_sell_min ?? 0))}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-muted">RSI buy max</dt>
+            <dd className="font-mono font-semibold text-foreground">
+              {Math.round(Number(activeLimits.rsi_buy_max ?? 100))}
+            </dd>
+          </div>
+        </dl>
+      )}
+      {loading && (
+        <p className="mt-2 text-[11px] text-muted">Loading profile…</p>
+      )}
+      {message && (
+        <p className="mt-2 text-[11px] text-success leading-snug">{message}</p>
+      )}
+      {error && (
+        <p className="mt-2 text-[11px] text-danger leading-snug">{error}</p>
+      )}
+      <p className="mt-2 text-[10px] text-muted leading-snug">
+        Saved to config and hot-reloaded on all trading loops. Use{" "}
+        <span className="font-semibold text-foreground">Restart Agent</span>{" "}
+        below only if gates look stale after a change.
+      </p>
+    </Card>
   );
 }
 
@@ -516,6 +671,8 @@ export default function SystemPanel({ state, wsConnected, reconnecting }) {
           </p>
         </div>
       </Card>
+
+      <StrictnessControls />
 
       {/* Agent controls */}
       <Card title="Agent controls">
