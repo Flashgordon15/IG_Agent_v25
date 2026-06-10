@@ -133,6 +133,26 @@ function resolveSignalConfidence(state) {
   return Math.min(100, Math.max(0, Math.round(Number(raw))));
 }
 
+function resolveSignalDirection(signal) {
+  return String(signal?.direction ?? "WAIT").toUpperCase();
+}
+
+function resolveSignalCoreScore(signal, state) {
+  const fromSig = signal?.signal_core_score;
+  if (fromSig != null && !Number.isNaN(Number(fromSig))) {
+    return Math.min(100, Math.max(0, Math.round(Number(fromSig))));
+  }
+  const rules = signal?.rules_confidence;
+  if (rules != null && !Number.isNaN(Number(rules))) {
+    return Math.min(100, Math.max(0, Math.round(Number(rules))));
+  }
+  const gateConf = state?.health?.gates?.find((g) => g.name === "signal_confidence")?.value?.confidence;
+  if (gateConf != null && !Number.isNaN(Number(gateConf))) {
+    return Math.min(100, Math.max(0, Math.round(Number(gateConf))));
+  }
+  return null;
+}
+
 function resolveMlProbability(state) {
   const sigGate = (state?.health?.gates || []).find((g) => g.name === "signal_confidence");
   const fromGate = sigGate?.value?.ml_probability;
@@ -245,6 +265,8 @@ function GateRow({ gate }) {
 function SignalConfidenceBreakdown({ signal, state, pointsState }) {
   const sigGate = (state?.health?.gates || []).find((g) => g.name === "signal_confidence");
   const gate = sigGate?.value;
+  const direction = resolveSignalDirection(signal);
+  const isWait = direction === "WAIT";
   const pick = (sigKey, topKey, gateKey) => {
     const fromSig = signal?.[sigKey];
     if (fromSig != null && !Number.isNaN(Number(fromSig))) return Number(fromSig);
@@ -254,7 +276,8 @@ function SignalConfidenceBreakdown({ signal, state, pointsState }) {
     if (fromGate != null && !Number.isNaN(Number(fromGate))) return Number(fromGate);
     return null;
   };
-  const current = pick("confidence", "signal_strength", "confidence");
+  const primaryDial = pick("confidence", "signal_strength", "confidence");
+  const coreScore = resolveSignalCoreScore(signal, state);
   const config  = pick("config_signal_threshold", "config_signal_threshold", "config_signal_threshold");
   const effective = pick("threshold", "signal_threshold", "threshold");
   const minSize = pick("min_size_threshold", "min_size_threshold", "min_size_threshold");
@@ -264,28 +287,145 @@ function SignalConfidenceBreakdown({ signal, state, pointsState }) {
     { label: "Config threshold", value: config, highlight: false },
     { label: `Gate (${stateLabel})`, value: effective, highlight: false },
     { label: "Min size threshold", value: minSize, highlight: false },
-    { label: "Current", value: current, highlight: true },
+    {
+      label: isWait ? "Entry readiness (dial)" : `${direction} confidence (dial)`,
+      value: primaryDial,
+      highlight: true,
+    },
+    ...(coreScore != null
+      ? [{ label: "Signal core score", value: coreScore, diagnostic: true }]
+      : []),
   ];
 
   return (
     <div className="rounded-lg border border-border bg-card p-3">
-      <p className="label-caps mb-2">Signal confidence</p>
+      <p className="label-caps mb-2">{isWait ? "Tradability breakdown" : "Signal confidence"}</p>
       <ul className="space-y-1.5 text-[12px]">
-        {rows.map(({ label, value, highlight }) => {
+        {rows.map(({ label, value, highlight, diagnostic }) => {
           const n = value != null && !Number.isNaN(Number(value)) ? Number(value) : null;
           const belowMin = highlight && n != null && minSize != null && n < Number(minSize);
           const belowGate = highlight && n != null && effective != null && n < Number(effective) && !belowMin;
           return (
-            <li key={label} className={["flex justify-between gap-3 tabular-nums", highlight ? "font-semibold text-foreground" : "text-muted", belowMin ? "text-danger" : belowGate ? "text-warning" : ""].join(" ")}>
+            <li
+              key={label}
+              className={[
+                "flex justify-between gap-3 tabular-nums",
+                diagnostic ? "text-muted" : highlight ? "font-semibold text-foreground" : "text-muted",
+                diagnostic ? "" : belowMin ? "text-danger" : belowGate ? "text-warning" : "",
+              ].join(" ")}
+            >
               <span>{label}</span>
-              <span>{n != null ? `${Math.round(n)}%` : "—"}</span>
+              <span className={diagnostic ? "font-mono text-blue-400/90" : ""}>
+                {n != null ? `${Math.round(n)}%` : "—"}
+              </span>
             </li>
           );
         })}
       </ul>
-      {current != null && minSize != null && Number(current) < Number(minSize) && (
+      {isWait && coreScore != null && primaryDial != null && (
+        <p className="mt-2 text-[10px] leading-snug text-muted">
+          Core momentum{" "}
+          <span className="font-mono text-blue-400/90">{Math.round(coreScore)}%</span>
+          {" "}— gates blocking entry; dial shows aggregate readiness.
+        </p>
+      )}
+      {!isWait && primaryDial != null && minSize != null && Number(primaryDial) < Number(minSize) && (
         <p className="mt-2 text-[11px] text-danger leading-snug">
           Need ≥{Math.round(Number(minSize))}% for 0.5× size in {stateLabel}.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function SignalHeroDial({ signal, state }) {
+  const direction = resolveSignalDirection(signal);
+  const isWait = direction === "WAIT";
+  const displayValue = resolveSignalConfidence(state);
+  const coreScore = resolveSignalCoreScore(signal, state);
+  const max = 100;
+  const pct =
+    displayValue == null ? 0 : Math.min(100, Math.max(0, (Number(displayValue) / max) * 100));
+  const r = 44;
+  const c = 2 * Math.PI * r;
+  const offset = c - (pct / 100) * c;
+
+  let strokeClass = "stroke-accent";
+  let valueClass = "text-foreground";
+  let ringClass = "border-border";
+  if (!isWait) {
+    if (direction === "BUY") {
+      strokeClass = "stroke-success";
+      valueClass = "text-success";
+      ringClass = "border-success/40 bg-success/5";
+    } else if (direction === "SELL") {
+      strokeClass = "stroke-danger";
+      valueClass = "text-danger";
+      ringClass = "border-danger/40 bg-danger/5";
+    }
+  } else if (displayValue != null) {
+    const ratio = Number(displayValue) / max;
+    if (ratio >= 0.7) strokeClass = "stroke-success";
+    else if (ratio >= 0.4) strokeClass = "stroke-warning";
+    else strokeClass = "stroke-danger";
+  }
+
+  const dialLabel = isWait ? "Entry Readiness" : "Signal Confidence";
+
+  return (
+    <div className={`flex flex-col items-center rounded-lg border p-4 ${ringClass}`}>
+      <div className="flex w-full flex-col items-center gap-1">
+        <p className="label-caps">{dialLabel}</p>
+        {!isWait && (
+          <span
+            className={[
+              "inline-flex rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide",
+              direction === "BUY"
+                ? "border-success/50 bg-success/15 text-success"
+                : "border-danger/50 bg-danger/15 text-danger",
+            ].join(" ")}
+          >
+            {direction}
+          </span>
+        )}
+      </div>
+      <div className="relative my-3 h-[112px] w-[112px]">
+        <svg viewBox="0 0 112 112" className="h-full w-full -rotate-90">
+          <circle cx="56" cy="56" r={r} fill="none" className="stroke-border" strokeWidth="9" />
+          {displayValue != null && (
+            <circle
+              cx="56"
+              cy="56"
+              r={r}
+              fill="none"
+              className={`${strokeClass} transition-all duration-500`}
+              strokeWidth="9"
+              strokeLinecap="round"
+              strokeDasharray={c}
+              strokeDashoffset={offset}
+            />
+          )}
+        </svg>
+        <div className="absolute inset-0 flex flex-col items-center justify-center">
+          <span className={`font-mono text-3xl font-semibold tabular-nums leading-none ${valueClass}`}>
+            {displayValue != null ? `${displayValue}%` : "—"}
+          </span>
+        </div>
+      </div>
+      {coreScore != null && (
+        <div
+          className="mt-1 inline-flex items-center gap-1.5 rounded-md border border-border/80 bg-surface/60 px-2.5 py-1 text-[10px] text-muted"
+          title="Raw momentum score before gate blocking — diagnostic only"
+        >
+          <span className="uppercase tracking-wide">Signal Core Score</span>
+          <span className="font-mono font-semibold tabular-nums text-blue-400/90">
+            {coreScore}%
+          </span>
+        </div>
+      )}
+      {isWait && (
+        <p className="mt-2 text-center text-[10px] leading-snug text-muted">
+          Aggregate gate readiness — not an imminent entry signal.
         </p>
       )}
     </div>
@@ -732,8 +872,9 @@ export default function LivePanel({ state, rawState, selectedEpic, onSelectEpic,
         )}
       </Card>
 
-      {/* 6. Signal confidence + ML gauge */}
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 sm:gap-3">
+      {/* 6. Entry readiness / signal confidence + ML gauge */}
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 sm:gap-3">
+        <SignalHeroDial signal={signal} state={state} />
         <SignalConfidenceBreakdown signal={signal} state={state} pointsState={state.points?.state} />
         <Gauge label="ML confidence" value={mlProb} max={1} disabled={mlDisabled} disabledLabel="ML disabled" formatValue={(v) => v.toFixed(2)} />
       </div>

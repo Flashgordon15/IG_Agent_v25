@@ -114,7 +114,11 @@ wait_for_dashboard() {
     exit 0
   fi
   log "WARN: dashboard did not become healthy within 360s (${mode})"
-  notify_failure "IG Agent did not start. Check src/data/logs/launcher.log"
+  if [ -f "${ROOT}/src/data/logs/engine.log" ]; then
+    notify_failure "Agent did not reach healthy state in 6 minutes. Check src/data/logs/engine.log and watchdog.log — launchd may still be booting."
+  else
+    notify_failure "IG Agent did not start. Check src/data/logs/launcher.log"
+  fi
   exit 1
 }
 

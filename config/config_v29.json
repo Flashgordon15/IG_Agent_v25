@@ -7,19 +7,27 @@
   "reward_multiple": 3.0,
   "adaptive_high_confidence_reward_multiple": 3.0,
   "adaptive_max_limit_atr_multiple": 4.0,
+  "spread_to_atr_circuit_breaker_max": 0.30,
   "enforce_rr_floor_filter": true,
   "enforce_1h_ema_filter": true,
   "enforce_top3_rotation_filter": false,
   "enforce_environment_fitness_filter": true,
   "environment_fitness_min_pct": 45,
+  "trading_strictness_profile": "firm",
   "instruments": {
     "gold": {
       "enabled": true,
-      "reward_multiple": 3.0
+      "reward_multiple": 3.0,
+      "trading_session_whitelist": [
+        "london_morning",
+        "london_us_overlap",
+        "us_afternoon"
+      ]
     },
     "wall_street": {
       "enabled": true,
       "reward_multiple": 3.0,
+      "spread_to_atr_max": 0.45,
       "trading_session_whitelist": [
         "london_us_overlap",
         "us_afternoon",
@@ -28,7 +36,13 @@
     },
     "nasdaq_100": {
       "enabled": true,
-      "reward_multiple": 3.0
+      "reward_multiple": 3.0,
+      "spread_to_atr_max": 0.45,
+      "trading_session_whitelist": [
+        "london_us_overlap",
+        "us_afternoon",
+        "late"
+      ]
     },
     "gbp_usd": {
       "enabled": true,

@@ -136,11 +136,11 @@ class TestComputeTradeReadiness(unittest.TestCase):
             },
             {"name": "execution", "pass": False},
         ]
-        # session=1.0, cold(bars=6)=1.0, env(40/55)=0.727, points=0, risk=0, sig(80/80)=1.0, exec=0
-        # total=3.727/7 ≈ 53%
-        r = compute_trade_readiness(gates)
-        self.assertEqual(r["pct"], 53)
-        self.assertEqual(r["remaining_pct"], 47)
+        # session=1.0, cold(bars=6)=1.0, env(40/45)=0.889, points=0, risk=0, sig(80/80)=1.0, exec=0
+        # total=3.889/7 ≈ 56% (firm profile fitness floor)
+        r = compute_trade_readiness(gates, fitness_min=45.0)
+        self.assertEqual(r["pct"], 56)
+        self.assertEqual(r["remaining_pct"], 44)
 
 
 class TestFormatHealthBadgeText(unittest.TestCase):

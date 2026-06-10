@@ -19,6 +19,7 @@ _CIRCUIT_RE = re.compile(
     r"^(\d{4}-\d{2}-\d{2}) .*CIRCUIT_BREAKER_ACTIVE \| epic=([^\s]+) spread/atr=([\d.]+)"
 )
 _EXEC_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}) .*REJECTED_ASYMMETRIC_RR_FLOOR_GATED")
+_TRACE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}) .*GATE_TRACE \| .* block=([^ ]+)")
 
 
 def _log_paths(log: Path, *, include_rotated: bool) -> list[Path]:
@@ -48,6 +49,7 @@ def rollup_gate_blocks(
     detail_samples: dict[str, str] = {}
     circuit_by_epic: Counter[str] = Counter()
     rr_floor_rejects = 0
+    trace_counts: Counter[str] = Counter()
     lines_scanned = 0
     wait_lines = 0
 
@@ -78,6 +80,12 @@ def rollup_gate_blocks(
                 day_s = raw[:10]
                 if _parse_day(day_s) >= cutoff:
                     rr_floor_rejects += 1
+                continue
+            tm = _TRACE_RE.match(raw)
+            if tm:
+                day_s, block = tm.groups()
+                if _parse_day(day_s) >= cutoff:
+                    trace_counts[block.strip()] += 1
 
     total_waits = sum(gate_counts.values())
     ranked = [
@@ -88,6 +96,16 @@ def rollup_gate_blocks(
             "sample": detail_samples.get(gate, ""),
         }
         for gate, count in gate_counts.most_common()
+    ]
+    trace_ranked = [
+        {
+            "gate": gate,
+            "count": count,
+            "pct": round(100.0 * count / sum(trace_counts.values()), 1)
+            if trace_counts
+            else 0.0,
+        }
+        for gate, count in trace_counts.most_common()
     ]
 
     return {
@@ -100,6 +118,7 @@ def rollup_gate_blocks(
         "ranked_blockers": ranked,
         "spread_atr_circuit_by_epic": dict(circuit_by_epic.most_common()),
         "rr_floor_rejects": rr_floor_rejects,
+        "trace_blockers": trace_ranked,
     }
 
 
@@ -121,6 +140,11 @@ def format_report(payload: dict[str, object]) -> str:
             lines.append(
                 f"  {row['gate']:22} {row['count']:6}  ({row['pct']:5.1f}%)  {row['sample']}"
             )
+    trace_ranked = payload.get("trace_blockers") or []
+    if trace_ranked:
+        lines.extend(["", "GATE_TRACE blockers (structured):"])
+        for row in trace_ranked[:10]:
+            lines.append(f"  {row['gate']:22} {row['count']:6}  ({row['pct']:5.1f}%)")
     circuit = payload.get("spread_atr_circuit_by_epic") or {}
     if circuit:
         lines.extend(["", "Spread/ATR circuit breaker (by epic):"])

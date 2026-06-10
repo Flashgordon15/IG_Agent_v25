@@ -83,13 +83,17 @@ def compute_trade_readiness(
     gates: list[Any] | None,
     *,
     gate_count: int | None = None,
-    fitness_min: float = GATE_PASS_MIN,
+    fitness_min: float | None = None,
 ) -> dict[str, int | str]:
     """
     Average gate contributions × 100.
 
     remaining_pct is the gap until 100% (all gates passing), not a separate target.
     """
+    if fitness_min is None:
+        from trading.strictness_resolver import resolve_strictness
+
+        fitness_min = resolve_strictness().fitness_floor
     n = gate_count if gate_count is not None else TRADE_GATE_COUNT
     if n <= 0:
         n = TRADE_GATE_COUNT

@@ -43,6 +43,7 @@ from trading.points_engine import PointsEngine
 from trading.price_trend import compute_price_trend_30m
 from trading.session_manager import SessionManager
 from trading.session_summary import SessionTickTracker, write_session_end_summary
+from trading.strictness_resolver import resolve_strictness
 from trading.trade_eligibility import build_trade_eligibility
 
 STAGE1_GBP_RISK_CAP = 150.0
@@ -601,10 +602,6 @@ class TradingLoop:
         self._maybe_consume_points_skip_on_suppressed_signal(gates)
         all_passed = all(g.passed for g in gates)
         wait_reason = ""
-        if not all_passed:
-            failed = next(g for g in gates if not g.passed)
-            wait_reason = f"{failed.name}: {failed.detail}"
-
         signal: SignalResult | None = None
         fitness = 0.0
         for g in gates:
@@ -616,6 +613,22 @@ class TradingLoop:
                     fitness = float(v or 0.0)
             if g.name == "signal_confidence" and isinstance(g.value, dict):
                 signal = g.value.get("signal")
+        if not all_passed:
+            failed = next(g for g in gates if not g.passed)
+            wait_reason = f"{failed.name}: {failed.detail}"
+            sig_conf = 0.0
+            for g in gates:
+                if g.name == "signal_confidence" and isinstance(g.value, dict):
+                    try:
+                        sig_conf = float(g.value.get("confidence") or 0)
+                    except (TypeError, ValueError):
+                        sig_conf = 0.0
+                    break
+            log_engine(
+                f"GATE_TRACE | epic={self._epic} market={self._market} "
+                f"block={failed.name} conf={sig_conf:.1f} fitness={fitness:.0f} "
+                f"detail={(failed.detail or '')[:100]}"
+            )
 
         outcome: TickOutcome | None = None
         try:
@@ -1138,11 +1151,12 @@ class TradingLoop:
                 current_atr = 0.0
         if current_atr > 0.0 and current_spread > 0.0:
             spread_to_atr_ratio = current_spread / current_atr
-            if spread_to_atr_ratio > SPREAD_TO_ATR_CIRCUIT_BREAKER_MAX:
+            spread_atr_max = self._spread_to_atr_circuit_max()
+            if spread_to_atr_ratio > spread_atr_max:
                 log_engine(
                     f"CIRCUIT_BREAKER_ACTIVE | epic={self._epic} "
                     f"spread/atr={spread_to_atr_ratio:.2f} "
-                    f"(>{SPREAD_TO_ATR_CIRCUIT_BREAKER_MAX:.2f}) - Locking entry gates."
+                    f"(>{spread_atr_max:.2f}) - Locking entry gates."
                 )
                 return [
                     GateResult(
@@ -1217,6 +1231,22 @@ class TradingLoop:
                     GateResult(name=name, passed=False, value=None, detail=detail)
                 )
         return results
+
+    def _spread_to_atr_circuit_max(self) -> float:
+        """Per-instrument override, then config global, then module default."""
+        default = float(
+            self._config.get("spread_to_atr_circuit_breaker_max")
+            or SPREAD_TO_ATR_CIRCUIT_BREAKER_MAX
+        )
+        try:
+            from trading.instrument_registry import InstrumentRegistry
+
+            inst = InstrumentRegistry(self._config.as_dict()).get_by_epic(self._epic)
+            if inst and inst.get("spread_to_atr_max") is not None:
+                return float(inst["spread_to_atr_max"])
+        except (TypeError, ValueError, ImportError):
+            pass
+        return default
 
     def _gate_active_rotation(self) -> GateResult:
         if not self._config.get("enforce_top3_rotation_filter", True):
@@ -1438,19 +1468,7 @@ class TradingLoop:
             )
             score = float(SAFE_DEFAULT_SCORE)
         score_int = int(round(score))
-        fitness_min = GATE_PASS_MIN
-        custom_min = self._config.get("environment_fitness_min_pct")
-        if custom_min is not None:
-            fitness_min = float(custom_min)
-        else:
-            try:
-                from system.gate_relaxation import effective_fitness_min
-
-                fitness_min = effective_fitness_min(
-                    self._epic, points_state=self._points.get_state()
-                )
-            except Exception:
-                fitness_min = GATE_PASS_MIN
+        fitness_min = resolve_strictness(self._config).fitness_floor
         passed = score >= fitness_min
         sent = {}
         if hasattr(self._env, "get_sentiment_factor"):
@@ -2482,7 +2500,11 @@ class TradingLoop:
         elif ctx.all_passed:
             badge = "READY"
 
-        readiness = compute_trade_readiness(ctx.gates)
+        strictness = resolve_strictness(self._config)
+        readiness = compute_trade_readiness(
+            ctx.gates,
+            fitness_min=strictness.fitness_floor,
+        )
         badge_text = format_health_badge_text(badge, readiness)
 
         quote_ts = quote.time if isinstance(quote.time, datetime) else self._clock()
@@ -2600,6 +2622,10 @@ class TradingLoop:
         from trading.open_position_view import epic_market_label
 
         market_label = epic_market_label(self._epic)
+        signal_core_score = int(round(confidence))
+        display_confidence = float(confidence)
+        if direction == "WAIT":
+            display_confidence = float(readiness.get("pct", 0))
         return {
             "type": "tick",
             "epic": self._epic,
@@ -2630,7 +2656,8 @@ class TradingLoop:
             "signal": {
                 "direction": direction,
                 "raw_direction": raw_direction or None,
-                "confidence": int(round(confidence)),  # ML-blended if available
+                "signal_core_score": signal_core_score,
+                "confidence": int(round(display_confidence)),
                 "rules_confidence": int(round(float(sig.adjusted_confidence)))
                 if isinstance(sig, SignalResult)
                 else 0,
@@ -2650,7 +2677,7 @@ class TradingLoop:
                 "points_state": points_state,
                 "block_reason": block_reason or None,
                 "fitness": int(round(ctx.fitness)),
-                "fitness_threshold": int(round(GATE_PASS_MIN)),
+                "fitness_threshold": int(round(strictness.fitness_floor)),
                 "fitness_factors": self._fitness_factors_payload(),
                 "atr": round(atr, 1) if atr else 0.0,
                 "atr_threshold": (

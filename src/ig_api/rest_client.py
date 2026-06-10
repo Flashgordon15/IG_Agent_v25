@@ -465,7 +465,7 @@ class IGRestClient:
         except Exception as e:
             log_demo_rest("DELETE /session — logout error", error=str(e))
         finally:
-            self._auth.tokens = None
+            self._auth.clear()
 
     @staticmethod
     def _dealing_rule_value(rules: dict[str, Any], key: str) -> float:

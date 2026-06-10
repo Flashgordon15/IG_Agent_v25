@@ -26,6 +26,7 @@ CRITICAL_KEYS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 OPTIONAL_DEFAULTS: dict[str, Any] = {
+    "trading_strictness_profile": "firm",
     "signal_threshold": 85,
     "allow_live_trading": True,
     "trade_size": 1.0,

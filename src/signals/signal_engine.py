@@ -308,6 +308,11 @@ class SignalEngine:
 
     def evaluate(self, market: str) -> SignalResult:
         cfg = self._cfg
+        from trading.strictness_resolver import resolve_strictness
+
+        _strict = resolve_strictness(get_config())
+        rsi_buy_max = _strict.rsi_buy_max
+        rsi_sell_min = _strict.rsi_sell_min
         df = self.quote_df(market)
         c5 = self.candles(df, 5)
         c15 = self.candles(df, 15)
@@ -411,8 +416,8 @@ class SignalEngine:
             else 0
         )
 
-        rsi_buy_cap = cfg.rsi_buy_max if cfg.rsi_buy_max > cfg.rsi_buy_min else 99.0
-        rsi_sell_cap = cfg.rsi_sell_min if cfg.rsi_sell_min < cfg.rsi_sell_max else 0.0
+        rsi_buy_cap = rsi_buy_max if rsi_buy_max > cfg.rsi_buy_min else 99.0
+        rsi_sell_cap = rsi_sell_min if rsi_sell_min < cfg.rsi_sell_max else 0.0
         buy = (
             (
                 30
@@ -482,17 +487,13 @@ class SignalEngine:
         if candidate in ("BUY", "SELL"):
             rsi_val = float(last["rsi"])
             rsi_block = ""
-            if candidate == "BUY" and cfg.rsi_buy_max > 0 and rsi_val > cfg.rsi_buy_max:
+            if candidate == "BUY" and rsi_buy_max > 0 and rsi_val > rsi_buy_max:
                 rsi_block = (
-                    f"RSI overbought filter: {rsi_val:.1f} > max {cfg.rsi_buy_max:.0f}"
+                    f"RSI overbought filter: {rsi_val:.1f} > max {rsi_buy_max:.0f}"
                 )
-            elif (
-                candidate == "SELL"
-                and cfg.rsi_sell_min > 0
-                and rsi_val < cfg.rsi_sell_min
-            ):
+            elif candidate == "SELL" and rsi_sell_min > 0 and rsi_val < rsi_sell_min:
                 rsi_block = (
-                    f"RSI oversold filter: {rsi_val:.1f} < min {cfg.rsi_sell_min:.0f}"
+                    f"RSI oversold filter: {rsi_val:.1f} < min {rsi_sell_min:.0f}"
                 )
             if rsi_block:
                 setup = self.setup_key(raw_sig, last, trend15, atr_series)
