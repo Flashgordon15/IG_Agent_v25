@@ -471,23 +471,26 @@ class TestSession4PreLaunchValidation:
         )
 
     def test_points_engine_caution_size_multiplier_flat(self, tmp_path):
-        """CAUTION state must return 0.5× for all confidence values ≥ 80 (new flat rate)."""
+        """CAUTION state enforces multiplier floors (core 0.8×, probe 0.5×)."""
         import sys
 
         sys.path.insert(0, str(SRC))
         from trading.points_engine import CONF_MARGINAL_MIN, PointsEngine
 
         engine = PointsEngine(store=None, state_path=tmp_path / "pts_caution.json")
-        # cumulative=0 → CAUTION
         assert engine.get_state() == "CAUTION", (
             f"Expected CAUTION at zero cumulative, got {engine.get_state()}"
         )
         for conf in (80, 85, 88, 95):
             mult = engine.get_size_multiplier(float(conf))
-            assert mult == 0.5, (
-                f"CAUTION state: get_size_multiplier({conf}) = {mult}, expected 0.5 "
-                f"(flat rate for all conf >= {CONF_MARGINAL_MIN})"
+            assert mult >= 0.8, (
+                f"CAUTION state: get_size_multiplier({conf}) = {mult}, "
+                f"expected >= 0.8 (core multiplier floor)"
             )
+        probe_mult = engine.get_size_multiplier(72.0)
+        assert probe_mult >= 0.5, (
+            f"CAUTION probe: get_size_multiplier(72) = {probe_mult}, expected >= 0.5"
+        )
 
     # ------------------------------------------------------------------
     # Test B: Trailing stop

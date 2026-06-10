@@ -20,6 +20,7 @@ from ai.strategy.performance_reviewer import (
 from data.learning_store import LearningStore
 from data.models import Quote
 from signals.signal_engine import SignalEngine
+from trading.strictness_resolver import StrictnessLimits
 from trading.trading_loop import TradingLoop
 
 
@@ -170,25 +171,48 @@ class OneHourRegimeTests(unittest.TestCase):
         self.assertGreater(len(c15), 0)
         self.assertGreater(len(c60), 0)
 
-    def test_sell_blocked_without_1h_bearish_regime(self) -> None:
+    def test_sell_soft_penalty_without_1h_bearish_regime(self) -> None:
         cfg = _cfg_mock(signal_threshold=50, rsi_sell_min=0, rsi_sell_max=100)
+        cfg["enforce_1h_ema_filter"] = True
         engine = SignalEngine(cfg)
         base = datetime(2026, 6, 1, 8, 0)
         quotes: list[Quote] = []
-        price = 100.0
+        price = 200.0
         for i in range(1800):
             t = base + timedelta(minutes=i)
-            if i > 1700:
-                price -= 0.15
-            else:
-                price += 0.05
+            price -= 0.04
             quotes.append(Quote(t, price - 0.1, price + 0.1))
         engine.seed_ohlc_history("Test", quotes)
-        result = engine.evaluate("Test")
+        real_add_indicators = engine.add_indicators
+
+        def _add_indicators_with_bullish_1h(df):
+            out = real_add_indicators(df)
+            if len(out) >= 2 and len(df) < 120:
+                idx = out.index[-2]
+                out.at[idx, "fast_ema"] = 210.0
+                out.at[idx, "slow_ema"] = 205.0
+            return out
+
+        with (
+            patch(
+                "trading.strictness_resolver.resolve_strictness",
+                return_value=StrictnessLimits("loose", 30.0, 0.0, 100.0),
+            ),
+            patch.object(
+                engine, "add_indicators", side_effect=_add_indicators_with_bullish_1h
+            ),
+        ):
+            result = engine.evaluate("Test")
         snap = engine.last_snapshot.get("Test", {})
+        self.assertIn("1h", result.notes.lower())
         self.assertFalse(snap.get("h1_bearish", True))
-        self.assertEqual(result.signal, "WAIT")
-        self.assertTrue(snap.get("h1_block") or "1h" in result.notes.lower())
+        self.assertEqual(snap.get("h1_penalty"), 8.0)
+        self.assertEqual(snap.get("raw_signal"), "SELL")
+        # Soft penalty only — signal may still fire if score clears threshold after -8.
+        if result.signal == "SELL":
+            self.assertGreaterEqual(result.adjusted_confidence, 50.0)
+        else:
+            self.assertEqual(result.signal, "WAIT")
 
 
 class UnifiedGateRiskTests(unittest.TestCase):

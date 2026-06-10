@@ -334,9 +334,7 @@ function SignalConfidenceBreakdown({ signal = {}, state, pointsState }) {
       </ul>
       {isWait && (
         <p className="mt-2 text-[10px] leading-snug text-muted">
-          Core momentum{" "}
-          <span className="font-mono text-blue-400/90">{coreScore}%</span>
-          {" "}— gates blocking entry; dial shows aggregate readiness.
+          Dial = share of entry gates satisfied (100% only when execution is armed).
         </p>
       )}
       {!isWait && primaryDial != null && minSize != null && Number(primaryDial) < Number(minSize) && (
@@ -434,7 +432,7 @@ function SignalHeroDial({ signal = {}, state }) {
       </div>
       {isWait && (
         <p className="mt-2 text-center text-[10px] leading-snug text-muted">
-          Aggregate gate readiness — not an imminent entry signal.
+          Entry readiness — 100% only when all gates pass and execution is armed.
         </p>
       )}
     </div>

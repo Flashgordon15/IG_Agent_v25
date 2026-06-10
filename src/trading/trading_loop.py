@@ -669,11 +669,13 @@ class TradingLoop:
                 "— invoking execution pipeline"
             )
             try:
+                gate_exec = self._gate_execution_params_from_gates(gates)
                 outcome = self._execution_loop.process_tick(
                     self._market,
                     self._epic,
                     quote,
                     prefetched_signal=prefetched,
+                    gate_execution_params=gate_exec,
                 )
                 self._log_execution_outcome(outcome)
                 exec_wait = self._execution_wait_reason(outcome)
@@ -1001,6 +1003,37 @@ class TradingLoop:
             )
             break
 
+    def _gate_execution_params_from_gates(
+        self, gates: list[GateResult]
+    ) -> dict[str, Any] | None:
+        """Approved sizing from risk_validation — single source for order submission."""
+        from execution.types import normalize_gate_execution_params
+
+        for g in gates:
+            if g.name != "risk_validation" or not g.passed:
+                continue
+            if not isinstance(g.value, dict):
+                continue
+            v = g.value
+            try:
+                stop_pts = float(v.get("stop_points") or 0)
+                limit_pts = float(v.get("limit_points") or 0)
+            except (TypeError, ValueError):
+                continue
+            if stop_pts <= 0:
+                continue
+            if limit_pts <= 0:
+                limit_pts = stop_pts * float(self._config.reward_multiple)
+            raw = {
+                "actual_size": v.get("actual_size"),
+                "stop_points": stop_pts,
+                "limit_points": limit_pts,
+                "stop_source": v.get("stop_source"),
+                "risk_gbp": v.get("risk_gbp"),
+            }
+            return normalize_gate_execution_params(raw)
+        return None
+
     def _trade_size_from_gates(
         self, gates: list[GateResult], confidence: float
     ) -> float:
@@ -1058,14 +1091,6 @@ class TradingLoop:
         rejection = str(getattr(execution, "rejection_reason", "") or "")
         if success or action == "SUBMITTED":
             log_engine(f"EXEC OK epic={self._epic} signal={direction} action={action}")
-            try:
-                from system.telegram_notifier import send_critical_alert
-
-                params = getattr(execution, "execution_params", None) or {}
-                size = params.get("size", self._config.trade_size)
-                send_critical_alert(f"📈 Trade: {direction} {self._epic} size={size}")
-            except Exception as e:
-                log_engine(f"telegram trade alert failed: {type(e).__name__}: {e}")
         else:
             log_engine(
                 f"EXEC REJECTED epic={self._epic} signal={direction} "
@@ -1137,18 +1162,14 @@ class TradingLoop:
                 )
             ]
 
+        # Use ATR in price points from the signal snapshot — not environment
+        # fitness factor scores (0–30), which caused false spread/ATR blocks.
         current_atr = 0.0
-        if self._env is not None and hasattr(self._env, "get_factors"):
-            try:
-                current_atr = float(self._env.get_factors().get("atr") or 0.0)
-            except (TypeError, ValueError, AttributeError):
-                current_atr = 0.0
-        if current_atr <= 0.0:
-            try:
-                sig = self._get_gate_signal()
-                current_atr = _atr_from_signal_snapshot(sig.snapshot or {})
-            except Exception:
-                current_atr = 0.0
+        try:
+            sig = self._get_gate_signal()
+            current_atr = _atr_from_signal_snapshot(sig.snapshot or {})
+        except Exception:
+            current_atr = 0.0
         if current_atr > 0.0 and current_spread > 0.0:
             spread_to_atr_ratio = current_spread / current_atr
             spread_atr_max = self._spread_to_atr_circuit_max()
@@ -1468,7 +1489,9 @@ class TradingLoop:
             )
             score = float(SAFE_DEFAULT_SCORE)
         score_int = int(round(score))
-        fitness_min = resolve_strictness(self._config).fitness_floor
+        fitness_min = resolve_strictness(
+            self._config, signal_engine=self._signal_engine, market=self._market
+        ).fitness_floor
         passed = score >= fitness_min
         sent = {}
         if hasattr(self._env, "get_sentiment_factor"):
@@ -1478,8 +1501,6 @@ class TradingLoop:
                 sent = {}
         sent_label = str(sent.get("label") or "")
         detail = f"fitness {score_int}% (need >={int(fitness_min)}%)"
-        if fitness_min < GATE_PASS_MIN:
-            detail += " (v26 relaxed)"
         if sent_label and sent_label != "neutral":
             detail += f" — {sent_label}"
         factors_payload = self._fitness_factors_payload()
@@ -1782,6 +1803,10 @@ class TradingLoop:
         except Exception:
             pass
 
+        from execution.size_floors import apply_operational_size_floor
+
+        actual_size = apply_operational_size_floor(actual_size, self._epic)
+
         risk_gbp = stop * actual_size * point_value
         risk_ok = risk_gbp <= risk_cap
         if risk_band_label == "probe":
@@ -1857,6 +1882,7 @@ class TradingLoop:
                 "size_multiplier": round(size_mult, 3),
                 "stop_points": round(stop, 1),
                 "stop_source": stop_source,
+                "limit_points": round(stop * float(self._config.reward_multiple), 1),
                 "point_value_gbp": round(point_value, 3),
                 "spread_cap": round(spread_cap, 1),
                 "risk_cap_gbp": risk_cap,
@@ -2033,9 +2059,23 @@ class TradingLoop:
                     )
             except Exception as e:
                 log_engine(f"ML gate blend skipped: {type(e).__name__}: {e}")
+        snap = sig.snapshot or {}
+        h1_penalty = float(snap.get("h1_penalty") or 0)
+        if h1_penalty > 0 and ml_prob is not None:
+            from signals.signal_engine import (
+                H1_EMA_SOFT_PENALTY,
+                H1_ML_PENALTY_WAIVER_PROB,
+            )
+
+            if ml_prob >= H1_ML_PENALTY_WAIVER_PROB:
+                conf = max(0.0, min(100.0, conf + H1_EMA_SOFT_PENALTY))
+                rules_conf = max(0.0, min(100.0, rules_conf + H1_EMA_SOFT_PENALTY))
+                log_engine(
+                    f"1h EMA soft penalty waived (ml_prob={ml_prob:.3f} "
+                    f">= {H1_ML_PENALTY_WAIVER_PROB:.2f})"
+                )
         self._last_ml_prob = ml_prob
         self._last_sig_direction = str(sig.signal or "WAIT")
-        snap = sig.snapshot or {}
         vol_penalty_mult = 1.0
         vol_penalty_detail = ""
         try:
@@ -2363,6 +2403,37 @@ class TradingLoop:
             except Exception as e:
                 log_engine(f"publish_tick failed: {type(e).__name__}: {e}")
 
+    def force_position_view_refresh(self, quote: Quote | None = None) -> bool:
+        """Push open-position marks immediately from a live quote (bypasses refresh_seconds)."""
+        q = quote
+        if q is None:
+            try:
+                q = self.quote_source()
+            except Exception:
+                q = None
+        if q is None or float(q.bid) <= 0 or float(q.offer) <= 0:
+            return False
+        tick_age_s: float | None = None
+        try:
+            from system.market_data_hub import get_market_data_hub
+
+            snap = get_market_data_hub().get_snapshot(self._epic)
+            if snap is not None:
+                tick_age_s = float(snap.age_seconds())
+        except Exception:
+            pass
+        try:
+            from api.snapshot_store import force_position_view_refresh as _store_refresh
+
+            return _store_refresh(
+                self._epic,
+                float(q.bid),
+                float(q.offer),
+                tick_age_s=tick_age_s,
+            )
+        except Exception:
+            return False
+
     def build_snapshot_payload(self, ctx: TickContext | None = None) -> dict[str, Any]:
         """Build dashboard tick payload (orchestrator merge / tests)."""
         target = ctx if ctx is not None else self.last_context
@@ -2500,7 +2571,9 @@ class TradingLoop:
         elif ctx.all_passed:
             badge = "READY"
 
-        strictness = resolve_strictness(self._config)
+        strictness = resolve_strictness(
+            self._config, signal_engine=self._signal_engine, market=self._market
+        )
         readiness = compute_trade_readiness(
             ctx.gates,
             fitness_min=strictness.fitness_floor,

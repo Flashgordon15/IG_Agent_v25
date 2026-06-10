@@ -172,8 +172,9 @@ def api_get_strictness() -> dict[str, Any]:
 
 @router.post("/api/config/strictness")
 async def api_set_strictness(request: Request) -> JSONResponse:
+    """Manual strictness overrides are deprecated — velocity regime is automated."""
     from system.engine_log import log_engine
-    from trading.strictness_resolver import set_strictness_profile
+    from trading.strictness_resolver import strictness_payload
 
     try:
         body = await request.json()
@@ -182,22 +183,22 @@ async def api_set_strictness(request: Request) -> JSONResponse:
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="JSON object required")
 
-    profile = body.get("profile")
-    if not profile:
-        raise HTTPException(
-            status_code=400, detail="profile required (loose, firm, strict)"
+    requested = body.get("profile")
+    if requested:
+        log_engine(
+            "api/config/strictness: manual profile ignored — "
+            f"requested={requested!r}; strictness is velocity-driven per market loop"
         )
-    try:
-        payload = set_strictness_profile(
-            str(profile),
-            hot_reload=bool(body.get("hot_reload", True)),
-        )
-        return JSONResponse({"ok": True, **payload})
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    except Exception as e:
-        log_engine(f"api/config/strictness failed: {type(e).__name__}: {e}")
-        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    payload = strictness_payload()
+    return JSONResponse(
+        {
+            "ok": True,
+            "ignored": True,
+            "message": "Manual strictness overrides are disabled; profile is velocity-driven.",
+            **payload,
+        }
+    )
 
 
 @router.get("/api/replay/summary")

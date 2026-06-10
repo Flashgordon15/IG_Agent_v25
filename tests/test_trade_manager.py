@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -614,6 +614,69 @@ class LimitExtensionTests(unittest.TestCase):
         )
         # SELL target should decrease (move further in profit direction)
         self.assertAlmostEqual(new_target, initial_target - atr, places=1)
+
+
+class CapitalRecycleTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = LearningStore(str(Path(self.tmp.name) / "learning.db"))
+        self.store.connect()
+        self.cfg = _cfg(
+            capital_recycle_enabled=True,
+            capital_recycle_age_minutes=45,
+            capital_recycle_breakeven_lock_points=1.0,
+            breakeven_enabled=False,
+            adaptive_trailing_stop_enabled=False,
+        )
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.tmp.cleanup()
+
+    def test_capital_recycle_moves_buy_stop_to_be_plus_one(self) -> None:
+        tid = _open_trade(self.store, entry=100.0, stop=90.0)
+        opened = datetime.utcnow() - timedelta(minutes=46)
+        self.store.conn.execute(
+            "UPDATE trades SET opened_at=? WHERE id=?",
+            (opened.isoformat(), tid),
+        )
+        self.store.conn.commit()
+        mgr = TradeManager(self.cfg, self.store)
+        with patch(
+            "execution.adaptive_engine.capital_recycle_eligible", return_value=True
+        ):
+            msgs = mgr.update_from_quote(
+                "Japan 225",
+                "IX.D.NIKKEI.IFM.IP",
+                Quote(datetime.now(), 100.5, 100.7),
+            )
+        self.assertTrue(any("CAPITAL RECYCLE" in m for m in msgs), msgs)
+        row = self.store.conn.execute(
+            "SELECT stop FROM trades WHERE id=?", (tid,)
+        ).fetchone()
+        self.assertAlmostEqual(float(row["stop"]), 101.0)
+
+    def test_capital_recycle_skipped_when_disabled(self) -> None:
+        tid = _open_trade(self.store, entry=100.0, stop=90.0)
+        cfg = _cfg(
+            capital_recycle_enabled=False,
+            breakeven_enabled=False,
+            adaptive_trailing_stop_enabled=False,
+        )
+        mgr = TradeManager(cfg, self.store)
+        with patch(
+            "execution.adaptive_engine.capital_recycle_eligible", return_value=True
+        ):
+            msgs = mgr.update_from_quote(
+                "Japan 225",
+                "IX.D.NIKKEI.IFM.IP",
+                Quote(datetime.now(), 100.5, 100.7),
+            )
+        self.assertFalse(any("CAPITAL RECYCLE" in m for m in msgs), msgs)
+        row = self.store.conn.execute(
+            "SELECT stop FROM trades WHERE id=?", (tid,)
+        ).fetchone()
+        self.assertAlmostEqual(float(row["stop"]), 90.0)
 
 
 if __name__ == "__main__":

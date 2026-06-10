@@ -142,6 +142,29 @@ class TestComputeTradeReadiness(unittest.TestCase):
         self.assertEqual(r["pct"], 56)
         self.assertEqual(r["remaining_pct"], 44)
 
+    def test_full_gate_stack_blocked_not_inflated_to_100(self) -> None:
+        """Regression: denominator must match gate list length (not hard-coded 7)."""
+        gates = [
+            GateResult(name="session_open", passed=True),
+            GateResult(name="cold_start_gap", passed=True),
+            GateResult(name="environment_fitness", passed=False, value={"score": 18}),
+            GateResult(name="points_state", passed=True),
+            GateResult(name="correlation_ok", passed=True),
+            GateResult(name="risk_validation", passed=True),
+            GateResult(name="expectancy_ok", passed=True),
+            GateResult(name="calendar_ok", passed=True),
+            GateResult(
+                name="signal_confidence",
+                passed=False,
+                value={"confidence": 0.0, "threshold": 80.0},
+            ),
+            GateResult(name="ml_veto", passed=True),
+            GateResult(name="execution", passed=False, detail="Not armed"),
+        ]
+        r = compute_trade_readiness(gates, fitness_min=45.0)
+        self.assertEqual(r["pct"], 76)
+        self.assertEqual(r["remaining_pct"], 24)
+
 
 class TestFormatHealthBadgeText(unittest.TestCase):
     def test_ready_string(self) -> None:

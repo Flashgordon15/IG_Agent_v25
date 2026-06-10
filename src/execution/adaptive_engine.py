@@ -175,8 +175,13 @@ class AdaptiveEngine:
         if max_lim_mult > 0 and atr_val > 0:
             atr_cap = atr_val * max_lim_mult
             if limit > atr_cap:
-                limit = atr_cap
-                notes.append(f"limit capped at {limit:.1f} ({max_lim_mult}×ATR)")
+                if atr_cap >= floor_limit:
+                    limit = atr_cap
+                    notes.append(f"limit capped at {limit:.1f} ({max_lim_mult}×ATR)")
+                else:
+                    notes.append(
+                        f"ATR cap {atr_cap:.1f} skipped — RR floor needs {floor_limit:.1f}"
+                    )
 
         daily_range_ratio = (spread_val / atr_val) if atr_val > 0 else 0.0
         return {
@@ -215,8 +220,8 @@ class AdaptiveEngine:
                 )
                 return True, "REJECTED_ASYMMETRIC_RR_FLOOR_GATED"
 
-        if adjusted_confidence < cfg.adaptive_min_adjusted_confidence:
-            return True, "adaptive block: confidence below adaptive minimum"
+        # Entry confidence is validated by signal_confidence gate + order_validator;
+        # do not re-block at a higher adaptive-only floor (was 72% vs gate 55%).
 
         atr_val, spread_val = self._snapshot_atr_spread(snapshot)
         if spread_val > cfg.adaptive_max_entry_spread:
@@ -260,3 +265,57 @@ class AdaptiveEngine:
                         )
 
         return False, ""
+
+
+CAPITAL_RECYCLE_AGE_MINUTES_DEFAULT = 45
+CAPITAL_RECYCLE_BE_LOCK_POINTS_DEFAULT = 1.0
+
+
+def capital_recycle_breakeven_stop(
+    side: str,
+    entry: float,
+    lock_points: float = CAPITAL_RECYCLE_BE_LOCK_POINTS_DEFAULT,
+) -> float:
+    """Break-even stop with a small lock above/below entry to cover spread."""
+    entry_f = float(entry)
+    lock_f = float(lock_points)
+    if str(side or "").upper() == "BUY":
+        return entry_f + lock_f
+    return entry_f - lock_f
+
+
+def capital_recycle_eligible(
+    *,
+    age_minutes: float,
+    side: str,
+    entry: float,
+    stop: float,
+    target: float,
+    px: float,
+    market: str,
+    min_age_minutes: float = CAPITAL_RECYCLE_AGE_MINUTES_DEFAULT,
+    signal_engine: Any | None = None,
+) -> bool:
+    """
+    Time-decay capital recycle: stale sideways trades in low-vol regimes.
+
+    Eligible when age exceeds the threshold, price has not hit TP/SL, and
+    normalized ATR velocity indicates a choppy/low-vol environment.
+    """
+    if age_minutes <= float(min_age_minutes):
+        return False
+    side_u = str(side or "").upper()
+    if side_u == "BUY":
+        if px <= stop or px >= target:
+            return False
+    elif side_u == "SELL":
+        if px >= stop or px <= target:
+            return False
+    else:
+        return False
+    from trading.strictness_resolver import is_low_volatility_regime
+
+    try:
+        return is_low_volatility_regime(signal_engine=signal_engine, market=market)
+    except Exception:
+        return False

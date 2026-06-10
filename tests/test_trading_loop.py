@@ -17,6 +17,7 @@ from data.models import Quote
 from execution.trading_loop import TickOutcome
 from signals.signal_engine import SignalResult
 from trading.trading_loop import (
+    BLOCKED_SPREAD_TO_ATR_CIRCUIT_BREAKER,
     STAGE1_GBP_RISK_CAP,
     GateResult,
     TradingLoop,
@@ -36,7 +37,7 @@ def _wait_signal() -> SignalResult:
         learning_delta=0.0,
         setup_key="",
         notes="wait",
-        snapshot={},
+        snapshot={"atr": 50.0},
     )
 
 
@@ -75,6 +76,8 @@ def _make_loop(**overrides) -> TradingLoop:
         side_effect=lambda key, default=None: {
             "ig_point_value_gbp": 1.0,
             "risk_cap_gbp": None,
+            "enforce_top3_rotation_filter": False,
+            "spread_to_atr_circuit_breaker_max": 0.30,
         }.get(key, default)
     )
 
@@ -90,6 +93,7 @@ def _make_loop(**overrides) -> TradingLoop:
 
     env = MagicMock()
     env.score.return_value = 55.0
+    env.get_factors.return_value = {"atr": 50.0}
 
     points = MagicMock()
     points.get_state.return_value = "HEALTHY"
@@ -521,6 +525,34 @@ class DynamicMaxPerEpicTests(unittest.TestCase):
         self.assertEqual(gate.value["max_per_epic"], 4)
         self.assertIn("profitable", gate.value["dynamic_unlock_reason"])
         self.assertTrue(gate.passed)
+
+
+class SpreadAtrCircuitBreakerTests(unittest.TestCase):
+    def test_uses_signal_atr_points_not_fitness_factor(self) -> None:
+        """Fitness factor scores (0–30) must not drive spread/ATR circuit math."""
+        loop = _make_loop()
+        loop._env.get_factors.return_value = {"atr": 2.2}
+        loop._signal_engine.evaluate.return_value = SignalResult(
+            signal="WAIT",
+            raw_confidence=0.0,
+            adjusted_confidence=0.0,
+            learning_delta=0.0,
+            setup_key="",
+            notes="wait",
+            snapshot={"last": {"atr": 100.0}},
+        )
+        quote = Quote(datetime(2026, 5, 27, 14, 0), 100.0, 102.4)
+
+        with patch("system.market_data_hub.get_market_data_hub") as hub_mock:
+            hub_mock.return_value.verify_liquidity_shield_delta.return_value = (
+                True,
+                1.0,
+            )
+            gates = loop._evaluate_gates_core(quote)
+
+        self.assertGreater(len(gates), 1)
+        risk = next(g for g in gates if g.name == "risk_validation")
+        self.assertNotEqual(risk.detail, BLOCKED_SPREAD_TO_ATR_CIRCUIT_BREAKER)
 
 
 if __name__ == "__main__":

@@ -54,6 +54,14 @@ ROADMAP_COMPOUND_ENTER_CUMULATIVE = 15.0
 ROADMAP_COMPOUND_EXIT_CUMULATIVE = 10.0
 ROADMAP_COMPOUND_BOOST_MULTIPLIER = 2.5
 
+EQUITY_LOCK_SESSION_MILESTONE = 3.0
+EQUITY_LOCK_SIZE_MULTIPLIER = 0.5
+EQUITY_LOCK_SIGNAL_THRESHOLD = 65.0
+
+# Hard multiplier floors (applied before equity lock) for HEALTHY/CAUTION entries.
+PROBE_MULTIPLIER_FLOOR = 0.5
+CORE_MULTIPLIER_FLOOR = 0.8
+
 
 def _clamp_multiplier_to_trade_size_bounds(
     multiplier: float,
@@ -129,7 +137,22 @@ class PointsEngine:
         self._gbp_loss_events: list[tuple[float, float]] = []
         self._rapid_cooldown_until: float = 0.0
         self._roadmap_compound_boost = False
+        self._equity_lock_announced = False
         self._load()
+
+    def equity_lock_active(self) -> bool:
+        """Session milestone protection — preserve gains after strong session_score."""
+        try:
+            with _lock:
+                return self._session_score >= EQUITY_LOCK_SESSION_MILESTONE
+        except Exception:
+            return False
+
+    def protected_signal_threshold_floor(self) -> float | None:
+        """Raised entry bar when equity lock is active."""
+        if self.equity_lock_active():
+            return EQUITY_LOCK_SIGNAL_THRESHOLD
+        return None
 
     def _snapshot(self) -> PointsSnapshot:
         nominal = _nominal_state(self._cumulative)
@@ -163,6 +186,9 @@ class PointsEngine:
             "stop_latched": self._stop_latched,
             "last_nominal": self._last_nominal,
             "rapid_cooldown_until": self._rapid_cooldown_until,
+            "equity_lock_active": self.equity_lock_active(),
+            "equity_lock_milestone": EQUITY_LOCK_SESSION_MILESTONE,
+            "equity_lock_signal_threshold": EQUITY_LOCK_SIGNAL_THRESHOLD,
         }
 
     def _apply_payload(self, data: dict[str, Any]) -> None:
@@ -371,6 +397,18 @@ class PointsEngine:
                 self._session_score += score
                 self._last_trade_score = score
 
+                if (
+                    self._session_score >= EQUITY_LOCK_SESSION_MILESTONE
+                    and not self._equity_lock_announced
+                ):
+                    self._equity_lock_announced = True
+                    log_engine(
+                        f"EQUITY LOCK active — session_score "
+                        f"{self._session_score:.1f} >= {EQUITY_LOCK_SESSION_MILESTONE:.1f}: "
+                        f"{EQUITY_LOCK_SIZE_MULTIPLIER:.1f}× size, "
+                        f"{EQUITY_LOCK_SIGNAL_THRESHOLD:.0f}% signal threshold"
+                    )
+
                 if result_u == "LOSS":
                     self._consecutive_losses += 1
                     if self._consecutive_losses >= SESSION_LOSS_STREAK_TRIGGER:
@@ -441,7 +479,11 @@ class PointsEngine:
             effective_floor = min(
                 cfg_floor + bootstrap_wins * recovery, CONF_MARGINAL_MIN
             )
-            return max(effective_floor, float(cfg.signal_threshold))
+            threshold = max(effective_floor, float(cfg.signal_threshold))
+            prot = self.protected_signal_threshold_floor()
+            if prot is not None:
+                threshold = max(threshold, prot)
+            return threshold
         except Exception:
             return CONF_MARGINAL_MIN
 
@@ -485,10 +527,43 @@ class PointsEngine:
             ROADMAP_COMPOUND_BOOST_MULTIPLIER if self._roadmap_compound_boost else 1.0
         )
 
-    def _finalize_size_multiplier(self, raw: float) -> float:
+    def _finalize_size_multiplier(
+        self,
+        raw: float,
+        *,
+        confidence: float | None = None,
+    ) -> float:
         if raw <= 0.0:
             return 0.0
         scaled = raw * self._roadmap_cumulative_scale()
+
+        if confidence is not None:
+            conf = float(confidence)
+            state = self.get_state()
+            entry_min = CONF_MARGINAL_MIN
+            try:
+                from system.risk_bands import bands_enabled, entry_confidence_floor
+
+                if bands_enabled():
+                    entry_min = entry_confidence_floor()
+            except Exception:
+                pass
+            if state in ("HEALTHY", "CAUTION") and conf >= entry_min:
+                mult_floor = CORE_MULTIPLIER_FLOOR
+                try:
+                    from system.risk_bands import (
+                        bands_enabled,
+                        risk_band_for_confidence,
+                    )
+
+                    if bands_enabled() and risk_band_for_confidence(conf) == "probe":
+                        mult_floor = PROBE_MULTIPLIER_FLOOR
+                except Exception:
+                    pass
+                scaled = max(scaled, mult_floor)
+
+        if self.equity_lock_active():
+            scaled *= EQUITY_LOCK_SIZE_MULTIPLIER
         try:
             from system.config_loader import get_config
 
@@ -552,27 +627,35 @@ class PointsEngine:
                     if bands_enabled():
                         rb = risk_band_for_confidence(conf)
                         if rb == "probe":
-                            return self._finalize_size_multiplier(tier_mult * 0.25)
+                            return self._finalize_size_multiplier(
+                                tier_mult * 0.25, confidence=conf
+                            )
                         if rb == "core":
                             core = core_size_multiplier()
                             if band == "high":
-                                return self._finalize_size_multiplier(tier_mult * core)
+                                return self._finalize_size_multiplier(
+                                    tier_mult * core, confidence=conf
+                                )
                             if band == "standard":
                                 return self._finalize_size_multiplier(
-                                    tier_mult * 0.5 * core
+                                    tier_mult * 0.5 * core, confidence=conf
                                 )
                             if band == "marginal":
                                 return self._finalize_size_multiplier(
-                                    tier_mult * 0.25 * core
+                                    tier_mult * 0.25 * core, confidence=conf
                                 )
                 except Exception:
                     pass
                 if band == "high":
-                    return self._finalize_size_multiplier(tier_mult)
+                    return self._finalize_size_multiplier(tier_mult, confidence=conf)
                 if band == "standard":
-                    return self._finalize_size_multiplier(tier_mult * 0.5)
+                    return self._finalize_size_multiplier(
+                        tier_mult * 0.5, confidence=conf
+                    )
                 if band == "marginal":
-                    return self._finalize_size_multiplier(tier_mult * 0.25)
+                    return self._finalize_size_multiplier(
+                        tier_mult * 0.25, confidence=conf
+                    )
                 return 0.0
 
             if state == "CAUTION":
@@ -583,18 +666,18 @@ class PointsEngine:
                     )
 
                     if bands_enabled() and risk_band_for_confidence(conf) == "probe":
-                        return self._finalize_size_multiplier(0.25)
+                        return self._finalize_size_multiplier(0.25, confidence=conf)
                 except Exception:
                     pass
                 if conf >= CONF_MARGINAL_MIN:
-                    return self._finalize_size_multiplier(0.5)
+                    return self._finalize_size_multiplier(0.5, confidence=conf)
                 if conf >= entry_min:
-                    return self._finalize_size_multiplier(0.25)
+                    return self._finalize_size_multiplier(0.25, confidence=conf)
                 return 0.0
 
             if state == "WARNING":
                 if band == "high":
-                    return self._finalize_size_multiplier(0.25)
+                    return self._finalize_size_multiplier(0.25, confidence=conf)
                 return 0.0
 
             return 0.0
@@ -633,6 +716,7 @@ class PointsEngine:
             self._signals_to_skip = 0
             self._day_stopped = False
             self._recovery_wins = 0
+            self._equity_lock_announced = False
             self._persist()
 
     def clear_stop(self) -> None:

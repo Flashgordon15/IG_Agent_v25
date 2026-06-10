@@ -639,6 +639,44 @@ class TestRoadmapE2EIntegration(unittest.TestCase):
         self.assertTrue(blocked)
         self.assertEqual(reason, "REJECTED_ASYMMETRIC_RR_FLOOR_GATED")
 
+    def test_atr_cap_skipped_when_below_rr_floor(self) -> None:
+        cfg = MagicMock()
+        cfg.adaptive_execution_enabled = True
+        cfg.adaptive_atr_risk_enabled = True
+        cfg.dynamic_stop_floor_enabled = True
+        cfg.dynamic_stop_floor_min = 5.0
+        cfg.adaptive_min_risk_points = 5.0
+        cfg.adaptive_max_risk_points = 40.0
+        cfg.atr_multiplier = 1.0
+        cfg.default_stop_distance_points = 10.0
+        cfg.reward_multiple = 3.0
+        cfg.adaptive_high_confidence = 95.0
+        cfg.adaptive_high_confidence_reward_multiple = 3.0
+        cfg.adaptive_min_setup_trades = 99
+        cfg.adaptive_good_winrate_threshold = 0.6
+        cfg.adaptive_bad_winrate_threshold = 0.4
+        cfg.adaptive_good_setup_reward_multiple = 2.4
+        cfg.adaptive_bad_setup_reward_multiple = 1.4
+        cfg.adaptive_good_setup_multiplier = 1.0
+        cfg.adaptive_bad_setup_multiplier = 1.0
+        cfg.adaptive_min_trade_size = 0.01
+        cfg.adaptive_max_trade_size = 10.0
+        cfg.adaptive_max_limit_atr_multiple = 4.0
+        cfg.trade_size = 1.0
+        cfg.get = MagicMock(return_value=True)
+
+        adaptive = AdaptiveEngine(cfg)
+        snapshot = {"last": {"atr": 6.2, "spread": 0.3}}
+        with patch("execution.adaptive_engine.get_config", return_value=cfg):
+            settings = adaptive.settings(
+                "SELL|bear|us_afternoon|atr0-30|rsilow|volhigh", 81.0, snapshot
+            )
+
+        risk = float(settings["risk"])
+        limit = float(settings["limit"])
+        self.assertGreaterEqual(limit / risk, 3.0 - 1e-6)
+        self.assertIn("skipped", settings["notes"])
+
 
 if __name__ == "__main__":
     unittest.main()

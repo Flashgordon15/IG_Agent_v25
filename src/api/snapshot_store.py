@@ -11,7 +11,6 @@ import asyncio
 import json
 import threading
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -21,10 +20,12 @@ from api.snapshot import (
     enrich_signal_thresholds,
     normalize_tick,
 )
-from data.models import Quote
 from system.paths import data_dir
 from system.state_manager import atomic_write_json, read_json_file
-from trading.open_position_view import enrich_positions_with_quote
+from trading.open_position_view import (
+    apply_position_view_refresh,
+    tick_has_open_positions_for_epic,
+)
 
 _SNAPSHOT_FILENAME = "dashboard_snapshot.json"
 _lock = threading.RLock()
@@ -125,7 +126,8 @@ def write_tick_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
     return tick
 
 
-def push_hub_quote_to_dashboard(
+def _merge_hub_quote_into_tick(
+    tick: dict[str, Any],
     epic: str,
     bid: float,
     offer: float,
@@ -133,23 +135,8 @@ def push_hub_quote_to_dashboard(
     tick_age_s: float | None = None,
     stream_status: str = "LIVE",
 ) -> None:
-    """Merge live hub bid/offer into the dashboard tick and push to WebSocket clients."""
-    global _last_hub_push_ts
-    if bid <= 0 or offer <= 0:
-        return
+    """Merge live hub bid/offer into dashboard tick (top-level and market slice)."""
     epic_key = str(epic or "").strip()
-    if not epic_key:
-        return
-    now = time.time()
-    if now - _last_hub_push_ts < _hub_push_min_interval:
-        return
-    _last_hub_push_ts = now
-
-    tick = dict(get_tick())
-    sig = tick.get("signal")
-    if isinstance(sig, dict):
-        tick["signal"] = dict(sig)
-
     spread = round(float(offer) - float(bid), 5)
     age = round(float(tick_age_s), 1) if tick_age_s is not None else 0.0
     ts = _iso_now()
@@ -183,7 +170,90 @@ def push_hub_quote_to_dashboard(
         if tick.get("market_state") == "OFFLINE" and bid > 0:
             tick["market_state"] = "OPEN"
 
-    _refresh_positions_from_hub_quote(tick, epic_key, float(bid), float(offer))
+
+def force_position_view_refresh(
+    epic: str,
+    bid: float,
+    offer: float,
+    *,
+    tick_age_s: float | None = None,
+    stream_status: str = "LIVE",
+) -> bool:
+    """Immediate position P&L refresh — bypasses hub push throttle when positions are open."""
+    epic_key = str(epic or "").strip()
+    if not epic_key or bid <= 0 or offer <= 0:
+        return False
+
+    with _lock:
+        tick = dict(_cached)
+    if not tick_has_open_positions_for_epic(tick, epic_key):
+        return False
+
+    sig = tick.get("signal")
+    if isinstance(sig, dict):
+        tick["signal"] = dict(sig)
+
+    _merge_hub_quote_into_tick(
+        tick,
+        epic_key,
+        float(bid),
+        float(offer),
+        tick_age_s=tick_age_s,
+        stream_status=stream_status,
+    )
+    apply_position_view_refresh(
+        tick,
+        epic_key,
+        float(bid),
+        float(offer),
+        point_value_gbp=_point_value_gbp_for_epic(tick, epic_key),
+    )
+    publish_tick(tick, notify=True)
+    return True
+
+
+def push_hub_quote_to_dashboard(
+    epic: str,
+    bid: float,
+    offer: float,
+    *,
+    tick_age_s: float | None = None,
+    stream_status: str = "LIVE",
+) -> None:
+    """Merge live hub bid/offer into the dashboard tick and push to WebSocket clients."""
+    if force_position_view_refresh(
+        epic,
+        bid,
+        offer,
+        tick_age_s=tick_age_s,
+        stream_status=stream_status,
+    ):
+        return
+
+    global _last_hub_push_ts
+    if bid <= 0 or offer <= 0:
+        return
+    epic_key = str(epic or "").strip()
+    if not epic_key:
+        return
+    now = time.time()
+    if now - _last_hub_push_ts < _hub_push_min_interval:
+        return
+    _last_hub_push_ts = now
+
+    tick = dict(get_tick())
+    sig = tick.get("signal")
+    if isinstance(sig, dict):
+        tick["signal"] = dict(sig)
+
+    _merge_hub_quote_into_tick(
+        tick,
+        epic_key,
+        float(bid),
+        float(offer),
+        tick_age_s=tick_age_s,
+        stream_status=stream_status,
+    )
     publish_tick(tick, notify=True)
 
 
@@ -205,25 +275,6 @@ def _point_value_gbp_for_epic(tick: dict[str, Any], epic: str) -> float:
         except (TypeError, ValueError):
             pass
     return 1.0
-
-
-def _refresh_positions_from_hub_quote(
-    tick: dict[str, Any],
-    epic: str,
-    bid: float,
-    offer: float,
-) -> None:
-    """Update open-position mark/pnl_pts from streaming quote between loop snapshots."""
-    positions = tick.get("positions")
-    if not isinstance(positions, list) or not positions:
-        return
-    quote = Quote(datetime.now(timezone.utc), bid, offer)
-    tick["positions"] = enrich_positions_with_quote(
-        positions,
-        quote,
-        point_value_gbp=_point_value_gbp_for_epic(tick, epic),
-        epic=epic,
-    )
 
 
 def wire_hub_quotes_to_dashboard(*, min_interval: float = 0.25) -> Callable[[], None]:

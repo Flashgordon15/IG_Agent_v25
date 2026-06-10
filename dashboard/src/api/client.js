@@ -50,10 +50,4 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ proposal_id: proposalId }),
     }),
-  getStrictness: () => fetchJson("/api/config/strictness"),
-  setStrictness: (profile, hotReload = true) =>
-    fetchJson("/api/config/strictness", {
-      method: "POST",
-      body: JSON.stringify({ profile, hot_reload: hotReload }),
-    }),
 };

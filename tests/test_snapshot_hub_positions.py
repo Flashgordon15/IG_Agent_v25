@@ -11,11 +11,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from api.snapshot_store import (
+    force_position_view_refresh,
+    get_tick,
     publish_tick,
     push_hub_quote_to_dashboard,
     reset_snapshot_store_for_tests,
     set_snapshot_path_for_tests,
-    get_tick,
 )
 
 
@@ -65,6 +66,43 @@ class SnapshotHubPositionsTests(unittest.TestCase):
         self.assertEqual(pos["pnl_pts"], 8.0)
         # pnl_gbp=0.0 from IG DEMO → now calculated from quote (not kept at 0)
         self.assertNotEqual(pos["pnl_gbp"], 0.0)
+
+    def test_force_refresh_bypasses_hub_push_throttle(self) -> None:
+        publish_tick(
+            {
+                "type": "tick",
+                "epic": "CS.D.CFPGOLD.CFP.IP",
+                "selected_epic": "CS.D.CFPGOLD.CFP.IP",
+                "bid": 4454.79,
+                "offer": 4455.29,
+                "positions": [
+                    {
+                        "deal_id": "DIAAAAXNM2VYUAN",
+                        "epic": "CS.D.CFPGOLD.CFP.IP",
+                        "side": "SELL",
+                        "entry": 4463.25,
+                        "current": 4460.59,
+                        "pnl_pts": 2.7,
+                        "pnl_gbp": 0.0,
+                        "size": 10.0,
+                    }
+                ],
+            }
+        )
+
+        self.assertTrue(
+            force_position_view_refresh("CS.D.CFPGOLD.CFP.IP", 4450.0, 4450.5)
+        )
+        pos_first = (get_tick().get("positions") or [{}])[0]
+        self.assertEqual(pos_first["current"], 4450.5)
+        self.assertEqual(pos_first["pnl_pts"], 12.8)
+
+        self.assertTrue(
+            force_position_view_refresh("CS.D.CFPGOLD.CFP.IP", 4448.0, 4448.5)
+        )
+        pos_second = (get_tick().get("positions") or [{}])[0]
+        self.assertEqual(pos_second["current"], 4448.5)
+        self.assertEqual(pos_second["pnl_pts"], 14.8)
 
 
 if __name__ == "__main__":

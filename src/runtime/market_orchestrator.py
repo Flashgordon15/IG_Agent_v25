@@ -55,6 +55,40 @@ _FEED_RECOVERY_MAX_AGE_SEC = 30.0
 OFFLINE_BROKER_FEED_REJECTED = "OFFLINE_BROKER_FEED_REJECTED"
 
 
+def compute_rotation_trend_cleanliness(
+    row_15m: pd.Series,
+    *,
+    atr_15m: float = 0.0,
+    atr_5m: float = 0.0,
+) -> float:
+    """
+    Direction-neutral trend strength for rotation rank_score.
+
+    Bull (fast > slow, RSI > 50) and bear (fast < slow, RSI < 50) alignment
+    score equally via ``score_trend_factor``. Momentum scales by |EMA gap|/ATR;
+    volatility adds a mild boost from absolute ATR (tradable movement, not direction).
+    """
+    from trading.environment_scorer import score_trend_factor
+
+    alignment = score_trend_factor(row_15m)
+    if alignment <= 0:
+        return _ROTATION_RANK_FLOOR
+
+    fast = float(row_15m.get("fast_ema", 0))
+    slow = float(row_15m.get("slow_ema", 0))
+    atr_ref = float(atr_5m or atr_15m or row_15m.get("atr", 0) or 0)
+    ema_gap = abs(fast - slow)
+
+    if atr_ref > 0:
+        momentum_mult = 0.5 + 0.5 * min(1.0, ema_gap / (2.0 * atr_ref))
+        vol_mult = 1.0 + min(0.25, atr_ref / 80.0)
+    else:
+        momentum_mult = 0.5 + 0.5 * min(1.0, ema_gap / 40.0)
+        vol_mult = 1.0
+
+    return max(alignment * momentum_mult * vol_mult, _ROTATION_RANK_FLOOR)
+
+
 class MarketOrchestrator:
     """Starts/stops per-epic loops and publishes a merged multi-market tick."""
 
@@ -261,7 +295,30 @@ class MarketOrchestrator:
         )
 
     def _trend_cleanliness(self, loop: TradingLoop) -> float:
-        """Session-style weighted trend factor (EMA slope / ADX proxy from env scorer)."""
+        """15m EMA+RSI alignment (bull or bear) × |EMA gap| momentum × ATR vol."""
+        engine = getattr(loop, "_signal_engine", None)
+        market = str(getattr(loop, "_market", "") or "")
+        if engine is not None and market:
+            try:
+                df = engine.quote_df(market)
+                c15 = engine.candles(df, 15)
+                if len(c15) >= 2:
+                    c15i = engine.add_indicators(c15)
+                    row15 = c15i.iloc[-2]
+                    atr_15 = float(row15.get("atr", 0) or 0)
+                    atr_5 = 0.0
+                    c5 = engine.candles(df, 5)
+                    if len(c5) >= 2:
+                        c5i = engine.add_indicators(c5)
+                        atr_5 = float(c5i.iloc[-2].get("atr", 0) or 0)
+                    return compute_rotation_trend_cleanliness(
+                        row15,
+                        atr_15m=atr_15,
+                        atr_5m=atr_5,
+                    )
+            except Exception:
+                pass
+
         env = loop._env
         if env is None:
             return _ROTATION_RANK_FLOOR
@@ -270,7 +327,9 @@ class MarketOrchestrator:
                 factors = env.get_factors()
                 trend = float(factors.get("trend") or 0.0)
                 if trend > 0:
-                    return max(trend, _ROTATION_RANK_FLOOR)
+                    atr_pts = float(factors.get("atr") or 0.0)
+                    vol_mult = 1.0 + min(0.25, atr_pts / 80.0) if atr_pts > 0 else 1.0
+                    return max(trend * vol_mult, _ROTATION_RANK_FLOOR)
             last = getattr(env, "_last", None)
             fitness = float(getattr(last, "total", 0.0) or 0.0)
             if fitness > 0:
@@ -285,7 +344,11 @@ class MarketOrchestrator:
         return trend_cleanliness / relative_spread_cost
 
     def refresh_active_epics(self) -> list[str]:
-        """Layer 3 Hot Market Selector — rank_score = trend_cleanliness / relative_spread_cost."""
+        """Layer 3 Hot Market Selector — rank_score = trend_cleanliness / relative_spread_cost.
+
+        trend_cleanliness uses absolute 15m trend alignment (bull or bear) and
+        momentum/volatility scaling, not upward direction alone.
+        """
         import time
 
         feed_offline = self._apply_feed_circuit_breakers()
@@ -327,6 +390,18 @@ class MarketOrchestrator:
         if _ORCHESTRATOR_REF is None:
             return []
         return _ORCHESTRATOR_REF.get_active_epics()
+
+    @staticmethod
+    def get_signal_engine_for_market(market: str) -> Any | None:
+        """Resolve the per-market SignalEngine from a running orchestrator loop."""
+        global _ORCHESTRATOR_REF
+        key = str(market or "").strip()
+        if not key or _ORCHESTRATOR_REF is None:
+            return None
+        for loop in _ORCHESTRATOR_REF._loops:
+            if str(getattr(loop, "_market", "") or "") == key:
+                return getattr(loop, "_signal_engine", None)
+        return None
 
     @staticmethod
     def hot_reload_config(config: Config | None = None) -> int:

@@ -409,7 +409,23 @@ def _build_fast_health_status() -> dict[str, Any]:
 def get_runtime_tick_fields() -> dict[str, Any]:
     """Cached dashboard fields — refreshed by the health-cache thread only."""
     with _RUNTIME_TICK_LOCK:
-        return dict(_RUNTIME_TICK_FIELDS)
+        if _RUNTIME_TICK_FIELDS:
+            return dict(_RUNTIME_TICK_FIELDS)
+    fast = _build_fast_health_status()
+    return {
+        "last_gate_check_age_sec": fast.get("last_gate_check_age_sec"),
+        "quotes_fresh": fast.get("quotes_fresh"),
+        "markets_open_count": fast.get("markets_open_count"),
+        "trading_healthy": fast.get("trading_healthy"),
+        "watchdog_active": fast.get("watchdog_active"),
+        "supervision_drift_ok": fast.get("supervision_drift_ok"),
+        "supervision_drift": fast.get("supervision_drift"),
+        "supervision_warnings": fast.get("supervision_warnings"),
+        "overnight_supervision": fast.get("overnight_supervision"),
+        "independent_of_cursor": fast.get("independent_of_cursor"),
+        "overnight_armed": fast.get("overnight_armed"),
+        "env_scorer_fallback_active": fast.get("env_scorer_fallback_active"),
+    }
 
 
 def _update_runtime_tick_fields(status: dict[str, Any]) -> None:

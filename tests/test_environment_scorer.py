@@ -38,26 +38,22 @@ class FactorUnitTests(unittest.TestCase):
         self.assertLess(mid, 30)
 
     def test_trend_factor(self) -> None:
-        strong = pd.Series({"fast_ema": 110, "slow_ema": 100, "rsi": 55})
-        partial = pd.Series({"fast_ema": 110, "slow_ema": 100, "rsi": 45})
-        flat = pd.Series({"fast_ema": 100, "slow_ema": 110, "rsi": 45})
-        self.assertEqual(score_trend_factor(strong), 25.0)
-        self.assertEqual(score_trend_factor(partial), 12.5)
+        strong_bull = pd.Series({"fast_ema": 110, "slow_ema": 100, "rsi": 55})
+        partial_bull = pd.Series({"fast_ema": 110, "slow_ema": 100, "rsi": 45})
+        strong_bear = pd.Series({"fast_ema": 100, "slow_ema": 110, "rsi": 45})
+        mixed = pd.Series({"fast_ema": 100, "slow_ema": 110, "rsi": 55})
+        flat = pd.Series({"fast_ema": 100, "slow_ema": 100, "rsi": 50})
+        self.assertEqual(score_trend_factor(strong_bull), 25.0)
+        self.assertEqual(score_trend_factor(partial_bull), 12.5)
+        self.assertEqual(score_trend_factor(strong_bear), 25.0)
+        self.assertEqual(score_trend_factor(mixed), 12.5)
         self.assertEqual(score_trend_factor(flat), 0.0)
 
     def test_session_timing_factor(self) -> None:
-        self.assertEqual(
-            score_session_timing_factor(datetime(2026, 5, 27, 1, 0)), 20.0
-        )
-        self.assertEqual(
-            score_session_timing_factor(datetime(2026, 5, 27, 4, 0)), 15.0
-        )
-        self.assertEqual(
-            score_session_timing_factor(datetime(2026, 5, 27, 6, 45)), 5.0
-        )
-        self.assertEqual(
-            score_session_timing_factor(datetime(2026, 5, 27, 12, 0)), 0.0
-        )
+        self.assertEqual(score_session_timing_factor(datetime(2026, 5, 27, 1, 0)), 20.0)
+        self.assertEqual(score_session_timing_factor(datetime(2026, 5, 27, 4, 0)), 15.0)
+        self.assertEqual(score_session_timing_factor(datetime(2026, 5, 27, 6, 45)), 5.0)
+        self.assertEqual(score_session_timing_factor(datetime(2026, 5, 27, 12, 0)), 0.0)
 
     def test_spread_factor(self) -> None:
         self.assertEqual(score_spread_factor(10, 10), 25.0)
@@ -69,7 +65,9 @@ class FactorUnitTests(unittest.TestCase):
     def test_regime_labels(self) -> None:
         self.assertEqual(regime_label(85), "Excellent")
         self.assertEqual(regime_label(70), "Good")
-        self.assertEqual(regime_label(57), "Marginal")  # GATE_PASS_MIN=55, so 57 is Marginal
+        self.assertEqual(
+            regime_label(57), "Marginal"
+        )  # GATE_PASS_MIN=55, so 57 is Marginal
         self.assertEqual(regime_label(30), "WAIT")
 
 
@@ -182,7 +180,9 @@ class EnvironmentScorerIntegrationTests(unittest.TestCase):
             rest, engine, "IX.D.NIKKEI.IFM.IP", market, environment_scorer=scorer
         )
         for j in range(300):
-            engine.add_quote(market, Quote(datetime(2026, 5, 28, 12, 0, j % 60), 100.0, 101.0))
+            engine.add_quote(
+                market, Quote(datetime(2026, 5, 28, 12, 0, j % 60), 100.0, 101.0)
+            )
         qdf = engine.quote_df(market)
         total = scorer.score(market, quote_df=qdf)
         self.assertGreater(total, 0.0)
@@ -221,7 +221,10 @@ class EnvironmentScorerIntegrationTests(unittest.TestCase):
         self.assertTrue(scorer.last_score().capped_gap_open)
 
     def test_safe_default_on_error(self) -> None:
-        from system.engine_log import get_engine_alerts_snapshot, reset_engine_alerts_for_tests
+        from system.engine_log import (
+            get_engine_alerts_snapshot,
+            reset_engine_alerts_for_tests,
+        )
 
         reset_engine_alerts_for_tests()
         scorer = EnvironmentScorer(None)
@@ -238,12 +241,17 @@ class EnvironmentScorerIntegrationTests(unittest.TestCase):
         reset_engine_alerts_for_tests()
 
     def test_insufficient_bars_warmup_does_not_emit_engine_warning(self) -> None:
-        from system.engine_log import get_engine_alerts_snapshot, reset_engine_alerts_for_tests
+        from system.engine_log import (
+            get_engine_alerts_snapshot,
+            reset_engine_alerts_for_tests,
+        )
 
         reset_engine_alerts_for_tests()
         scorer = EnvironmentScorer(None)
         with patch.object(
-            EnvironmentScorer, "_compute_factors", side_effect=ValueError("insufficient bars")
+            EnvironmentScorer,
+            "_compute_factors",
+            side_effect=ValueError("insufficient bars"),
         ):
             total_1 = scorer.score("Japan 225")
             total_2 = scorer.score("Japan 225")

@@ -31,7 +31,7 @@ from trading.trading_loop import TradingLoop
 
 def _quote(at: datetime | None = None) -> Quote:
     t = at or datetime(2026, 5, 27, 12, 0)
-    return Quote(t, 65000.0, 65007.0)
+    return Quote(t, 65000.0, 65000.1)
 
 
 def _ohlc_bars(n: int = 100) -> list[dict]:
@@ -75,6 +75,7 @@ class OrchestratorPostBootstrapGatesTests(unittest.TestCase):
         hub = MagicMock()
         hub.is_in_maintenance.return_value = False
         hub.get_snapshot.return_value = MagicMock(age_seconds=lambda: 1.0)
+        hub.verify_liquidity_shield_delta.return_value = (True, 1.0)
         hub_mock.return_value = hub
 
         cfg = ConfigLoader(ROOT / "config" / "config_v25.json").load_config()

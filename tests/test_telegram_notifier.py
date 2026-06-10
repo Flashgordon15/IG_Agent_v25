@@ -47,7 +47,13 @@ class TelegramNotifierTests(unittest.TestCase):
 
     def test_notify_startup_uses_send_now(self) -> None:
         n = TelegramNotifier(enabled=True, bot_token="tok", chat_id="99")
-        with patch.object(n, "send_now") as send_now:
+        with (
+            patch(
+                "system.telegram_notifier.executive_status_only_enabled",
+                return_value=False,
+            ),
+            patch.object(n, "send_now") as send_now,
+        ):
             n.notify_startup(state_restored=True)
         send_now.assert_called_once()
         text = send_now.call_args[0][0]

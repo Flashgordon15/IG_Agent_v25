@@ -22,6 +22,9 @@ from system.config import Config
 from system.config_loader import get_config
 from system.paths import data_dir
 
+H1_EMA_SOFT_PENALTY = 8.0
+H1_ML_PENALTY_WAIVER_PROB = 0.75
+
 
 @dataclass
 class SignalResult:
@@ -54,6 +57,20 @@ class SignalEngine:
     @property
     def config(self) -> Config:
         return get_config()
+
+    def _effective_signal_threshold(self, cfg: Config) -> float:
+        threshold = float(cfg.signal_threshold)
+        try:
+            from execution.ml_training_hooks import get_points_engine
+
+            pe = get_points_engine()
+            if pe is not None:
+                prot = pe.protected_signal_threshold_floor()
+                if prot is not None:
+                    threshold = max(threshold, float(prot))
+        except Exception:
+            pass
+        return threshold
 
     def _resolve_market_key(self, market: str) -> str:
         key = str(market or "").strip()
@@ -310,9 +327,9 @@ class SignalEngine:
         cfg = self._cfg
         from trading.strictness_resolver import resolve_strictness
 
-        _strict = resolve_strictness(get_config())
-        rsi_buy_max = _strict.rsi_buy_max
-        rsi_sell_min = _strict.rsi_sell_min
+        _strict = resolve_strictness(cfg, signal_engine=self, market=market)
+        rsi_buy_max = float(_strict.rsi_buy_max)
+        rsi_sell_min = float(_strict.rsi_sell_min)
         df = self.quote_df(market)
         c5 = self.candles(df, 5)
         c15 = self.candles(df, 15)
@@ -471,12 +488,14 @@ class SignalEngine:
 
         raw_conf = max(buy, sell)
         raw_sig = "BUY" if buy > sell else "SELL" if sell > buy else "WAIT"
-        threshold = cfg.signal_threshold
+        threshold = self._effective_signal_threshold(cfg)
         buy_ok = buy >= threshold
         sell_ok = sell >= threshold
 
         signal = "WAIT"
         candidate = raw_sig
+        h1_penalty = 0.0
+        h1_note = ""
         if buy_ok and sell_ok:
             candidate = "BUY" if buy >= sell else "SELL"
         elif buy_ok:
@@ -538,39 +557,12 @@ class SignalEngine:
                 and candidate == "SELL"
                 and (trend60 is None or not h1_bearish)
             ):
+                h1_penalty = H1_EMA_SOFT_PENALTY
+                adjusted = max(0, min(99, adjusted - h1_penalty))
                 h1_note = (
-                    "1h EMA not bearish (fast >= slow)"
+                    "1h EMA soft penalty -8 (fast >= slow)"
                     if trend60 is not None
-                    else "1h data collecting"
-                )
-                notes = (
-                    f"raw={raw_sig}, buy_score={buy:.1f}, sell_score={sell:.1f}, "
-                    f"threshold={threshold:.0f}, blocked: {h1_note}, {learn_note}"
-                )
-                snapshot = {
-                    "last": last,
-                    "trend15": trend15,
-                    "trend60": trend60,
-                    "setup_key": setup,
-                    "raw_signal": raw_sig,
-                    "raw_confidence": raw_conf,
-                    "adjusted_confidence": adjusted,
-                    "learning_delta": delta,
-                    "buy_score": buy,
-                    "sell_score": sell,
-                    "h1_block": h1_note,
-                    "h1_bearish": h1_bearish,
-                    "h1_bullish": h1_bullish,
-                }
-                self.last_snapshot[market] = snapshot
-                return SignalResult(
-                    "WAIT",
-                    float(raw_conf),
-                    float(adjusted),
-                    float(delta),
-                    setup,
-                    notes,
-                    snapshot,
+                    else "1h EMA soft penalty -8 (1h collecting)"
                 )
             if adjusted >= threshold:
                 signal = candidate
@@ -583,6 +575,8 @@ class SignalEngine:
         vol_note = f", vol_regime={current_regime}" + (
             f" BLOCKED: {vol_block_reason}" if vol_blocked else ""
         )
+        if h1_note:
+            vol_note = f"{vol_note}, {h1_note}"
         notes = (
             f"raw={raw_sig}, buy_score={buy:.1f}, sell_score={sell:.1f}, "
             f"threshold={threshold:.0f}, adjusted={adjusted:.1f}, "
@@ -603,21 +597,9 @@ class SignalEngine:
             "vol_regime": current_regime,
             "h1_bearish": h1_bearish,
             "h1_bullish": h1_bullish,
+            "h1_penalty": h1_penalty,
         }
         self.last_snapshot[market] = snapshot
-
-        if (
-            cfg.get("enforce_1h_ema_filter", True)
-            and signal == "SELL"
-            and (trend60 is None or not h1_bearish)
-        ):
-            signal = "WAIT"
-            h1_note = (
-                "1h EMA not bearish (fast >= slow)"
-                if trend60 is not None
-                else "1h data collecting"
-            )
-            notes = f"{notes} | blocked: {h1_note}"
 
         if (
             cfg.vol_regime_filter_enabled

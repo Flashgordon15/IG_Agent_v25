@@ -251,6 +251,7 @@ class TestV29ChaosE2E(unittest.TestCase):
         quote = Quote(datetime(2026, 6, 10, 14, 0), 2350.0, 2352.5)
         loop = MagicMock(spec=TradingLoop)
         loop._epic = GOLD_EPIC
+        loop.entry_circuit_breaker.return_value = ""
         loop._gate_active_rotation = MagicMock(
             return_value=SimpleNamespace(passed=True, value={}, detail="ok")
         )

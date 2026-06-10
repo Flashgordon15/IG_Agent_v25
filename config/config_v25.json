@@ -281,16 +281,16 @@
   "engine_log_intermittent": true,
   "engine_log_intermittent_seconds": 30,
   "allow_live_trading": true,
-  "max_open_positions": 2,
+  "max_open_positions": 5,
   "correlation_guard": {
-    "max_concurrent_us_index_shorts": 1,
-    "max_open_positions_global": 2,
+    "max_concurrent_us_index_shorts": 2,
+    "max_open_positions_global": 5,
     "us_index_epics": [
       "IX.D.DOW.IFM.IP",
       "IX.D.NASDAQ.IFM.IP"
     ]
   },
-  "max_positions_per_epic": 2,
+  "max_positions_per_epic": 3,
   "max_daily_loss_gbp": 500.0,
   "adaptive_block_bad_setups": true,
   "breakeven_lock_points": 0,
@@ -346,7 +346,8 @@
   "telegram": {
     "enabled": true,
     "bot_token": "",
-    "chat_id": ""
+    "chat_id": "",
+    "executive_status_only": true
   },
   "rest_hard_cap_per_minute": 3,
   "trailing_stop": {

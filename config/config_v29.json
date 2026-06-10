@@ -3,17 +3,28 @@
   "$extends": "config_v25.json",
   "version": "29.0.0",
   "app_version": "v29.0",
-  "_note": "v29.0 primary configuration tier — merges over config_v25.json at load time (Stage 1 workspace unification)",
+  "_note": "v29.0 primary configuration tier \u2014 merges over config_v25.json at load time (Stage 1 workspace unification)",
   "reward_multiple": 3.0,
   "adaptive_high_confidence_reward_multiple": 3.0,
   "adaptive_max_limit_atr_multiple": 4.0,
-  "spread_to_atr_circuit_breaker_max": 0.30,
+  "spread_to_atr_circuit_breaker_max": 0.3,
   "enforce_rr_floor_filter": true,
   "enforce_1h_ema_filter": true,
-  "enforce_top3_rotation_filter": false,
+  "enforce_top3_rotation_filter": true,
+  "max_open_positions": 5,
+  "max_positions_per_epic": 3,
+  "correlation_guard": {
+    "max_concurrent_us_index_shorts": 2,
+    "max_open_positions_global": 5
+  },
+  "capital_recycle_enabled": true,
+  "capital_recycle_age_minutes": 45,
+  "capital_recycle_breakeven_lock_points": 1.0,
   "enforce_environment_fitness_filter": true,
-  "environment_fitness_min_pct": 45,
-  "trading_strictness_profile": "firm",
+  "_deprecated_config_removals": {
+    "environment_fitness_min_pct": "Unused — fitness floor comes from velocity strictness_resolver",
+    "trading_strictness_profile": "Unused — strictness morphs from live ATR velocity per instrument"
+  },
   "instruments": {
     "gold": {
       "enabled": true,
@@ -37,6 +48,7 @@
     "nasdaq_100": {
       "enabled": true,
       "reward_multiple": 3.0,
+      "risk_cap_gbp": 200,
       "spread_to_atr_max": 0.45,
       "trading_session_whitelist": [
         "london_us_overlap",

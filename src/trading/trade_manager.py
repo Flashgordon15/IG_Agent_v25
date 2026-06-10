@@ -49,6 +49,7 @@ class TradeManager:
         self._last_ig_limit: dict[str, float] = {}
         self._limit_ext_count: dict[int, int] = {}
         self._gone_deals: set[str] = set()
+        self._capital_recycle_applied: set[int] = set()
 
     @staticmethod
     def confidence_band(confidence: float) -> str:
@@ -266,6 +267,27 @@ class TradeManager:
             if friday_msg:
                 messages.extend(friday_msg)
                 continue
+
+            recycle_msgs: list[str] = []
+            try:
+                recycle_msgs = self._apply_capital_recycle_breakeven(
+                    market,
+                    side,
+                    trade_id,
+                    entry,
+                    stop,
+                    target,
+                    px,
+                    tr,
+                )
+            except Exception as e:
+                log_engine(
+                    f"capital_recycle skipped trade={trade_id} {market}: "
+                    f"{type(e).__name__}: {e}"
+                )
+            if recycle_msgs:
+                messages.extend(recycle_msgs)
+                stop = self._current_stop(trade_id, stop)
 
             prev_stop = stop
             prev_target = target
@@ -546,6 +568,113 @@ class TradeManager:
 
     def _profit_points(self, side: str, entry: float, px: float) -> float:
         return (px - entry) if side == "BUY" else (entry - px)
+
+    def _trade_age_minutes(self, tr: Any) -> float | None:
+        opened_at_raw = tr["opened_at"] if "opened_at" in tr.keys() else None
+        if not opened_at_raw:
+            return None
+        try:
+            opened_dt = datetime.fromisoformat(str(opened_at_raw).replace("Z", ""))
+            return (datetime.utcnow() - opened_dt).total_seconds() / 60.0
+        except Exception:
+            return None
+
+    def _apply_capital_recycle_breakeven(
+        self,
+        market: str,
+        side: str,
+        trade_id: int,
+        entry: float,
+        stop: float,
+        target: float,
+        px: float,
+        tr: Any,
+    ) -> list[str]:
+        """Move stop to BE+spread lock on stale sideways trades in low-vol regimes."""
+        try:
+            return self._apply_capital_recycle_breakeven_impl(
+                market,
+                side,
+                trade_id,
+                entry,
+                stop,
+                target,
+                px,
+                tr,
+            )
+        except Exception as e:
+            log_engine(
+                f"capital_recycle error trade={trade_id} {market}: "
+                f"{type(e).__name__}: {e}"
+            )
+            return []
+
+    def _apply_capital_recycle_breakeven_impl(
+        self,
+        market: str,
+        side: str,
+        trade_id: int,
+        entry: float,
+        stop: float,
+        target: float,
+        px: float,
+        tr: Any,
+    ) -> list[str]:
+        """Internal capital recycle — must not raise (caller also guarded)."""
+        if not self._cfg.get("capital_recycle_enabled", True):
+            return []
+        if trade_id in self._capital_recycle_applied:
+            return []
+        age_mins = self._trade_age_minutes(tr)
+        if age_mins is None:
+            return []
+        min_age = float(
+            self._cfg.get(
+                "capital_recycle_age_minutes",
+                45,
+            )
+        )
+        lock_pts = float(
+            self._cfg.get(
+                "capital_recycle_breakeven_lock_points",
+                1.0,
+            )
+        )
+        from execution.adaptive_engine import (
+            capital_recycle_breakeven_stop,
+            capital_recycle_eligible,
+        )
+
+        if not capital_recycle_eligible(
+            age_minutes=age_mins,
+            side=side,
+            entry=entry,
+            stop=stop,
+            target=target,
+            px=px,
+            market=market,
+            min_age_minutes=min_age,
+        ):
+            return []
+        be_stop = capital_recycle_breakeven_stop(side, entry, lock_pts)
+        if side == "BUY" and stop >= be_stop:
+            return []
+        if side == "SELL" and stop <= be_stop:
+            return []
+        self.store.update_stop(
+            trade_id,
+            be_stop,
+            f" | Capital recycle BE+{lock_pts:.0f} ({age_mins:.0f}m low-vol)",
+        )
+        self._capital_recycle_applied.add(trade_id)
+        msg = (
+            f"CAPITAL RECYCLE | {market} {side} | stop → {be_stop:.1f} "
+            f"({age_mins:.0f}m sideways, low vol)"
+        )
+        log_engine(msg)
+        if self.on_alert:
+            self.on_alert(msg)
+        return [msg]
 
     def _check_max_position_age(
         self,

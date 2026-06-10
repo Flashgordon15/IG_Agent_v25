@@ -115,7 +115,16 @@ def apply_config_defaults(config: dict[str, Any]) -> dict[str, Any]:
     ):
         out["max_positions_per_epic"] = int(out.get("max_open_positions", 1))
     if "telegram" not in out or not isinstance(out.get("telegram"), dict):
-        out["telegram"] = {"enabled": False, "bot_token": "", "chat_id": ""}
+        out["telegram"] = {
+            "enabled": False,
+            "bot_token": "",
+            "chat_id": "",
+            "executive_status_only": True,
+        }
+    else:
+        tg = out["telegram"]
+        if "executive_status_only" not in tg:
+            tg["executive_status_only"] = True
     return out
 
 

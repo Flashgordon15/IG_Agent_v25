@@ -15,6 +15,7 @@ from system.engine_log import log_engine
 
 _LONDON = ZoneInfo("Europe/London")
 _HOURLY_INTERVAL_SEC = 3600.0
+_FIRST_REPORT_DELAY_SEC = 60.0
 _hourly_stop = threading.Event()
 _hourly_thread: threading.Thread | None = None
 _hourly_lock = threading.RLock()
@@ -162,6 +163,29 @@ def format_hourly_executive_report(state: dict[str, Any]) -> str:
     )
 
 
+def send_executive_test_report() -> bool:
+    """Send a one-off preview of the hourly executive report (manual verification)."""
+    state = build_executive_report_state()
+    body = format_hourly_executive_report(state)
+    text = f"🧪 TEST — Hourly Executive Preview\n{body}"
+    try:
+        from system.telegram_notifier import get_telegram_notifier
+
+        notifier = get_telegram_notifier()
+        if notifier is None or not notifier.enabled:
+            log_engine("executive test report skipped — telegram disabled")
+            return False
+        ok = notifier.send_now(text)
+        if ok:
+            log_engine("executive test report sent")
+        else:
+            log_engine("executive test report send failed")
+        return ok
+    except Exception as e:
+        log_engine(f"executive test report error: {type(e).__name__}: {e}")
+        return False
+
+
 def send_hourly_executive_report(state: dict[str, Any] | None = None) -> bool:
     """
     Send the v29 hourly executive status update.
@@ -203,8 +227,10 @@ def start_hourly_executive_telegram_scheduler(
         _hourly_stop.clear()
 
         def _loop() -> None:
-            # First report after one full interval (avoid duplicate with startup alert).
-            while not _hourly_stop.wait(interval_sec):
+            # First report shortly after boot; recurring reports every hour.
+            if _hourly_stop.wait(_FIRST_REPORT_DELAY_SEC):
+                return
+            while True:
                 try:
                     if is_agent_active():
                         send_hourly_executive_report()
@@ -212,6 +238,8 @@ def start_hourly_executive_telegram_scheduler(
                     log_engine(
                         f"hourly executive scheduler tick failed: {type(e).__name__}: {e}"
                     )
+                if _hourly_stop.wait(interval_sec):
+                    break
 
         _hourly_thread = threading.Thread(
             target=_loop,
@@ -220,7 +248,9 @@ def start_hourly_executive_telegram_scheduler(
         )
         _hourly_thread.start()
         log_engine(
-            f"hourly executive telegram scheduler started (interval {interval_sec / 60:.0f}m)"
+            f"hourly executive telegram scheduler started "
+            f"(first report in {_FIRST_REPORT_DELAY_SEC / 60:.0f}m, then every "
+            f"{interval_sec / 60:.0f}m)"
         )
 
 

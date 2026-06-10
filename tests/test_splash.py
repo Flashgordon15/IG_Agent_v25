@@ -22,14 +22,18 @@ class SplashTests(unittest.TestCase):
             with patch("api.dashboard_data.version_json_path", return_value=path):
                 state = read_version_state()
             self.assertFalse(state["shown"])
-            self.assertEqual(state["version"], "25.5.0")
+            self.assertEqual(state["version"], "29.0.0")
 
     def test_shown_true_in_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "version.json"
             path.write_text(
                 json.dumps(
-                    {"version": "25.5.0", "shown": True, "shown_for_version": "25.5.0"}
+                    {
+                        "version": "29.0.0",
+                        "shown": True,
+                        "shown_for_version": "29.0.0",
+                    }
                 ),
                 encoding="utf-8",
             )

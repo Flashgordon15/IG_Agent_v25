@@ -31,7 +31,7 @@ class CorrelationOpenBookTests(unittest.TestCase):
     def setUp(self) -> None:
         reset_correlation_guard_for_tests()
 
-    def test_blocks_second_us_index_short(self) -> None:
+    def test_allows_second_us_index_short(self) -> None:
         positions = [
             {"epic": "IX.D.DOW.IFM.IP", "side": "SELL", "size": -0.5},
         ]
@@ -40,16 +40,40 @@ class CorrelationOpenBookTests(unittest.TestCase):
             "SELL",
             positions,
         )
+        self.assertTrue(ok)
+        self.assertEqual(detail, "")
+
+    def test_blocks_at_us_index_short_cap(self) -> None:
+        us = frozenset(
+            {
+                "IX.D.DOW.IFM.IP",
+                "IX.D.NASDAQ.IFM.IP",
+                "IX.D.SP500.IFM.IP",
+            }
+        )
+        with patch("execution.correlation_guard._us_index_epics", return_value=us):
+            positions = [
+                {"epic": "IX.D.DOW.IFM.IP", "side": "SELL", "size": -0.5},
+                {"epic": "IX.D.NASDAQ.IFM.IP", "side": "SELL", "size": -0.5},
+            ]
+            ok, detail = check_open_book_limits(
+                "IX.D.SP500.IFM.IP",
+                "SELL",
+                positions,
+            )
         self.assertFalse(ok)
         self.assertIn("US index shorts", detail)
 
-    def test_blocks_third_global_open(self) -> None:
+    def test_blocks_sixth_global_open(self) -> None:
         positions = [
             {"epic": "CS.D.CFPGOLD.CFP.IP", "side": "SELL", "size": -1},
             {"epic": "IX.D.NIKKEI.IFM.IP", "side": "BUY", "size": 1},
+            {"epic": "CS.D.EURUSD.CFD.IP", "side": "BUY", "size": 1},
+            {"epic": "IX.D.DOW.IFM.IP", "side": "SELL", "size": -0.5},
+            {"epic": "IX.D.NASDAQ.IFM.IP", "side": "BUY", "size": 0.5},
         ]
         ok, detail = check_open_book_limits(
-            "CS.D.EURUSD.CFD.IP",
+            "CS.D.USOil.CFD.IP",
             "BUY",
             positions,
         )

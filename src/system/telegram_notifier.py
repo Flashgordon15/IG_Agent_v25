@@ -93,11 +93,51 @@ def stop_telegram_heartbeat() -> None:
     _heartbeat_stop.set()
 
 
+def executive_status_only_enabled(cfg: Any | None = None) -> bool:
+    """When True, status noise is suppressed; hourly executive + trade fills only."""
+    try:
+        if cfg is None:
+            from system.config_loader import get_config
+
+            cfg = get_config()
+        tg = getattr(cfg, "telegram", None)
+        if isinstance(tg, dict):
+            return bool(tg.get("executive_status_only", True))
+        return True
+    except Exception:
+        return True
+
+
+def _preserve_alert_in_executive_mode(message: str) -> bool:
+    """Trade fills and true emergencies still notify when executive mode is on."""
+    body = str(message or "").strip()
+    if not body:
+        return False
+    if body.startswith(("✅ WIN", "❌ LOSS")):
+        return True
+    lower = body.lower()
+    preserve = (
+        "drawdown limit",
+        "agent crash",
+        "agent stopped",
+        "trading loops stopped",
+        "emergency",
+        "order confirmation unresolved",
+        "startup blocked",
+        "watchdog fatal",
+        "manual intervention",
+    )
+    return any(token in lower for token in preserve)
+
+
 def send_critical_alert(message: str) -> bool:
     """Send an immediate critical alert (blocking). Logs all failures; never raises."""
     body = str(message or "").strip()
     if not body:
         log_engine("telegram critical alert skipped: empty message")
+        return False
+    if executive_status_only_enabled() and not _preserve_alert_in_executive_mode(body):
+        log_engine(f"telegram status alert suppressed (executive mode): {body[:100]}")
         return False
     if body.startswith("🚨 IG Agent CRITICAL"):
         text = body
@@ -125,6 +165,9 @@ def send_critical_alert(message: str) -> bool:
 
 def send_startup_test() -> bool:
     """Verify Telegram delivery at bootstrap. Logs clearly on failure."""
+    if executive_status_only_enabled():
+        log_engine("telegram startup test skipped — executive status mode")
+        return False
     try:
         notifier = get_telegram_notifier()
         if notifier is None or not notifier.enabled:
@@ -230,6 +273,8 @@ class TelegramNotifier:
     def _alert_deduped(
         self, key: str, text: str, *, dedupe_sec: float = _ALERT_DEDUPE_SEC
     ) -> None:
+        if executive_status_only_enabled():
+            return
         now = time.time()
         with _lock:
             last = self._alert_last_sent.get(key, 0.0)
@@ -260,6 +305,8 @@ class TelegramNotifier:
         market_count: int = 0,
         points_state: str = "CAUTION",
     ) -> None:
+        if executive_status_only_enabled():
+            return
         markets_line = f"Markets: {market_count} active | " if market_count else ""
         self.send_now(f"🟢 IG Agent v25 started\n{markets_line}Points: {points_state}")
 
@@ -352,6 +399,8 @@ class TelegramNotifier:
         self._send_async("\n".join(lines))
 
     def send_heartbeat(self, snapshot: dict[str, Any]) -> None:
+        if executive_status_only_enabled():
+            return
         fitness = float(snapshot.get("fitness") or 0)
         signal = float(snapshot.get("signal") or 0)
         stream = str(snapshot.get("stream") or "DISCONNECTED")

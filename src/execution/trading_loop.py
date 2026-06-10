@@ -9,9 +9,13 @@ from data.journal import DecisionJournal
 from data.models import Quote
 from execution.execution_engine import ExecutionEngine
 from execution.live_trade_gate import LiveTradeGate
-from execution.types import ExecutionResult, TradeSignal
-from signals.signal_engine import SignalEngine, SignalResult
 from execution.order_validator import ValidationResult
+from execution.types import (
+    ExecutionResult,
+    TradeSignal,
+    normalize_gate_execution_params,
+)
+from signals.signal_engine import SignalEngine, SignalResult
 from system.demo_execution_trace import trace_execution, update_demo_diagnostics
 from system.engine_log import log_engine
 from system.trade_audit import log_trade_audit
@@ -19,7 +23,6 @@ from system.trade_lifecycle_bus import (
     STAGE_RISK,
     STAGE_SIGNAL,
     STAGE_VALIDATION,
-    STATUS_FAIL,
     STATUS_OK,
     STATUS_SKIP,
     get_lifecycle_bus,
@@ -85,6 +88,7 @@ class TradingLoop:
         quote: Quote,
         *,
         prefetched_signal: SignalResult | None = None,
+        gate_execution_params: dict[str, Any] | None = None,
     ) -> TickOutcome:
         from system.market_watch.japan225_session import (
             japan225_strategy_paused,
@@ -145,7 +149,12 @@ class TradingLoop:
             "TradingLoop.process_tick",
             decision="tick started",
             next_fn="SignalEngine.evaluate",
-            params={"market": market, "epic": epic, "bid": quote.bid, "offer": quote.offer},
+            params={
+                "market": market,
+                "epic": epic,
+                "bid": quote.bid,
+                "offer": quote.offer,
+            },
         )
         self.signal_engine.add_quote(market, quote)
         position_messages = self.execution_engine.update_positions(market, epic, quote)
@@ -155,7 +164,9 @@ class TradingLoop:
                 "SIGNAL",
                 "SignalEngine.evaluate",
                 decision=f"using gate signal={sig.signal} conf={sig.adjusted_confidence:.1f}%",
-                next_fn="OrderValidator.validate" if sig.signal in ("BUY", "SELL") else "end",
+                next_fn="OrderValidator.validate"
+                if sig.signal in ("BUY", "SELL")
+                else "end",
                 params={"market": market, "prefetched": True},
             )
         else:
@@ -181,10 +192,18 @@ class TradingLoop:
             "SIGNAL",
             "SignalEngine.evaluate",
             decision=f"signal={sig.signal} conf={sig.adjusted_confidence:.1f}%",
-            next_fn="OrderValidator.validate" if sig.signal in ("BUY", "SELL") else "end",
-            params={"signal": sig.signal, "setup_key": sig.setup_key, "notes": sig.notes[:120]},
+            next_fn="OrderValidator.validate"
+            if sig.signal in ("BUY", "SELL")
+            else "end",
+            params={
+                "signal": sig.signal,
+                "setup_key": sig.setup_key,
+                "notes": sig.notes[:120],
+            },
         )
-        update_demo_diagnostics(last_signal=sig.signal, auto_trade_enabled=self.auto_trade)
+        update_demo_diagnostics(
+            last_signal=sig.signal, auto_trade_enabled=self.auto_trade
+        )
 
         trade_signal = TradeSignal(
             market=market,
@@ -196,6 +215,9 @@ class TradingLoop:
             quote=quote,
             snapshot=sig.snapshot,
             notes=sig.notes,
+            gate_execution_params=normalize_gate_execution_params(
+                gate_execution_params
+            ),
         )
         trace_execution(
             "VALIDATION",
@@ -216,7 +238,12 @@ class TradingLoop:
                     direction=sig.signal,
                     setup_key=sig.setup_key,
                 )
-                bus.emit(STAGE_VALIDATION, STATUS_OK, "All checks passed", checks=validation.checks)
+                bus.emit(
+                    STAGE_VALIDATION,
+                    STATUS_OK,
+                    "All checks passed",
+                    checks=validation.checks,
+                )
             else:
                 bus.record_validation_block(
                     epic=epic,
@@ -275,7 +302,9 @@ class TradingLoop:
         if self.broker_gate is not None:
             ok, gate_reason = self.broker_gate()
             if not ok:
-                block_reason = gate_reason or "IG connection unavailable — trading disabled"
+                block_reason = (
+                    gate_reason or "IG connection unavailable — trading disabled"
+                )
                 update_demo_diagnostics(last_rejection=block_reason)
         elif self.broker_connected is not None and not self.broker_connected():
             block_reason = "IG connection unavailable — trading disabled"
@@ -330,7 +359,9 @@ class TradingLoop:
                 decision="SKIPPED execute_trade — auto_trade disabled",
                 params={"auto_trade": self.auto_trade},
             )
-            update_demo_diagnostics(execute_trade_called=False, last_rejection="auto_trade disabled")
+            update_demo_diagnostics(
+                execute_trade_called=False, last_rejection="auto_trade disabled"
+            )
         elif sig.signal not in ("BUY", "SELL"):
             trace_execution(
                 "EXECUTION",
@@ -356,9 +387,7 @@ class TradingLoop:
                 update_demo_diagnostics(last_rejection=block_reason)
 
         if sig.signal in ("BUY", "SELL") and validation.allowed and block_reason:
-            log_engine(
-                f"EXEC BLOCKED market={market} epic={epic} — {block_reason}"
-            )
+            log_engine(f"EXEC BLOCKED market={market} epic={epic} — {block_reason}")
             trace_execution(
                 "EXECUTION",
                 "TradingLoop.process_tick",
@@ -386,15 +415,16 @@ class TradingLoop:
 
         if can_execute:
             cfg = self.execution_engine.config
+            gate_exec = trade_signal.gate_execution_params
             exec_size = float(
-                self.execution_engine.get_execution_settings(trade_signal).get(
-                    "size", cfg.trade_size
-                )
+                (gate_exec or {}).get("actual_size")
+                or self.execution_engine.config.trade_size
             )
             log_engine(
                 f"EXEC SUBMIT market={market} epic={epic} "
                 f"dir={sig.signal} conf={sig.adjusted_confidence:.1f}% "
-                f"size={exec_size} allow_live_trading={cfg.allow_live_trading} "
+                f"size={exec_size} gate_sourced={bool(gate_exec)} "
+                f"allow_live_trading={cfg.allow_live_trading} "
                 f"dry_run={cfg.dry_run}"
             )
             trace_execution(
@@ -412,7 +442,9 @@ class TradingLoop:
                 signal=sig.signal,
                 signal_time=quote.time.isoformat(),
             )
-            execution = self.execution_engine.execute_trade(trade_signal, prevalidated=True)
+            execution = self.execution_engine.execute_trade(
+                trade_signal, prevalidated=True
+            )
             trace_execution(
                 "EXECUTION",
                 "ExecutionEngine.execute_trade",
@@ -426,14 +458,20 @@ class TradingLoop:
             if execution.action == "SUBMITTED":
                 log_engine("Order submitted — background worker handling confirm")
             elif not execution.success:
-                update_demo_diagnostics(last_rejection=execution.rejection_reason or execution.action)
+                update_demo_diagnostics(
+                    last_rejection=execution.rejection_reason or execution.action
+                )
                 if self.live_gate is not None and execution.rejection_reason:
                     self.live_gate.note_broker_rejection(
                         execution.rejection_reason,
-                        open_count=self.execution_engine.trade_tracker.count_open_for_epic(epic),
+                        open_count=self.execution_engine.trade_tracker.count_open_for_epic(
+                            epic
+                        ),
                     )
                 if sig.signal in ("BUY", "SELL") and not validation.reasons:
-                    bus.finalize_failure(reason=execution.rejection_reason or execution.action)
+                    bus.finalize_failure(
+                        reason=execution.rejection_reason or execution.action
+                    )
                 log_engine(
                     f"trade rejected reason={execution.rejection_reason or execution.action}"
                 )

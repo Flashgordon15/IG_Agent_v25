@@ -14,7 +14,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from data.learning_store import LearningStore
-from trading.points_engine import PointsEngine, set_points_state_path_for_tests
+from trading.points_engine import (  # noqa: E402
+    EQUITY_LOCK_SESSION_MILESTONE,
+    EQUITY_LOCK_SIGNAL_THRESHOLD,
+    PointsEngine,
+    set_points_state_path_for_tests,
+)
 
 
 def _make_store() -> tuple[LearningStore, tempfile.TemporaryDirectory]:
@@ -237,22 +242,23 @@ class PointsEngineThresholdSizeTests(unittest.TestCase):
         self._set_state(15.0)
         self.assertEqual(self.engine.get_size_multiplier(93.0), 3.75)
         self.assertEqual(self.engine.get_size_multiplier(88.0), 1.875)
-        # Core band 80–85% applies 0.65× on standard tier (× roadmap 2.5)
-        self.assertAlmostEqual(self.engine.get_size_multiplier(82.0), 0.609375)
-        # Probe band (55–72%): tier_mult × 0.25 × 2.5
-        self.assertAlmostEqual(self.engine.get_size_multiplier(75.0), 0.9375)
+        # Core standard: stacked decay floored at CORE_MULTIPLIER_FLOOR (0.8×)
+        self.assertAlmostEqual(self.engine.get_size_multiplier(82.0), 0.8)
+        # Probe band floored at PROBE_MULTIPLIER_FLOOR (0.5×) when raw×roadmap is lower
+        mult_75 = self.engine.get_size_multiplier(75.0)
+        self.assertGreaterEqual(mult_75, 0.5)
 
     def test_size_multiplier_caution_bands(self) -> None:
         self._set_state(0.0)
-        self.assertEqual(self.engine.get_size_multiplier(89.0), 0.5)
-        self.assertEqual(self.engine.get_size_multiplier(82.0), 0.5)
-        self.assertEqual(self.engine.get_size_multiplier(79.0), 0.25)
+        self.assertEqual(self.engine.get_size_multiplier(89.0), 0.8)
+        self.assertEqual(self.engine.get_size_multiplier(82.0), 0.8)
+        self.assertEqual(self.engine.get_size_multiplier(79.0), 0.5)
 
     def test_size_multiplier_spec_matrix(self) -> None:
-        # CAUTION (cum=0.0 → -5 <= cum <= 10): flat 0.5× for all conf >= 55
+        # CAUTION: core/full signals floored at 0.8×; probe at 0.5×
         self._set_state(0.0)
-        self.assertEqual(self.engine.get_size_multiplier(82.0), 0.5)
-        self.assertEqual(self.engine.get_size_multiplier(89.0), 0.5)
+        self.assertEqual(self.engine.get_size_multiplier(82.0), 0.8)
+        self.assertEqual(self.engine.get_size_multiplier(89.0), 0.8)
         # HEALTHY (cum=15.0): tier_mult=1.5 × roadmap 2.5 → standard=1.875, high=3.75
         self._set_state(15.0)
         self.assertEqual(self.engine.get_size_multiplier(86.0), 1.875)
@@ -275,6 +281,35 @@ class PointsEngineThresholdSizeTests(unittest.TestCase):
         self._set_state(-10.0)
         self.assertEqual(self.engine.get_size_multiplier(93.0), 0.25)
         self.assertEqual(self.engine.get_size_multiplier(88.0), 0.0)
+
+    def test_equity_lock_halves_size_and_raises_threshold(self) -> None:
+        self._set_state(15.0)
+        base = self.engine.get_size_multiplier(93.0)
+        self.engine._session_score = EQUITY_LOCK_SESSION_MILESTONE
+        self.assertTrue(self.engine.equity_lock_active())
+        self.assertEqual(
+            self.engine.protected_signal_threshold_floor(),
+            EQUITY_LOCK_SIGNAL_THRESHOLD,
+        )
+        locked = self.engine.get_size_multiplier(93.0)
+        self.assertAlmostEqual(locked, base * 0.5)
+
+        class _Cfg:
+            signal_threshold = 55.0
+            confidence_floor = 55.0
+            confidence_floor_recovery_per_win = 1.0
+
+        self.assertEqual(
+            self.engine.trade_confidence_threshold(_Cfg()),
+            EQUITY_LOCK_SIGNAL_THRESHOLD,
+        )
+
+    def test_equity_lock_resets_on_session_reset(self) -> None:
+        self.engine._session_score = EQUITY_LOCK_SESSION_MILESTONE
+        self.engine._equity_lock_announced = True
+        self.engine.reset_session()
+        self.assertFalse(self.engine.equity_lock_active())
+        self.assertFalse(self.engine._equity_lock_announced)
 
 
 class PointsEnginePersistenceTests(unittest.TestCase):

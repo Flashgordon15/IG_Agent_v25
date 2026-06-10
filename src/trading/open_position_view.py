@@ -4,7 +4,7 @@ Dashboard open-position rows — IG sync fields + per-tick quote unrealized P&L.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from data.models import Quote
@@ -221,6 +221,89 @@ def normalize_sync_position(pos: dict[str, Any]) -> dict[str, Any]:
         "point_value": point_value,
         "currency": currency,
     }
+
+
+def tick_has_open_positions_for_epic(tick: dict[str, Any], epic: str) -> bool:
+    """True when the dashboard tick holds at least one open row for epic."""
+    epic_key = normalize_epic(epic)
+    if not epic_key:
+        return False
+    positions = tick.get("positions")
+    if isinstance(positions, list):
+        for pos in positions:
+            if isinstance(pos, dict) and row_belongs_to_epic(pos, epic_key):
+                return True
+    markets = tick.get("markets")
+    if isinstance(markets, dict):
+        mslice = markets.get(epic_key)
+        if isinstance(mslice, dict):
+            slice_positions = mslice.get("positions")
+            if isinstance(slice_positions, list) and slice_positions:
+                return True
+    return False
+
+
+def apply_position_view_refresh(
+    tick: dict[str, Any],
+    epic: str,
+    bid: float,
+    offer: float,
+    *,
+    point_value_gbp: float = 1.0,
+) -> bool:
+    """Recompute open-position marks/P&L in-memory from a streaming quote."""
+    epic_key = normalize_epic(epic)
+    if not epic_key or bid <= 0 or offer <= 0:
+        return False
+    if not tick_has_open_positions_for_epic(tick, epic_key):
+        return False
+    quote = Quote(datetime.now(timezone.utc), bid, offer)
+    updated = False
+
+    markets = tick.get("markets")
+    if isinstance(markets, dict):
+        mslice = markets.get(epic_key)
+        if isinstance(mslice, dict):
+            slice_positions = mslice.get("positions")
+            if isinstance(slice_positions, list) and slice_positions:
+                mslice["positions"] = enrich_positions_with_quote(
+                    slice_positions,
+                    quote,
+                    point_value_gbp=point_value_gbp,
+                    epic=epic_key,
+                )
+                updated = True
+
+    positions = tick.get("positions")
+    if isinstance(positions, list) and positions:
+        tick["positions"] = enrich_positions_with_quote(
+            positions,
+            quote,
+            point_value_gbp=point_value_gbp,
+            epic=epic_key,
+        )
+        updated = True
+    return updated
+
+
+def force_position_view_refresh(
+    epic: str,
+    bid: float,
+    offer: float,
+    *,
+    tick_age_s: float | None = None,
+    stream_status: str = "LIVE",
+) -> bool:
+    """Push an immediate dashboard position refresh from a live quote tick."""
+    from api.snapshot_store import force_position_view_refresh as _store_refresh
+
+    return _store_refresh(
+        epic,
+        bid,
+        offer,
+        tick_age_s=tick_age_s,
+        stream_status=stream_status,
+    )
 
 
 def enrich_positions_with_quote(

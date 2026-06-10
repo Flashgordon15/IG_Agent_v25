@@ -290,6 +290,52 @@ class ExecutionEngine:
         )
         return settings
 
+    def _resolve_execution_params(
+        self,
+        signal: TradeSignal,
+        *,
+        gate_execution_params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """
+        Build order params. When gate_execution_params is set, size/stop/limit
+        come from risk_validation (no duplicate points/risk-band size recompute).
+        """
+        from execution.size_floors import apply_operational_size_floor
+        from execution.types import normalize_gate_execution_params
+
+        gate = normalize_gate_execution_params(
+            gate_execution_params or signal.gate_execution_params
+        )
+        if gate is not None:
+            stop_pts = float(gate["stop_points"])
+            limit_pts = float(gate["limit_points"])
+            if limit_pts <= 0:
+                limit_pts = stop_pts * float(self.config.reward_multiple)
+            size = apply_operational_size_floor(float(gate["actual_size"]), signal.epic)
+            adaptive = self._adaptive.settings(
+                signal.setup_key, signal.adjusted_confidence, signal.snapshot
+            )
+            notes = str(adaptive.get("notes") or "")
+            if notes:
+                notes = f"{notes}, gate-approved size"
+            else:
+                notes = "gate-approved size/stop from risk_validation"
+            return {
+                **adaptive,
+                "size": size,
+                "risk": stop_pts,
+                "limit": limit_pts,
+                "gate_sourced": True,
+                "notes": notes,
+            }
+
+        settings = self.get_execution_settings(signal)
+        settings["size"] = apply_operational_size_floor(
+            float(settings.get("size", self.config.trade_size)),
+            signal.epic,
+        )
+        return settings
+
     def execute_trade(
         self, signal: TradeSignal, *, prevalidated: bool = False
     ) -> ExecutionResult:
@@ -334,11 +380,11 @@ class ExecutionEngine:
                 success=False,
                 action="REJECTED",
                 rejection_reason=reason,
-                execution_params=self.get_execution_settings(signal),
+                execution_params=self._resolve_execution_params(signal),
                 messages=validation.reasons,
             )
 
-        execution_params = self.get_execution_settings(signal)
+        execution_params = self._resolve_execution_params(signal)
         trace_execution(
             "RISK",
             "RiskManager.assess",
@@ -399,9 +445,11 @@ class ExecutionEngine:
                 execution_params=execution_params,
             )
 
+        from execution.size_floors import apply_operational_size_floor
+
         execution_params = {
             **execution_params,
-            "size": risk.size,
+            "size": apply_operational_size_floor(risk.size, signal.epic),
             "risk": risk.stop_distance,
             "limit": risk.limit_distance,
         }

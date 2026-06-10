@@ -1,5 +1,5 @@
 """
-Aggregate trade readiness from the 7 evaluation gates.
+Aggregate trade readiness from entry gates.
 
 100% means every gate has passed — that is the actual requirement to arm execution.
 Partial credit on continuous gates (environment fitness, signal confidence) and
@@ -10,9 +10,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from api.snapshot import GATE_NAMES
 from trading.environment_scorer import GATE_PASS_MIN
 
-TRADE_GATE_COUNT = 7
+TRADE_GATE_COUNT = len(GATE_NAMES)
 COLD_START_BARS_REQUIRED = 6
 
 
@@ -93,10 +94,8 @@ def compute_trade_readiness(
     if fitness_min is None:
         from trading.strictness_resolver import resolve_strictness
 
+        # Offline/default readiness only — live loops pass per-market fitness_min.
         fitness_min = resolve_strictness().fitness_floor
-    n = gate_count if gate_count is not None else TRADE_GATE_COUNT
-    if n <= 0:
-        n = TRADE_GATE_COUNT
 
     items = list(gates or [])
     if not items:
@@ -105,6 +104,10 @@ def compute_trade_readiness(
             "remaining_pct": 100,
             "label": "0% — 100% remaining before trade",
         }
+
+    n = len(items) if gate_count is None else int(gate_count)
+    if n <= 0:
+        n = len(items)
 
     total = sum(gate_contribution(g, fitness_min=fitness_min) for g in items)
     ratio = total / float(n)

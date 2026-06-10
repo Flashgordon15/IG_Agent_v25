@@ -57,12 +57,15 @@ _liquidity_shield_blocks: list[float] = []
 
 def record_liquidity_shield_block(*, epic: str = "") -> None:
     """In-memory tally for hourly executive reports (no disk writes)."""
+    global _liquidity_shield_blocks
     _ = epic
     now = time.time()
     with _lock:
         _liquidity_shield_blocks.append(now)
         cutoff = now - 3600.0
-        _liquidity_shield_blocks = [t for t in _liquidity_shield_blocks if t >= cutoff]
+        _liquidity_shield_blocks[:] = [
+            t for t in _liquidity_shield_blocks if t >= cutoff
+        ]
 
 
 def count_liquidity_shield_blocks_last_hour() -> int:

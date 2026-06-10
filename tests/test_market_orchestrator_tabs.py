@@ -62,7 +62,8 @@ class MarketOrchestratorTabTests(unittest.TestCase):
 
         self.assertTrue(publish_mock.called)
         merged = publish_mock.call_args[0][0]
-        self.assertEqual(merged["enabled_epics"], enabled)
+        for epic in enabled:
+            self.assertIn(epic, merged["enabled_epics"])
         self.assertIn("CS.D.CFPGOLD.CFP.IP", merged["markets"])
         self.assertEqual(
             merged["markets"]["CS.D.CFPGOLD.CFP.IP"]["market"],

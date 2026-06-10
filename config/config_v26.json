@@ -78,8 +78,8 @@
     "_note": "Probe 55\u201380% \u2192 \u00a350\u201380 risk; core 80\u201385% \u2192 0.65\u00d7; full \u226585% (operator override floor 55%)"
   },
   "correlation_guard": {
-    "max_concurrent_us_index_shorts": 1,
-    "max_open_positions_global": 2,
+    "max_concurrent_us_index_shorts": 2,
+    "max_open_positions_global": 5,
     "us_index_epics": [
       "IX.D.DOW.IFM.IP",
       "IX.D.NASDAQ.IFM.IP"

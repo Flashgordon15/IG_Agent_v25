@@ -90,9 +90,11 @@ def score_trend_factor(row_15m: pd.Series) -> float:
     rsi_val = float(row_15m.get("rsi", 50))
     ema_bull = fast > slow
     rsi_bull = rsi_val > 50
-    if ema_bull and rsi_bull:
+    ema_bear = fast < slow
+    rsi_bear = rsi_val < 50
+    if (ema_bull and rsi_bull) or (ema_bear and rsi_bear):
         return FACTOR_TREND_MAX
-    if ema_bull or rsi_bull:
+    if ema_bull or rsi_bull or ema_bear or rsi_bear:
         return FACTOR_TREND_MAX / 2.0
     return 0.0
 

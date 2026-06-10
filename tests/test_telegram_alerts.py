@@ -19,8 +19,11 @@ def test_critical_alert_function_exists() -> None:
     assert callable(send_critical_alert)
 
 
+@patch("system.telegram_notifier.executive_status_only_enabled", return_value=False)
 @patch("system.telegram_notifier.get_telegram_notifier")
-def test_send_critical_alert_prefixes_and_sends(mock_get: MagicMock) -> None:
+def test_send_critical_alert_prefixes_and_sends(
+    mock_get: MagicMock, _exec_mode: MagicMock
+) -> None:
     notifier = MagicMock()
     notifier.enabled = True
     notifier.send_now.return_value = True
