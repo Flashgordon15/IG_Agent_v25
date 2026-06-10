@@ -13,6 +13,44 @@ from system.config import Config
 from system.engine_log import log_engine
 from trading.trading_loop import TradingLoop
 
+_ORCHESTRATOR_REF: "MarketOrchestrator | None" = None
+
+# Layer 3 — £1k/day global rotation matrix (indices, FX, metals).
+# Dashboard + routing monitor all epics; each TradingLoop thread stays epic-scoped.
+GLOBAL_ROTATION_UNIVERSE: tuple[str, ...] = (
+    # Major global indices
+    "IX.D.NIKKEI.IFM.IP",
+    "IX.D.DOW.IFM.IP",
+    "IX.D.NASDAQ.IFM.IP",
+    "IX.D.DAX.IFM.IP",
+    "IX.D.FTSE.IFM.IP",
+    "IX.D.CAC.IFM.IP",
+    "IX.D.HSI.IFM.IP",
+    "IX.D.ASX.IFM.IP",
+    "IX.D.SPTRD.IFE.IP",
+    # Cross-currency pairs
+    "CS.D.EURUSD.CFD.IP",
+    "CS.D.GBPUSD.CFD.IP",
+    "CS.D.USDJPY.CFD.IP",
+    "CS.D.EURGBP.CFD.IP",
+    "CS.D.AUDUSD.CFD.IP",
+    "CS.D.USDCAD.CFD.IP",
+    "CS.D.USDCHF.CFD.IP",
+    "CS.D.NZDUSD.CFD.IP",
+    "CS.D.EURJPY.CFD.IP",
+    "CS.D.GBPJPY.CFD.IP",
+    # Precious metals & energy
+    "CS.D.CFPGOLD.CFP.IP",
+    "CS.D.CFPSILVER.CFP.IP",
+    "CS.D.CFPPLAT.CFP.IP",
+    "CS.D.CRUDE.CFD.IP",
+)
+
+TOP_ROTATION_SLOTS = 3
+ROTATION_MIN_ONLINE_FOR_FILTER = 3
+_ROTATION_ONLINE_MAX_AGE_SEC = 30.0
+_ROTATION_RANK_FLOOR = 0.01
+
 
 class MarketOrchestrator:
     """Starts/stops per-epic loops and publishes a merged multi-market tick."""
@@ -30,12 +68,20 @@ class MarketOrchestrator:
         self._loops = list(loops)
         self._primary_epic = primary_epic or (loops[0]._epic if loops else "")
         loop_epics = [str(loop._epic) for loop in loops if getattr(loop, "_epic", "")]
-        self._enabled_epics = list(enabled_epics or loop_epics)
+        passed_enabled = list(enabled_epics or loop_epics)
+        universe: list[str] = list(GLOBAL_ROTATION_UNIVERSE)
+        for epic in passed_enabled:
+            key = str(epic or "").strip()
+            if key and key not in universe:
+                universe.append(key)
+        self._enabled_epics = universe
         self._instrument_meta = dict(instrument_meta or {})
         self._snapshots: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._running = False
+        self._active_epics: list[str] = list(passed_enabled)
+        self._active_epics_updated_at: float = 0.0
 
     @property
     def config(self) -> Config:
@@ -61,6 +107,150 @@ class MarketOrchestrator:
 
     def is_running(self) -> bool:
         return self._running
+
+    def _loop_providing_live_data(self, epic: str, loop: TradingLoop) -> bool:
+        """True when epic has a fresh quote or a recent loop snapshot."""
+        try:
+            from system.market_data_hub import get_market_data_hub
+
+            snap = get_market_data_hub().get_snapshot(epic)
+            if (
+                snap is not None
+                and snap.bid > 0
+                and snap.offer > 0
+                and snap.age_seconds() <= _ROTATION_ONLINE_MAX_AGE_SEC
+            ):
+                return True
+        except Exception:
+            pass
+        with self._lock:
+            payload = self._snapshots.get(epic)
+        if isinstance(payload, dict):
+            bid = payload.get("bid")
+            offer = payload.get("offer")
+            if bid and offer and float(bid) > 0 and float(offer) > 0:
+                return True
+        return bool(getattr(loop, "_env", None) is not None)
+
+    def _relative_spread_cost(self, epic: str, loop: TradingLoop) -> float:
+        """Broker spread deviation — prefer env-scorer factor, else live quote ratio."""
+        env = loop._env
+        if env is not None and hasattr(env, "get_factors"):
+            try:
+                from trading.environment_scorer import FACTOR_SPREAD_MAX
+
+                factors = env.get_factors()
+                spread_factor = float(factors.get("spread") or 0.0)
+                if spread_factor > 0:
+                    return max(
+                        FACTOR_SPREAD_MAX / spread_factor,
+                        _ROTATION_RANK_FLOOR,
+                    )
+            except Exception:
+                pass
+
+        current_spread: float | None = None
+        normal_spread: float | None = None
+        try:
+            from system.market_data_hub import get_market_data_hub
+
+            snap = get_market_data_hub().get_snapshot(epic)
+            if snap is not None and snap.bid > 0 and snap.offer > 0:
+                current_spread = float(snap.offer) - float(snap.bid)
+        except Exception:
+            pass
+        if current_spread is None:
+            with self._lock:
+                payload = self._snapshots.get(epic) or {}
+            bid = payload.get("bid")
+            offer = payload.get("offer")
+            if bid is not None and offer is not None:
+                try:
+                    current_spread = float(offer) - float(bid)
+                except (TypeError, ValueError):
+                    current_spread = None
+        if normal_spread is None or normal_spread <= 0:
+            meta = self._instrument_meta.get(epic, {})
+            cfg_pts = meta.get("max_spread_pts")
+            if cfg_pts is not None:
+                try:
+                    normal_spread = float(cfg_pts)
+                except (TypeError, ValueError):
+                    normal_spread = None
+            if normal_spread is None or normal_spread <= 0:
+                normal_spread = max(
+                    current_spread or _ROTATION_RANK_FLOOR, _ROTATION_RANK_FLOOR
+                )
+        if current_spread is None or current_spread <= 0:
+            return max(normal_spread, _ROTATION_RANK_FLOOR)
+        return max(
+            current_spread / max(normal_spread, _ROTATION_RANK_FLOOR),
+            _ROTATION_RANK_FLOOR,
+        )
+
+    def _trend_cleanliness(self, loop: TradingLoop) -> float:
+        """Session-style weighted trend factor (EMA slope / ADX proxy from env scorer)."""
+        env = loop._env
+        if env is None:
+            return _ROTATION_RANK_FLOOR
+        try:
+            if hasattr(env, "get_factors"):
+                factors = env.get_factors()
+                trend = float(factors.get("trend") or 0.0)
+                if trend > 0:
+                    return max(trend, _ROTATION_RANK_FLOOR)
+            last = getattr(env, "_last", None)
+            fitness = float(getattr(last, "total", 0.0) or 0.0)
+            if fitness > 0:
+                return max(fitness * 0.25, _ROTATION_RANK_FLOOR)
+        except Exception:
+            pass
+        return _ROTATION_RANK_FLOOR
+
+    def _rotation_rank_score(self, epic: str, loop: TradingLoop) -> float:
+        trend_cleanliness = self._trend_cleanliness(loop)
+        relative_spread_cost = self._relative_spread_cost(epic, loop)
+        return trend_cleanliness / relative_spread_cost
+
+    def refresh_active_epics(self) -> list[str]:
+        """Layer 3 Hot Market Selector — rank_score = trend_cleanliness / relative_spread_cost."""
+        import time
+
+        ranked_assets: list[tuple[str, float]] = []
+        for loop in self._loops:
+            epic = str(getattr(loop, "_epic", "") or "")
+            if not epic or loop._env is None:
+                continue
+            if not self._loop_providing_live_data(epic, loop):
+                continue
+            try:
+                rank_score = self._rotation_rank_score(epic, loop)
+            except Exception:
+                continue
+            ranked_assets.append((epic, rank_score))
+
+        ranked_assets.sort(key=lambda item: item[1], reverse=True)
+
+        if len(ranked_assets) < ROTATION_MIN_ONLINE_FOR_FILTER:
+            active = [epic for epic, _ in ranked_assets]
+        else:
+            active = [epic for epic, _ in ranked_assets[:TOP_ROTATION_SLOTS]]
+
+        with self._lock:
+            self._active_epics = active
+            self._active_epics_updated_at = time.time()
+        return list(self._active_epics)
+
+    def get_active_epics(self) -> list[str]:
+        with self._lock:
+            return list(self._active_epics)
+
+    @staticmethod
+    def get_global_active_epics() -> list[str]:
+        global _ORCHESTRATOR_REF
+        if _ORCHESTRATOR_REF is None:
+            return []
+        return _ORCHESTRATOR_REF.get_active_epics()
 
     def start(self) -> None:
         if self._running:
@@ -181,6 +371,7 @@ class MarketOrchestrator:
             return
         with self._lock:
             self._snapshots[epic] = payload
+        self.refresh_active_epics()
         self._publish_merged()
 
     def _placeholder_market_slice(self, epic: str) -> dict[str, Any]:
@@ -279,6 +470,7 @@ class MarketOrchestrator:
         merged["orchestrator"] = {
             "loop_count": len(self._loops),
             "primary_epic": self._primary_epic,
+            "active_epics": self.get_active_epics(),
         }
         try:
             publish_tick(merged)
@@ -288,7 +480,10 @@ class MarketOrchestrator:
 
 def attach_snapshot_handlers(orchestrator: MarketOrchestrator) -> None:
     """Wire each loop to feed the orchestrator merge publisher."""
+    global _ORCHESTRATOR_REF
+    _ORCHESTRATOR_REF = orchestrator
     handler: Callable[[dict[str, Any]], None] = orchestrator.on_market_snapshot
     for loop in orchestrator.loops:
         loop._on_snapshot = handler
         loop._publish_snapshots = False
+    orchestrator.refresh_active_epics()

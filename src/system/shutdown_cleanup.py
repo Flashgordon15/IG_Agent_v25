@@ -50,6 +50,12 @@ def mark_manual_stop(*, source: str = "dashboard") -> None:
             encoding="utf-8",
         )
         log_engine(f"manual_stop: flagged (source={source})")
+        try:
+            from system.overnight_supervision import clear_overnight_armed
+
+            clear_overnight_armed()
+        except Exception:
+            pass
     except Exception as e:
         log_engine(f"manual_stop: flag failed: {type(e).__name__}: {e}")
 
@@ -57,7 +63,7 @@ def mark_manual_stop(*, source: str = "dashboard") -> None:
 def clear_manual_stop() -> None:
     try:
         _MANUAL_STOP_FILE.unlink(missing_ok=True)
-    except Exception:
+    except OSError:
         pass
 
 
@@ -208,8 +214,10 @@ def perform_shutdown_cleanup(
     try:
         from api.agent_health import stop_watchdog
 
-        stop_watchdog()
-        log_engine("shutdown cleanup: watchdog stopped")
+        # Preserve launchd supervision on agent exit — watchdog stays loaded and
+        # respects manual_stop.json after dashboard Stop.
+        stop_watchdog(preserve_launchd=True)
+        log_engine("shutdown cleanup: agent stopped (launchd supervision preserved)")
     except Exception as e:
         log_engine(f"shutdown cleanup: watchdog stop error (continuing): {e}")
 
@@ -366,12 +374,25 @@ def agent_fully_started(
 
 def stopped_verification_checks(issues: list[str]) -> list[dict[str, object]]:
     """Structured checklist matching scripts/confirm_stopped.py."""
+    try:
+        from system.overnight_supervision import launchd_watchdog_active
+
+        launchd_wd = launchd_watchdog_active()
+    except Exception:
+        launchd_wd = False
+
     mapping = [
         ("No main.py process", "main.py still running"),
-        ("No watchdog process", "watchdog.sh still running"),
+        (
+            "Launchd supervision preserved" if launchd_wd else "No watchdog process",
+            "watchdog.sh still running",
+        ),
         ("Port 8080 free", "port 8080 still bound"),
         ("No instance lock", "instance lock file present"),
-        ("No watchdog.pid", "watchdog.pid present"),
+        (
+            "Watchdog supervising (launchd)" if launchd_wd else "No watchdog.pid",
+            "watchdog.pid present",
+        ),
     ]
     return [
         {
@@ -408,17 +429,29 @@ def post_cleanup_shutdown_checks(*, exclude_pid: int) -> list[dict[str, object]]
     )
     try:
         from api.agent_health import _watchdog_active
+        from system.overnight_supervision import launchd_watchdog_active
 
+        launchd_wd = launchd_watchdog_active()
         watchdog_active = _watchdog_active()
     except Exception:
+        launchd_wd = False
         watchdog_active = True
-    checks.append(
-        {
-            "label": "Watchdog stopped",
-            "ok": not watchdog_active,
-            "detail": "" if not watchdog_active else "watchdog still active",
-        }
-    )
+    if launchd_wd:
+        checks.append(
+            {
+                "label": "Launchd supervision preserved",
+                "ok": True,
+                "detail": "watchdog job still loaded",
+            }
+        )
+    else:
+        checks.append(
+            {
+                "label": "Watchdog stopped",
+                "ok": not watchdog_active,
+                "detail": "" if not watchdog_active else "watchdog still active",
+            }
+        )
     port_bound = _port_bound()
     checks.append(
         {
@@ -436,13 +469,28 @@ def post_cleanup_shutdown_checks(*, exclude_pid: int) -> list[dict[str, object]]
         }
     )
     wd_pid = data_dir() / "watchdog.pid"
-    checks.append(
-        {
-            "label": "Watchdog PID cleared",
-            "ok": not wd_pid.is_file(),
-            "detail": "" if not wd_pid.is_file() else "watchdog.pid present",
-        }
-    )
+    try:
+        from system.overnight_supervision import launchd_watchdog_active
+
+        launchd_wd = launchd_watchdog_active()
+    except Exception:
+        launchd_wd = False
+    if launchd_wd:
+        checks.append(
+            {
+                "label": "Watchdog PID (launchd)",
+                "ok": True,
+                "detail": "expected while supervision loaded",
+            }
+        )
+    else:
+        checks.append(
+            {
+                "label": "Watchdog PID cleared",
+                "ok": not wd_pid.is_file(),
+                "detail": "" if not wd_pid.is_file() else "watchdog.pid present",
+            }
+        )
     return checks
 
 
@@ -488,24 +536,36 @@ def spawn_post_shutdown_verifier(parent_pid: int) -> None:
         log_engine(f"shutdown verify: spawn failed: {type(e).__name__}: {e}")
 
 
-def agent_fully_stopped() -> tuple[bool, list[str]]:
-    """Return (ok, issues) when no agent/watchdog/listener remains."""
+def agent_fully_stopped(
+    *, preserve_launchd_supervision: bool = True
+) -> tuple[bool, list[str]]:
+    """Return (ok, issues) when the trading agent process has fully exited."""
     issues: list[str] = []
 
     if _list_main_py_pids():
         issues.append("main.py still running")
 
-    try:
-        result = subprocess.run(
-            ["/usr/bin/pgrep", "-f", "scripts/watchdog.sh"],
-            capture_output=True,
-            text=True,
-            timeout=3,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            issues.append("watchdog.sh still running")
-    except Exception:
-        pass
+    launchd_wd = False
+    if preserve_launchd_supervision:
+        try:
+            from system.overnight_supervision import launchd_watchdog_active
+
+            launchd_wd = launchd_watchdog_active()
+        except Exception:
+            pass
+
+    if not launchd_wd:
+        try:
+            result = subprocess.run(
+                ["/usr/bin/pgrep", "-f", "scripts/watchdog.sh"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                issues.append("watchdog.sh still running")
+        except Exception:
+            pass
 
     if _port_bound():
         issues.append("port 8080 still bound")
@@ -515,7 +575,7 @@ def agent_fully_stopped() -> tuple[bool, list[str]]:
         issues.append("instance lock file present")
 
     wd_pid = data_dir() / "watchdog.pid"
-    if wd_pid.is_file():
+    if wd_pid.is_file() and not launchd_wd:
         issues.append("watchdog.pid present")
 
     return (len(issues) == 0, issues)

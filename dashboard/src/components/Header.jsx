@@ -1,5 +1,14 @@
 import { useCallback, useState } from "react";
+import {
+  Activity,
+  Brain,
+  BrainCircuit,
+  Shield,
+  ShieldAlert,
+  ShieldCheck,
+} from "lucide-react";
 import { fmtPrice } from "../utils/fmtPrice.js";
+import { APP_VERSION_LABEL } from "../utils/roadmapTelemetry.js";
 
 function isNil(v) {
   return v == null || v === "";
@@ -109,6 +118,88 @@ function Pill({ label, value, valueClassName = "text-foreground" }) {
   );
 }
 
+function RoadmapAiStatusPills({
+  supervisionDriftOk,
+  watchdogActive,
+  sessionStyle,
+  envScorerFallbackActive,
+}) {
+  const appInitializing =
+    supervisionDriftOk == null && watchdogActive == null;
+  const appHealthy =
+    !appInitializing &&
+    supervisionDriftOk !== false &&
+    (watchdogActive === true || supervisionDriftOk === true);
+
+  let appClass =
+    "border-border bg-card/60 text-muted";
+  let AppIcon = Shield;
+  let appLabel = "INITIALIZING…";
+
+  if (!appInitializing) {
+    if (appHealthy) {
+      appClass =
+        "border-success/50 bg-success/15 text-success shadow-sm shadow-success/10";
+      AppIcon = ShieldCheck;
+      appLabel = "App AI: RUNNING";
+    } else {
+      appClass = "border-danger/40 bg-danger/10 text-danger animate-pulse";
+      AppIcon = ShieldAlert;
+      appLabel = "App AI: DRIFT_WARN";
+    }
+  }
+
+  const style = sessionStyle ? String(sessionStyle).toUpperCase() : null;
+  let stratClass = "border-border bg-card/60 text-muted";
+  let StratIcon = Brain;
+  let stratLabel = "INITIALIZING…";
+
+  if (envScorerFallbackActive) {
+    stratClass =
+      "border-amber-400/70 bg-amber-500/25 text-amber-100 shadow-sm shadow-amber-500/20 ring-1 ring-amber-400/40 animate-pulse";
+    StratIcon = ShieldAlert;
+    stratLabel = "⚠️ Strategy: SILENT_FALLBACK_WARN";
+  } else if (style === "ASIAN_RANGE") {
+    stratClass =
+      "border-indigo-400/50 bg-indigo-500/15 text-indigo-200 shadow-sm shadow-indigo-500/10";
+    StratIcon = BrainCircuit;
+    stratLabel = "Strategy: ASIAN RANGE (Mean Reversion)";
+  } else if (style === "WESTERN_MOMENTUM") {
+    stratClass =
+      "border-amber-400/60 bg-amber-500/20 text-amber-200 shadow-sm shadow-amber-500/15 ring-1 ring-amber-400/20";
+    StratIcon = Activity;
+    stratLabel = "Strategy: WESTERN MOMENTUM (Breakout)";
+  }
+
+  return (
+    <div className="flex shrink-0 flex-wrap items-center gap-4">
+      <span
+        className={[
+          "inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-semibold leading-none",
+          appClass,
+        ].join(" ")}
+        title="Application supervision & watchdog telemetry"
+      >
+        <AppIcon className="h-3.5 w-3.5 shrink-0" aria-hidden />
+        {appLabel}
+      </span>
+      <span
+        className={[
+          "inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-semibold leading-none",
+          stratClass,
+        ].join(" ")}
+        title="Environment scorer session regime"
+      >
+        <StratIcon className="h-3.5 w-3.5 shrink-0" aria-hidden />
+        {stratLabel}
+      </span>
+      <span className="hidden text-[9px] font-medium uppercase tracking-wider text-muted/60 lg:inline">
+        {APP_VERSION_LABEL}
+      </span>
+    </div>
+  );
+}
+
 export default function Header({
   bid,
   offer,
@@ -135,6 +226,10 @@ export default function Header({
   maxPositions,
   onStopAgent,
   onOpenStrategyHelp,
+  supervisionDriftOk,
+  watchdogActive,
+  sessionStyle,
+  envScorerFallbackActive,
 }) {
   const [safeLeaveModal, setSafeLeaveModal] = useState(null);
 
@@ -248,6 +343,15 @@ export default function Header({
         {/* Divider */}
         <span className="hidden sm:block h-5 w-px bg-border shrink-0" aria-hidden />
 
+        <div className="mx-6 flex shrink-0 items-center gap-4">
+          <RoadmapAiStatusPills
+            supervisionDriftOk={supervisionDriftOk}
+            watchdogActive={watchdogActive}
+            sessionStyle={sessionStyle}
+            envScorerFallbackActive={envScorerFallbackActive}
+          />
+        </div>
+
         {/* Stat pills group */}
         <div className="flex items-center gap-3 rounded-lg border border-border bg-card/60 px-3 py-1.5">
           <Pill label="Today P&L" value={dash(dailyPnl, fmtPnl)} valueClassName={pnlColor} />
@@ -302,8 +406,13 @@ export default function Header({
           <button
             type="button"
             onClick={onStopAgent}
-            className="inline-flex items-center justify-center gap-1.5 rounded-md border border-danger/50 bg-danger/10 px-2.5 py-1 text-[11px] font-semibold text-danger transition-colors hover:bg-danger/20 active:scale-95"
-            title="Save session state and shut down the agent cleanly"
+            disabled={Boolean(safeLeaveModal)}
+            className="inline-flex items-center justify-center gap-1.5 rounded-md border border-danger/50 bg-danger/10 px-2.5 py-1 text-[11px] font-semibold text-danger transition-colors hover:bg-danger/20 active:scale-95 disabled:cursor-not-allowed disabled:opacity-40"
+            title={
+              safeLeaveModal
+                ? "Disabled while Safe to Leave check is open"
+                : "Save session state and shut down the agent cleanly"
+            }
           >
             <span className="h-1.5 w-1.5 rounded-full bg-danger" aria-hidden />
             Stop Agent
@@ -323,11 +432,25 @@ export default function Header({
               id="safe-to-leave-title"
               className={`text-center text-[15px] font-semibold ${safeLeaveModal.ok ? "text-success" : "text-danger"}`}
             >
-              {safeLeaveModal.ok ? "Safe to Leave" : "Not Safe to Leave"}
+              {safeLeaveModal.ok ? "Safe to Leave — Overnight Armed" : "Not Safe to Leave"}
             </h2>
+            {safeLeaveModal.ok ? (
+              <p className="mt-2 text-center text-[12px] text-success">
+                Launchd owns the agent — you may close Cursor and this browser tab.
+              </p>
+            ) : null}
+            {safeLeaveModal.supervision?.launchd_detail && (
+              <p className="mt-1 text-center text-[11px] text-muted">
+                Supervision: {safeLeaveModal.supervision.launchd_detail}
+              </p>
+            )}
             {safeLeaveModal.message && (
               <p className="mt-2 text-center text-[12px] text-muted">{safeLeaveModal.message}</p>
             )}
+            <p className="mt-2 text-center text-[11px] text-muted">
+              Overnight bundle: launchd watchdog + trust checks. Does not stop the agent.
+              Use Stop Agent only for deliberate shutdown (clears overnight armed).
+            </p>
             {safeLeaveModal.error && (
               <p className="mt-2 text-center text-[12px] text-danger">{safeLeaveModal.error}</p>
             )}

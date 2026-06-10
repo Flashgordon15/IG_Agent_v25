@@ -1,7 +1,7 @@
 {
   "name": "ig-agent-v25-dashboard",
   "private": true,
-  "version": "25.5.0",
+  "version": "29.0.0",
   "type": "module",
   "engines": {
     "node": ">=20"

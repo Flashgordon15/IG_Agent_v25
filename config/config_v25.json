@@ -98,8 +98,8 @@
   "telegram_bot_token": "",
   "telegram_chat_id": "",
   "$schema": "./config_schema.json",
-  "version": "25.5.0",
-  "app_version": "v25-dev",
+  "version": "29.0.0",
+  "app_version": "v29.0",
   "operating_mode": "DEMO",
   "markets": [],
   "instruments": {
@@ -207,7 +207,8 @@
       "best_session": "13:30-21:00 BST",
       "trading_session_whitelist": [
         "london_us_overlap",
-        "us_afternoon"
+        "us_afternoon",
+        "late"
       ]
     },
     "gold": {
@@ -261,7 +262,8 @@
       "best_session": "14:30-21:00 BST",
       "trading_session_whitelist": [
         "london_us_overlap",
-        "us_afternoon"
+        "us_afternoon",
+        "late"
       ],
       "stop_distance_points": 100,
       "max_spread_pts": 5,

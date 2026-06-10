@@ -400,9 +400,13 @@ def run_layer2(ctx: ValidationContext) -> LayerSummary:
     eng = SignalEngine(ctx.cfg)
     eng.seed_ohlc_history(MARKET, bullish, aliases=[EPIC])
     r1 = eng.evaluate(MARKET)
-    r2 = eng.evaluate(MARKET)
+    eng2 = SignalEngine(ctx.cfg)
+    eng2.seed_ohlc_history(MARKET, bullish, aliases=[EPIC])
+    r2 = eng2.evaluate(MARKET)
     det = (
-        abs(r1.adjusted_confidence - r2.adjusted_confidence) < 0.01
+        r1 is not None
+        and r2 is not None
+        and abs(r1.adjusted_confidence - r2.adjusted_confidence) < 0.01
         and r1.signal == r2.signal
     )
     layer.checks.append(
@@ -411,7 +415,10 @@ def run_layer2(ctx: ValidationContext) -> LayerSummary:
             "2.2a",
             "Signal confidence deterministic on same bar",
             det,
-            got=f"r1={r1.adjusted_confidence:.2f} r2={r2.adjusted_confidence:.2f}",
+            got=(
+                f"r1={r1.adjusted_confidence:.2f}/{r1.signal} "
+                f"r2={r2.adjusted_confidence:.2f}/{r2.signal}"
+            ),
         )
     )
     in_range = 0 <= r1.adjusted_confidence <= 100
@@ -425,9 +432,11 @@ def run_layer2(ctx: ValidationContext) -> LayerSummary:
         )
     )
     entry_floor = float(ctx.cfg.signal_threshold)
-    wait_68 = (
+    below_floor = max(0.0, entry_floor - 3.0)
+    above_floor = entry_floor + 19.0
+    wait_below = (
         signal_gate_explanation(
-            SignalResult("BUY", 68, 68, 0, "k", "", {}),
+            SignalResult("BUY", below_floor, below_floor, 0, "k", "", {}),
             entry_floor,
         )[1]
         != ""
@@ -436,17 +445,18 @@ def run_layer2(ctx: ValidationContext) -> LayerSummary:
         _check(
             "2",
             "2.2c",
-            f"68% below {entry_floor:.0f}% M0 floor → WAIT",
-            wait_68,
+            f"{below_floor:.0f}% below {entry_floor:.0f}% threshold → WAIT",
+            wait_below,
             expected="blocked",
             got=signal_gate_explanation(
-                SignalResult("BUY", 68, 68, 0, "k", "", {}), entry_floor
+                SignalResult("BUY", below_floor, below_floor, 0, "k", "", {}),
+                entry_floor,
             )[0],
         )
     )
-    pass_74 = (
+    pass_above = (
         signal_gate_explanation(
-            SignalResult("BUY", 74, 74, 0, "k", "", {}),
+            SignalResult("BUY", above_floor, above_floor, 0, "k", "", {}),
             entry_floor,
         )[1]
         == ""
@@ -455,15 +465,16 @@ def run_layer2(ctx: ValidationContext) -> LayerSummary:
         _check(
             "2",
             "2.2d",
-            f"74% at or above {entry_floor:.0f}% M0 floor → passes gate",
-            pass_74,
+            f"{above_floor:.0f}% at or above {entry_floor:.0f}% threshold → passes gate",
+            pass_above,
             got=signal_gate_explanation(
-                SignalResult("BUY", 74, 74, 0, "k", "", {}), entry_floor
+                SignalResult("BUY", above_floor, above_floor, 0, "k", "", {}),
+                entry_floor,
             )[0],
         )
     )
 
-    # 2.3 — points engine state transitions (M0 72% entry floor)
+    # 2.3 — points engine state transitions (aligned with config signal_threshold)
     set_points_state_path_for_tests(ctx.points_path)
     pe = PointsEngine(state_path=ctx.points_path)
     cfg_floor = float(getattr(ctx.cfg, "confidence_floor", entry_floor))

@@ -88,12 +88,14 @@ class MlVetoGateTests(unittest.TestCase):
             self.assertTrue(epic_ml_veto_enabled("CS.D.GBPUSD.CFD.IP"))
             self.assertFalse(epic_ml_veto_enabled("IX.D.NIKKEI.IFM.IP"))
 
-    def test_config_v26_ml_veto_has_per_epic(self) -> None:
+    def test_config_v26_ml_veto_structure(self) -> None:
         from system.v26_config import ml_veto_settings, reset_v26_config_cache_for_tests
 
         reset_v26_config_cache_for_tests()
         cfg = ml_veto_settings()
-        self.assertIn("CS.D.EURUSD.CFD.IP", cfg.get("per_epic") or {})
+        self.assertIn("per_epic", cfg)
+        self.assertIsInstance(cfg.get("per_epic"), dict)
+        self.assertTrue(cfg.get("enabled"))
 
 
 if __name__ == "__main__":

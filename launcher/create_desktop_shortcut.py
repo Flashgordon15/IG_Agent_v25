@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Create ~/Desktop/IG Agent v25.app shortcut to the launcher bundle.
+Create ~/Desktop/Desktop IG Agent v29.0.app shortcut to the launcher bundle.
 
 Uses a symlink (not a Finder alias) so macOS shows the real app icon on Desktop.
 """
@@ -11,8 +11,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-BUNDLE_NAME = "IG Agent v25.app"
-SHORTCUT_NAME = BUNDLE_NAME
+BUNDLE_NAME = "IG Agent v29.0.app"
+SHORTCUT_NAME = "Desktop IG Agent v29.0.app"
+LEGACY_SHORTCUT_NAMES = (
+    "IG Agent v25.app",
+    "Desktop IG Agent v25.app",
+)
 
 
 def project_root() -> Path:
@@ -57,6 +61,12 @@ def create_shortcut() -> Path:
 
     link = Path.home() / "Desktop" / SHORTCUT_NAME
     create_symlink_shortcut(bundle, link)
+
+    for legacy_name in LEGACY_SHORTCUT_NAMES:
+        legacy = Path.home() / "Desktop" / legacy_name
+        if legacy.exists() or legacy.is_symlink():
+            remove_existing_shortcut(legacy)
+            print(f"Removed legacy Desktop shortcut: {legacy}")
 
     subprocess.run(["/usr/bin/touch", str(bundle)], check=False)
     for path in (bundle, link):

@@ -27,7 +27,9 @@ class AdaptiveEngine:
     def _clamp(value: float, low: float, high: float) -> float:
         return max(low, min(high, value))
 
-    def _snapshot_atr_spread(self, snapshot: dict[str, Any] | None) -> tuple[float, float]:
+    def _snapshot_atr_spread(
+        self, snapshot: dict[str, Any] | None
+    ) -> tuple[float, float]:
         atr_val, spread_val = 0.0, 0.0
         if not snapshot or snapshot.get("last") is None:
             return atr_val, spread_val
@@ -37,7 +39,9 @@ class AdaptiveEngine:
         except (TypeError, ValueError, KeyError):
             pass
         try:
-            spread_val = float(last.get("spread", 0) if hasattr(last, "get") else last["spread"])
+            spread_val = float(
+                last.get("spread", 0) if hasattr(last, "get") else last["spread"]
+            )
         except (TypeError, ValueError, KeyError):
             pass
         return atr_val, spread_val
@@ -119,7 +123,9 @@ class AdaptiveEngine:
                     cfg.adaptive_max_risk_points,
                 )
                 floor_source = "dynamic" if cfg.dynamic_stop_floor_enabled else "fixed"
-                notes.append(f"ATR risk {risk:.1f} (floor {stop_floor:.1f} {floor_source})")
+                notes.append(
+                    f"ATR risk {risk:.1f} (floor {stop_floor:.1f} {floor_source})"
+                )
 
             if adjusted_confidence >= cfg.adaptive_high_confidence:
                 reward = max(reward, cfg.adaptive_high_confidence_reward_multiple)
@@ -139,10 +145,19 @@ class AdaptiveEngine:
                         size *= cfg.adaptive_bad_setup_multiplier
                         notes.append(f"bad setup protected wr {wr:.0%}")
 
-            size = self._clamp(size, cfg.adaptive_min_trade_size, cfg.adaptive_max_trade_size)
+            size = self._clamp(
+                size, cfg.adaptive_min_trade_size, cfg.adaptive_max_trade_size
+            )
 
-        if self._memory and getattr(self._memory, "circuit_breaker_half_size_active", lambda: False)():
-            size = self._clamp(size * 0.5, cfg.adaptive_min_trade_size, cfg.adaptive_max_trade_size)
+        if (
+            self._memory
+            and getattr(
+                self._memory, "circuit_breaker_half_size_active", lambda: False
+            )()
+        ):
+            size = self._clamp(
+                size * 0.5, cfg.adaptive_min_trade_size, cfg.adaptive_max_trade_size
+            )
             notes.append("circuit breaker half-size resume")
 
         limit = risk * reward
@@ -178,17 +193,37 @@ class AdaptiveEngine:
         if not cfg.adaptive_execution_enabled:
             return False, ""
 
+        exec_settings = self.settings(setup_key, adjusted_confidence, snapshot)
+        risk_pts = float(exec_settings.get("risk") or 0.0)
+        limit_pts = float(exec_settings.get("limit") or 0.0)
+
+        if risk_pts > 0.0:
+            rr_ratio = limit_pts / risk_pts
+            if rr_ratio < 3.0:
+                from system.engine_log import log_engine
+
+                log_engine(
+                    f"REJECTED_ASYMMETRIC_RR_FLOOR_GATED | market={setup_key} "
+                    f"limit={limit_pts:.1f} risk={risk_pts:.1f} rr={rr_ratio:.2f} (<3.0)"
+                )
+                return True, "REJECTED_ASYMMETRIC_RR_FLOOR_GATED"
+
         if adjusted_confidence < cfg.adaptive_min_adjusted_confidence:
             return True, "adaptive block: confidence below adaptive minimum"
 
         atr_val, spread_val = self._snapshot_atr_spread(snapshot)
         if spread_val > cfg.adaptive_max_entry_spread:
-            return True, f"adaptive block: spread {spread_val:.1f} > {cfg.adaptive_max_entry_spread:.1f}"
+            return (
+                True,
+                f"adaptive block: spread {spread_val:.1f} > {cfg.adaptive_max_entry_spread:.1f}",
+            )
 
         # Block if net profit after spread is below minimum (spread eats too much of the target).
         min_net = cfg.adaptive_min_net_profit_pts
         if min_net > 0 and spread_val > 0 and atr_val > 0:
-            max_lim = atr_val * max(cfg.adaptive_max_limit_atr_multiple, cfg.reward_multiple)
+            max_lim = atr_val * max(
+                cfg.adaptive_max_limit_atr_multiple, cfg.reward_multiple
+            )
             net_profit = max_lim - spread_val
             if net_profit < min_net:
                 return (

@@ -1,11 +1,11 @@
 {
   "block_reason": null,
   "last_attempted_range": {
-    "from": "2026-06-05T07:30:00",
-    "to": "2026-06-06T07:30:00"
+    "from": "2026-06-09T06:20:00",
+    "to": "2026-06-09T07:14:22"
   },
-  "last_run_time": "2026-06-07T08:23:36",
-  "last_success_timestamp": "2026-06-05T07:25:00",
+  "last_run_time": "2026-06-09T07:15:39",
+  "last_success_timestamp": "2026-06-09T07:00:00",
   "next_retry_time": null,
   "run_status": "complete",
   "status": "ok"

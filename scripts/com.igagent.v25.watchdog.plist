@@ -6,11 +6,18 @@
 	<string>com.igagent.v25.watchdog</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/bin/bash</string>
-		<string>__IG_AGENT_ROOT__/scripts/watchdog.sh</string>
+		<string>__PYTHON_BIN__</string>
+		<string>__IG_AGENT_ROOT__/scripts/watchdog_launchd.py</string>
 	</array>
 	<key>WorkingDirectory</key>
 	<string>__IG_AGENT_ROOT__</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>IG_AGENT_ROOT</key>
+		<string>__IG_AGENT_ROOT__</string>
+		<key>PYTHONPATH</key>
+		<string>__IG_AGENT_ROOT__/src</string>
+	</dict>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>

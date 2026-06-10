@@ -3,7 +3,7 @@
  * Update when config or gate logic changes.
  */
 
-export const STRATEGY_HELP_VERSION = "25.5.0";
+export const STRATEGY_HELP_VERSION = "29.0.0";
 
 export const HELP_SECTIONS = [
   {

@@ -14,6 +14,9 @@ from system.paths import project_root
 
 LOCK_FILENAME = "emergency_stop.lock"
 
+APP_VERSION = "29.0.0"
+APP_VERSION_LABEL = "v29.0"
+
 CRITICAL_KEYS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("ig_username", ("ig_username", "username")),
     ("ig_password", ("ig_password", "password")),
@@ -148,5 +151,15 @@ def validate_config(config: dict[str, Any]) -> tuple[bool, list[str]]:
 
     if not _validate_instruments(config, messages):
         valid = False
+
+    cfg_version = str(config.get("version") or config.get("app_version") or "").strip()
+    if not cfg_version:
+        warn = f"missing version — expected {APP_VERSION_LABEL}"
+        messages.append(f"WARNING: {warn}")
+        log_engine(f"config_validator: {warn}")
+    elif not cfg_version.startswith("29"):
+        warn = f"config version {cfg_version!r} — platform expects {APP_VERSION_LABEL}"
+        messages.append(f"WARNING: {warn}")
+        log_engine(f"config_validator: {warn}")
 
     return valid, messages

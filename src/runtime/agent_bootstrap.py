@@ -396,30 +396,44 @@ def build_market_orchestrator(
             _set_transaction_sync_instance(txn_sync)
             log_engine("IG transaction sync started")
             if os.environ.get("IG_AGENT_PYTEST") != "1":
-                try:
-                    from ai.strategy.performance_reviewer import (
-                        force_shadow_learning_pipeline,
-                    )
 
-                    shadow_result = force_shadow_learning_pipeline(store)
-                    log_engine(f"Risk hardening: {shadow_result.detail}")
-                except Exception as exc:
-                    log_engine(
-                        f"shadow learning pipeline failed: {type(exc).__name__}: {exc}"
-                    )
-                try:
-                    from runtime.ig_transaction_sync import (
-                        force_immediate_transaction_sync,
-                    )
-
-                    if force_immediate_transaction_sync(reason="risk_hardening_boot"):
-                        log_engine(
-                            "Risk hardening: IG transaction sync scheduled (force)"
+                def _risk_hardening_boot() -> None:
+                    try:
+                        from ai.strategy.performance_reviewer import (
+                            force_shadow_learning_pipeline,
                         )
-                except Exception as exc:
-                    log_engine(
-                        f"transaction sync force failed: {type(exc).__name__}: {exc}"
-                    )
+
+                        shadow_result = force_shadow_learning_pipeline(store)
+                        log_engine(f"Risk hardening: {shadow_result.detail}")
+                    except Exception as exc:
+                        log_engine(
+                            "shadow learning pipeline failed: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                    try:
+                        from runtime.ig_transaction_sync import (
+                            force_immediate_transaction_sync,
+                        )
+
+                        if force_immediate_transaction_sync(
+                            reason="risk_hardening_boot"
+                        ):
+                            log_engine(
+                                "Risk hardening: IG transaction sync scheduled (force)"
+                            )
+                    except Exception as exc:
+                        log_engine(
+                            "transaction sync force failed: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+
+                import threading
+
+                threading.Thread(
+                    target=_risk_hardening_boot,
+                    name="risk-hardening-boot",
+                    daemon=True,
+                ).start()
         except Exception as _txn_e:
             log_engine(
                 f"IG transaction sync start failed: {type(_txn_e).__name__}: {_txn_e}"

@@ -35,7 +35,7 @@ def _build_date() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
-CURRENT_VERSION = "25.5.0"
+CURRENT_VERSION = "29.0.0"
 
 
 def read_version_state() -> dict[str, Any]:
@@ -345,7 +345,7 @@ def run_safe_to_leave() -> dict[str, Any]:
         }
     try:
         proc = subprocess.run(
-            [sys.executable, str(script)],
+            [sys.executable, str(script), "--quick"],
             cwd=str(root),
             capture_output=True,
             text=True,
@@ -353,6 +353,8 @@ def run_safe_to_leave() -> dict[str, Any]:
             env={
                 **dict(__import__("os").environ),
                 "PYTHONPATH": str(root / "src"),
+                "IG_AGENT_SAFE_TO_LEAVE_QUICK": "1",
+                "IG_AGENT_ENSURE_LAUNCHD": "1",
             },
         )
         output = (proc.stdout or "").strip()
@@ -380,11 +382,24 @@ def run_safe_to_leave() -> dict[str, Any]:
                     )
                     break
         ok = proc.returncode == 0
+        from system.overnight_supervision import (
+            mark_overnight_armed,
+            overnight_supervision_summary,
+        )
+
+        supervision = overnight_supervision_summary()
+        if ok:
+            mark_overnight_armed(source="safe_to_leave_dashboard")
+            supervision = overnight_supervision_summary()
+
         result: dict[str, Any] = {
             "ok": ok,
             "checks": checks,
             "message": message,
             "output": output,
+            "supervision": supervision,
+            "overnight_armed": bool(supervision.get("overnight_armed")),
+            "independent_of_cursor": bool(supervision.get("independent_of_cursor")),
         }
         if not ok and proc.stderr:
             result["error"] = proc.stderr.strip().splitlines()[-1][:240]

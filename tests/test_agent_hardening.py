@@ -97,6 +97,9 @@ class ApiHealthTests(unittest.TestCase):
             "issues",
             "markets",
             "quote_fresh_by_epic",
+            "supervision_drift_ok",
+            "supervision_drift",
+            "overnight_supervision",
         ):
             self.assertIn(key, body, f"missing /api/health field: {key}")
         self.assertIsInstance(body["agent_alive"], bool)
@@ -118,6 +121,9 @@ class ApiHealthTests(unittest.TestCase):
         enriched = enrich_tick_runtime({"type": "tick"})
         self.assertTrue(enriched["trading_loops_running"])
         self.assertFalse(enriched["trading_paused"])
+        self.assertIn("supervision_drift_ok", enriched)
+        self.assertIn("overnight_supervision", enriched)
+        self.assertIn("watchdog_active", enriched)
 
 
 class WatchdogDeploymentTests(unittest.TestCase):

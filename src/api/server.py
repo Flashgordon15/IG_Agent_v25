@@ -351,8 +351,18 @@ _startup_hooks: list = []
 
 
 def register_api_startup(callback) -> None:
-    """Run callback after WebSocket loop is bound (start stream/trading here)."""
+    """Run callback in a background thread after the API port is listening."""
     _startup_hooks.append(callback)
+
+
+def _run_startup_hooks() -> None:
+    from system.engine_log import log_engine
+
+    for hook in list(_startup_hooks):
+        try:
+            hook()
+        except Exception as exc:
+            log_engine(f"API startup hook failed: {type(exc).__name__}: {exc}")
 
 
 def _dashboard_dist() -> Path:
@@ -368,13 +378,20 @@ def create_app(*, watch_snapshot: bool = True) -> FastAPI:
 
         _legacy_ws.hub.bind_loop(loop)
 
-        for hook in list(_startup_hooks):
-            try:
-                hook()
-            except Exception as exc:
-                from system.engine_log import log_engine
+        # Warm /api/health cache without blocking the event loop.
+        try:
+            from api.agent_health import start_health_cache_refresher
 
-                log_engine(f"API startup hook failed: {type(exc).__name__}: {exc}")
+            start_health_cache_refresher()
+        except Exception:
+            pass
+
+        # Heavy startup (streams, trading loops) must not block uvicorn bind.
+        threading.Thread(
+            target=_run_startup_hooks,
+            name="api-startup-hooks",
+            daemon=True,
+        ).start()
 
         watcher = None
         if watch_snapshot:

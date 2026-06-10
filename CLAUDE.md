@@ -70,3 +70,31 @@ After editing `dashboard/src/`, always rebuild (`npm run build`) — the agent s
 - ML features are normalised by stop distance (`atr_ratio = atr/stop_pts`) for cross-instrument generalisation
 - `RestApiBudget` enforces a hard 3-calls/min cap checked atomically; first call waits a full interval to prevent startup bursts
 - `correlation_guard.py` blocks correlated entries; `drawdown_monitor.py` enforces daily loss limit (£500)
+
+## Supervision lifecycle (launch / stop / overnight)
+
+**Safe to Leave** = launchd bundle (`com.igagent.v25.watchdog` + `com.igagent.v25.caffeinate`). Install once: `./scripts/install_launchd.sh`
+
+| Action | Expected behaviour |
+|--------|-------------------|
+| Dashboard **Stop Agent** | Agent exits cleanly; **launchd watchdog stays loaded**; `manual_stop.json` blocks auto-restart ~10 min |
+| Desktop launcher | If launchd watchdog active and agent down, **wait for watchdog** — do not spawn duplicate `main.py` |
+| `install_launchd.sh` | If agent already healthy, **handoff without kill**; clears `manual_stop.json` |
+| Agent crash | Watchdog restarts via `start_agent_launchd.py` (unless `manual_stop` active) |
+
+**Built-in operator (AI + runtime):**
+
+```bash
+# Supervision drift check (issues, warnings, launchd state)
+PYTHONPATH=src python3 scripts/supervision_check.py
+
+# With auto-repair of missing launchd jobs
+PYTHONPATH=src python3 scripts/supervision_check.py --repair
+
+# Full overnight readiness
+./scripts/ensure_overnight_ready.sh
+```
+
+While running, `trading_health_monitor` calls `supervision_monitor.run_supervision_monitor_tick()` every 60s — logs drift to `engine.log`, Telegram on sustained issues. `/api/health` exposes `supervision_drift` and `supervision_warnings`.
+
+**AI operators:** Before declaring "ready for overnight", run preflight + `supervision_check.py --repair`. Never bootout launchd watchdog on Stop Agent. If `overnight_armed` but launchd missing, run `install_launchd.sh` or `--repair`.

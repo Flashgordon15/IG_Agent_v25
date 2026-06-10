@@ -1,0 +1,191 @@
+{
+  "type": "RCA_DIAGNOSTIC",
+  "ts": "2026-06-10T03:23:15.617Z",
+  "epic": "IX.D.NIKKEI.IFM.IP",
+  "session_window": {
+    "start": "2026-06-10T02:23:14.639Z",
+    "end": "2026-06-10T03:23:15.617Z",
+    "duration_min": 60.0
+  },
+  "trades_taken": 0,
+  "atr_filter_cleared": true,
+  "dominant_gate_block": "execution",
+  "gate_fail_counts": {
+    "session_open": 1,
+    "cold_start_gap": 1,
+    "environment_fitness": 48,
+    "points_state": 1,
+    "correlation_ok": 1,
+    "risk_validation": 1,
+    "expectancy_ok": 1,
+    "calendar_ok": 1,
+    "signal_confidence": 555,
+    "ml_veto": 1,
+    "execution": 563
+  },
+  "sentinel_excerpt": [
+    {
+      "ts": "2026-06-10T03:16:52.560Z",
+      "type": "monitor_pass",
+      "agent_pid": 59124,
+      "pid_alive": true,
+      "port": 8080,
+      "port_open": true,
+      "tick_streak": {
+        "IX.D.NIKKEI.IFM.IP": 0,
+        "CS.D.GBPUSD.CFD.IP": 0,
+        "CS.D.EURUSD.CFD.IP": 0,
+        "IX.D.NASDAQ.IFM.IP": 0,
+        "CS.D.CFPGOLD.CFP.IP": 0,
+        "IX.D.DOW.IFM.IP": 0
+      },
+      "safety_freeze": false
+    },
+    {
+      "ts": "2026-06-10T03:16:54.570Z",
+      "type": "monitor_pass",
+      "agent_pid": 59124,
+      "pid_alive": true,
+      "port": 8080,
+      "port_open": true,
+      "tick_streak": {
+        "IX.D.NIKKEI.IFM.IP": 0,
+        "CS.D.GBPUSD.CFD.IP": 0,
+        "CS.D.EURUSD.CFD.IP": 0,
+        "IX.D.NASDAQ.IFM.IP": 0,
+        "CS.D.CFPGOLD.CFP.IP": 0,
+        "IX.D.DOW.IFM.IP": 0
+      },
+      "safety_freeze": false
+    },
+    {
+      "ts": "2026-06-10T03:16:55.643Z",
+      "type": "loop_tick",
+      "epic": "IX.D.NIKKEI.IFM.IP",
+      "unhealthy": false,
+      "loop_error": false,
+      "stream_disconnected": false,
+      "quote_stale": false,
+      "consecutive_unhealthy": 0,
+      "agent_pid": 59124,
+      "pid_alive": true,
+      "port_open": true
+    },
+    {
+      "ts": "2026-06-10T03:16:56.632Z",
+      "type": "monitor_pass",
+      "agent_pid": 59124,
+      "pid_alive": true,
+      "port": 8080,
+      "port_open": true,
+      "tick_streak": {
+        "IX.D.NIKKEI.IFM.IP": 0,
+        "CS.D.GBPUSD.CFD.IP": 0,
+        "CS.D.EURUSD.CFD.IP": 0,
+        "IX.D.NASDAQ.IFM.IP": 0,
+        "CS.D.CFPGOLD.CFP.IP": 0,
+        "IX.D.DOW.IFM.IP": 0
+      },
+      "safety_freeze": false
+    },
+    {
+      "ts": "2026-06-10T03:16:58.679Z",
+      "type": "monitor_pass",
+      "agent_pid": 59124,
+      "pid_alive": true,
+      "port": 8080,
+      "port_open": true,
+      "tick_streak": {
+        "IX.D.NIKKEI.IFM.IP": 0,
+        "CS.D.GBPUSD.CFD.IP": 0,
+        "CS.D.EURUSD.CFD.IP": 0,
+        "IX.D.NASDAQ.IFM.IP": 0,
+        "CS.D.CFPGOLD.CFP.IP": 0,
+        "IX.D.DOW.IFM.IP": 0
+      },
+      "safety_freeze": false
+    },
+    {
+      "ts": "2026-06-10T03:17:00.700Z",
+      "type": "monitor_pass",
+      "agent_pid": 59124,
+      "pid_alive": true,
+      "port": 8080,
+      "port_open": true,
+      "tick_streak": {
+        "IX.D.NIKKEI.IFM.IP": 0,
+        "CS.D.GBPUSD.CFD.IP": 0,
+        "CS.D.EURUSD.CFD.IP": 0,
+        "IX.D.NASDAQ.IFM.IP": 0,
+        "CS.D.CFPGOLD.CFP.IP": 0,
+        "IX.D.DOW.IFM.IP": 0
+      },
+      "safety_freeze": false
+    },
+    {
+      "ts": "2026-06-10T03:17:02.030Z",
+      "type": "loop_tick",
+      "epic": "IX.D.NIKKEI.IFM.IP",
+      "unhealthy": false,
+      "loop_error": false,
+      "stream_disconnected": false,
+      "quote_stale": false,
+      "consecutive_unhealthy": 0,
+      "agent_pid": 59124,
+      "pid_alive": true,
+      "port_open": true
+    },
+    {
+      "ts": "2026-06-10T03:17:02.716Z",
+      "type": "monitor_pass",
+      "agent_pid": 59124,
+      "pid_alive": true,
+      "port": 8080,
+      "port_open": true,
+      "tick_streak": {
+        "IX.D.NIKKEI.IFM.IP": 0,
+        "CS.D.GBPUSD.CFD.IP": 0,
+        "CS.D.EURUSD.CFD.IP": 0,
+        "IX.D.NASDAQ.IFM.IP": 0,
+        "CS.D.CFPGOLD.CFP.IP": 0,
+        "IX.D.DOW.IFM.IP": 0
+      },
+      "safety_freeze": false
+    },
+    {
+      "ts": "2026-06-10T03:17:04.733Z",
+      "type": "monitor_pass",
+      "agent_pid": 59124,
+      "pid_alive": true,
+      "port": 8080,
+      "port_open": true,
+      "tick_streak": {
+        "IX.D.NIKKEI.IFM.IP": 0,
+        "CS.D.GBPUSD.CFD.IP": 0,
+        "CS.D.EURUSD.CFD.IP": 0,
+        "IX.D.NASDAQ.IFM.IP": 0,
+        "CS.D.CFPGOLD.CFP.IP": 0,
+        "IX.D.DOW.IFM.IP": 0
+      },
+      "safety_freeze": false
+    },
+    {
+      "ts": "2026-06-10T03:17:06.743Z",
+      "type": "monitor_pass",
+      "agent_pid": 59124,
+      "pid_alive": true,
+      "port": 8080,
+      "port_open": true,
+      "tick_streak": {
+        "IX.D.NIKKEI.IFM.IP": 0,
+        "CS.D.GBPUSD.CFD.IP": 0,
+        "CS.D.EURUSD.CFD.IP": 0,
+        "IX.D.NASDAQ.IFM.IP": 0,
+        "CS.D.CFPGOLD.CFP.IP": 0,
+        "IX.D.DOW.IFM.IP": 0
+      },
+      "safety_freeze": false
+    }
+  ],
+  "recommended_operator_action": "review gate detail \u2014 no auto threshold change"
+}

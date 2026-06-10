@@ -1,5 +1,5 @@
 /*
- * Minimal Mach-O entry point for IG Agent v25.app.
+ * Minimal Mach-O entry point for IG Agent v29.0.app.
  * macOS LaunchServices requires a native executable; this runs launch.sh.
  */
 #include <limits.h>

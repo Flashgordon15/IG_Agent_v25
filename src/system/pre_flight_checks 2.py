@@ -1,0 +1,299 @@
+"""
+Pre-flight checks for a running IG Agent — log integrity, gate activity, live data.
+
+Used by scripts/pre_flight_check.py and e2e platform validation layer 7.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any
+from zoneinfo import ZoneInfo
+
+from system.gate_activity import seconds_since_last_gate_eval
+from system.paths import logs_dir
+
+_BST = ZoneInfo("Europe/London")
+_LOG_TS = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+_GATE_LINE = re.compile(
+    r"WAIT —|gate .* error — WAIT:|stream_ready:|trading_loop started|orchestrator trading loop started"
+)
+_MAGICMOCK = re.compile(r"MagicMock|<MagicMock")
+_SUMMARY_REQUIRED = (
+    "IG Agent v25 — Session Summary",
+    "Trades:",
+    "Final state:",
+    "Stream uptime:",
+)
+
+
+@dataclass(frozen=True)
+class PreFlightResult:
+    check_id: str
+    description: str
+    passed: bool
+    reason: str = ""
+
+
+def _parse_log_ts(line: str) -> datetime | None:
+    m = _LOG_TS.match(line.strip())
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+
+
+def _read_log_tail(path: Path, *, max_lines: int = 4000) -> list[str]:
+    if not path.is_file():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    lines = text.splitlines()
+    if len(lines) > max_lines:
+        lines = lines[-max_lines:]
+    return lines
+
+
+def _latest_gate_log_age_sec(*, now: datetime | None = None) -> tuple[float | None, str]:
+    """Return (age_seconds, source) from engine/launcher logs, newest first."""
+    now = now or datetime.now()
+    best_age: float | None = None
+    best_src = ""
+    for name in ("engine.log", "launcher.log"):
+        path = logs_dir() / name
+        for line in reversed(_read_log_tail(path)):
+            if not _GATE_LINE.search(line):
+                continue
+            ts = _parse_log_ts(line)
+            if ts is None:
+                continue
+            age = (now - ts).total_seconds()
+            if age < 0:
+                age = 0.0
+            if best_age is None or age < best_age:
+                best_age = age
+                best_src = name
+    return best_age, best_src
+
+
+def check_anti_mock_session_summaries(logs: Path | None = None) -> PreFlightResult:
+    """Fail if any session_summary_*.txt contains unittest MagicMock strings."""
+    root = logs or logs_dir()
+    bad: list[str] = []
+    for path in sorted(root.glob("session_summary_*.txt")):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            bad.append(f"{path.name}: read error {e}")
+            continue
+        if _MAGICMOCK.search(text):
+            bad.append(path.name)
+    if bad:
+        return PreFlightResult(
+            "7.1",
+            "Session summaries free of MagicMock (no test pollution)",
+            False,
+            reason=f"polluted files: {', '.join(bad)}",
+        )
+    return PreFlightResult(
+        "7.1",
+        "Session summaries free of MagicMock (no test pollution)",
+        True,
+    )
+
+
+def check_session_summary_integrity(logs: Path | None = None) -> PreFlightResult:
+    root = logs or logs_dir()
+    files = sorted(root.glob("session_summary_*.txt"))
+    if not files:
+        return PreFlightResult(
+            "7.2",
+            "Session summary files well-formed (when present)",
+            True,
+            reason="no session summary files yet",
+        )
+    latest = files[-1]
+    try:
+        text = latest.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        return PreFlightResult(
+            "7.2",
+            "Session summary files well-formed (when present)",
+            False,
+            reason=str(e),
+        )
+    missing = [needle for needle in _SUMMARY_REQUIRED if needle not in text]
+    if _MAGICMOCK.search(text):
+        missing.append("MagicMock contamination")
+    if missing:
+        return PreFlightResult(
+            "7.2",
+            "Session summary files well-formed (when present)",
+            False,
+            reason=f"{latest.name}: missing/invalid {missing}",
+        )
+    return PreFlightResult(
+        "7.2",
+        "Session summary files well-formed (when present)",
+        True,
+        reason=latest.name,
+    )
+
+
+def check_gate_evaluation_recent(*, max_age_sec: float = 60.0) -> PreFlightResult:
+    """Gate activity from in-process tracker or log tail."""
+    in_proc = seconds_since_last_gate_eval()
+    if in_proc is not None and in_proc <= max_age_sec:
+        return PreFlightResult(
+            "7.3",
+            f"Last gate evaluation within {int(max_age_sec)}s",
+            True,
+            reason=f"in-process {in_proc:.0f}s ago",
+        )
+    log_age, src = _latest_gate_log_age_sec()
+    if log_age is not None and log_age <= max_age_sec:
+        return PreFlightResult(
+            "7.3",
+            f"Last gate evaluation within {int(max_age_sec)}s",
+            True,
+            reason=f"{src} {log_age:.0f}s ago",
+        )
+    detail = "no recent gate activity"
+    if in_proc is not None:
+        detail = f"in-process {in_proc:.0f}s ago"
+    elif log_age is not None:
+        detail = f"{src} {log_age:.0f}s ago"
+    return PreFlightResult(
+        "7.3",
+        f"Last gate evaluation within {int(max_age_sec)}s",
+        False,
+        reason=detail,
+    )
+
+
+def check_live_data_recent(*, max_tick_age_sec: float = 60.0) -> PreFlightResult:
+    """Hub or dashboard snapshot has a fresh quote."""
+    try:
+        from system.market_data_hub import get_market_data_hub
+
+        hub = get_market_data_hub()
+        freshest: float | None = None
+        epic_label = ""
+        for epic in hub.list_epics():
+            snap = hub.get_snapshot(epic)
+            if snap is None or snap.bid <= 0:
+                continue
+            age = float(snap.age_seconds())
+            if freshest is None or age < freshest:
+                freshest = age
+                epic_label = epic
+        if freshest is not None and freshest <= max_tick_age_sec:
+            return PreFlightResult(
+                "7.4",
+                f"Live market data fresh (<{int(max_tick_age_sec)}s)",
+                True,
+                reason=f"{epic_label} age={freshest:.1f}s",
+            )
+    except Exception as e:
+        hub_err = f"{type(e).__name__}: {e}"
+    else:
+        hub_err = "no hub snapshots"
+
+    try:
+        from api.snapshot_store import get_tick
+
+        tick = get_tick()
+        age = tick.get("tick_age_s")
+        epic = tick.get("epic") or tick.get("selected_epic") or "?"
+        if age is not None and float(age) <= max_tick_age_sec:
+            return PreFlightResult(
+                "7.4",
+                f"Live market data fresh (<{int(max_tick_age_sec)}s)",
+                True,
+                reason=f"dashboard {epic} age={float(age):.1f}s",
+            )
+    except Exception:
+        pass
+
+    return PreFlightResult(
+        "7.4",
+        f"Live market data fresh (<{int(max_tick_age_sec)}s)",
+        False,
+        reason=hub_err,
+    )
+
+
+def check_startup_stream_gate_log(*, within_minutes: float = 10.0) -> PreFlightResult:
+    """After startup, stream_ready or timeout proceed should appear in logs."""
+    cutoff = datetime.now() - timedelta(minutes=within_minutes)
+    patterns = (
+        "stream_ready: market stream live",
+        "stream_ready: hub quotes already live",
+        "stream_ready_timeout",
+        "timeout_proceed",
+        "test_mode_no_stream",
+    )
+    for name in ("engine.log", "launcher.log"):
+        path = logs_dir() / name
+        for line in reversed(_read_log_tail(path)):
+            ts = _parse_log_ts(line)
+            if ts is not None and ts < cutoff:
+                break
+            if any(p in line for p in patterns):
+                return PreFlightResult(
+                    "7.5",
+                    "Startup stream_ready gate logged",
+                    True,
+                    reason=f"{name}: {line.split('|', 1)[-1].strip()[:80]}",
+                )
+    return PreFlightResult(
+        "7.5",
+        "Startup stream_ready gate logged",
+        False,
+        reason=f"no stream_ready line in last {within_minutes:.0f} min",
+    )
+
+
+def run_all_pre_flight_checks(
+    *,
+    require_live_agent: bool = False,
+    max_gate_age_sec: float = 60.0,
+) -> list[PreFlightResult]:
+    results = [
+        check_anti_mock_session_summaries(),
+        check_session_summary_integrity(),
+    ]
+    if require_live_agent:
+        results.extend(
+            [
+                check_gate_evaluation_recent(max_age_sec=max_gate_age_sec),
+                check_live_data_recent(),
+                check_startup_stream_gate_log(),
+            ]
+        )
+    return results
+
+
+def pre_flight_summary(results: list[PreFlightResult]) -> dict[str, Any]:
+    passed = sum(1 for r in results if r.passed)
+    return {
+        "passed": passed,
+        "total": len(results),
+        "ok": all(r.passed for r in results),
+        "results": [
+            {
+                "id": r.check_id,
+                "description": r.description,
+                "passed": r.passed,
+                "reason": r.reason,
+            }
+            for r in results
+        ],
+    }

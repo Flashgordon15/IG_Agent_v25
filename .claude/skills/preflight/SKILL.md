@@ -16,4 +16,9 @@ PYTHONPATH=src python3 scripts/pre_flight_check.py --live
 PYTHONPATH=src python3 scripts/e2e_platform_validation.py
 ```
 
-If either command fails, report the specific failure and do not declare the system ready. If both pass, confirm "Pre-flight complete — system ready for live session."
+3. Supervision drift check (launchd, watchdog, manual_stop):
+```
+PYTHONPATH=src python3 scripts/supervision_check.py --repair
+```
+
+If any command fails, report the specific failure and do not declare the system ready. If all pass, confirm "Pre-flight complete — system ready for live session."

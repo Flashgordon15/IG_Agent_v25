@@ -1,9 +1,9 @@
 {
   "$schema": "./config_schema.json",
   "$extends": "config_v25.json",
-  "version": "26.0.0",
+  "version": "29.0.0",
   "_profile": "50k_demo_certification",
-  "_note": "v26 strategic framework — merge with config_v25.json when loader wired",
+  "_note": "v29 strategic framework — merge with config_v25.json when loader wired",
   "operating_mode": "DEMO",
   "capital_envelope": {
     "account_balance_gbp": 50000,

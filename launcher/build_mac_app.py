@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Rebuild launcher/IG Agent v25.app for macOS.
+Rebuild launcher/IG Agent v29.0.app for macOS.
 
 Run from project root:
   python3 launcher/build_mac_app.py
@@ -18,10 +18,11 @@ import zlib
 from datetime import datetime
 from pathlib import Path
 
-BUNDLE_NAME = "IG Agent v25.app"
-BUNDLE_ID = "com.igagent.v25"
-DISPLAY_NAME = "IG Agent v25"
-VERSION = "25.1.0"
+BUNDLE_NAME = "IG Agent v29.0.app"
+BUNDLE_ID = "com.igagent.v29"
+DISPLAY_NAME = "IG Agent v29.0"
+VERSION = "29.0.0"
+LEGACY_BUNDLE_NAME = "IG Agent v25.app"
 
 
 def project_root() -> Path:
@@ -49,7 +50,7 @@ def ensure_placeholder_png(png_path: Path) -> None:
             t = max(0.0, min(1.0, ((x - x0) * dx + (y - y0) * dy) / length_sq))
             px = x0 + t * dx
             py = y0 + t * dy
-            if (x - px) ** 2 + (y - py) ** 2 <= 14 ** 2:
+            if (x - px) ** 2 + (y - py) ** 2 <= 14**2:
                 return True
         return False
 
@@ -196,7 +197,9 @@ def validate_bundle(bundle: Path, root: Path) -> list[str]:
         errors.append(f"missing Info.plist: {plist}")
     else:
         try:
-            subprocess.run(["plutil", "-lint", str(plist)], check=True, capture_output=True)
+            subprocess.run(
+                ["plutil", "-lint", str(plist)], check=True, capture_output=True
+            )
         except subprocess.CalledProcessError as e:
             errors.append(f"invalid Info.plist: {e.stderr.decode() if e.stderr else e}")
 
@@ -212,7 +215,11 @@ def validate_bundle(bundle: Path, root: Path) -> list[str]:
             capture_output=True,
             text=True,
             timeout=5,
-            env={**os.environ, "PATH": os.environ.get("PATH", ""), "LAUNCHER_VALIDATE_ONLY": "1"},
+            env={
+                **os.environ,
+                "PATH": os.environ.get("PATH", ""),
+                "LAUNCHER_VALIDATE_ONLY": "1",
+            },
         )
         resolved = (probe.stdout or "").strip().splitlines()[-1] if probe.stdout else ""
         if probe.returncode != 0:
@@ -249,6 +256,7 @@ def build() -> Path:
     root = project_root()
     launcher_dir = root / "launcher"
     bundle = launcher_dir / BUNDLE_NAME
+    legacy_bundle = launcher_dir / LEGACY_BUNDLE_NAME
     contents = bundle / "Contents"
     macos = contents / "MacOS"
     resources = contents / "Resources"
@@ -277,6 +285,10 @@ def build() -> Path:
     errors = validate_bundle(bundle, root)
     if errors:
         raise RuntimeError("Bundle validation failed:\n  " + "\n  ".join(errors))
+
+    if legacy_bundle.exists() and legacy_bundle != bundle:
+        shutil.rmtree(legacy_bundle)
+        log_build(root, f"removed legacy bundle {legacy_bundle}")
 
     log_build(root, f"built and validated {bundle}")
     return bundle

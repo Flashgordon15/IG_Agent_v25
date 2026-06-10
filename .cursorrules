@@ -1,0 +1,13 @@
+# .cursorrules - Production Guardrails for IG_Agent_v29.0
+
+[Architecture Priorities]
+CorePipeline=src/trading/trading_loop.py -> src/trading/environment_scorer.py -> src/trading/ml_scorer.py -> src/trading/points_engine.py -> src/execution/risk_manager.py
+DatabaseRetention=Do NOT alter or touch SQLite history tables, JSON schema fallback structures, or relative log paths on disk.
+
+[Strict Safety Constraints]
+TradingMathGuard=NEVER modify, refactor, or optimize the 72% floor calibration parameters, position lot calculations, or hard risk limits.
+RefactoringDepth=Restrict structural edits to pure presentation, testing assertions, or telemetry injection handlers. Do not rewrite working modules.
+
+[Multi-Agent Delegation Roles]
+ArchitectAgent=Focus exclusively on system routing, data hub ingress validation, and identifying file boundaries or logic clashes.
+WorkerAgent=Focus strictly on isolated function patches, test class appending, and log instrumentation.

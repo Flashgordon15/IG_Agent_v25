@@ -168,7 +168,7 @@ export default function StartupSplash({ onComplete }) {
               IG Agent
             </p>
             <h1 style={{ fontSize: "1.5rem", fontWeight: 700, color: "#e2e8f0", margin: 0 }}>
-              v25
+              v29.0
             </h1>
             <p style={{ fontSize: "11px", color: "#475569", marginTop: "0.3rem" }}>
               {ready ? "All systems ready" : error ? "Startup error" : "Starting up…"}

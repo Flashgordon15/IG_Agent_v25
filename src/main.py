@@ -365,7 +365,18 @@ def _pre_startup_cleanup() -> None:
 
 
 def _ensure_watchdog_running() -> None:
-    """Start scripts/watchdog.sh when absent (manual python src/main.py launches)."""
+    """Start scripts/watchdog.sh when absent — skip if launchd already owns supervision."""
+    try:
+        from system.overnight_supervision import launchd_watchdog_active
+
+        if launchd_watchdog_active():
+            log_engine(
+                "startup: launchd watchdog active — skipping manual watchdog spawn"
+            )
+            return
+    except Exception:
+        pass
+
     try:
         from api.agent_health import _watchdog_active
 
@@ -602,10 +613,12 @@ class AgentRuntime:
                 if not result.get("ok"):
                     self.trading_loop.start()
                 _startup_mark("ready")
+                from api.agent_health import start_health_cache_refresher
                 from system.replay_daily_scheduler import start_replay_daily_scheduler
                 from system.trading_health_monitor import start_trading_health_monitor
 
                 start_replay_daily_scheduler()
+                start_health_cache_refresher()
                 start_trading_health_monitor()
                 from system.gate_coherence_scheduler import (
                     start_gate_coherence_scheduler,
@@ -648,7 +661,7 @@ class AgentRuntime:
 
             import uvicorn
 
-            log_engine(f"API server: started on port {_API_PORT}")
+            log_engine(f"API server: binding on port {_API_PORT}")
             uvicorn.run(app, host=_API_HOST, port=_API_PORT, log_level="info")
             return EXIT_OK
         finally:

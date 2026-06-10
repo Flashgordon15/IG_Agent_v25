@@ -1,5 +1,8 @@
 """
 Runtime control hooks — trading loop start/stop from FastAPI (Step 13).
+
+Dashboard WebSocket ticks attach supervision_drift via cached runtime fields
+from api.agent_health (refreshed in the health-cache background thread).
 """
 
 from __future__ import annotations
@@ -55,33 +58,14 @@ def is_trading_running() -> bool:
 
 def enrich_tick_runtime(tick: dict[str, Any]) -> dict[str, Any]:
     """Attach live trading-loop status for dashboard / WebSocket consumers."""
+    from api.agent_health import get_runtime_tick_fields
+
     out = dict(tick)
     out["trading_paused"] = is_paused()
     loops = is_trading_running()
     out["trading_loops_running"] = loops
-    try:
-        from api.agent_health import (
-            _configured_epics,
-            _quotes_fresh_by_epic,
-            evaluate_trading_health,
-        )
-        from system.gate_activity import seconds_since_last_gate_eval
-
-        gate_age = seconds_since_last_gate_eval()
-        out["last_gate_check_age_sec"] = gate_age
-        epics = _configured_epics()
-        quote_fresh = _quotes_fresh_by_epic(epics) if loops and epics else {}
-        health = evaluate_trading_health(
-            loops_running=loops,
-            paused=is_paused(),
-            gate_age=gate_age,
-            epics=epics,
-            quote_fresh=quote_fresh,
-        )
-        out["quotes_fresh"] = health["quotes_fresh"]
-        out["markets_open_count"] = health["markets_open_count"]
-        out["trading_healthy"] = health["trading_healthy"]
-    except Exception:
+    out.update(get_runtime_tick_fields())
+    if "trading_healthy" not in out:
         out["trading_healthy"] = loops and not is_paused()
     return out
 

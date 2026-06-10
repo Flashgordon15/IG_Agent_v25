@@ -6,7 +6,11 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-AGENT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+if [ -n "${IG_AGENT_ROOT:-}" ]; then
+    AGENT_DIR="${IG_AGENT_ROOT}"
+else
+    AGENT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+fi
 LOCK_FILE="$AGENT_DIR/src/data/.ig_agent_v25.lock"
 LOG="$AGENT_DIR/src/data/logs/watchdog.log"
 RESTART_LOG="$AGENT_DIR/src/data/logs/agent_restart.log"
@@ -91,6 +95,32 @@ except Exception:
 UNHEALTHY_STREAK=0
 UNHEALTHY_RESTART_AFTER=3
 last_restart_epoch=$(date +%s)
+START_LAUNCHD="$AGENT_DIR/scripts/start_agent_launchd.py"
+
+resolve_python_bin() {
+    local candidate PY=""
+    for candidate in \
+        "${AGENT_DIR}/.venv/bin/python3" \
+        "${AGENT_DIR}/venv/bin/python3" \
+        "/Library/Frameworks/Python.framework/Versions/3.14/bin/python3" \
+        "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3" \
+        "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3" \
+        "/opt/homebrew/bin/python3" \
+        "/usr/local/bin/python3" \
+        "$(command -v python3 2>/dev/null || true)"
+    do
+        if [ -n "${candidate}" ] && [ -x "${candidate}" ]; then
+            PY="${candidate}"
+            break
+        fi
+    done
+    printf '%s\n' "${PY}"
+}
+
+# Cold start: if nothing is listening, do not wait 300s before first restart.
+if ! agent_alive; then
+    last_restart_epoch=$(( $(date +%s) - STARTUP_GRACE_SEC - 1 ))
+fi
 
 cleanup_stale() {
     log "WATCHDOG: cleaning up stale resources on port $PORT"
@@ -112,19 +142,31 @@ restart_agent() {
     log "WATCHDOG: waiting 5s before restart..."
     sleep 5
 
-    if [ ! -x "$START_SCRIPT" ]; then
-        log "WATCHDOG: ERROR — start script missing or not executable ($START_SCRIPT)"
+    local PY
+    PY="$(resolve_python_bin)"
+    if [ -z "${PY}" ]; then
+        log "WATCHDOG: ERROR — no python3 executable found"
+        return 1
+    fi
+
+    if [ ! -f "$START_LAUNCHD" ]; then
+        log "WATCHDOG: ERROR — start launcher missing ($START_LAUNCHD)"
         return 1
     fi
 
     cd "$AGENT_DIR" || { log "WATCHDOG: ERROR — cannot cd to $AGENT_DIR"; return 1; }
 
-    log "WATCHDOG: restarting agent via start_agent_background.sh"
-    nohup bash "$START_SCRIPT" >> "$RESTART_LOG" 2>&1 &
+    export IG_AGENT_ROOT="$AGENT_DIR"
+    export IG_AGENT_FROM_LAUNCHER=1
+    export IG_AGENT_SKIP_DEPLOY_CHECK=1
+    export PYTHONPATH="${AGENT_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}"
+
+    log "WATCHDOG: restarting agent via start_agent_launchd.py (python=${PY})"
+    nohup "${PY}" "$START_LAUNCHD" >> "$RESTART_LOG" 2>&1 &
     local new_pid=$!
     disown "$new_pid" 2>/dev/null || true
     last_restart_epoch=$(date +%s)
-    log "WATCHDOG: agent restart launched — shell pid=$new_pid (grace ${STARTUP_GRACE_SEC}s)"
+    log "WATCHDOG: agent restart launched — pid=$new_pid (grace ${STARTUP_GRACE_SEC}s)"
 }
 
 notify_telegram() {

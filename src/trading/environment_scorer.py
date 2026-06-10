@@ -7,7 +7,7 @@ Section 4.5 Step 3. Reuses SignalEngine candle/indicator pipeline (no re-fetch).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pandas as pd
@@ -30,6 +30,37 @@ FACTOR_ATR_MAX = 30.0
 FACTOR_TREND_MAX = 25.0
 FACTOR_SESSION_MAX = 20.0
 FACTOR_SPREAD_MAX = 25.0
+
+
+def _utc_hour(now: datetime) -> int:
+    if now.tzinfo is not None:
+        return now.astimezone(timezone.utc).hour
+    return datetime.now(timezone.utc).hour
+
+
+def _session_style_utc(now: datetime) -> str:
+    hour = _utc_hour(now)
+    if hour >= 23 or hour < 7:
+        return "ASIAN_RANGE"
+    return "WESTERN_MOMENTUM"
+
+
+def _apply_session_style_weights(
+    factors: dict[str, float], session_style: str
+) -> dict[str, float]:
+    out = dict(factors)
+    if session_style == "ASIAN_RANGE":
+        out["trend"] = out.get("trend", 0.0) * 0.5
+        out["atr"] = out.get("atr", 0.0) * 1.30
+        out["session"] = out.get("session", 0.0) * 1.20
+        out["spread"] = out.get("spread", 0.0) * 1.10
+    else:
+        raw_trend = out.get("trend", 0.0)
+        out["trend"] = min(FACTOR_TREND_MAX, raw_trend * 2.5)
+        if out["trend"] < (FACTOR_TREND_MAX * 0.5):
+            for key in ("atr", "session", "spread"):
+                out[key] = out.get(key, 0.0) * 0.40
+    return out
 
 
 def _linear_down(value: float, start: float, end: float, max_pts: float) -> float:
@@ -127,6 +158,8 @@ class EnvironmentScore:
     capped_cold_start: bool = False
     capped_gap_open: bool = False
     gate_passes: bool = True
+    session_style: str = "WESTERN_MOMENTUM"
+    fallback_active: bool = False
 
 
 class EnvironmentScorer:
@@ -353,12 +386,16 @@ class EnvironmentScorer:
             ),
             "spread": score_spread_factor(current_spread, normal_spread),
         }
+        session_style = _session_style_utc(now)
+        factors = _apply_session_style_weights(factors, session_style=session_style)
         meta = {
             "current_atr": current_atr,
             "avg_atr_20": avg_atr_20,
             "current_spread": current_spread,
             "normal_spread": normal_spread,
             "complete_bars": max(0, len(c5) - 1),
+            "session_style": session_style,
+            "utc_hour": _utc_hour(now),
         }
         return factors, meta
 
@@ -374,6 +411,7 @@ class EnvironmentScorer:
             factors, meta = self._compute_factors(
                 market, quote=quote, quote_df=quote_df
             )
+            session_style = str(meta.get("session_style") or "WESTERN_MOMENTUM")
             self._fallback_warned_for_market.discard(market_key)
             total = sum(factors.values())
             sentiment = self.fetch_sentiment(self._epic or market)
@@ -426,6 +464,8 @@ class EnvironmentScorer:
                 capped_cold_start=capped_cold,
                 capped_gap_open=capped_gap,
                 gate_passes=total >= GATE_PASS_MIN,
+                session_style=session_style,
+                fallback_active=False,
             )
             return total
         except Exception as e:
@@ -459,6 +499,7 @@ class EnvironmentScorer:
                     "spread": SAFE_DEFAULT_SCORE * 0.25,
                 },
                 gate_passes=SAFE_DEFAULT_SCORE >= GATE_PASS_MIN,
+                fallback_active=not is_warmup,
             )
             return SAFE_DEFAULT_SCORE
 

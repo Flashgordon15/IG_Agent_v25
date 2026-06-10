@@ -158,6 +158,10 @@ def _atr_from_signal_snapshot(snapshot: dict[str, Any] | None) -> float:
         return 0.0
 
 
+NOT_IN_TOP_3_VOLATILITY_ROTATION = "NOT_IN_TOP_3_VOLATILITY_ROTATION"
+SOFT_BLOCK_NOT_IN_TOP_3 = f"soft block — {NOT_IN_TOP_3_VOLATILITY_ROTATION}"
+
+
 @dataclass
 class GateResult:
     name: str
@@ -1040,6 +1044,51 @@ class TradingLoop:
             return self._evaluate_gates_core(quote)
 
     def _evaluate_gates_core(self, quote: Quote) -> list[GateResult]:
+        rotation = self._gate_active_rotation()
+        if not rotation.passed:
+            blocked = GateResult(
+                name="active_rotation",
+                passed=False,
+                value=rotation.value,
+                detail=SOFT_BLOCK_NOT_IN_TOP_3,
+            )
+            results: list[GateResult] = [blocked]
+            for name in GATE_NAMES:
+                results.append(
+                    GateResult(
+                        name=name,
+                        passed=False,
+                        value=None,
+                        detail=SOFT_BLOCK_NOT_IN_TOP_3,
+                    )
+                )
+            return results
+
+        from system.market_data_hub import get_market_data_hub
+
+        current_spread = float(
+            quote.get("spread", 0.0)
+            if isinstance(quote, dict)
+            else getattr(quote, "spread", 0.0)
+        )
+        shield_passed, rr_ratio_delta = (
+            get_market_data_hub().verify_liquidity_shield_delta(
+                self._epic, current_spread
+            )
+        )
+        if not shield_passed:
+            log_engine(
+                f"LIQUIDITY_SHIELD_BLOCKED | epic={self._epic} spread={current_spread:.2f} "
+                f"ratio={rr_ratio_delta:.2f}x (>3.5x baseline)"
+            )
+            return [
+                GateResult(
+                    name="risk_validation",
+                    passed=False,
+                    detail="BLOCKED_MULTI_BROKER_LIQUIDITY_SHIELD",
+                )
+            ]
+
         results: list[GateResult] = []
         for name in GATE_NAMES:
             try:
@@ -1105,6 +1154,30 @@ class TradingLoop:
                     GateResult(name=name, passed=False, value=None, detail=detail)
                 )
         return results
+
+    def _gate_active_rotation(self) -> GateResult:
+        from runtime.market_orchestrator import MarketOrchestrator
+
+        active = MarketOrchestrator.get_global_active_epics()
+        if len(active) < 3:
+            return GateResult(
+                name="active_rotation",
+                passed=True,
+                value={"active_epics": active},
+                detail="rotation filter inactive (<3 markets)",
+            )
+        passed = self._epic in active
+        detail = (
+            f"in top-{len(active)} rotation"
+            if passed
+            else NOT_IN_TOP_3_VOLATILITY_ROTATION
+        )
+        return GateResult(
+            name="active_rotation",
+            passed=passed,
+            value={"active_epics": active, "epic": self._epic},
+            detail=detail,
+        )
 
     def _gate_session_open(self) -> GateResult:
         from system.market_data_hub import get_market_data_hub
@@ -1268,6 +1341,10 @@ class TradingLoop:
                 "gate_min": GATE_PASS_MIN,
                 "capped_cold_start": bool(last.capped_cold_start),
                 "capped_gap_open": bool(last.capped_gap_open),
+                "session_style": str(
+                    getattr(last, "session_style", None) or "WESTERN_MOMENTUM"
+                ),
+                "fallback_active": bool(getattr(last, "fallback_active", False)),
                 "sentiment": sentiment,
             }
         except Exception:

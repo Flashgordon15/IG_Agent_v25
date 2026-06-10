@@ -356,7 +356,7 @@ def test_api_health_endpoint_defined() -> None:
     routes = (_SRC / "api" / "routes.py").read_text(encoding="utf-8")
     health = (_SRC / "api" / "agent_health.py").read_text(encoding="utf-8")
     assert '@router.get("/api/health")' in routes
-    assert "build_health_status" in routes
+    assert "get_cached_health_status" in routes
     for field in (
         "agent_alive",
         "trading_healthy",
@@ -460,7 +460,7 @@ def test_safe_to_leave_script_exists() -> None:
 
 
 def test_shutdown_cleanup_module_covers_full_teardown() -> None:
-    """Stop Agent must tear down streams, IG session, watchdog, orphans, lock, and port."""
+    """Stop Agent must tear down streams, IG session, watchdog (preserve launchd), orphans, lock."""
     path = _SRC / "system" / "shutdown_cleanup.py"
     assert path.is_file(), "shutdown_cleanup.py missing"
     source = path.read_text(encoding="utf-8")
@@ -470,11 +470,13 @@ def test_shutdown_cleanup_module_covers_full_teardown() -> None:
         "stop_ig_position_sync",
         "shutdown_shared_ig_session",
         "stop_watchdog",
+        "preserve_launchd=True",
         "kill_other_agent_processes",
         "release_instance_lock",
         "_force_cleanup_port",
         "agent_fully_started",
         "agent_fully_stopped",
+        "preserve_launchd_supervision",
     ):
         assert needle in source, f"shutdown_cleanup missing {needle}"
 
@@ -512,16 +514,25 @@ def test_shutdown_verify_server_and_dashboard_integration() -> None:
     assert "verify_poll_url" in routes_src
     assert "skip_port_cleanup=True" in routes_src
     assert "BackgroundTasks" in routes_src
+    assert '"supervision"' in routes_src or "'supervision'" in routes_src
+    assert "Launchd supervision" in routes_src
+    assert "stop_watchdog()" not in routes_src.split("api_shutdown")[1].split("def ")[0]
     main_src = _MAIN_PY.read_text(encoding="utf-8")
     assert "-sTCP:LISTEN" in main_src
     verify_src = verify.read_text(encoding="utf-8")
     assert '("0.0.0.0", VERIFY_PORT)' in verify_src
+    assert "supervision_drift" in verify_src
+    assert "_supervision_fields" in verify_src
     app_src = app.read_text(encoding="utf-8")
     assert "pollShutdownVerify" in app_src
     assert "127.0.0.1:8081/shutdown-verify" in app_src
     assert "Fully stopped — verified" in app_src
+    assert "SupervisionBanner" in app_src
+    assert "shutdownVerification" in app_src
+    assert "persistStopSupervision" in app_src
     confirm = (_ROOT / "scripts" / "confirm_stopped.py").read_text(encoding="utf-8")
     assert "agent_fully_stopped" in confirm
+    assert "stopped_verification_checks" in confirm
 
 
 def test_confirm_started_script_exists() -> None:
@@ -723,7 +734,7 @@ def test_watchdog_uses_dynamic_agent_dir_and_grace() -> None:
     watchdog = _ROOT / "scripts" / "watchdog.sh"
     source = watchdog.read_text(encoding="utf-8")
     assert 'SCRIPT_DIR="$(cd "$(dirname "$0")"' in source
-    assert "start_agent_background.sh" in source
+    assert "start_agent_launchd.py" in source
     assert "STARTUP_GRACE_SEC" in source
     assert "/Users/chrisgordon/Desktop/IG_Agent_v25" not in source
 
@@ -773,7 +784,8 @@ def test_watchdog_launchd_keeper_plist() -> None:
     source = plist.read_text(encoding="utf-8")
     assert "<key>KeepAlive</key>" in source
     assert "<true/>" in source
-    assert "watchdog.sh" in source
+    assert "watchdog_launchd.py" in source
+    assert (_ROOT / "scripts" / "watchdog_launchd.py").is_file()
     install = (_ROOT / "scripts" / "install_launchd.sh").read_text(encoding="utf-8")
     assert "com.igagent.v25.watchdog.plist" in install
 
@@ -854,11 +866,17 @@ def test_dashboard_safe_to_leave_button_and_api() -> None:
     )
     routes = (_ROOT / "src" / "api" / "routes.py").read_text(encoding="utf-8")
     data = (_ROOT / "src" / "api" / "dashboard_data.py").read_text(encoding="utf-8")
+    safe = (_ROOT / "scripts" / "safe_to_leave.py").read_text(encoding="utf-8")
     assert "Safe to Leave" in header
+    assert "Overnight Armed" in header
     assert "/api/safe-to-leave" in header
     assert "api_safe_to_leave" in routes
+    assert "api_overnight_status" in routes
     assert "run_safe_to_leave" in routes
     assert "def run_safe_to_leave" in data
+    assert "mark_overnight_armed" in data
+    assert "Launchd supervision bootstrap" in safe
+    assert "Overnight bundle" in safe
 
 
 def test_safe_to_leave_skips_tick_freshness_when_markets_closed() -> None:
@@ -922,3 +940,33 @@ def test_main_respawns_watchdog_when_silent() -> None:
     assert "_ensure_watchdog_running" in source
     assert "watchdog.sh" in source
     assert "_watchdog_active" in source
+
+
+def test_supervision_monitor_module_wired() -> None:
+    """Built-in operator layer must run from health monitor and expose drift checks."""
+    monitor = (_SRC / "system" / "supervision_monitor.py").read_text(encoding="utf-8")
+    health = (_SRC / "system" / "trading_health_monitor.py").read_text(encoding="utf-8")
+    agent_health = (_SRC / "api" / "agent_health.py").read_text(encoding="utf-8")
+    control = (_SRC / "api" / "agent_control.py").read_text(encoding="utf-8")
+    script = _ROOT / "scripts" / "supervision_check.py"
+    assert script.is_file()
+    assert "evaluate_supervision_drift" in monitor
+    assert "run_supervision_monitor_tick" in monitor
+    assert "supervision_monitor" in health
+    assert "supervision_drift_ok" in agent_health
+    assert "supervision_drift" in control
+
+
+def test_install_launchd_graceful_handoff() -> None:
+    """install_launchd must not kill a healthy agent and must clear manual_stop."""
+    install = (_ROOT / "scripts" / "install_launchd.sh").read_text(encoding="utf-8")
+    assert "clear_manual_stop_flag" in install
+    assert "handoff to launchd without stopping" in install
+    assert "/api/health" in install
+
+
+def test_agent_health_stop_watchdog_preserves_launchd_by_default() -> None:
+    source = (_SRC / "api" / "agent_health.py").read_text(encoding="utf-8")
+    assert "preserve_launchd: bool = True" in source
+    assert "launchd_watchdog_active" in source
+    assert "watchdog_launchd.py" in source

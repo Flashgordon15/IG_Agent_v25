@@ -1,6 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api/client.js";
 import { fmtPrice } from "../utils/fmtPrice.js";
+import {
+  activeEpicRank,
+  isEpicRotationMuted,
+  medalForRank,
+  resolveActiveEpics,
+} from "../utils/roadmapTelemetry.js";
 import SentinelDiagnosticConsole from "./SentinelDiagnosticConsole.jsx";
 
 // ---------------------------------------------------------------------------
@@ -398,6 +404,7 @@ function MarketGrid({ rawState, selectedEpic, onSelectEpic }) {
   const labels  = rawState?.instrument_labels || {};
   const enabled = Array.isArray(rawState?.enabled_epics) ? rawState.enabled_epics.filter(Boolean) : [];
   const epics   = enabled.length ? enabled : (markets ? Object.keys(markets) : []);
+  const activeEpics = resolveActiveEpics(rawState);
   if (epics.length <= 1) return null;
 
   return (
@@ -410,6 +417,8 @@ function MarketGrid({ rawState, selectedEpic, onSelectEpic }) {
         const active = epic === selectedEpic;
         const status = marketStatusMeta(m.market_state, m.stream_status);
         const isOpen = String(m.market_state ?? "").toUpperCase() === "OPEN";
+        const rotationRank = activeEpicRank(activeEpics, epic);
+        const rotationMuted = isEpicRotationMuted(activeEpics, epic);
         const sessionGateVal = (m.health?.gates || []).find((g) => g.name === "session_open")?.value;
         const nextOpenIso = typeof sessionGateVal === "object" ? sessionGateVal?.next_open : null;
         const nextOpenTime = fmtNextOpen(nextOpenIso);
@@ -419,20 +428,33 @@ function MarketGrid({ rawState, selectedEpic, onSelectEpic }) {
             key={epic}
             type="button"
             onClick={() => onSelectEpic?.(epic)}
+            disabled={rotationMuted}
             className={[
-              "rounded-lg border p-2 text-left transition-all",
-              active
-                ? "border-accent bg-accent/10"
-                : "border-border bg-surface hover:border-accent/40 hover:bg-card",
+              "rounded-lg border p-2 text-left transition-all duration-300",
+              rotationMuted
+                ? "pointer-events-none border-border/60 bg-surface/50 opacity-40 grayscale"
+                : active
+                  ? "border-accent bg-accent/10"
+                  : "border-border bg-surface hover:border-accent/40 hover:bg-card",
             ].join(" ")}
           >
             {/* Name + stream dot */}
             <div className="flex items-center justify-between gap-1 mb-1">
               <span className={`text-[10px] font-semibold uppercase tracking-wide truncate ${active ? "text-accent" : "text-foreground"}`}>
+                {rotationRank >= 0 && medalForRank(rotationRank) ? (
+                  <span className="mr-0.5" aria-hidden>{medalForRank(rotationRank)}</span>
+                ) : null}
                 {marketPillLabel(epic, name)}
               </span>
               <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${status.dot}`} />
             </div>
+            {rotationMuted && (
+              <div className="mb-1">
+                <span className="inline-flex rounded border border-border bg-muted/20 px-1 py-0.5 text-[8px] font-bold uppercase tracking-wide text-muted">
+                  MUTED — ROTATION
+                </span>
+              </div>
+            )}
             {/* Price */}
             <div className="font-mono text-[11px] tabular-nums text-muted">
               {isOpen && bid != null ? fmtPrice(bid, epic) : "—"}

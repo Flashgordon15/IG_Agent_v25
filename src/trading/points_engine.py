@@ -50,6 +50,24 @@ def set_points_state_path_for_tests(path: Path | str | None) -> None:
 
 
 HEALTHY_CUMULATIVE_MIN = 4.0  # was 6.0 — faster recovery to full size after drawdown
+ROADMAP_COMPOUND_ENTER_CUMULATIVE = 15.0
+ROADMAP_COMPOUND_EXIT_CUMULATIVE = 10.0
+ROADMAP_COMPOUND_BOOST_MULTIPLIER = 2.5
+
+
+def _clamp_multiplier_to_trade_size_bounds(
+    multiplier: float,
+    *,
+    trade_size: float,
+    min_size: float,
+    max_size: float,
+) -> float:
+    """Maps sizing multiplier to actual trade volumes, clamps, and reverses mapping."""
+    if multiplier <= 0.0 or trade_size <= 0.0:
+        return multiplier
+    implied = trade_size * multiplier
+    clamped = max(min_size, min(max_size, implied))
+    return clamped / trade_size
 
 
 def _nominal_state(cumulative: float) -> PointsStateName:
@@ -110,6 +128,7 @@ class PointsEngine:
         self._telegram_last_effective: PointsStateName | None = None
         self._gbp_loss_events: list[tuple[float, float]] = []
         self._rapid_cooldown_until: float = 0.0
+        self._roadmap_compound_boost = False
         self._load()
 
     def _snapshot(self) -> PointsSnapshot:
@@ -453,6 +472,36 @@ class PointsEngine:
         """Public confidence band label (high / standard / marginal / low)."""
         return _confidence_band(float(confidence))
 
+    def _roadmap_cumulative_scale(self) -> float:
+        """Roadmap Layer 2: 2.5× win-streak boost with 10–14.9 pt hysteresis band."""
+        cumulative = self._cumulative
+        if cumulative >= ROADMAP_COMPOUND_ENTER_CUMULATIVE:
+            self._roadmap_compound_boost = True
+            return ROADMAP_COMPOUND_BOOST_MULTIPLIER
+        if cumulative < ROADMAP_COMPOUND_EXIT_CUMULATIVE:
+            self._roadmap_compound_boost = False
+            return 1.0
+        return (
+            ROADMAP_COMPOUND_BOOST_MULTIPLIER if self._roadmap_compound_boost else 1.0
+        )
+
+    def _finalize_size_multiplier(self, raw: float) -> float:
+        if raw <= 0.0:
+            return 0.0
+        scaled = raw * self._roadmap_cumulative_scale()
+        try:
+            from system.config_loader import get_config
+
+            cfg = get_config()
+            return _clamp_multiplier_to_trade_size_bounds(
+                scaled,
+                trade_size=float(cfg.trade_size),
+                min_size=float(cfg.adaptive_min_trade_size),
+                max_size=float(cfg.adaptive_max_trade_size),
+            )
+        except Exception:
+            return scaled
+
     def get_size_multiplier(self, confidence: float) -> float:
         """Position size multiplier for confidence and current state (0 = no trade)."""
         try:
@@ -503,23 +552,27 @@ class PointsEngine:
                     if bands_enabled():
                         rb = risk_band_for_confidence(conf)
                         if rb == "probe":
-                            return tier_mult * 0.25
+                            return self._finalize_size_multiplier(tier_mult * 0.25)
                         if rb == "core":
                             core = core_size_multiplier()
                             if band == "high":
-                                return tier_mult * core
+                                return self._finalize_size_multiplier(tier_mult * core)
                             if band == "standard":
-                                return tier_mult * 0.5 * core
+                                return self._finalize_size_multiplier(
+                                    tier_mult * 0.5 * core
+                                )
                             if band == "marginal":
-                                return tier_mult * 0.25 * core
+                                return self._finalize_size_multiplier(
+                                    tier_mult * 0.25 * core
+                                )
                 except Exception:
                     pass
                 if band == "high":
-                    return tier_mult
+                    return self._finalize_size_multiplier(tier_mult)
                 if band == "standard":
-                    return tier_mult * 0.5
+                    return self._finalize_size_multiplier(tier_mult * 0.5)
                 if band == "marginal":
-                    return tier_mult * 0.25
+                    return self._finalize_size_multiplier(tier_mult * 0.25)
                 return 0.0
 
             if state == "CAUTION":
@@ -530,18 +583,18 @@ class PointsEngine:
                     )
 
                     if bands_enabled() and risk_band_for_confidence(conf) == "probe":
-                        return 0.25
+                        return self._finalize_size_multiplier(0.25)
                 except Exception:
                     pass
                 if conf >= CONF_MARGINAL_MIN:
-                    return 0.5
+                    return self._finalize_size_multiplier(0.5)
                 if conf >= entry_min:
-                    return 0.25
+                    return self._finalize_size_multiplier(0.25)
                 return 0.0
 
             if state == "WARNING":
                 if band == "high":
-                    return 0.25
+                    return self._finalize_size_multiplier(0.25)
                 return 0.0
 
             return 0.0

@@ -1,5 +1,5 @@
 """
-Load and validate configuration — v24 primary, legacy v23/v22 fallback.
+Load and validate configuration — v29 primary, v25/v24 legacy fallback.
 """
 
 from __future__ import annotations
@@ -18,15 +18,16 @@ _config: Config | None = None
 _config_lock = threading.RLock()
 _config_file_mtime: float = 0.0  # last known mtime of active config file
 
+V29_FILE = "config_v29.json"
 V25_FILE = "config_v25.json"
 V24_FILE = "config_v24.json"
 LEGACY_V23_FILE = "legacy_v23/config_v23.json"
 
 
 def _primary_config_path() -> Path:
-    """Resolve config file: v25 → v24 → legacy v23 (first that exists)."""
+    """Resolve config file: v29 → v25 → v24 → legacy v23 (first that exists)."""
     cd = config_dir()
-    for rel in (V25_FILE, V24_FILE):
+    for rel in (V29_FILE, V25_FILE, V24_FILE):
         p = cd / rel
         if p.exists():
             return p
@@ -126,7 +127,7 @@ def _sync_operating_mode_from_credentials(cfg: dict[str, Any]) -> None:
 def get_config(*, reload: bool = False) -> Config:
     """Return the global Config singleton.
 
-    Auto-reloads when config_v24.json has been modified on disk so that runtime
+    Auto-reloads when the active config file has been modified on disk so that runtime
     edits to the file take effect immediately (within one trading tick) without
     requiring a bot restart.  Pass ``reload=True`` to force a reload regardless.
     """
@@ -168,7 +169,7 @@ MAX_POSITIONS_PER_EPIC_LIMIT = 6
 
 def update_config_values(**kwargs: Any) -> Config:
     """
-    Merge runtime config updates, persist to config_v24.json, and refresh the singleton.
+    Merge runtime config updates, persist to the active primary config file, and refresh the singleton.
 
     ``max_positions_per_epic`` is clamped to 1–6. Values above 1 disable ``one_position_per_epic``.
     """
@@ -282,7 +283,19 @@ class ConfigLoader:
         else:
             with open(self._path, "r", encoding="utf-8") as f:
                 primary = json.load(f)
-            merged = _deep_merge(base, primary)
+            extends = primary.get("$extends")
+            if extends:
+                ext_path = config_dir() / str(extends)
+                if not ext_path.is_file():
+                    raise FileNotFoundError(
+                        f"Config extends missing: {extends} (from {self._path.name})"
+                    )
+                with open(ext_path, "r", encoding="utf-8") as ef:
+                    ext_data = json.load(ef)
+                merged = _deep_merge(base, ext_data)
+                merged = _deep_merge(merged, primary)
+            else:
+                merged = _deep_merge(base, primary)
         # IG secrets: config/credentials/credentials.json via system.credentials_loader only
         if "operating_mode" not in merged:
             merged["operating_mode"] = (

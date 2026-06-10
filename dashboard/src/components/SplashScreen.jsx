@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 
 export default function SplashScreen({ versionData, onDismiss }) {
-  const version = versionData?.version ?? "25.x";
+  const version = versionData?.version ?? "29.0";
   const buildDate = versionData?.build_date ?? "";
   const changelog = Array.isArray(versionData?.changelog) ? versionData.changelog : [];
   const latest = changelog[0] ?? null;

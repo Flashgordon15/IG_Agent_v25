@@ -29,10 +29,26 @@ PYTHONPATH=src python3 src/main.py
 - Uses Python 3.14 from the spec path when available
 - Logs to `src/data/logs/launcher.log`
 
-## Login at launch (optional)
+## Overnight / unattended trading
 
-Install launchd jobs (auto-start on login):
+**Safe to Leave = overnight bundle.** Clicking it in the dashboard:
+
+1. Ensures **launchd** watchdog + caffeinate are loaded (auto-bootstrap if plists exist)
+2. Runs all trust checks (health, gates, quotes, AC power, telegram, …)
+3. **Arms overnight mode** — you may close Cursor and the browser tab
+
+The agent does **not** depend on Cursor. Use Cursor only for code changes.
+
+One-time install:
 
 ```bash
 ./scripts/install_launchd.sh
 ```
+
+Before bed (CLI equivalent of the dashboard button):
+
+```bash
+./scripts/ensure_overnight_ready.sh
+```
+
+**Stop Agent** clears overnight armed and stops launchd watchdog (no auto-restart for 10 min).

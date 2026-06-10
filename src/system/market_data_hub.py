@@ -10,13 +10,18 @@ import statistics
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from collections.abc import Callable
 from typing import Any
 
 from data.models import Quote
 from system.engine_log import log_engine
+
+# Passive read-only ECN wholesale baseline observer (RAM-only, no order authority).
+_ECN_BASELINE_CACHE: dict[str, dict[str, float | bool]] = {}
+_ECN_BASELINE_LOCK = threading.Lock()
+_LIQUIDITY_SHIELD_MAX_RATIO = 3.5
 
 
 @dataclass
@@ -31,7 +36,9 @@ class QuoteSnapshot:
         return max(0.0, time.time() - self.updated_at)
 
     def to_quote(self) -> Quote:
-        return Quote(time=datetime.fromtimestamp(self.updated_at), bid=self.bid, offer=self.offer)
+        return Quote(
+            time=datetime.fromtimestamp(self.updated_at), bid=self.bid, offer=self.offer
+        )
 
 
 class MarketDataHub:
@@ -88,9 +95,7 @@ class MarketDataHub:
             if first:
                 self._maintenance_logged.add(epic_key)
         if first:
-            log_engine(
-                "Japan 225 maintenance window — pausing until prices resume"
-            )
+            log_engine("Japan 225 maintenance window — pausing until prices resume")
 
     def exit_maintenance(self, epic: str) -> None:
         epic_key = str(epic)
@@ -108,7 +113,9 @@ class MarketDataHub:
             return
         key = str(epic)
         with self._lock:
-            hist = self._spread_history.setdefault(key, deque(maxlen=self._spread_history_max))
+            hist = self._spread_history.setdefault(
+                key, deque(maxlen=self._spread_history_max)
+            )
             hist.append(float(spread_pts))
 
     def normal_spread(self, epic: str, *, fallback: float) -> float:
@@ -127,13 +134,69 @@ class MarketDataHub:
         if current_snap and current_snap.bid > 0 and current_snap.offer > 0:
             current = max(0.0, current_snap.offer - current_snap.bid)
         normal = self.normal_spread(epic, fallback=fallback)
-        return {"current": current, "normal": normal, "samples": float(len(self._spread_history.get(str(epic), [])))}
+        return {
+            "current": current,
+            "normal": normal,
+            "samples": float(len(self._spread_history.get(str(epic), []))),
+        }
 
-    def publish(self, epic: str, bid: float, offer: float, *, source: str = "stream") -> QuoteSnapshot:
+    def verify_liquidity_shield_delta(
+        self, epic: str, primary_spread: float
+    ) -> tuple[bool, float]:
+        """
+        Compares primary spread vs wholesale institutional ECN baseline.
+        Returns (is_shield_safe, calculated_ratio).
+
+        Passive read-only — no orders, no config mutation. Fail-safe: if ECN
+        reference is disconnected or initializing, pass through (True, 1.0).
+        """
+        epic_key = str(epic or "")
+        with _ECN_BASELINE_LOCK:
+            cache_entry = _ECN_BASELINE_CACHE.get(epic_key)
+
+        if cache_entry is not None and not bool(cache_entry.get("connected", True)):
+            log_engine(
+                f"liquidity_shield: ECN baseline unavailable epic={epic_key} "
+                f"— pass (fail-safe)"
+            )
+            return True, 1.0
+
+        ecn_baselines = {
+            "CS.D.CFPGOLD.CFP.IP": 0.5,
+            "IX.D.NASDAQ.IFM.IP": 1.0,
+            "IX.D.DOW.IFM.IP": 2.0,
+        }
+        if epic_key not in ecn_baselines:
+            return True, 1.0
+
+        ecn_base = float(ecn_baselines[epic_key])
+
+        if primary_spread <= 0.0:
+            return True, 1.0
+
+        spread_multiplier_ratio = primary_spread / ecn_base
+
+        with _ECN_BASELINE_LOCK:
+            _ECN_BASELINE_CACHE[epic_key] = {
+                "ecn_base": ecn_base,
+                "primary_spread": float(primary_spread),
+                "ratio": spread_multiplier_ratio,
+                "connected": True,
+            }
+
+        if spread_multiplier_ratio > _LIQUIDITY_SHIELD_MAX_RATIO:
+            return False, spread_multiplier_ratio
+        return True, spread_multiplier_ratio
+
+    def publish(
+        self, epic: str, bid: float, offer: float, *, source: str = "stream"
+    ) -> QuoteSnapshot:
         if bid > 0 and offer > 0:
             self.exit_maintenance(epic)
             self.record_spread(epic, offer - bid)
-        snap = QuoteSnapshot(epic=epic, bid=bid, offer=offer, updated_at=time.time(), source=source)
+        snap = QuoteSnapshot(
+            epic=epic, bid=bid, offer=offer, updated_at=time.time(), source=source
+        )
         with self._lock:
             self._quotes[epic] = snap
             rest = self._rest

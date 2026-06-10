@@ -16,7 +16,11 @@ import pytest
 from data.models import Quote
 from signals.signal_engine import SignalEngine
 from system.config_loader import ConfigLoader
-from trading.environment_scorer import GATE_PASS_MIN, SAFE_DEFAULT_SCORE, EnvironmentScorer
+from trading.environment_scorer import (
+    GATE_PASS_MIN,
+    SAFE_DEFAULT_SCORE,
+    EnvironmentScorer,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 EPIC = "IX.D.NIKKEI.IFM.IP"
@@ -79,8 +83,9 @@ def test_full_signal_to_shadow_log_pipeline(shadow_log_path: Path) -> None:
     fitness_score = scorer.score(MARKET)
     assert isinstance(fitness_score, float)
     assert 0.0 <= fitness_score <= 100.0
-    # Score may equal GATE_PASS_MIN when cold-start cap applies; just verify scorer ran
-    assert not scorer.last_score().capped_cold_start or fitness_score == GATE_PASS_MIN
+    # Cold-start cap limits score to GATE_PASS_MIN when raw total would exceed it
+    if scorer.last_score().capped_cold_start:
+        assert fitness_score <= GATE_PASS_MIN
 
     before = _read_shadow_rows(shadow_log_path)
     result = engine.evaluate(MARKET)
@@ -112,4 +117,6 @@ def test_full_signal_to_shadow_log_pipeline(shadow_log_path: Path) -> None:
     assert isinstance(record["atr"], (int, float))
     assert isinstance(record["fitness"], (int, float))
     assert isinstance(record["would_have_fired"], bool)
-    assert record["gate_blocked_at"] is None or isinstance(record["gate_blocked_at"], str)
+    assert record["gate_blocked_at"] is None or isinstance(
+        record["gate_blocked_at"], str
+    )

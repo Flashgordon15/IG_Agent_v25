@@ -20,15 +20,21 @@ def _check_once() -> None:
     global _UNHEALTHY_STREAK, _LAST_ALERT_MONO
     try:
         from api.agent_control import is_trading_running
-        from api.agent_health import build_health_status
+        from api.agent_health import refresh_health_cache
 
         if not is_trading_running():
             _UNHEALTHY_STREAK = 0
             return
 
-        status = build_health_status()
+        status = refresh_health_cache()
         if status.get("trading_healthy"):
             _UNHEALTHY_STREAK = 0
+            try:
+                from system.supervision_monitor import run_supervision_monitor_tick
+
+                run_supervision_monitor_tick(repair=True)
+            except Exception:
+                pass
             return
 
         _UNHEALTHY_STREAK += 1
@@ -46,6 +52,12 @@ def _check_once() -> None:
         from system.telegram_notifier import send_critical_alert
 
         send_critical_alert(f"⚠️ Agent unhealthy x{_UNHEALTHY_STREAK} — {detail}")
+        try:
+            from system.supervision_monitor import run_supervision_monitor_tick
+
+            run_supervision_monitor_tick(repair=True)
+        except Exception:
+            pass
     except Exception as e:
         log_engine(f"trading_health_monitor error: {type(e).__name__}: {e}")
 

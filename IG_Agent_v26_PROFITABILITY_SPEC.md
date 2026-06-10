@@ -1,27 +1,34 @@
-# IG Agent v26 — Profitability Specification
+# IG Agent v28 — Profitability Specification
+## The Continuous Integration & Adaptive Optimization Engine (CIAO)
 
-**DRAFT v1 | June 2026 | CONFIDENTIAL**
+**DRAFT v3 | June 2026 | CONFIDENTIAL**
 
 | Field | Value |
 |-------|-------|
-| Application lineage | v25.6.0+ → **v26** |
-| Spec version | **v26.1** (profitability north-star) |
+| Application lineage | v25.6.0+ → v26 → v27 → **v28** |
+| Spec version | **v28.0** (CIAO — self-healing code + strategy automation) |
 | Foundation | v25 operational spec v8 (unchanged lifecycle/dashboard core) |
+| Profitability foundation | v26 profitability north-star (§1–§16 — **frozen trading law**) |
+| AI foundation | v27 Autonomous Sentinel — Twin AI Module (§17–§19) |
 | Capital assumption | **~£10,000** total account value |
 | Trade style | **Multiple trades/day** across uncorrelated markets |
 | Ultimate target | **£1,000 net/day** (stretch); staged milestones below |
-| Status | **PARTIALLY IMPLEMENTED** — M0 calibration window active (see §16 + Appendix) |
+| Status | **v28-M1: Continuous Integration Sandbox Active** |
 
 ---
 
 ## Purpose — Read This First
 
 v25 shipped a **reliable multi-market agent** (gates, points, ML blend, dashboard, lifecycle).  
-v26 defines **how that agent becomes profit-driven** on a **~£10k account** through measurable expectancy, controlled frequency, and capital-aware sizing.
+v26 defines **how that agent becomes profit-driven** on a **~£10k account** through measurable expectancy, controlled frequency, and capital-aware sizing.  
+**v27 (Autonomous Sentinel)** formalises a **Twin AI Module** architecture — separating **operational autonomy** (runtime health, repair, validation) from **strategy evolution** (research, proposals, backtests) — without altering core trading law.  
+**v28 (CIAO)** extends v27 with **self-healing code** (operational profiling, inactivity root-cause analysis) and **strategy automation** (isolated staging, checkpointed injection) — still bound by frozen trading law and the **30/30 PASS** verification gateway.
 
-This document is the **north-star for all v26 work**. It does not replace v8 for operational behaviour already shipped; it **extends** v8 with new modules, config, gates, and a mandatory measurement process.
+This document is the **north-star for all v28 work**. It does not replace v8 for operational behaviour already shipped; it **extends** v8, v26, and v27 with CI/CD-style validation, profiling, and staged optimization layers.
 
-**Operator principle:** No config change, market enable, or size increase is valid unless it improves **rolling £ expectancy** on the metrics in Section 4.
+**Frozen trading law (v28 non-negotiable):** Core rulesets (§6 gates), **72% entry confidence floor**, probe/core/full sizing math (Appendix), active position sizing formulas, and **multi-currency P&L display logic** are **immutable by AI modules**. CIAO may observe, profile, stage, propose, repair infrastructure, and validate — never silently rewrite trading parameters.
+
+**Operator principle:** No config change, market enable, size increase, or staged optimization promotion is valid unless it improves **rolling £ expectancy** on the metrics in Section 4 **and** passes the Cross-Module Validation Anchor (§19) **or** the Auto-Refactor Verification Gateway (§21).
 
 ---
 
@@ -155,6 +162,82 @@ flowchart TB
 | Correlation guard | Add **portfolio heat** (sum open risk £) |
 | Config | New `capital_envelope`, `expectancy`, `ml_veto`, `regime` blocks |
 | Dashboard | New **PROFIT** tab: E£, N, milestone progress |
+
+### 3.2 v27 Architecture — Twin AI Module (Autonomous Sentinel)
+
+v27 **layers** the Autonomous Sentinel Framework on top of the v26 profitability stack (§3.1). The Twin AI design splits autonomy into two **read-bounded** modules with a shared validation anchor:
+
+```mermaid
+flowchart TB
+  subgraph frozen [Frozen Trading Law — AI read-only]
+    G7[Seven Gates + v26 extensions]
+    RB[Risk Bands / 72% floor]
+    SZ[Position Sizing Math]
+    PNL[Multi-currency P&L Display]
+  end
+  subgraph twin [Twin AI Module — v27]
+    OAS[Operational AI Suite<br/>src/ai/operational/]
+    SES[Strategy Evolution Suite<br/>src/ai/strategy/]
+    CVA[Cross-Module Validation Anchor<br/>§19]
+  end
+  subgraph execute [v25/v26 Execution Core]
+    TL[Trading Loop]
+    MO[Market Orchestrator]
+    SS[Snapshot Store]
+  end
+  OAS -->|observe + repair hooks| TL
+  OAS -->|telemetry dead-drop| MO
+  OAS -->|pre-repair backup| SS
+  SES -->|proposals only| CVA
+  OAS -->|trigger e2e on approval| CVA
+  CVA -->|30/30 PASS or rollback| frozen
+  frozen --> TL
+```
+
+| Module | Path | Authority | Detail |
+|--------|------|-----------|--------|
+| **Operational AI Suite** | `src/ai/operational/` | Runtime health, telemetry, repair orchestration | §17 |
+| **Strategy Evolution Suite** | `src/ai/strategy/` | Research, backtests, human-facing proposals | §18 |
+| **Cross-Module Validation Anchor** | `scripts/e2e_platform_validation.py` + Operational AI trigger | Mandatory gate on any approved strategy change | §19 |
+
+**v27-M0 scope:** Document and initialise sandbox directory structures only. No Twin AI module may write trading config until §19 validation passes in a later milestone.
+
+### 3.3 v28 Architecture — CIAO (Continuous Integration & Adaptive Optimization)
+
+v28 **extends** the v27 Twin AI stack with self-healing observability and staged optimization promotion:
+
+```mermaid
+flowchart TB
+  subgraph frozen [Frozen Trading Law — AI read-only]
+    RB[72% floor + probe sizing]
+    PNL[Multi-currency P&L]
+  end
+  subgraph v27 [v27 Autonomous Sentinel]
+    OAS[Operational AI §17]
+    SES[Strategy AI §18]
+    CVA[Validation Anchor §19]
+  end
+  subgraph v28 [v28 CIAO]
+    PROF[Operational Profiler §20]
+    INV[Inactivity Investigator §20]
+    STG[src/ai/staging/ §21]
+    VGW[Verification Gateway §21]
+  end
+  PROF -->|latency traces| OAS
+  INV -->|RCA_DIAGNOSTIC| sentinel_diagnostics.jsonl
+  STG -->|checkpoint inject| VGW
+  VGW -->|30/30 PASS or rollback| data_lake/backups/
+  v27 --> v28
+  frozen --> v27
+```
+
+| Layer | Path | Authority | Detail |
+|-------|------|-----------|--------|
+| **Operational Profiler** | `src/ai/operational/profiler.py` | Latency + inactivity RCA | §20 |
+| **Auto-Refactor Staging** | `src/ai/staging/` | Isolated optimization sandbox | §21 |
+| **Verification Gateway** | `auto_repair.py` checkpoint + e2e | Mandatory 30/30 before production inject | §21 |
+
+**v28-M1 scope:** Continuous Integration sandbox active — profiler + staging directories documented; production inject requires §21 gateway. Frozen trading law unchanged.
 
 ---
 
@@ -509,15 +592,17 @@ v26 **does not promise** 10% daily returns. It **engineers** the path and stops 
 
 ---
 
-## 14. v25 → v26 Spec Relationship
+## 14. Spec Relationship (v25 → v26 → v27 → v28)
 
 | Document | Role |
 |----------|------|
 | `IG_Agent_v25_COMPLETE_SPEC_v8.md` | **Operational truth** for shipped v25 behaviour |
-| **`IG_Agent_v26_PROFITABILITY_SPEC.md`** | **North-star** for profitability extension |
+| **`IG_Agent_v26_PROFITABILITY_SPEC.md`** | **Profitability north-star** (§1–§16; frozen trading law) |
+| **§17–§19 (this document)** | **v27 Autonomous Sentinel** — Twin AI Module architecture |
+| **§20–§21 (this document)** | **v28 CIAO** — profiler, inactivity RCA, staging + verification gateway |
 | `docs/V26_IMPLEMENTATION_PROCESS.md` | Week-by-week operator/dev checklist |
 
-v26 ships **incrementally** (v26.0, v26.1, …). App `version` in config bumps per phase completion.
+v26 ships **incrementally** (v26.0, v26.1, …). v27 ships **incrementally** (v27-M0 sandbox → M1 operational hooks → M2 strategy proposals). v28 ships **incrementally** (v28-M1 CI sandbox → M2 profiler live → M3 staged optimization). App `version` in config bumps per phase completion.
 
 ---
 
@@ -530,7 +615,9 @@ v26 ships **incrementally** (v26.0, v26.1, …). App `version` in config bumps p
 5. **Veto** — ML blocks losers; does not invent edge.  
 6. **Regime** — Calendar and vol filter reduce friction.  
 7. **Milestone** — M1 → M2 → M3 → M4; **14 days each** before advance.  
-8. **Autonomy** — Weekly AI proposals; human approves until trust established.
+8. **Autonomy** — Weekly AI proposals; human approves until trust established.  
+9. **Twin AI (v27)** — Operational AI maintains runtime health; Strategy AI proposes; Validation Anchor enforces **30/30 PASS** before any approved change lands.  
+10. **CIAO (v28)** — Profiler + Inactivity Investigator diagnose zero-trade sessions; staged optimizations inject only through §21 verification gateway with instant rollback on failure.
 
 ---
 
@@ -564,6 +651,451 @@ Status of v26 modules that bridge shadow/research and **live v25 execution**. Co
 
 ---
 
+## 17. Operational AI Suite
+
+**Status:** v27-M0 — specification only; sandbox under `src/ai/operational/`.
+
+### 17.1 Purpose
+
+The Operational AI Suite is the **runtime sentinel** for the live agent. It observes execution health, ingests telemetry, orchestrates bounded repairs, and triggers platform validation — it does **not** invent or apply strategy changes.
+
+| Responsibility | In scope | Out of scope |
+|----------------|----------|--------------|
+| Loop health monitoring | Per-epic trading-loop failure streaks, stall detection | Threshold tuning, setup bans |
+| Telemetry aggregation | Gate pass rates, quote freshness, REST budget, snapshot drift | Strategy parameter writes |
+| Bounded repair | Restart hooks, cache refresh, stream resubscribe | Direct order placement |
+| Dead-drop safety | Flatten open books after catastrophic loop failure | Discretionary trade entries |
+| Validation trigger | Invoke §19 on human-approved strategy deltas | Approve its own config writes |
+| Snapshot stewardship | Pre-repair backup + post-repair integrity check | Learning DB schema changes |
+
+### 17.2 Directory layout (`src/ai/operational/`)
+
+| Path (planned) | Role |
+|----------------|------|
+| `src/ai/operational/__init__.py` | Package entry; exports hook registry |
+| `src/ai/operational/hooks.py` | Registration points for trading loop, orchestrator, bootstrap |
+| `src/ai/operational/telemetry.py` | Normalised event stream (loop tick, gate outcome, quote age) |
+| `src/ai/operational/repair.py` | Repair orchestrator (bounded actions only) |
+| `src/ai/operational/dead_drop.py` | Telemetry Dead-Drop Protocol implementation |
+| `src/ai/operational/snapshot_guard.py` | Pre-repair snapshot backup + restore |
+| `src/ai/operational/validation_bridge.py` | Operational trigger for §19 e2e run |
+
+### 17.3 Structural read-only boundary (trading parameters)
+
+Operational AI operates under a **hard read-only boundary** on trading parameters. The following are **observable but not writable** by any Operational AI code path:
+
+| Category | Examples (config / code) | Enforcement |
+|----------|--------------------------|-------------|
+| Entry confidence | `confidence_floor` (**72%**), `threshold_pass` tiers | Read-only adapter; writes rejected at hook layer |
+| Risk bands | `risk_bands`, `probe_risk_gbp_min/max`, `apply_risk_band_to_size()` | No direct config mutation |
+| Position sizing | `execution_engine` size clip, points multipliers | Repair may restart process; never patch sizing math |
+| Gate thresholds | Seven gates, `expectancy_ok`, `ml_veto`, calendar blocks | Telemetry only |
+| Capital envelope | `capital_envelope`, portfolio heat caps | Read for alerts; write via operator + §19 only |
+| P&L display | Multi-currency conversion, dashboard P&L formatting | Read-only; no display-logic mutation |
+
+**Hook contract:** All Operational AI hooks receive `(context, read_only_config_view)`. Any attempt to mutate frozen keys must raise `OperationalBoundaryError` and emit an audit event to `src/data/logs/operational_ai_audit.jsonl`.
+
+**Integration hooks (planned):**
+
+| Hook | Emitter | Operational AI action |
+|------|---------|------------------------|
+| `on_loop_tick` | `trading_loop.py` | Track tick health; increment error/disconnect streak |
+| `on_loop_error` | `trading_loop.py` | Log internal loop error; attempt bounded repair |
+| `on_stream_disconnect` | Lightstreamer hub / stream layer | Log socket disconnect; attempt resubscribe |
+| `on_tick_failure_streak` | `telemetry.py` | Evaluate dead-drop after 3 consecutive unhealthy ticks (§17.4) |
+| `on_orchestrator_stall` | `market_orchestrator.py` | Alert + optional bounded resubscribe |
+| `on_bootstrap_complete` | `agent_bootstrap.py` | Register telemetry sinks |
+| `on_pre_repair` | `repair.py` | Write `config_snapshot_backup.json` (§17.5) before any auto-repair |
+| `on_strategy_approval` | Dashboard / operator UI | Trigger §19 via `validation_bridge.py` |
+
+### 17.4 Telemetry Dead-Drop Protocol
+
+When an **internal loop error** or **streaming socket disconnect** cannot be cleared, Operational AI must **fail safe**: flatten exposed books, enter a **safety freeze**, and halt autonomous recovery until operator review.
+
+**Trigger condition (per epic, evaluated each loop tick):**
+
+```
+unhealthy_tick(epic) =
+  internal_loop_error(epic)
+  OR streaming_socket_disconnected(epic)
+  OR quote_stale_beyond_freshness_threshold(epic)
+
+IF consecutive_unhealthy_ticks(epic) >= 3
+  AND bounded_repair_attempt(epic) did not restore health on tick 3
+THEN execute Dead-Drop
+```
+
+A **tick** is one completed trading-loop iteration for the epic. Three consecutive unhealthy ticks without recovery on the third constitutes a Dead-Drop trigger — regardless of whether the root cause is loop logic or stream transport.
+
+**Mandatory sequence:**
+
+1. **Safety freeze** — set global `operational_safety_freeze=true`; block all new entries across the book.  
+2. **Flatten** all open positions on affected epic(s) — session flatten path (`exit_reason=operational_dead_drop`).  
+3. **Dead-drop telemetry** — write flattened book summary to `src/data/state/telemetry_dead_drop_{epic}_{ts}.json`.  
+4. **Notify** operator (Telegram + dashboard INCIDENT banner).  
+5. **Remain frozen** until operator acknowledges and §19 quick validation (layers 1–3) passes.
+
+**Cross-epic rule:** Stream hub failures affecting multiple epics may trigger book-wide flatten under safety freeze. Single-epic loop errors flatten **only** the affected epic unless orchestrator detects shared infrastructure failure.
+
+### 17.5 Pre-repair snapshot backup requirements
+
+Before **any** Operational AI auto-repair routine executes (stream resubscribe, orchestrator restart, cache invalidation, process recycle):
+
+| Step | Requirement |
+|------|-------------|
+| 1 | Serialize active runtime config + state pointers to `src/data/state/config_snapshot_backup.json` |
+| 2 | Include: merged config hash, `dashboard_snapshot.json` path ref, open-position export ref, repair reason, epic scope, timestamp |
+| 3 | Verify backup file written and checksum-valid **before** repair begins |
+| 4 | Execute auto-repair |
+| 5 | Post-repair: if integrity check fails → restore from `config_snapshot_backup.json` and abort repair |
+
+**Mandatory rule:** No auto-repair routine may run if `config_snapshot_backup.json` cannot be written. Retain last **7** backup files as `config_snapshot_backup_{ts}.json`; promote latest symlink/copy to `config_snapshot_backup.json`.
+
+---
+
+## 18. Strategy Evolution Suite
+
+**Status:** v27-M0 — specification only; sandbox under `src/ai/strategy/`.
+
+### 18.1 Purpose
+
+The Strategy Evolution Suite is the **research and proposal engine**. It analyses historical and shadow data, constructs strategy deltas, and presents human-readable proposals — it never applies changes directly to live config.
+
+| Responsibility | In scope | Out of scope |
+|----------------|----------|--------------|
+| Hypothesis generation | New session filters, epic candidates, exit tweaks | Live config writes |
+| Backtesting | Out-of-sample replay runs | Bypassing §19 validation |
+| Friction analysis | Spread-to-ATR matrix per epic/session | Real-time order execution |
+| Proposal packaging | Diff + evidence bundle for operator review | Auto-approve promotions |
+| Shadow comparison | v25 vs v26 vs proposed counterfactual | Modifying `confidence_floor` or risk bands |
+
+### 18.2 Directory layout (`src/ai/strategy/`)
+
+| Path (planned) | Role |
+|----------------|------|
+| `src/ai/strategy/__init__.py` | Package entry |
+| `src/ai/strategy/proposal.py` | Proposal schema + status lifecycle |
+| `src/ai/strategy/backtest_runner.py` | Out-of-sample historical backtest orchestration |
+| `src/ai/strategy/friction_matrix.py` | Spread-to-ATR Friction Matrix builder |
+| `src/ai/strategy/evidence_pack.py` | Bundles metrics, charts paths, replay hashes |
+| `src/ai/strategy/shadow_compare.py` | Counterfactual vs live/shadow books |
+
+### 18.3 Structural read-only boundary
+
+Strategy Evolution Suite code may **read** all config, learning DB exports, shadow logs, and replay artifacts. It may **write only** to:
+
+- `src/data/state/strategy_proposals/{proposal_id}/`  
+- `data_lake/research/strategy/` (derived analytics)  
+- Proposal audit log: `src/data/logs/strategy_evolution_audit.jsonl`
+
+It may **never write** to `config/config_v25.json`, `config/config_v26.json`, instrument overrides, or any runtime state file consumed by the trading loop without an operator approval record **and** successful §19 validation executed by Operational AI.
+
+### 18.4 Spread-to-ATR Friction Matrix (mandatory)
+
+Every strategy proposal that affects entry timing, epic enablement, session windows, or **trade allocation** **must** include an up-to-date **Spread-to-ATR Friction Matrix**.
+
+**Definition (per epic, evaluated at proposal generation time):**
+
+```
+spread_friction_pct = (transaction_spread_pts / active_14_bar_atr_pts) × 100
+
+active_14_bar_atr_pts = ATR(14) on the asset's active 5m bar series (most recent 14 bars)
+transaction_spread_pts = median quoted spread at proposal timestamp (or session median if live quote unavailable)
+```
+
+| Condition | Rule |
+|-----------|------|
+| `spread_friction_pct ≤ 15%` | Eligible for strategy update review and trade allocation |
+| `spread_friction_pct > 15%` | **Prohibited** — block strategy update **and** block trade allocation for that asset |
+
+**Enforcement:** Proposals or allocation changes failing the 15% gate are **auto-rejected** and must not enter the operator approval queue. Strategy Evolution Suite writes the matrix to `strategy_proposals/{id}/friction_matrix.json`; missing or stale matrix → proposal invalid.
+
+### 18.5 Out-of-sample backtesting (mandatory before proposals)
+
+No proposal may be **generated or presented** to an operator until **strict out-of-sample (OOS) historical backtesting** completes successfully.
+
+**Required protocol:**
+
+| Step | Rule |
+|------|------|
+| 1 | Split timeline: **in-sample (IS)** = oldest 70% of available replay window; **OOS** = most recent 30% |
+| 2 | Fit / tune proposal logic **only** on IS data — no peeking at OOS |
+| 3 | Evaluate WR, E£, PF, `friction_pct`, and `max_dd` on **OOS only** |
+| 4 | OOS gates (minimum): `WR ≥ 50%`, `E£ > 0`, `PF ≥ 1.2`, `spread_friction_pct ≤ 15%` per §18.4 |
+| 5 | Store replay hash, bar range, IS/OOS date boundaries, and CLI invocation in `evidence_pack.json` |
+| 6 | Mark proposal `status: ready_for_review` **only** when steps 1–5 and §18.4 friction gate pass |
+
+**Presentation rule:** Dashboard and weekly pack surfaces **OOS metrics only** as headline figures; IS metrics are appendix-only to prevent overfit approval. Proposals without a completed OOS run must not be generated.
+
+---
+
+## 19. The Cross-Module Validation Anchor
+
+**Status:** v27-M0 — specification only; automation wired in v27-M1.
+
+### 19.1 Purpose
+
+The Cross-Module Validation Anchor is the **non-bypassable law** connecting human strategy approval to platform integrity. It ensures no approved strategy delta reaches live config unless the full platform validation suite passes.
+
+**Binding rule:** Any human approval of a §18 strategy proposal **must automatically** trigger — via the Operational AI loop (`validation_bridge.py`), not manual ad-hoc runs alone:
+
+```bash
+PYTHONPATH=src python3 scripts/e2e_platform_validation.py
+```
+
+If validation returns **anything less than a perfect 30/30 PASS**, the system **must instantly abort the config injection and roll back** to the pre-approval snapshot.
+
+### 19.2 Mandatory automation loop
+
+```mermaid
+sequenceDiagram
+  participant Op as Operator
+  participant Dash as Dashboard
+  participant SES as Strategy Evolution Suite
+  participant OAS as Operational AI Suite
+  participant E2E as e2e_platform_validation.py
+  participant CFG as Live Config
+
+  Op->>Dash: Approve proposal
+  Dash->>SES: Mark approved (pending validation)
+  SES->>OAS: on_strategy_approval(proposal_id)
+  OAS->>OAS: Pre-apply snapshot backup
+  OAS->>E2E: subprocess full run (7 layers)
+  alt 30/30 PASS
+    E2E-->>OAS: exit 0
+    OAS->>CFG: Apply approved diff
+    OAS->>Dash: status validated
+  else less than 30/30 PASS
+    E2E-->>OAS: exit 1 + failure report
+    OAS->>CFG: Roll back to pre-apply snapshot
+    OAS->>SES: Mark proposal aborted
+    OAS->>Dash: INCIDENT — validation failed
+    OAS->>Op: Notify — no config change landed
+  end
+```
+
+| Stage | Owner | Action |
+|-------|-------|--------|
+| T0 | Operator | Approve proposal in dashboard |
+| T+0s | Operational AI | Receive approval event; create pre-apply backup |
+| T+0s | Operational AI | Spawn `e2e_platform_validation.py` (full run, not `--quick`) |
+| T+finish | Operational AI | Parse `TOTAL` line — require **30/30 PASS** |
+| Pass | Operational AI | Commit config diff; log `validation_anchor_pass` |
+| Fail | Operational AI | **Instantly abort** config injection; **roll back** configuration from pre-apply backup; log `validation_anchor_abort` |
+
+### 19.3 Pass criteria (exact)
+
+| Check | Requirement |
+|-------|-------------|
+| Command | `PYTHONPATH=src python3 scripts/e2e_platform_validation.py` |
+| Mode | Full run (layers 1–7); `--quick` is **not** sufficient for approval |
+| Exit code | `0` |
+| Score | **`30/30 PASS`** on `TOTAL` summary line |
+| Partial pass | **29/30 or below** → automatic abort + rollback — no operator override in v27 |
+
+**Layer coverage (reference):**
+
+| Layer | Checks |
+|-------|--------|
+| 1 — Data Integrity | 6 |
+| 2 — Gate Validation | 6 |
+| 3 — Execution Simulation | 4 |
+| 4 — Learning Pipeline | 3 |
+| 5 — Dashboard Integrity | 3 |
+| 6 — Resilience | 3 |
+| 7 — Operational Integrity | 5 |
+| **Total** | **30** |
+
+### 19.4 Rollback requirements
+
+On any validation failure:
+
+1. Restore config files from pre-apply backup manifest.  
+2. Restore `src/data/state/` snapshots listed in manifest.  
+3. Set proposal status → `aborted_validation_failed`.  
+4. Emit audit record with e2e failure checklist IDs.  
+5. Require fresh operator approval (new approval id) after root-cause fix — **no retry without re-approval**.
+
+### 19.5 Cross-module invariants
+
+| Invariant | Enforcement |
+|-----------|-------------|
+| Strategy AI cannot invoke e2e directly for self-approval | Only Operational AI holds subprocess trigger |
+| Operational AI cannot approve proposals | Observer + validator role only |
+| Frozen trading law unchanged by failed validation | Rollback restores exact pre-approval bytes |
+| Dead-drop state survives failed validation | Positions flattened under §17.4 are not re-opened by rollback |
+
+---
+
+## 20. The Operational Profiler & Inactivity Investigator
+
+**Status:** v28-M1 — specification only; sandbox under `src/ai/operational/profiler.py`.
+
+### 20.1 Purpose
+
+The Operational Profiler extends the v27 Operational AI Suite with **code-path latency telemetry** and an **Inactivity Investigator** that automatically explains zero-trade sessions when market conditions appear tradable. It observes and diagnoses — it does **not** mutate trading parameters or place orders.
+
+| Responsibility | In scope | Out of scope |
+|----------------|----------|--------------|
+| Latency profiling | Per-tick timing in `trading_loop.py`, order path in `execution_engine.py` | Threshold tuning, gate rewrites |
+| Inactivity RCA | Zero-trade session analysis when ATR/vol filters clear | Forced entries, confidence floor changes |
+| Diagnostic output | `RCA_DIAGNOSTIC` payloads to `data_lake/state/` | Live config writes |
+| Sentinel correlation | Parse `sentinel_diagnostics.jsonl` for gate/safety context | Bypass §19 / §21 validation |
+
+### 20.2 Module layout (`src/ai/operational/profiler.py`)
+
+| Path (planned) | Role |
+|----------------|------|
+| `src/ai/operational/profiler.py` | Profiler entry + Inactivity Investigator orchestration |
+| `src/ai/operational/profiler_hooks.py` | Instrumentation hooks for trading loop and execution engine |
+| `data_lake/state/rca_diagnostics/` | Written `RCA_DIAGNOSTIC` JSON payloads |
+| `data_lake/state/profiler_latency.jsonl` | Rolling latency samples (append-only) |
+
+### 20.3 Code execution profiler
+
+The profiler tracks **wall-clock latency** on critical hot paths without altering trading logic:
+
+| Probe point | Source module | Metric |
+|-------------|---------------|--------|
+| `probe_trading_loop_tick` | `src/trading/trading_loop.py` | Total `_run_tick()` duration (ms) |
+| `probe_gate_evaluation` | `src/trading/trading_loop.py` | `_evaluate_gates()` duration (ms) |
+| `probe_execution_process_tick` | `src/execution/execution_engine.py` | Order submission path duration (ms) |
+| `probe_snapshot_publish` | `src/trading/trading_loop.py` | `_publish_snapshot()` duration (ms) |
+
+**Sampling rule:** Record every tick in live mode; aggregate p50 / p95 / p99 over rolling 1-hour windows. Emit WARN when `probe_trading_loop_tick` p95 exceeds **2×** tick interval (default 5s → warn above 10s).
+
+**Hook contract:** Profiler hooks are **read-only wrappers** — they must not change gate outcomes, sizing, or order payloads.
+
+### 20.4 Inactivity Investigator — binding laws
+
+The Inactivity Investigator activates when **all** of the following are true for an **active session window**:
+
+| Condition | Definition |
+|-----------|------------|
+| **Zero trades** | `qualified_trades_taken == 0` for the epic/session window |
+| **Session active** | Market `session_open` gate passing for ≥ **60 minutes** continuous |
+| **Volatility cleared** | Environment fitness ATR factor **> 0** and ATR ≥ instrument `min_atr_points` |
+| **Not safety-frozen** | `operational_safety_freeze` is **false** in sentinel state |
+
+**Mandatory automated sequence:**
+
+1. **Scan** `data_lake/state/sentinel_diagnostics.jsonl` — last **500** lines for the epic.  
+2. **Correlate** with learning DB / gate activity for the same window.  
+3. **Isolate** the **dominant gate failure** — gate name with highest fail count or longest consecutive block streak.  
+4. **Write** `RCA_DIAGNOSTIC` payload to `data_lake/state/rca_diagnostics/rca_{epic}_{ts}.json`.  
+5. **Notify** operator dashboard INCIDENT panel (read-only banner — no auto-remediation of frozen keys).
+
+**RCA_DIAGNOSTIC schema (minimum fields):**
+
+```json
+{
+  "type": "RCA_DIAGNOSTIC",
+  "ts": "ISO-8601",
+  "epic": "CS.D.CFPGOLD.CFP.IP",
+  "session_window": { "start": "...", "end": "..." },
+  "trades_taken": 0,
+  "atr_filter_cleared": true,
+  "dominant_gate_block": "signal_confidence",
+  "gate_fail_counts": { "signal_confidence": 142, "risk_validation": 3 },
+  "sentinel_excerpt": [],
+  "recommended_operator_action": "review gate detail — no auto threshold change"
+}
+```
+
+**Investigator boundary:** RCA output is **diagnostic only**. It must **not** auto-lower the **72% confidence floor**, probe sizing, or any frozen trading-law parameter.
+
+---
+
+## 21. Auto-Refactor Staging & Verification Gateway
+
+**Status:** v28-M1 — specification only; sandbox under `src/ai/staging/`.
+
+### 21.1 Purpose
+
+CIAO staged optimization allows AI-generated code and config **candidates** to be developed in **runtime isolation** and promoted to production **only** through an automated verification checkpoint. This extends §19 (strategy proposal validation) to cover **operational optimizations** and refactors staged under `src/ai/staging/`.
+
+### 21.2 Staging directory — strict runtime isolation (`src/ai/staging/`)
+
+| Rule | Enforcement |
+|------|-------------|
+| **Write sandbox** | All staged artifacts live under `src/ai/staging/{optimization_id}/` only |
+| **No direct production writes** | Staging code must not import-write to `config/config_v25.json`, `config/config_v26.json`, or frozen keys |
+| **Promotion path** | Production inject **only** via `auto_repair.py` checkpoint function (§21.3) |
+| **Frozen law** | Staged diffs touching `confidence_floor`, `risk_bands`, probe sizing, or P&L display logic are **rejected at staging ingest** |
+| **Audit trail** | Every staging action logged to `src/data/logs/staging_audit.jsonl` |
+
+**Planned layout:**
+
+| Path | Role |
+|------|------|
+| `src/ai/staging/__init__.py` | Package marker |
+| `src/ai/staging/{optimization_id}/manifest.json` | Staged file list + checksums |
+| `src/ai/staging/{optimization_id}/patch/` | Candidate diffs (config/code) |
+| `src/ai/staging/{optimization_id}/evidence.json` | Profiler / RCA context that motivated the change |
+
+### 21.3 Verification Gateway — checkpoint in `auto_repair.py`
+
+Before **any** staged AI optimization is injected into production, `AutoRepairEngine` must execute the **Verification Gateway** sequence:
+
+```mermaid
+sequenceDiagram
+  participant STG as src/ai/staging/
+  participant AR as auto_repair.py
+  participant BAK as data_lake/backups/
+  participant E2E as e2e_platform_validation.py
+  participant PROD as Production Config/Code
+
+  STG->>AR: promote(optimization_id)
+  AR->>BAK: write config_snapshot_backup.json
+  AR->>PROD: apply staged patch (pending)
+  AR->>E2E: subprocess full run (7 layers)
+  alt 30/30 PASS
+    E2E-->>AR: exit 0
+    AR->>PROD: commit — status validated
+  else less than 30/30 PASS
+    E2E-->>AR: exit 1
+    AR->>PROD: instant rollback from backup
+    AR->>STG: mark optimization aborted
+  end
+```
+
+| Step | Requirement |
+|------|-------------|
+| 1 | Write full backup to `data_lake/backups/config_snapshot_backup.json` (+ timestamped copy) |
+| 2 | Apply staged patch to production paths (atomic pending state) |
+| 3 | Spawn `PYTHONPATH=src python3 scripts/e2e_platform_validation.py` (full run — **not** `--quick`) |
+| 4 | Parse `TOTAL` line — require **30/30 PASS**, exit code **0** |
+| 5a | **Pass** → log `verification_gateway_pass`; leave production patch committed |
+| 5b | **Fail** → **instant configuration rollback** from backup; log `verification_gateway_abort`; staged optimization status → `aborted_verification_failed` |
+
+**Pass criteria (exact — same bar as §19):**
+
+| Check | Requirement |
+|-------|-------------|
+| Score | **`30/30 PASS`** on full e2e suite |
+| Partial pass | **29/30 or below** → mandatory instant rollback — no operator override in v28-M1 |
+| Retry | Requires new staging promotion id after root-cause fix |
+
+### 21.4 Relationship to §19 Cross-Module Validation Anchor
+
+| Flow | Gateway |
+|------|---------|
+| Human-approved **strategy proposal** (§18) | §19 — `check_approved_proposals()` |
+| Staged **AI optimization** (§21) | §21 — `promote_staged_optimization()` in `auto_repair.py` |
+
+Both gateways share the same **30/30 PASS** bar and `data_lake/backups/` rollback discipline. §21 does **not** replace §19 — it extends validation to operational refactor staging.
+
+### 21.5 Cross-module invariants
+
+| Invariant | Enforcement |
+|-----------|-------------|
+| Staging cannot self-promote without e2e | Only `auto_repair.py` holds promotion trigger |
+| Profiler / RCA cannot promote staging | Diagnostic modules are read-only |
+| Failed verification restores exact bytes | Rollback from pre-inject backup manifest |
+| Frozen trading law survives failed promotion | No partial application left on disk after abort |
+
+---
+
 ## Current Calibration Appendix
 
 **Active from:** June 2026 restart · **Duration:** 7-day data-gathering window (M0) · **Milestone:** `current: M0` in `config_v26.json`
@@ -587,7 +1119,9 @@ Status of v26 modules that bridge shadow/research and **live v25 execution**. Co
 
 **Operator pre-flight:** Live tab → `expectancy ok` = PASS · `setup registry inactive` · probe badge visible on 72–79% signals before restart completes calibration logging.
 
+**v28 note:** Parameters in this appendix are **frozen trading law**. Twin AI (§17–§18) and CIAO (§20–§21) modules may read these values for telemetry, profiling, and staging context but **must not write** to `confidence_floor`, `risk_bands`, probe/core/full sizing keys, gate thresholds, or multi-currency P&L display logic without human approval **and** §19 or §21 validation.
+
 ---
 
-*IG Agent v26 — Profitability Specification v1 — Confidential*  
-*£10k capital · Multiple trades · Expectancy-driven · June 2026*
+*IG Agent v28 — Profitability Specification v3 (CIAO) — Confidential*  
+*£10k capital · Multiple trades · Expectancy-driven · Twin AI · Continuous Integration · June 2026*

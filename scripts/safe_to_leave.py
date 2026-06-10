@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import urllib.error
@@ -82,25 +83,21 @@ def _heartbeat_auto_shutdown_disabled() -> tuple[bool, str]:
         return False, f"{type(e).__name__}: {e}"
 
 
-def _on_ac_power() -> tuple[bool, str]:
-    """caffeinate -s only prevents sleep on AC; battery + lid close can still kill the agent."""
-    try:
-        import subprocess
+def _overnight_supervision() -> tuple[bool, str]:
+    from system.overnight_supervision import launchd_supervision_status
 
-        result = subprocess.run(
-            ["pmset", "-g", "batt"],
-            capture_output=True,
-            text=True,
-            timeout=3,
-        )
-        out = (result.stdout or "").lower()
-        if "battery power" in out or "on battery" in out:
-            return False, "on battery — plug in Mac for overnight (lid close may sleep)"
-        if "ac power" in out or "now drawing from 'ac power'" in out:
-            return True, "on AC power"
-        return True, "power source unknown — assume plugged in"
-    except Exception as e:
-        return True, f"power check skipped ({type(e).__name__})"
+    ok, detail = launchd_supervision_status()
+    if ok:
+        return True, detail
+    return False, f"{detail} — required for Safe to Leave bundle"
+
+
+def _ensure_overnight_supervision() -> tuple[bool, str]:
+    if os.environ.get("IG_AGENT_ENSURE_LAUNCHD", "1").strip() in ("0", "false", "no"):
+        return True, "skipped (IG_AGENT_ENSURE_LAUNCHD=0)"
+    from system.overnight_supervision import prepare_overnight_bundle
+
+    return prepare_overnight_bundle()
 
 
 def _on_ac_power() -> tuple[bool, str]:
@@ -144,21 +141,47 @@ def _telegram_configured() -> tuple[bool, str]:
         return False, f"{type(e).__name__}: {e}"
 
 
+def _quick_mode() -> bool:
+    """Live dashboard checks must not run full pytest (blocks API for minutes)."""
+    return os.environ.get("IG_AGENT_SAFE_TO_LEAVE_QUICK", "").strip() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="IG Agent v25 safe-to-leave check")
+    parser.add_argument(
+        "--quick",
+        action="store_true",
+        help="Skip deployment pytest suite (used by live dashboard API)",
+    )
     args = parser.parse_args()
+    quick = bool(args.quick) or _quick_mode()
 
     print()
     print("IG Agent v25 — SAFE TO LEAVE CHECK")
     print("=" * 48)
+    if quick:
+        print("[MODE] quick — deployment pytest skipped (live agent)")
 
     all_ok = True
+
+    ensure_ok, ensure_detail = _ensure_overnight_supervision()
+    all_ok &= _check("Launchd supervision bootstrap", ensure_ok, ensure_detail)
 
     hb_ok, hb_detail = _heartbeat_auto_shutdown_disabled()
     all_ok &= _check("Heartbeat auto-shutdown disabled", hb_ok, hb_detail)
 
-    deploy_ok, deploy_detail = _run_deployment_tests()
-    all_ok &= _check("Deployment verification tests", deploy_ok, deploy_detail)
+    if quick:
+        print(
+            "[SKIP] Deployment verification tests — skipped in quick mode "
+            "(run: PYTHONPATH=src python3 scripts/safe_to_leave.py)"
+        )
+    else:
+        deploy_ok, deploy_detail = _run_deployment_tests()
+        all_ok &= _check("Deployment verification tests", deploy_ok, deploy_detail)
 
     health = _fetch_health()
     markets_open = int(health.get("markets_open_count") or 0) if health else -1
@@ -206,6 +229,13 @@ def main() -> int:
     ok = _watchdog_running()
     all_ok &= _check("Watchdog running", ok)
 
+    sup_ok, sup_detail = _overnight_supervision()
+    all_ok &= _check(
+        "Overnight bundle (launchd watchdog — survives Cursor close)",
+        sup_ok,
+        sup_detail,
+    )
+
     ac_ok, ac_detail = _on_ac_power()
     all_ok &= _check("Mac on AC power (overnight sleep)", ac_ok, ac_detail)
 
@@ -214,7 +244,10 @@ def main() -> int:
 
     print("=" * 48)
     if all_ok:
-        print("→ SAFE TO LEAVE — all critical checks passed")
+        from system.overnight_supervision import mark_overnight_armed
+
+        mark_overnight_armed(source="safe_to_leave_cli")
+        print("→ SAFE TO LEAVE — overnight bundle armed (close Cursor/browser safely)")
         print()
         return 0
     print("→ NOT SAFE — fix FAIL items before leaving")

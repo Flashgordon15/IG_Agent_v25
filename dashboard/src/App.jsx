@@ -4,6 +4,13 @@ import { fetchState, fetchSplash, dismissSplash } from "./api.js";
 
 const HEARTBEAT_INTERVAL_MS = 25000; // ping every 25 s (server times out at 10 min)
 import Header from "./components/Header.jsx";
+import SupervisionBanner from "./components/SupervisionBanner.jsx";
+import ActiveGatesRibbon from "./components/ActiveGatesRibbon.jsx";
+import {
+  persistStopSupervision,
+  loadStopSupervision,
+} from "./utils/supervision.js";
+import { resolveSessionStyle } from "./utils/roadmapTelemetry.js";
 import LivePanel from "./components/LivePanel.jsx";
 import TradesPanel from "./components/TradesPanel.jsx";
 import PointsPanel from "./components/PointsPanel.jsx";
@@ -571,6 +578,9 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         cleanupChecks = data.cleanup_checks || [];
+        if (data.supervision) {
+          persistStopSupervision(data.supervision);
+        }
         if (data.verify_poll_url) {
           verifyUrls.unshift(data.verify_poll_url);
         }
@@ -582,6 +592,15 @@ export default function App() {
     }
     setShutdownState("verifying");
     const finalVerify = await pollShutdownVerify(verifyUrls);
+    if (finalVerify?.supervision_drift || finalVerify?.overnight_supervision) {
+      persistStopSupervision({
+        supervision_drift_ok: finalVerify.supervision_drift_ok,
+        supervision_drift: finalVerify.supervision_drift,
+        supervision_warnings: finalVerify.supervision_warnings,
+        overnight_supervision: finalVerify.overnight_supervision,
+        overnight_armed: finalVerify.overnight_armed,
+      });
+    }
     setShutdownVerification({
       cleanup: cleanupChecks,
       final: finalVerify,
@@ -642,6 +661,15 @@ export default function App() {
                 final: data,
                 ok: Boolean(data.ok),
               }));
+              if (data.supervision_drift || data.overnight_supervision) {
+                persistStopSupervision({
+                  supervision_drift_ok: data.supervision_drift_ok,
+                  supervision_drift: data.supervision_drift,
+                  supervision_warnings: data.supervision_warnings,
+                  overnight_supervision: data.overnight_supervision,
+                  overnight_armed: data.overnight_armed,
+                });
+              }
               return;
             }
           } catch {
@@ -673,9 +701,18 @@ export default function App() {
 
     const recoverStoppedScreen = async () => {
       if (isRecentDeliberateStop()) {
+        const cachedSupervision = loadStopSupervision();
         if (!cancelled) {
           setShutdownVerification({
-            cleanup: [],
+            cleanup: cachedSupervision
+              ? [
+                  {
+                    label: "Launchd supervision",
+                    ok: Boolean(cachedSupervision?.overnight_supervision?.launchd_watchdog),
+                    detail: cachedSupervision?.overnight_supervision?.launchd_detail || "",
+                  },
+                ]
+              : [],
             final: {
               ok: true,
               status: "done",
@@ -687,6 +724,7 @@ export default function App() {
                   detail: "recovered from browser session after agent shutdown",
                 },
               ],
+              ...(cachedSupervision || {}),
             },
             ok: true,
           });
@@ -752,6 +790,12 @@ export default function App() {
     maxPositions: state?.max_open_positions ?? 10,
     onStopAgent: handleStopAgent,
     onOpenStrategyHelp: () => setStrategyHelpOpen(true),
+    supervisionDriftOk: state?.supervision_drift_ok,
+    watchdogActive: state?.watchdog_active,
+    sessionStyle: resolveSessionStyle(state, viewState),
+    envScorerFallbackActive: Boolean(
+      state?.env_scorer_fallback_active ?? state?.health?.env_scorer_fallback_active,
+    ),
   };
 
   // Agent stopped screen (with post-shutdown verification)
@@ -809,11 +853,15 @@ export default function App() {
             : fullyVerified
               ? "All shutdown checks passed. Safe to close this tab or restart from the desktop icon."
               : agentStoppedVerify
-                ? "Trading agent is down. You may close this browser tab. Manual stop is active so the watchdog will not restart the agent."
+                ? "Trading agent is down. Supervision status below — manual stop blocks auto-restart ~10 min."
                 : agentDown
                   ? "The agent is no longer responding on port 8080. Waiting for post-exit verification…"
                   : "Verification did not fully pass. See checks below or use the desktop icon to stop the agent."}
         </p>
+        <SupervisionBanner
+          shutdownVerification={shutdownVerification}
+          compact
+        />
         {checkRows.length > 0 && (
           <ul style={{
             listStyle: "none", margin: "8px 0 0", padding: 0, width: "min(360px, 92vw)",
@@ -909,6 +957,10 @@ export default function App() {
     <div className="flex min-h-screen min-w-0 flex-col bg-bg text-foreground">
       <Header {...headerProps} />
 
+      <ActiveGatesRibbon state={state} />
+
+      <SupervisionBanner state={state} />
+
       {/* Stop confirmation modal */}
       {(shutdownState === "confirming" || shutdownState === "stopping" || shutdownState === "verifying") && (
         <div style={{
@@ -928,7 +980,7 @@ export default function App() {
                 </p>
                 <p style={{ color: "#64748b", fontSize: "12px" }}>
                   {shutdownState === "verifying"
-                    ? "Confirming no agent, watchdog, lock, or port 8080 remains."
+                    ? "Confirming agent exited; launchd supervision may stay loaded overnight."
                     : "Saving session state and stopping trading loops."}
                 </p>
               </>

@@ -13,19 +13,35 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
+
+import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from data.models import Quote
+from execution.adaptive_engine import AdaptiveEngine
 from execution.order_validator import ValidationResult
 from execution.trading_loop import TickOutcome
 from execution.trading_loop import TradingLoop as ExecutionTickLoop
 from execution.types import ExecutionMode, ExecutionResult, TradeSignal
+from runtime.market_orchestrator import MarketOrchestrator, attach_snapshot_handlers
 from signals.signal_engine import SignalResult
+from system.config_loader import ConfigLoader
+from trading.environment_scorer import (
+    FACTOR_TREND_MAX,
+    SAFE_DEFAULT_SCORE,
+    EnvironmentScorer,
+    _apply_session_style_weights,
+    _session_style_utc,
+)
+from trading.points_engine import PointsEngine, set_points_state_path_for_tests
+from trading.trading_loop import SOFT_BLOCK_NOT_IN_TOP_3
 from trading.trading_loop import TradingLoop as OrchestratorLoop
 
 
@@ -43,6 +59,85 @@ def _buy_signal(conf: float = 92.0) -> SignalResult:
         notes="e2e mock",
         snapshot={"atr": 50.0},
     )
+
+
+def _assert_no_env_scorer_fallback(
+    testcase: unittest.TestCase,
+    scorer: Any,
+    *,
+    market: str = "",
+    quote: Quote | None = None,
+) -> None:
+    """Fail fast when environment scorer drops into exception fallback (flat 55 path)."""
+    if isinstance(scorer, MagicMock):
+        last = scorer.last_score()
+    else:
+        if market:
+            scorer.score(market, quote=quote)
+        last = scorer.last_score()
+    testcase.assertFalse(
+        bool(getattr(last, "fallback_active", False)),
+        "environment_scorer fallback_active must be False (exception fallback detected)",
+    )
+    if (
+        hasattr(scorer, "_compute_factors")
+        and market
+        and not isinstance(scorer, MagicMock)
+    ):
+        _, meta = scorer._compute_factors(market, quote=quote)
+        testcase.assertFalse(
+            bool(meta.get("fallback_active")),
+            "environment_scorer meta must not flag fallback_active",
+        )
+        testcase.assertNotIn(
+            "env_scorer_fallback",
+            meta,
+            "environment_scorer meta must not contain env_scorer_fallback key",
+        )
+    factors = scorer.get_factors() if hasattr(scorer, "get_factors") else {}
+    if isinstance(factors, dict):
+        testcase.assertFalse(
+            bool(factors.get("fallback_active")),
+            "environment_scorer factors must not flag fallback_active",
+        )
+        testcase.assertNotIn(
+            "env_scorer_fallback",
+            factors,
+            "environment_scorer factors must not contain env_scorer_fallback key",
+        )
+
+
+def _make_engine_with_bars(n_5m: int = 25) -> MagicMock:
+    rows = []
+    for i in range(n_5m):
+        rows.append(
+            {
+                "time": datetime(2026, 6, 10, 10, 0) + timedelta(minutes=i * 5),
+                "open": 100.0,
+                "high": 101.0,
+                "low": 99.0,
+                "close": 100.5,
+                "price": 100.5,
+                "bid": 100.0,
+                "offer": 100.5,
+                "spread": 0.5,
+                "fast_ema": 101.0,
+                "slow_ema": 99.0,
+                "rsi": 55.0,
+                "atr": 10.0,
+            }
+        )
+    df = pd.DataFrame(rows)
+    c5 = df.copy()
+    c15 = df.iloc[: max(3, len(df) // 3)].copy()
+    engine = MagicMock()
+    engine.quote_df.return_value = df
+    engine.candles.side_effect = lambda _df, minutes: c5 if minutes == 5 else c15
+    engine.add_indicators.side_effect = lambda frame: frame
+    cfg = MagicMock()
+    cfg.max_spread_points = 35.0
+    engine.config = cfg
+    return engine
 
 
 def _make_orchestrator(**overrides) -> OrchestratorLoop:
@@ -81,6 +176,23 @@ def _make_orchestrator(**overrides) -> OrchestratorLoop:
 
     env = MagicMock()
     env.score.return_value = 55.0
+    env.last_score.return_value = SimpleNamespace(
+        total=55.0,
+        fallback_active=False,
+        session_style="WESTERN_MOMENTUM",
+        regime="Marginal",
+        factors={},
+        capped_cold_start=False,
+        capped_gap_open=False,
+        gate_passes=True,
+    )
+    env.get_factors.return_value = {
+        "atr": 15.0,
+        "trend": 12.5,
+        "session": 10.0,
+        "spread": 12.5,
+        "fallback_active": False,
+    }
 
     points = MagicMock()
     points.get_state.return_value = "HEALTHY"
@@ -151,6 +263,7 @@ class OrchestratorPipelineTests(unittest.TestCase):
         self.assertIn("ml_veto", [g.name for g in ctx.gates])
         self.assertTrue(all(g.passed for g in ctx.gates))
         loop._execution_loop.process_tick.assert_called_once()
+        _assert_no_env_scorer_fallback(self, loop._env)
         call = loop._execution_loop.process_tick.call_args
         self.assertEqual(call.args[:3], ("Japan 225", "IX.D.NIKKEI.IFM.IP", _quote()))
         self.assertIn("prefetched_signal", call.kwargs)
@@ -314,6 +427,217 @@ class DryRunExecutorTests(unittest.TestCase):
 
             self.assertTrue(result.success)
             rest.place_market_order.assert_not_called()
+
+
+def _roadmap_env_scorer(fitness_total: float) -> MagicMock:
+    env = MagicMock()
+    trend = max(0.01, float(fitness_total) * 0.25)
+    env._last = SimpleNamespace(total=float(fitness_total))
+    env.get_factors.return_value = {
+        "trend": trend,
+        "spread": 15.0,
+        "atr": 20.0,
+        "session": 10.0,
+    }
+    env.last_score.return_value = env._last
+    env.score.return_value = float(fitness_total)
+    return env
+
+
+def _roadmap_loop(epic: str, fitness_total: float, *, market: str) -> MagicMock:
+    loop = MagicMock()
+    loop._epic = epic
+    loop._market = market
+    loop._env = _roadmap_env_scorer(fitness_total)
+    loop._publish_snapshots = False
+    loop._on_snapshot = None
+    return loop
+
+
+def _build_four_market_orchestrator() -> MarketOrchestrator:
+    """Four dummy instruments with descending fitness (DAX is choppy / lowest)."""
+    cfg = ConfigLoader(ROOT / "config" / "config_v25.json").load_config()
+    epics = {
+        "IX.D.NASDAQ.CASH.IP": ("IXIC", 88.0),
+        "CS.D.CFPGOLD.CFP.IP": ("Spot Gold", 72.0),
+        "CS.D.EURUSD.CFD.IP": ("EUR/USD", 61.0),
+        "IX.D.DAX.IG.IP": ("DAX", 34.0),
+    }
+    loops = [
+        _roadmap_loop(epic, score, market=label)
+        for epic, (label, score) in epics.items()
+    ]
+    enabled = list(epics.keys())
+    meta = {
+        epic: {"name": label, "instrument_id": label.lower().replace(" ", "_")}
+        for epic, (label, _) in epics.items()
+    }
+    return MarketOrchestrator(
+        cfg,
+        loops,
+        primary_epic=enabled[0],
+        enabled_epics=enabled,
+        instrument_meta=meta,
+    )
+
+
+class TestRoadmapE2EIntegration(unittest.TestCase):
+    """£1,000/Day Roadmap — orchestrator rotation, session weights, sizing, R:R."""
+
+    def setUp(self) -> None:
+        from runtime import market_orchestrator as mo
+
+        self._orch_ref_backup = mo._ORCHESTRATOR_REF
+
+    def tearDown(self) -> None:
+        from runtime import market_orchestrator as mo
+
+        mo._ORCHESTRATOR_REF = self._orch_ref_backup
+        set_points_state_path_for_tests(None)
+
+    @patch("runtime.market_orchestrator.publish_tick")
+    def test_multi_market_hub_ingress_ranks_active_epics_top_three(
+        self, _publish: MagicMock
+    ) -> None:
+        orch = _build_four_market_orchestrator()
+        attach_snapshot_handlers(orch)
+
+        hub_ticks = [
+            ("IX.D.NASDAQ.CASH.IP", "IXIC", 18000.0, 18000.5, 88.0),
+            ("CS.D.CFPGOLD.CFP.IP", "Spot Gold", 2350.0, 2350.3, 72.0),
+            ("CS.D.EURUSD.CFD.IP", "EUR/USD", 1.0850, 1.0852, 61.0),
+            ("IX.D.DAX.IG.IP", "DAX", 18200.0, 18202.0, 34.0),
+        ]
+        for epic, market, bid, offer, fitness in hub_ticks:
+            loop = next(lo for lo in orch.loops if lo._epic == epic)
+            loop._env._last.total = fitness
+            loop._env.get_factors.return_value = {
+                "trend": max(0.01, float(fitness) * 0.25),
+                "spread": 15.0,
+                "atr": 20.0,
+                "session": 10.0,
+            }
+            orch.on_market_snapshot(
+                {
+                    "epic": epic,
+                    "market": market,
+                    "bid": bid,
+                    "offer": offer,
+                    "spread": round(offer - bid, 4),
+                    "signal": {"fitness": fitness},
+                }
+            )
+
+        active = orch.get_active_epics()
+        self.assertEqual(len(active), 3)
+        self.assertNotIn("IX.D.DAX.IG.IP", active)
+        self.assertEqual(
+            active,
+            [
+                "IX.D.NASDAQ.CASH.IP",
+                "CS.D.CFPGOLD.CFP.IP",
+                "CS.D.EURUSD.CFD.IP",
+            ],
+        )
+
+    @patch(
+        "system.market_watch.japan225_session.japan225_strategy_paused",
+        return_value=(False, ""),
+    )
+    def test_choppy_asset_outside_top_three_soft_blocked(
+        self, _j225: MagicMock
+    ) -> None:
+        orch = _build_four_market_orchestrator()
+        attach_snapshot_handlers(orch)
+        orch.refresh_active_epics()
+
+        loop = _make_orchestrator(
+            epic="IX.D.DAX.IG.IP",
+            market="DAX",
+        )
+        gates = loop._evaluate_gates_core(_quote())
+        self.assertFalse(any(g.passed for g in gates))
+        self.assertTrue(
+            all(g.detail == SOFT_BLOCK_NOT_IN_TOP_3 for g in gates),
+            [g.detail for g in gates],
+        )
+
+    def test_session_style_utc_asian_and_western_weights(self) -> None:
+        asian_now = datetime(2026, 6, 10, 2, 0, tzinfo=timezone.utc)
+        self.assertEqual(_session_style_utc(asian_now), "ASIAN_RANGE")
+        base = {"atr": 20.0, "trend": 20.0, "session": 10.0, "spread": 15.0}
+        asian = _apply_session_style_weights(dict(base), "ASIAN_RANGE")
+        self.assertAlmostEqual(asian["trend"], 10.0)
+        self.assertAlmostEqual(asian["trend"], base["trend"] * 0.5)
+
+        western_now = datetime(2026, 6, 10, 14, 0, tzinfo=timezone.utc)
+        self.assertEqual(_session_style_utc(western_now), "WESTERN_MOMENTUM")
+        weak = _apply_session_style_weights(
+            {"atr": 20.0, "trend": 4.0, "session": 10.0, "spread": 15.0},
+            "WESTERN_MOMENTUM",
+        )
+        self.assertAlmostEqual(weak["trend"], min(FACTOR_TREND_MAX, 4.0 * 2.5))
+        self.assertLess(weak["trend"], FACTOR_TREND_MAX * 0.5)
+        self.assertAlmostEqual(weak["atr"], 20.0 * 0.4)
+        self.assertAlmostEqual(weak["session"], 10.0 * 0.4)
+        self.assertAlmostEqual(weak["spread"], 15.0 * 0.4)
+
+        strong = _apply_session_style_weights(dict(base), "WESTERN_MOMENTUM")
+        self.assertAlmostEqual(strong["trend"], FACTOR_TREND_MAX)
+        self.assertAlmostEqual(strong["atr"], base["atr"])
+
+        engine = _make_engine_with_bars(25)
+        scorer = EnvironmentScorer(engine, config=engine.config, normal_spread=10.0)
+        quote = Quote(datetime(2026, 6, 10, 14, 0), 100.0, 100.5)
+        _assert_no_env_scorer_fallback(self, scorer, market="US Tech 100", quote=quote)
+
+    def test_environment_scorer_exception_fallback_flags_active(self) -> None:
+        engine = _make_engine_with_bars(25)
+        scorer = EnvironmentScorer(engine, config=engine.config, normal_spread=10.0)
+        quote = Quote(datetime(2026, 6, 10, 14, 0), 100.0, 100.5)
+        with patch.object(
+            scorer,
+            "_compute_factors",
+            side_effect=NameError("session_style"),
+        ):
+            score = scorer.score("US Tech 100", quote=quote)
+        self.assertEqual(score, SAFE_DEFAULT_SCORE)
+        self.assertTrue(scorer.last_score().fallback_active)
+
+    def test_roadmap_cumulative_sizing_boost_and_clamp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        set_points_state_path_for_tests(Path(tmp.name) / "points.json")
+        engine = PointsEngine(state_path=Path(tmp.name) / "points.json")
+        engine._cumulative = 16.0
+        self.assertAlmostEqual(engine._finalize_size_multiplier(0.5), 1.25)
+
+        cfg = MagicMock()
+        cfg.trade_size = 1.0
+        cfg.adaptive_min_trade_size = 0.01
+        cfg.adaptive_max_trade_size = 0.75
+        with patch("system.config_loader.get_config", return_value=cfg):
+            self.assertAlmostEqual(engine._finalize_size_multiplier(0.5), 0.75)
+
+    def test_asymmetric_rr_floor_blocks_below_three_to_one(self) -> None:
+        cfg = MagicMock()
+        cfg.adaptive_execution_enabled = True
+        cfg.adaptive_min_adjusted_confidence = 0.0
+        cfg.adaptive_max_entry_spread = 9999.0
+        cfg.adaptive_min_net_profit_pts = 0.0
+        cfg.adaptive_block_bad_setups = False
+
+        adaptive = AdaptiveEngine(cfg)
+        with patch.object(
+            adaptive,
+            "settings",
+            return_value={"risk": 40.0, "limit": 100.0},
+        ):
+            with patch("execution.adaptive_engine.get_config", return_value=cfg):
+                blocked, reason = adaptive.should_block("test|roadmap", 92.0, {})
+
+        self.assertTrue(blocked)
+        self.assertEqual(reason, "REJECTED_ASYMMETRIC_RR_FLOOR_GATED")
 
 
 if __name__ == "__main__":

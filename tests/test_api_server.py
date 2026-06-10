@@ -128,13 +128,14 @@ class ApiServerTests(unittest.TestCase):
             patch("api.routes.os._exit"),
             patch("system.shutdown_cleanup.spawn_post_shutdown_verifier"),
             patch("system.shutdown_cleanup.mark_manual_stop"),
-            patch("api.agent_health.stop_watchdog"),
+            patch("system.shutdown_cleanup.perform_shutdown_cleanup"),
         ):
             r = self.client.post("/api/shutdown")
         self.assertEqual(r.status_code, 200, r.text)
         body = r.json()
         self.assertTrue(body.get("ok"))
         self.assertEqual(body.get("status"), "shutting_down")
+        self.assertIn("supervision", body)
 
     def test_snapshot_persisted_to_disk(self) -> None:
         tick = build_default_tick()

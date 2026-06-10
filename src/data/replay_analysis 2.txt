@@ -1,0 +1,42 @@
+=== JAPAN 225 SIGNAL REPLAY ANALYSIS ===
+Date range: n/a to n/a
+Total bars: 0
+Total signals (score>=50): 0
+
+THRESHOLD ANALYSIS (3-bar forward):
+threshold  signals  win_rate  profit_factor
+50         0          0.0%     0.00
+60         0          0.0%     0.00
+70         0          0.0%     0.00
+75         0          0.0%     0.00
+80         0          0.0%     0.00
+85         0          0.0%     0.00
+90         0          0.0%     0.00
+
+RSI SELL RANGE ANALYSIS:
+rsi_min  rsi_max  signals  win_rate
+20       45       0          0.0%
+25       45       0          0.0%
+30       45       0          0.0%
+20       40       0          0.0%
+
+SESSION WINDOW ANALYSIS:
+window        signals  win_rate  avg_score
+asia_early     0          0.0%      0.0
+tokyo          0          0.0%      0.0
+london_open    0          0.0%      0.0
+
+VOL REGIME ANALYSIS:
+regime   signals  win_rate
+low       0          0.0%
+normal    0          0.0%
+high      0          0.0%
+unknown   0          0.0%
+
+RECOMMENDED CONFIG:
+  signal_threshold: 70  (best profit factor)
+  rsi_sell_min: 20      (best win rate)
+  rsi_sell_max: 45
+  rsi_buy_min: 58
+  rsi_buy_max: 78
+  Best session: asia_early

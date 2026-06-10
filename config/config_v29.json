@@ -1,0 +1,7 @@
+{
+  "$schema": "./config_schema.json",
+  "$extends": "config_v25.json",
+  "version": "29.0.0",
+  "app_version": "v29.0",
+  "_note": "v29.0 primary configuration tier — merges over config_v25.json at load time (Stage 1 workspace unification)"
+}

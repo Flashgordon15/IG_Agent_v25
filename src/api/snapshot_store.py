@@ -92,10 +92,12 @@ def subscribe(callback: Callable[[dict[str, Any]], None]) -> Callable[[], None]:
     return _unsub
 
 
-def _notify_locked(tick: dict[str, Any]) -> None:
+def _deliver_tick_to_subscribers(tick: dict[str, Any]) -> None:
     """Push a JSON-safe copy to WebSocket subscribers (may run on engine thread)."""
     payload = json.loads(json.dumps(_tick_for_readers(tick), default=str))
-    for cb in list(_subscribers):
+    with _lock:
+        subscribers = list(_subscribers)
+    for cb in subscribers:
         try:
             cb(payload)
         except Exception:
@@ -247,12 +249,13 @@ def publish_tick(payload: dict[str, Any], *, notify: bool = True) -> dict[str, A
     global _last_ws_broadcast_mtime
     tick = write_tick_snapshot(payload)
     if notify:
+        try:
+            mtime = snapshot_path().stat().st_mtime
+        except OSError:
+            mtime = time.time()
         with _lock:
-            try:
-                _last_ws_broadcast_mtime = snapshot_path().stat().st_mtime
-            except OSError:
-                _last_ws_broadcast_mtime = time.time()
-            _notify_locked(tick)
+            _last_ws_broadcast_mtime = mtime
+        _deliver_tick_to_subscribers(tick)
     return tick
 
 
@@ -386,17 +389,19 @@ def get_tick() -> dict[str, Any]:
     global _cached, _cached_mtime
     path = snapshot_path()
     with _lock:
-        if not path.exists():
-            return _tick_for_readers(_cached)
-        try:
-            mtime = path.stat().st_mtime
-        except OSError:
-            return _tick_for_readers(_cached)
-        if mtime <= _cached_mtime:
-            return _tick_for_readers(_cached)
+        cached = _cached
+        cached_mtime = _cached_mtime
+    if not path.exists():
+        return _tick_for_readers(cached)
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return _tick_for_readers(cached)
+    if mtime <= cached_mtime:
+        return _tick_for_readers(cached)
     data = read_json_file(path)
     if not isinstance(data, dict):
-        return _tick_for_readers(_cached)
+        return _tick_for_readers(cached)
     tick = normalize_tick(data)
     with _lock:
         _cached = tick
@@ -404,8 +409,29 @@ def get_tick() -> dict[str, Any]:
     return _tick_for_readers(tick)
 
 
+def snapshot_age_s_fast() -> float | None:
+    """Seconds since last tick timestamp without full snapshot enrichment."""
+    with _lock:
+        ts = _cached.get("ts")
+    if not ts:
+        return None
+    try:
+        from datetime import datetime
+
+        if str(ts).endswith("Z"):
+            dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        else:
+            dt = datetime.fromisoformat(str(ts))
+        return max(0.0, time.time() - dt.timestamp())
+    except Exception:
+        return None
+
+
 def snapshot_age_s() -> float | None:
     """Seconds since last published tick, or None if never written."""
+    age = snapshot_age_s_fast()
+    if age is not None:
+        return age
     tick = get_tick()
     ts = tick.get("ts")
     if not ts:
@@ -445,4 +471,4 @@ async def watch_snapshot_file(poll_interval: float = 0.25) -> None:
             _cached = tick
             _cached_mtime = mtime
             _last_ws_broadcast_mtime = mtime
-            _notify_locked(tick)
+        _deliver_tick_to_subscribers(tick)

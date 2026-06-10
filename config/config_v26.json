@@ -1,13 +1,13 @@
 {
   "$schema": "./config_schema.json",
   "$extends": "config_v25.json",
-  "version": "26.0.0",
-  "_note": "v26 profitability overlay \u2014 merge with config_v25.json at load time (not yet wired in v25.6)",
+  "version": "29.0.0",
+  "_note": "v29 profitability overlay — merge with config_v25.json at load time (v29 architecture)",
   "capital_envelope": {
     "account_balance_gbp": 10000,
     "max_margin_pct": 0.2,
     "max_concurrent_risk_gbp": 1200,
-    "max_daily_risk_deployed_gbp": 2500,
+    "max_daily_risk_deployed_gbp": 8000,
     "max_daily_loss_gbp": 500,
     "max_daily_profit_target_gbp": 1000,
     "min_available_gbp": 100,
@@ -47,12 +47,7 @@
     "min_probability_high_conf": 0.55,
     "setup_specific_thresholds": true,
     "blend_fallback": false,
-    "per_epic": {
-      "CS.D.EURUSD.CFD.IP": {
-        "enabled": true,
-        "min_probability": 0.53
-      }
-    }
+    "per_epic": {}
   },
   "shadow_service": {
     "enabled": true,
@@ -80,7 +75,7 @@
     "probe_risk_gbp_min": 50,
     "probe_risk_gbp_max": 80,
     "core_size_multiplier": 0.65,
-    "_note": "Probe 55–80% → £50–80 risk; core 80–85% → 0.65×; full ≥85% (operator override floor 55%)"
+    "_note": "Probe 55\u201380% \u2192 \u00a350\u201380 risk; core 80\u201385% \u2192 0.65\u00d7; full \u226585% (operator override floor 55%)"
   },
   "correlation_guard": {
     "max_concurrent_us_index_shorts": 1,

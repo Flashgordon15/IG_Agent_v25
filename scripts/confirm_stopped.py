@@ -11,21 +11,19 @@ sys.path.insert(0, str(ROOT / "src"))
 
 
 def main() -> int:
-    from system.shutdown_cleanup import agent_fully_stopped
+    from system.shutdown_cleanup import agent_fully_stopped, stopped_verification_checks
 
     ok, issues = agent_fully_stopped()
+    checks = stopped_verification_checks(issues)
     print()
     print("IG Agent v25 — CONFIRM STOPPED")
     print("=" * 40)
-    checks = [
-        ("No main.py process", "main.py still running" not in issues),
-        ("No watchdog process", "watchdog.sh still running" not in issues),
-        ("Port 8080 free", "port 8080 still bound" not in issues),
-        ("No instance lock", "instance lock file present" not in issues),
-        ("No watchdog.pid", "watchdog.pid present" not in issues),
-    ]
-    for label, passed in checks:
-        print(f"[{'PASS' if passed else 'FAIL'}] {label}")
+    for row in checks:
+        label = str(row.get("label") or "")
+        passed = bool(row.get("ok"))
+        detail = str(row.get("detail") or "").strip()
+        suffix = f" — {detail}" if detail else ""
+        print(f"[{'PASS' if passed else 'FAIL'}] {label}{suffix}")
     print("=" * 40)
     if ok:
         print("→ FULLY STOPPED — safe to close browser tab")

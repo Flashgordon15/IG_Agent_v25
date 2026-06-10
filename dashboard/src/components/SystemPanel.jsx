@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import { postEmergencyStop } from "../api.js";
+import resolveSupervisionAlert from "../utils/supervision.js";
 
 async function postJson(url) {
   const r = await fetch(url, { method: "POST" });
@@ -251,9 +252,30 @@ export default function SystemPanel({ state, wsConnected, reconnecting }) {
   const modelVersion = resolveModelVersion(state);
   const lastRetrain = resolveLastRetrain(state);
   const uptime = stableUptime;
+  const supervisionAlert = resolveSupervisionAlert(state);
+  const overnight = state?.overnight_supervision || {};
 
   return (
     <div className="mx-auto max-w-5xl space-y-3 px-1 pb-4">
+      {supervisionAlert && (
+        <div
+          className={[
+            "rounded-lg border px-3 py-2.5 text-[11px] leading-snug sm:text-xs",
+            supervisionAlert.severity === "danger"
+              ? "border-danger/50 bg-danger/10 text-danger"
+              : "border-warning/50 bg-warning/10 text-warning",
+          ].join(" ")}
+          role="alert"
+        >
+          <p className="font-semibold">{supervisionAlert.title}</p>
+          <ul className="mt-1 list-inside list-disc">
+            {(supervisionAlert.messages || []).map((msg) => (
+              <li key={msg}>{msg}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {isWatchdogFailed(state) && (
         <div
           className="animate-pulse rounded-lg border border-danger bg-danger px-3 py-2.5 text-center text-[11px] font-semibold leading-snug text-white sm:text-xs"
@@ -312,6 +334,52 @@ export default function SystemPanel({ state, wsConnected, reconnecting }) {
 
         <Card title="Agent info">
           <dl className="space-y-3">
+            <StatusRow label="Watchdog">
+              <span
+                className={
+                  state?.watchdog_active ? "font-semibold text-success" : "font-semibold text-danger"
+                }
+              >
+                {state?.watchdog_active ? "ACTIVE" : "INACTIVE"}
+              </span>
+            </StatusRow>
+
+            <StatusRow label="Launchd supervision">
+              <span
+                className={
+                  overnight.launchd_watchdog
+                    ? "font-semibold text-success"
+                    : "font-semibold text-warning"
+                }
+              >
+                {overnight.launchd_watchdog ? "LOADED" : "NOT LOADED"}
+              </span>
+            </StatusRow>
+
+            <StatusRow label="Overnight armed">
+              <span className="font-mono text-foreground">
+                {state?.overnight_armed ? "YES" : "NO"}
+              </span>
+            </StatusRow>
+
+            <StatusRow label="Supervision drift">
+              <span
+                className={
+                  state?.supervision_drift_ok === false
+                    ? "font-semibold text-danger"
+                    : (state?.supervision_warnings || []).length
+                      ? "font-semibold text-warning"
+                      : "font-semibold text-success"
+                }
+              >
+                {state?.supervision_drift_ok === false
+                  ? "ISSUES"
+                  : (state?.supervision_warnings || []).length
+                    ? "WARNINGS"
+                    : "OK"}
+              </span>
+            </StatusRow>
+
             <StatusRow label="ML Model">
               <span className="font-mono text-foreground">
                 {modelVersion ?? "—"}

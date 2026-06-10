@@ -77,11 +77,15 @@ class PreLaunchContractTests(unittest.TestCase):
             patch("api.routes.os._exit"),
             patch("system.shutdown_cleanup.spawn_post_shutdown_verifier"),
             patch("system.shutdown_cleanup.mark_manual_stop"),
-            patch("api.agent_health.stop_watchdog"),
+            patch("system.shutdown_cleanup.perform_shutdown_cleanup"),
         ):
             r = self.client.post("/api/shutdown")
         self.assertEqual(r.status_code, 200, r.text)
-        self.assertTrue(r.json().get("ok"))
+        body = r.json()
+        self.assertTrue(body.get("ok"))
+        self.assertIn("supervision", body)
+        cleanup_labels = [c.get("label") for c in body.get("cleanup_checks") or []]
+        self.assertIn("Launchd supervision", cleanup_labels)
 
     def test_main_clears_manual_stop_on_startup(self) -> None:
         main_src = (ROOT / "src" / "main.py").read_text(encoding="utf-8")

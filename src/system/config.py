@@ -13,7 +13,7 @@ from typing import Any
 
 @dataclass(frozen=True)
 class Config:
-    """Typed view over merged v24 + v22 adaptive autotrader settings."""
+    """Typed view over merged v29 / v25 / v22 adaptive autotrader settings."""
 
     _data: dict[str, Any] = field(default_factory=dict, repr=False)
 

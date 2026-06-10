@@ -21,7 +21,7 @@ from api.agent_control import (
     start_trading,
     stop_trading,
 )
-from api.agent_health import build_health_status
+from api.agent_health import get_cached_health_status
 from api.close_handler import close_deal
 from api.dashboard_data import (
     dismiss_splash,
@@ -39,7 +39,7 @@ from api.intelligence_data import (
     run_replay_pipeline,
     shadow_today,
 )
-from api.snapshot_store import get_tick, snapshot_age_s
+from api.snapshot_store import get_tick, snapshot_age_s_fast
 
 # ── Heartbeat ────────────────────────────────────────────────────────────────
 # Browser pings /api/heartbeat every 30 s. The endpoint is kept so the
@@ -55,7 +55,7 @@ router = APIRouter()
 
 @router.get("/health")
 def health() -> dict[str, Any]:
-    age = snapshot_age_s()
+    age = snapshot_age_s_fast()
     return {
         "ok": True,
         "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
@@ -65,14 +65,14 @@ def health() -> dict[str, Any]:
 
 
 @router.get("/api/health")
-def api_health() -> dict[str, Any]:
-    """Operational health — agent, loops, port, watchdog, and per-market gate activity."""
-    status = build_health_status()
-    status["ts"] = (
-        datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
-    )
-    status["snapshot_age_s"] = snapshot_age_s()
-    return status
+async def api_health() -> dict[str, Any]:
+    """Operational health — served from a background-refreshed cache (non-blocking)."""
+    status = get_cached_health_status()
+    return {
+        **status,
+        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+        "snapshot_age_s": snapshot_age_s_fast(),
+    }
 
 
 @router.get("/api/startup/status")
@@ -230,8 +230,22 @@ def api_system_e2e() -> dict[str, Any]:
 
 @router.post("/api/safe-to-leave")
 def api_safe_to_leave() -> dict[str, Any]:
-    """Run overnight trust gate (scripts/safe_to_leave.py)."""
+    """Run overnight trust bundle (launchd + checks). Never shuts down the agent."""
+    from system.engine_log import log_engine
+
+    log_engine(
+        "safe-to-leave: overnight bundle started "
+        "(launchd supervision + trust checks, no shutdown)"
+    )
     return run_safe_to_leave()
+
+
+@router.get("/api/overnight/status")
+def api_overnight_status() -> dict[str, Any]:
+    """Launchd supervision + armed state (independent of Cursor)."""
+    from system.overnight_supervision import overnight_supervision_summary
+
+    return {"ok": True, **overnight_supervision_summary()}
 
 
 @router.post("/api/close/{deal_id}")
@@ -539,24 +553,56 @@ def api_shutdown_verify_status() -> dict[str, Any]:
 @router.post("/api/shutdown")
 def api_shutdown(background_tasks: BackgroundTasks) -> JSONResponse:
     """Graceful agent shutdown — stop trading, clean port/lock, exit process."""
-    from api.agent_health import stop_watchdog
     from system.engine_log import log_engine
     from system.shutdown_cleanup import mark_manual_stop, spawn_post_shutdown_verifier
 
     try:
+        log_engine(
+            "shutdown API invoked — dashboard Stop Agent confirmed "
+            "(safe-to-leave does not call this endpoint)"
+        )
         mark_manual_stop(source="dashboard")
-        stop_watchdog()
         spawn_post_shutdown_verifier(os.getpid())
         background_tasks.add_task(_finish_dashboard_shutdown)
+        try:
+            from system.overnight_supervision import (
+                launchd_watchdog_active,
+                overnight_supervision_summary,
+            )
+            from system.supervision_monitor import evaluate_supervision_drift
+
+            launchd_preserved = launchd_watchdog_active()
+            drift = evaluate_supervision_drift()
+            summary = overnight_supervision_summary()
+            supervision_payload = {
+                "supervision_drift_ok": bool(drift.get("ok")),
+                "supervision_drift": drift,
+                "supervision_warnings": drift.get("warnings") or [],
+                "overnight_supervision": summary,
+                "overnight_armed": bool(summary.get("overnight_armed")),
+            }
+        except Exception:
+            launchd_preserved = False
+            supervision_payload = {}
         return JSONResponse(
             {
                 "ok": True,
                 "status": "shutting_down",
+                "supervision": supervision_payload,
                 "cleanup_checks": [
                     {
                         "label": "Manual stop flagged",
                         "ok": True,
-                        "detail": "watchdog will not auto-restart",
+                        "detail": "watchdog will not auto-restart agent for 10 min",
+                    },
+                    {
+                        "label": "Launchd supervision",
+                        "ok": launchd_preserved,
+                        "detail": (
+                            "preserved — Safe to Leave survives Stop Agent"
+                            if launchd_preserved
+                            else "not loaded — run ./scripts/install_launchd.sh"
+                        ),
                     },
                     {
                         "label": "Shutdown started",

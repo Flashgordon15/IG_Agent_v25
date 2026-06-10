@@ -129,6 +129,24 @@ def main() -> int:
 
     from system.shutdown_cleanup import agent_fully_stopped, stopped_verification_checks
 
+    def _supervision_fields() -> dict:
+        from system.overnight_supervision import overnight_supervision_summary
+        from system.shutdown_cleanup import manual_stop_active
+        from system.supervision_monitor import evaluate_supervision_drift
+
+        drift = evaluate_supervision_drift()
+        summary = overnight_supervision_summary()
+        warnings = list(drift.get("warnings") or [])
+        if manual_stop_active() and "manual_stop_active_agent_down" not in warnings:
+            warnings.append("manual_stop_active_agent_down")
+        return {
+            "supervision_drift_ok": bool(drift.get("ok")),
+            "supervision_drift": drift,
+            "supervision_warnings": warnings,
+            "overnight_supervision": summary,
+            "overnight_armed": bool(summary.get("overnight_armed")),
+        }
+
     ok = False
     issues: list[str] = ["verification timeout"]
     for attempt in range(60):
@@ -147,6 +165,7 @@ def main() -> int:
                 "status": "done",
                 "checks": stopped_verification_checks(issues),
                 "issues": issues,
+                **_supervision_fields(),
             }
         )
         final = dict(payload)

@@ -232,15 +232,15 @@ class PointsEngineThresholdSizeTests(unittest.TestCase):
         self.assertEqual(self.engine.get_threshold(), 100.0)
 
     def test_size_multiplier_healthy_bands(self) -> None:
-        # Progressive multiplier: cum=15 → tier_mult=1.5 (HEALTHY: cum > 10)
-        # high (>=92) → 1.5, standard (>=85) → 0.75, marginal (>=55) → 0.375
+        # Progressive multiplier: cum=15 → tier_mult=1.5 (HEALTHY: cum > 4)
+        # Roadmap ×2.5 when cumulative >= 15 (hysteresis holds through 10–14.9)
         self._set_state(15.0)
-        self.assertEqual(self.engine.get_size_multiplier(93.0), 1.5)
-        self.assertEqual(self.engine.get_size_multiplier(88.0), 0.75)
-        # Core band 80–85% applies 0.65× on marginal tier
-        self.assertAlmostEqual(self.engine.get_size_multiplier(82.0), 0.24375)
-        # Probe band (55–72%): tier_mult × 0.25
-        self.assertAlmostEqual(self.engine.get_size_multiplier(75.0), 0.375)
+        self.assertEqual(self.engine.get_size_multiplier(93.0), 3.75)
+        self.assertEqual(self.engine.get_size_multiplier(88.0), 1.875)
+        # Core band 80–85% applies 0.65× on standard tier (× roadmap 2.5)
+        self.assertAlmostEqual(self.engine.get_size_multiplier(82.0), 0.609375)
+        # Probe band (55–72%): tier_mult × 0.25 × 2.5
+        self.assertAlmostEqual(self.engine.get_size_multiplier(75.0), 0.9375)
 
     def test_size_multiplier_caution_bands(self) -> None:
         self._set_state(0.0)
@@ -253,13 +253,23 @@ class PointsEngineThresholdSizeTests(unittest.TestCase):
         self._set_state(0.0)
         self.assertEqual(self.engine.get_size_multiplier(82.0), 0.5)
         self.assertEqual(self.engine.get_size_multiplier(89.0), 0.5)
-        # HEALTHY (cum=15.0 > 10): tier_mult=1.5 → standard=0.75, high=1.5
+        # HEALTHY (cum=15.0): tier_mult=1.5 × roadmap 2.5 → standard=1.875, high=3.75
         self._set_state(15.0)
-        self.assertEqual(self.engine.get_size_multiplier(86.0), 0.75)
-        self.assertEqual(self.engine.get_size_multiplier(93.0), 1.5)
+        self.assertEqual(self.engine.get_size_multiplier(86.0), 1.875)
+        self.assertEqual(self.engine.get_size_multiplier(93.0), 3.75)
         # STOP: always 0
         self._set_state(-20.0, stop=True)
         self.assertEqual(self.engine.get_size_multiplier(99.0), 0.0)
+
+    def test_roadmap_compound_hysteresis_band(self) -> None:
+        self._set_state(16.0)
+        self.assertAlmostEqual(self.engine._roadmap_cumulative_scale(), 2.5)
+        self.engine._cumulative = 12.0
+        self.assertAlmostEqual(self.engine._roadmap_cumulative_scale(), 2.5)
+        self.engine._cumulative = 9.0
+        self.assertAlmostEqual(self.engine._roadmap_cumulative_scale(), 1.0)
+        self.engine._cumulative = 12.0
+        self.assertAlmostEqual(self.engine._roadmap_cumulative_scale(), 1.0)
 
     def test_size_multiplier_warning_only_high(self) -> None:
         self._set_state(-10.0)
