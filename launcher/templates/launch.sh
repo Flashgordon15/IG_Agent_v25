@@ -149,6 +149,21 @@ if [ -f "${ROOT}/emergency_stop.lock" ]; then
   exit 1
 fi
 
+clear_manual_stop_flag() {
+  local flag="${ROOT}/src/data/state/manual_stop.json"
+  if [ ! -f "${flag}" ]; then
+    return 0
+  fi
+  if IG_AGENT_ROOT="${ROOT}" PYTHONPATH="${ROOT}/src" python3 -c "
+from system.shutdown_cleanup import clear_manual_stop
+clear_manual_stop()
+" 2>/dev/null; then
+    log "cleared manual_stop flag — explicit launcher start"
+  else
+    rm -f "${flag}" && log "cleared manual_stop flag (fallback rm)" || true
+  fi
+}
+
 code_newer_than_agent() {
   if [ -z "${ROOT}" ]; then
     return 1
@@ -205,12 +220,14 @@ fi
 
 if command -v launchctl >/dev/null 2>&1; then
   if launchctl print "gui/$(id -u)/com.igagent.v25.watchdog" >/dev/null 2>&1; then
+    clear_manual_stop_flag
     log "launchd watchdog active — waiting for watchdog to start agent (no duplicate main.py)"
     notify_user "Launchd starting agent… dashboard will open when ready."
     wait_for_dashboard "launchd cold start"
   fi
 fi
 
+clear_manual_stop_flag
 notify_user "Starting IG Agent… dashboard will open when ready."
 log "startup notification sent — awaiting agent health"
 

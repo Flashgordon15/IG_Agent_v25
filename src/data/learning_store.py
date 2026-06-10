@@ -1183,6 +1183,38 @@ class LearningStore:
         return float(row["s"] or 0) if row else 0.0
 
     @_locked
+    def closed_trade_stats_since(self, since_ts: str) -> dict[str, int]:
+        """Closed non-dry-run trades with closed_at >= since_ts (YYYY-MM-DD HH:MM:SS)."""
+        rows = self.conn.execute(
+            """
+            SELECT result FROM trades
+            WHERE closed_at IS NOT NULL
+              AND closed_at >= ?
+              AND dry_run = 0
+            """,
+            (since_ts,),
+        ).fetchall()
+        wins = sum(1 for r in rows if str(r["result"] or "") == "WIN")
+        losses = sum(1 for r in rows if str(r["result"] or "") == "LOSS")
+        return {"trades": len(rows), "wins": wins, "losses": losses}
+
+    @_locked
+    def sum_realised_pnl_since(self, since_ts: str) -> float:
+        """Aggregate realised currency P&L for closes on or after since_ts."""
+        expr = self._realised_pnl_expr()
+        row = self.conn.execute(
+            f"""
+            SELECT COALESCE(SUM({expr}), 0) AS s
+            FROM trades
+            WHERE closed_at IS NOT NULL
+              AND closed_at >= ?
+              AND NOT (dry_run = 1 AND COALESCE(ig_pnl_currency, 0) = 0)
+            """,
+            (since_ts,),
+        ).fetchone()
+        return float(row["s"] or 0) if row else 0.0
+
+    @_locked
     def count_trades_opened_today(self, day: str | None = None) -> int:
         """Count non-dry-run trades opened on day (YYYY-MM-DD); default today."""
         d = day or date.today().strftime("%Y-%m-%d")

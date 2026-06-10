@@ -8,7 +8,6 @@ Runtime: trading loop (background) + FastAPI on :8080 (foreground).
 from __future__ import annotations
 
 import atexit
-import json
 import os
 import signal
 import socket
@@ -33,7 +32,7 @@ from system.credentials_holder import bootstrap_credentials, get_credentials_hol
 from system.credentials_loader import try_load_credentials
 from system.engine_log import log_engine
 from system.instance_lock import acquire_instance_lock, release_instance_lock
-from system.paths import config_dir, logs_dir, project_root
+from system.paths import logs_dir, project_root
 
 try:
     from system.startup_tracker import mark as _startup_mark
@@ -171,17 +170,14 @@ def _port_in_use_banner(port: int) -> str:
 
 
 def _config_path() -> Path:
-    return config_dir() / "config_v25.json"
+    from system.config_loader import _primary_config_path
+
+    return _primary_config_path()
 
 
 def load_raw_config_dict() -> dict[str, Any]:
-    path = _config_path()
-    if not path.exists():
-        raise FileNotFoundError(f"Config not found: {path}")
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict):
-        raise ValueError("config root must be a JSON object")
-    return data
+    """Load fully merged config (respects v29 → v25 $extends chain)."""
+    return ConfigLoader(_config_path()).load_config(validate=False).as_dict()
 
 
 def merge_credentials_for_validation(data: dict[str, Any]) -> dict[str, Any]:
@@ -623,10 +619,14 @@ class AgentRuntime:
                 from system.gate_coherence_scheduler import (
                     start_gate_coherence_scheduler,
                 )
+                from system.telegram_alerts import (
+                    start_hourly_executive_telegram_scheduler,
+                )
                 from system.v26_shadow_service import start_v26_shadow_service
 
                 start_v26_shadow_service()
                 start_gate_coherence_scheduler()
+                start_hourly_executive_telegram_scheduler()
                 try:
                     from ai.operational.system_monitor import get_system_monitor
 

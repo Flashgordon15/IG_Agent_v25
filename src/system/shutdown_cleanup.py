@@ -185,8 +185,10 @@ def perform_shutdown_cleanup(
         pass
 
     try:
+        from system.telegram_alerts import stop_hourly_executive_telegram_scheduler
         from system.telegram_notifier import stop_telegram_heartbeat
 
+        stop_hourly_executive_telegram_scheduler()
         stop_telegram_heartbeat()
     except Exception:
         pass

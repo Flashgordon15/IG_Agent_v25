@@ -347,8 +347,6 @@ def build_market_orchestrator(
     try:
         from system.telegram_notifier import (
             configure_telegram,
-            set_heartbeat_provider,
-            start_telegram_heartbeat,
         )
 
         configure_telegram(cfg)
@@ -571,31 +569,10 @@ def build_market_orchestrator(
     )
 
     try:
-        from api.snapshot_store import get_tick
         from system.telegram_notifier import (
             get_telegram_notifier,
-            set_heartbeat_provider,
-            start_telegram_heartbeat,
         )
 
-        def _heartbeat_snapshot() -> dict[str, Any]:
-            tick = get_tick()
-            sig = tick.get("signal") or {}
-            pts = tick.get("points") or {}
-            positions = tick.get("positions") or []
-            return {
-                "fitness": float(sig.get("fitness") or tick.get("fitness_score") or 0),
-                "signal": float(sig.get("confidence") or 0),
-                "stream": str(tick.get("stream_status") or "DISCONNECTED"),
-                "positions": len(positions) if isinstance(positions, list) else 0,
-                "cumulative": float(pts.get("cumulative") or 0),
-                "state": str(pts.get("state") or points_engine.get_state()),
-                "balance": tick.get("balance_gbp"),
-                "daily_pnl": tick.get("daily_pnl_gbp"),
-            }
-
-        set_heartbeat_provider(_heartbeat_snapshot)
-        start_telegram_heartbeat()
         notifier = get_telegram_notifier()
         if notifier is not None and notifier.enabled:
             notifier.notify_startup(
@@ -604,7 +581,7 @@ def build_market_orchestrator(
                 points_state=points_engine.get_state(),
             )
     except Exception as e:
-        log_engine(f"telegram heartbeat setup failed: {type(e).__name__}: {e}")
+        log_engine(f"telegram startup notify failed: {type(e).__name__}: {e}")
 
     return orch
 

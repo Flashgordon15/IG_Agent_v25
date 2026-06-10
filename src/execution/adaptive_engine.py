@@ -10,6 +10,9 @@ from typing import Any
 from system.config import Config
 from system.config_loader import get_config
 
+# v29 institutional floor — limit must reach this R:R before ATR cap may trim it.
+RR_FLOOR_RATIO = 3.0
+
 
 class AdaptiveEngine:
     def __init__(self, config: Config, memory_store: Any | None = None) -> None:
@@ -161,6 +164,10 @@ class AdaptiveEngine:
             notes.append("circuit breaker half-size resume")
 
         limit = risk * reward
+        floor_limit = risk * RR_FLOOR_RATIO
+        if limit < floor_limit:
+            limit = floor_limit
+            notes.append(f"RR floor {RR_FLOOR_RATIO:.1f}:1 → limit {limit:.1f}")
 
         # Cap limit so it doesn't exceed a realistic multiple of ATR (market's daily range proxy).
         # Prevents unachievable targets when stop is very tight but reward_multiple is high.
@@ -197,14 +204,14 @@ class AdaptiveEngine:
         risk_pts = float(exec_settings.get("risk") or 0.0)
         limit_pts = float(exec_settings.get("limit") or 0.0)
 
-        if risk_pts > 0.0:
+        if risk_pts > 0.0 and cfg.get("enforce_rr_floor_filter", True):
             rr_ratio = limit_pts / risk_pts
-            if rr_ratio < 3.0:
+            if rr_ratio < RR_FLOOR_RATIO:
                 from system.engine_log import log_engine
 
                 log_engine(
                     f"REJECTED_ASYMMETRIC_RR_FLOOR_GATED | market={setup_key} "
-                    f"limit={limit_pts:.1f} risk={risk_pts:.1f} rr={rr_ratio:.2f} (<3.0)"
+                    f"limit={limit_pts:.1f} risk={risk_pts:.1f} rr={rr_ratio:.2f} (<{RR_FLOOR_RATIO:.1f})"
                 )
                 return True, "REJECTED_ASYMMETRIC_RR_FLOOR_GATED"
 

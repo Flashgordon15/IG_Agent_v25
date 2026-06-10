@@ -44,7 +44,28 @@ def last_gate_check_by_epic() -> dict[str, float]:
 
 def reset_gate_activity_for_tests() -> None:
     global _last_gate_eval_mono, _last_gate_eval_wall, _per_epic_wall
+    global _liquidity_shield_blocks
     with _lock:
         _last_gate_eval_mono = 0.0
         _last_gate_eval_wall = 0.0
         _per_epic_wall = {}
+        _liquidity_shield_blocks = []
+
+
+_liquidity_shield_blocks: list[float] = []
+
+
+def record_liquidity_shield_block(*, epic: str = "") -> None:
+    """In-memory tally for hourly executive reports (no disk writes)."""
+    _ = epic
+    now = time.time()
+    with _lock:
+        _liquidity_shield_blocks.append(now)
+        cutoff = now - 3600.0
+        _liquidity_shield_blocks = [t for t in _liquidity_shield_blocks if t >= cutoff]
+
+
+def count_liquidity_shield_blocks_last_hour() -> int:
+    cutoff = time.time() - 3600.0
+    with _lock:
+        return sum(1 for t in _liquidity_shield_blocks if t >= cutoff)

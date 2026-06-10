@@ -50,6 +50,9 @@ TOP_ROTATION_SLOTS = 3
 ROTATION_MIN_ONLINE_FOR_FILTER = 3
 _ROTATION_ONLINE_MAX_AGE_SEC = 30.0
 _ROTATION_RANK_FLOOR = 0.01
+_FEED_STARVATION_MAX_AGE_SEC = 120.0
+_FEED_RECOVERY_MAX_AGE_SEC = 30.0
+OFFLINE_BROKER_FEED_REJECTED = "OFFLINE_BROKER_FEED_REJECTED"
 
 
 class MarketOrchestrator:
@@ -82,6 +85,7 @@ class MarketOrchestrator:
         self._running = False
         self._active_epics: list[str] = list(passed_enabled)
         self._active_epics_updated_at: float = 0.0
+        self._feed_offline_epics: set[str] = set()
 
     @property
     def config(self) -> Config:
@@ -131,6 +135,74 @@ class MarketOrchestrator:
             if bid and offer and float(bid) > 0 and float(offer) > 0:
                 return True
         return bool(getattr(loop, "_env", None) is not None)
+
+    def _quote_age_seconds(self, epic: str) -> float | None:
+        """Last hub quote age in seconds, or None when no live bid/offer."""
+        try:
+            from system.market_data_hub import get_market_data_hub
+
+            snap = get_market_data_hub().get_snapshot(epic)
+            if snap is None or snap.bid <= 0 or snap.offer <= 0:
+                return None
+            return float(snap.age_seconds())
+        except Exception:
+            return None
+
+    def _loop_connection_active(self, epic: str, loop: TradingLoop) -> bool:
+        """Instrument loop is running with an established (possibly stale) quote path."""
+        if not loop.is_running() or loop._env is None:
+            return False
+        return self._quote_age_seconds(epic) is not None
+
+    def _loop_for_epic(self, epic: str) -> TradingLoop | None:
+        key = str(epic or "").strip()
+        if not key:
+            return None
+        for loop in self._loops:
+            if str(getattr(loop, "_epic", "") or "") == key:
+                return loop
+        return None
+
+    def _apply_feed_circuit_breakers(self) -> set[str]:
+        """
+        Autonomous feed-stale interceptor — isolate starving epics in RAM only.
+
+        Never stops sibling loops; only flags entry gates and ejects from rotation pool.
+        """
+        offline_now: set[str] = set()
+        for loop in self._loops:
+            epic = str(getattr(loop, "_epic", "") or "")
+            if not epic:
+                continue
+            age = self._quote_age_seconds(epic)
+            if not self._loop_connection_active(epic, loop):
+                if epic in self._feed_offline_epics:
+                    loop.clear_entry_circuit_breaker()
+                continue
+            if age is not None and age > _FEED_STARVATION_MAX_AGE_SEC:
+                offline_now.add(epic)
+                if epic not in self._feed_offline_epics:
+                    log_engine(
+                        f"CIRCUIT_BREAKER_ACTIVE | epic={epic} quote_age={age:.0f}s "
+                        f"(>{_FEED_STARVATION_MAX_AGE_SEC:.0f}) — {OFFLINE_BROKER_FEED_REJECTED}"
+                    )
+                loop.set_entry_circuit_breaker(OFFLINE_BROKER_FEED_REJECTED)
+            elif epic in self._feed_offline_epics and age is not None:
+                if age <= _FEED_RECOVERY_MAX_AGE_SEC:
+                    loop.clear_entry_circuit_breaker()
+                    log_engine(
+                        f"CIRCUIT_BREAKER_CLEARED | epic={epic} quote_age={age:.1f}s — feed restored"
+                    )
+                else:
+                    offline_now.add(epic)
+                    loop.set_entry_circuit_breaker(OFFLINE_BROKER_FEED_REJECTED)
+
+        self._feed_offline_epics = offline_now
+        return set(offline_now)
+
+    def get_feed_offline_epics(self) -> list[str]:
+        with self._lock:
+            return sorted(self._feed_offline_epics)
 
     def _relative_spread_cost(self, epic: str, loop: TradingLoop) -> float:
         """Broker spread deviation — prefer env-scorer factor, else live quote ratio."""
@@ -216,10 +288,14 @@ class MarketOrchestrator:
         """Layer 3 Hot Market Selector — rank_score = trend_cleanliness / relative_spread_cost."""
         import time
 
+        feed_offline = self._apply_feed_circuit_breakers()
+
         ranked_assets: list[tuple[str, float]] = []
         for loop in self._loops:
             epic = str(getattr(loop, "_epic", "") or "")
             if not epic or loop._env is None:
+                continue
+            if epic in feed_offline:
                 continue
             if not self._loop_providing_live_data(epic, loop):
                 continue
@@ -471,6 +547,7 @@ class MarketOrchestrator:
             "loop_count": len(self._loops),
             "primary_epic": self._primary_epic,
             "active_epics": self.get_active_epics(),
+            "feed_offline_epics": self.get_feed_offline_epics(),
         }
         try:
             publish_tick(merged)

@@ -3,5 +3,55 @@
   "$extends": "config_v25.json",
   "version": "29.0.0",
   "app_version": "v29.0",
-  "_note": "v29.0 primary configuration tier — merges over config_v25.json at load time (Stage 1 workspace unification)"
+  "_note": "v29.0 primary configuration tier — merges over config_v25.json at load time (Stage 1 workspace unification)",
+  "reward_multiple": 3.0,
+  "adaptive_high_confidence_reward_multiple": 3.0,
+  "adaptive_max_limit_atr_multiple": 4.0,
+  "enforce_rr_floor_filter": true,
+  "enforce_1h_ema_filter": true,
+  "enforce_top3_rotation_filter": false,
+  "enforce_environment_fitness_filter": true,
+  "environment_fitness_min_pct": 45,
+  "instruments": {
+    "gold": {
+      "enabled": true,
+      "reward_multiple": 3.0
+    },
+    "wall_street": {
+      "enabled": true,
+      "reward_multiple": 3.0,
+      "trading_session_whitelist": [
+        "london_us_overlap",
+        "us_afternoon",
+        "late"
+      ]
+    },
+    "nasdaq_100": {
+      "enabled": true,
+      "reward_multiple": 3.0
+    },
+    "gbp_usd": {
+      "enabled": true,
+      "reward_multiple": 3.0,
+      "trading_session_whitelist": [
+        "london_morning",
+        "london_us_overlap",
+        "us_afternoon"
+      ]
+    },
+    "eur_usd": {
+      "enabled": false
+    },
+    "japan_225": {
+      "enabled": false
+    },
+    "us_oil": {
+      "enabled": false,
+      "reward_multiple": 3.0
+    },
+    "germany_40": {
+      "enabled": false,
+      "reward_multiple": 3.0
+    }
+  }
 }

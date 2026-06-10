@@ -160,6 +160,9 @@ def _atr_from_signal_snapshot(snapshot: dict[str, Any] | None) -> float:
 
 NOT_IN_TOP_3_VOLATILITY_ROTATION = "NOT_IN_TOP_3_VOLATILITY_ROTATION"
 SOFT_BLOCK_NOT_IN_TOP_3 = f"soft block — {NOT_IN_TOP_3_VOLATILITY_ROTATION}"
+OFFLINE_BROKER_FEED_REJECTED = "OFFLINE_BROKER_FEED_REJECTED"
+BLOCKED_SPREAD_TO_ATR_CIRCUIT_BREAKER = "BLOCKED_SPREAD_TO_ATR_CIRCUIT_BREAKER"
+SPREAD_TO_ATR_CIRCUIT_BREAKER_MAX = 0.30
 
 
 @dataclass
@@ -256,6 +259,7 @@ class TradingLoop:
         self._last_ml_prob: float | None = None
         self._last_sig_direction: str = "WAIT"
         self._gate_signal_cache: SignalResult | None = None
+        self._entry_circuit_breaker: str = ""
 
     @property
     def config(self) -> Config:
@@ -269,6 +273,30 @@ class TradingLoop:
     def is_running(self) -> bool:
         with self._lock:
             return self._running
+
+    def set_entry_circuit_breaker(self, reason: str) -> None:
+        """In-memory entry gate isolation — never stops the loop thread."""
+        with self._lock:
+            self._entry_circuit_breaker = str(reason or "").strip()
+
+    def clear_entry_circuit_breaker(self) -> None:
+        with self._lock:
+            self._entry_circuit_breaker = ""
+
+    def entry_circuit_breaker(self) -> str:
+        with self._lock:
+            return self._entry_circuit_breaker
+
+    def _hard_block_all_gates(
+        self, detail: str, *, primary_gate: str
+    ) -> list[GateResult]:
+        blocked = GateResult(name=primary_gate, passed=False, detail=detail)
+        results: list[GateResult] = [blocked]
+        for name in GATE_NAMES:
+            if name == primary_gate:
+                continue
+            results.append(GateResult(name=name, passed=False, detail=detail))
+        return results
 
     def start(self) -> None:
         with self._lock:
@@ -1044,6 +1072,10 @@ class TradingLoop:
             return self._evaluate_gates_core(quote)
 
     def _evaluate_gates_core(self, quote: Quote) -> list[GateResult]:
+        breaker = self.entry_circuit_breaker()
+        if breaker:
+            return self._hard_block_all_gates(breaker, primary_gate="broker_feed")
+
         rotation = self._gate_active_rotation()
         if not rotation.passed:
             blocked = GateResult(
@@ -1077,6 +1109,9 @@ class TradingLoop:
             )
         )
         if not shield_passed:
+            from system.gate_activity import record_liquidity_shield_block
+
+            record_liquidity_shield_block(epic=self._epic)
             log_engine(
                 f"LIQUIDITY_SHIELD_BLOCKED | epic={self._epic} spread={current_spread:.2f} "
                 f"ratio={rr_ratio_delta:.2f}x (>3.5x baseline)"
@@ -1088,6 +1123,34 @@ class TradingLoop:
                     detail="BLOCKED_MULTI_BROKER_LIQUIDITY_SHIELD",
                 )
             ]
+
+        current_atr = 0.0
+        if self._env is not None and hasattr(self._env, "get_factors"):
+            try:
+                current_atr = float(self._env.get_factors().get("atr") or 0.0)
+            except (TypeError, ValueError, AttributeError):
+                current_atr = 0.0
+        if current_atr <= 0.0:
+            try:
+                sig = self._get_gate_signal()
+                current_atr = _atr_from_signal_snapshot(sig.snapshot or {})
+            except Exception:
+                current_atr = 0.0
+        if current_atr > 0.0 and current_spread > 0.0:
+            spread_to_atr_ratio = current_spread / current_atr
+            if spread_to_atr_ratio > SPREAD_TO_ATR_CIRCUIT_BREAKER_MAX:
+                log_engine(
+                    f"CIRCUIT_BREAKER_ACTIVE | epic={self._epic} "
+                    f"spread/atr={spread_to_atr_ratio:.2f} "
+                    f"(>{SPREAD_TO_ATR_CIRCUIT_BREAKER_MAX:.2f}) - Locking entry gates."
+                )
+                return [
+                    GateResult(
+                        name="risk_validation",
+                        passed=False,
+                        detail=BLOCKED_SPREAD_TO_ATR_CIRCUIT_BREAKER,
+                    )
+                ]
 
         results: list[GateResult] = []
         for name in GATE_NAMES:
@@ -1156,6 +1219,13 @@ class TradingLoop:
         return results
 
     def _gate_active_rotation(self) -> GateResult:
+        if not self._config.get("enforce_top3_rotation_filter", True):
+            return GateResult(
+                name="active_rotation",
+                passed=True,
+                value={"bypass": True},
+                detail="rotation filter bypassed (config)",
+            )
         from runtime.market_orchestrator import MarketOrchestrator
 
         active = MarketOrchestrator.get_global_active_epics()
@@ -1351,6 +1421,13 @@ class TradingLoop:
             return {}
 
     def _gate_environment_fitness(self, quote: Quote) -> GateResult:
+        if not self._config.get("enforce_environment_fitness_filter", True):
+            return GateResult(
+                name="environment_fitness",
+                passed=True,
+                value={"bypass": True, "display": "bypass"},
+                detail="environment fitness filter bypassed (config)",
+            )
         try:
             quote_df = self._signal_engine.quote_df(self._market)
             score = float(self._env.score(self._market, quote=quote, quote_df=quote_df))
@@ -1362,14 +1439,18 @@ class TradingLoop:
             score = float(SAFE_DEFAULT_SCORE)
         score_int = int(round(score))
         fitness_min = GATE_PASS_MIN
-        try:
-            from system.gate_relaxation import effective_fitness_min
+        custom_min = self._config.get("environment_fitness_min_pct")
+        if custom_min is not None:
+            fitness_min = float(custom_min)
+        else:
+            try:
+                from system.gate_relaxation import effective_fitness_min
 
-            fitness_min = effective_fitness_min(
-                self._epic, points_state=self._points.get_state()
-            )
-        except Exception:
-            fitness_min = GATE_PASS_MIN
+                fitness_min = effective_fitness_min(
+                    self._epic, points_state=self._points.get_state()
+                )
+            except Exception:
+                fitness_min = GATE_PASS_MIN
         passed = score >= fitness_min
         sent = {}
         if hasattr(self._env, "get_sentiment_factor"):
@@ -2386,6 +2467,8 @@ class TradingLoop:
 
         if hub_maint or session_maint:
             market_state = "MAINTENANCE"
+        elif self.entry_circuit_breaker() == OFFLINE_BROKER_FEED_REJECTED:
+            market_state = "OFFLINE"
         elif not session_open:
             market_state = "CLOSED"
         elif spread <= 0:

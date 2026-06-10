@@ -187,7 +187,7 @@ def _make_orchestrator(**overrides) -> OrchestratorLoop:
         gate_passes=True,
     )
     env.get_factors.return_value = {
-        "atr": 15.0,
+        "atr": 100.0,
         "trend": 12.5,
         "session": 10.0,
         "spread": 12.5,

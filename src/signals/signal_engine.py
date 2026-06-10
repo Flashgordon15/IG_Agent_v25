@@ -532,7 +532,11 @@ class SignalEngine:
             side_score = buy if candidate == "BUY" else sell
             delta, learn_note = self.learning_adjustment(setup)
             adjusted = max(0, min(99, side_score + delta))
-            if candidate == "SELL" and (trend60 is None or not h1_bearish):
+            if (
+                cfg.get("enforce_1h_ema_filter", True)
+                and candidate == "SELL"
+                and (trend60 is None or not h1_bearish)
+            ):
                 h1_note = (
                     "1h EMA not bearish (fast >= slow)"
                     if trend60 is not None
@@ -601,7 +605,11 @@ class SignalEngine:
         }
         self.last_snapshot[market] = snapshot
 
-        if signal == "SELL" and (trend60 is None or not h1_bearish):
+        if (
+            cfg.get("enforce_1h_ema_filter", True)
+            and signal == "SELL"
+            and (trend60 is None or not h1_bearish)
+        ):
             signal = "WAIT"
             h1_note = (
                 "1h EMA not bearish (fast >= slow)"
