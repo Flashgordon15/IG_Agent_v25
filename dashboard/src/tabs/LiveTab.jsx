@@ -186,6 +186,19 @@ function formatGateValue(gate) {
     return parts.length ? parts.join(" · ") : "—";
   }
 
+  if (name === "points_state" && value && typeof value === "object") {
+    const pts = value.state ?? "—";
+    const loss = value.effective_loss_gbp;
+    const soft = value.soft_pause_gbp;
+    const hard = value.hard_limit_gbp;
+    const parts = [String(pts)];
+    if (loss != null) parts.push(`loss £${Number(loss).toFixed(0)}`);
+    if (soft != null && hard != null) {
+      parts.push(`soft £${soft} / hard £${hard}`);
+    }
+    return parts.join(" · ");
+  }
+
   if (name === "signal_confidence") {
     const conf = value.confidence;
     const threshold = value.threshold;
@@ -225,7 +238,18 @@ function formatGateValueCompact(gate) {
     }
     return value === true ? "open" : "closed";
   }
-  if (name === "points_state") return String(value ?? "—");
+  if (name === "points_state") {
+    if (value && typeof value === "object") {
+      const pts = value.state ?? value;
+      const loss = value.effective_loss_gbp;
+      const tier = value.tier;
+      if (loss != null && tier && tier !== "ok") {
+        return `${pts} · £${Number(loss).toFixed(0)} (${tier})`;
+      }
+      return String(pts ?? "—");
+    }
+    return String(value ?? "—");
+  }
   if (name === "cold_start_gap" && value && typeof value === "object") {
     return `${value.bars ?? 0} bars`;
   }

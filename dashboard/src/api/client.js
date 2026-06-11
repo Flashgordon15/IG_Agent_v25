@@ -45,6 +45,8 @@ export const api = {
   runE2eCheck: () => fetchJson("/api/system/e2e", { method: "POST" }),
   sentinelDiagnostics: (limit = 60) =>
     fetchJson(`/api/v27/sentinel/diagnostics?limit=${limit}`),
+  roadmapProgress: (days = 7) =>
+    fetchJson(`/api/roadmap/progress?days=${days}`),
   approveStrategyProposal: (proposalId) =>
     fetchJson("/api/v27/sentinel/approve", {
       method: "POST",

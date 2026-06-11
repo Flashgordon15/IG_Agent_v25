@@ -313,6 +313,49 @@ def check_gate_coherence() -> PreFlightResult:
         )
 
 
+def check_ohlc_cache_warm() -> PreFlightResult:
+    """Enabled instruments should have >=100 bars in local OHLC cache."""
+    try:
+        from system.config_loader import get_config
+        from trading.instrument_registry import InstrumentRegistry
+        from trading.ohlc_bootstrap import (
+            MIN_CACHE_BARS_FOR_BOOTSTRAP,
+            local_cache_bar_count,
+        )
+
+        cfg = get_config()
+        registry = InstrumentRegistry(cfg.as_dict())
+        gaps: list[str] = []
+        for iid, inst in registry.get_enabled_with_ids():
+            epic = str(inst.get("epic") or "").strip()
+            if not epic:
+                continue
+            market = str(inst.get("name") or iid)
+            bars = local_cache_bar_count(epic, market)
+            if bars < MIN_CACHE_BARS_FOR_BOOTSTRAP:
+                gaps.append(f"{iid}({bars}/{MIN_CACHE_BARS_FOR_BOOTSTRAP})")
+        if gaps:
+            return PreFlightResult(
+                "7.3",
+                "OHLC local cache warm (≥100 bars per enabled market)",
+                False,
+                reason="cold: " + ", ".join(gaps),
+            )
+        return PreFlightResult(
+            "7.3",
+            "OHLC local cache warm (≥100 bars per enabled market)",
+            True,
+            reason=f"{len(registry.get_enabled_with_ids())} markets ok",
+        )
+    except Exception as e:
+        return PreFlightResult(
+            "7.3",
+            "OHLC local cache warm (≥100 bars per enabled market)",
+            False,
+            reason=f"{type(e).__name__}: {e}",
+        )
+
+
 def run_all_pre_flight_checks(
     *,
     require_live_agent: bool = False,
@@ -322,6 +365,7 @@ def run_all_pre_flight_checks(
         check_gate_coherence(),
         check_anti_mock_session_summaries(),
         check_session_summary_integrity(),
+        check_ohlc_cache_warm(),
     ]
     if require_live_agent:
         results.extend(

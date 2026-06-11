@@ -1,8 +1,27 @@
 /** £1,000/Day Roadmap telemetry helpers — graceful fallbacks for dashboard UI. */
 
-export const APP_VERSION_LABEL = "v29.0";
+export const APP_VERSION_LABEL = "v29.1";
 
 const MEDALS = ["🥇", "🥈", "🥉"];
+
+export function resolveGateRelaxations(state) {
+  const block = state?.gate_relaxations;
+  return block && typeof block === "object" ? block : null;
+}
+
+export function resolveEffectivePolicy(state) {
+  const block = state?.effective_policy;
+  return block && typeof block === "object" ? block : null;
+}
+
+export function isRotationFilterBypassed(state) {
+  const relax = resolveGateRelaxations(state);
+  if (relax?.disable_rotation_filter === true) return true;
+  if (relax?.demo_soak_mode === true && relax?.disable_rotation_filter !== false) {
+    return true;
+  }
+  return false;
+}
 
 export function resolveActiveEpics(state) {
   const fromOrch = state?.orchestrator?.active_epics;
@@ -29,7 +48,8 @@ export function medalForRank(rank) {
   return MEDALS[rank];
 }
 
-export function isEpicRotationMuted(activeEpics, epic) {
+export function isEpicRotationMuted(activeEpics, epic, state = null) {
+  if (isRotationFilterBypassed(state)) return false;
   if (!Array.isArray(activeEpics) || activeEpics.length === 0 || !epic) return false;
   return activeEpics.indexOf(epic) === -1;
 }

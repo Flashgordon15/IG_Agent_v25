@@ -176,8 +176,24 @@ class ExecutionEngine:
         )
         return result
 
+    def _dynamic_sizing_allowed(self) -> bool:
+        """Profile B integrity — gate-sourced economics must not be re-tiered."""
+        try:
+            from system.learning_demo_policy import learning_demo_integrity_enabled
+
+            if learning_demo_integrity_enabled():
+                return False
+        except Exception:
+            pass
+        block = self.config.get("learning_demo_mode") or {}
+        if isinstance(block, dict) and block.get("disable_dynamic_sizing"):
+            return False
+        return True
+
     def _confidence_adjusted_size(self, base_size: float, confidence: float) -> float:
         """Scale position size by ML confidence tier from dynamic_sizing config."""
+        if not self._dynamic_sizing_allowed():
+            return base_size
         dyn = self.config.get("dynamic_sizing", {})
         if not dyn.get("enabled", False):
             return base_size
@@ -290,6 +306,37 @@ class ExecutionEngine:
         )
         return settings
 
+    def _gate_integrity_after_mutations(
+        self, execution_params: dict[str, Any]
+    ) -> str | None:
+        """Profile B — block submit if post-gate size/stop drift exceeds gate approval."""
+        if not execution_params.get("gate_sourced"):
+            return None
+        try:
+            from execution.economic_check import integrity_gate_sourced_required
+
+            if not integrity_gate_sourced_required():
+                return None
+        except Exception:
+            return None
+        approved_size = execution_params.get("gate_approved_size")
+        approved_stop = execution_params.get("gate_approved_stop")
+        if approved_size is None or approved_stop is None:
+            return None
+        size = float(execution_params.get("size") or 0)
+        stop = float(execution_params.get("risk") or 0)
+        if size > float(approved_size) + 1e-9:
+            return (
+                f"INTEGRITY_ABORT: size {size} > gate-approved "
+                f"{float(approved_size)}"
+            )
+        if abs(stop - float(approved_stop)) > 1e-9:
+            return (
+                f"INTEGRITY_ABORT: stop {stop} != gate-approved "
+                f"{float(approved_stop)}"
+            )
+        return None
+
     def _resolve_execution_params(
         self,
         signal: TradeSignal,
@@ -312,6 +359,27 @@ class ExecutionEngine:
             if limit_pts <= 0:
                 limit_pts = stop_pts * float(self.config.reward_multiple)
             size = apply_operational_size_floor(float(gate["actual_size"]), signal.epic)
+            from execution.economic_check import check_risk_cap
+
+            cap_ok, risk_gbp, cap_gbp = check_risk_cap(
+                size=size,
+                stop_pts=stop_pts,
+                cfg=self.config,
+                confidence=float(signal.adjusted_confidence),
+                risk_band_label=str(gate.get("risk_band") or ""),
+            )
+            if not cap_ok:
+                return {
+                    "size": size,
+                    "risk": stop_pts,
+                    "limit": limit_pts,
+                    "gate_sourced": False,
+                    "integrity_abort": True,
+                    "notes": (
+                        f"FLOOR_EXCEEDS_CAP: £{risk_gbp:.2f} > £{cap_gbp:.0f} "
+                        "after operational floor"
+                    ),
+                }
             adaptive = self._adaptive.settings(
                 signal.setup_key, signal.adjusted_confidence, signal.snapshot
             )
@@ -326,7 +394,24 @@ class ExecutionEngine:
                 "risk": stop_pts,
                 "limit": limit_pts,
                 "gate_sourced": True,
+                "gate_approved_size": size,
+                "gate_approved_stop": stop_pts,
+                "risk_gbp_at_submit": round(risk_gbp, 2),
+                "risk_cap_gbp": cap_gbp,
+                "sizing_confidence": float(signal.adjusted_confidence),
                 "notes": notes,
+            }
+
+        from execution.economic_check import integrity_gate_sourced_required
+
+        if integrity_gate_sourced_required():
+            return {
+                "size": 0.0,
+                "risk": 0.0,
+                "limit": 0.0,
+                "gate_sourced": False,
+                "integrity_abort": True,
+                "notes": "INTEGRITY_ABORT: missing gate_execution_params",
             }
 
         settings = self.get_execution_settings(signal)
@@ -385,6 +470,19 @@ class ExecutionEngine:
             )
 
         execution_params = self._resolve_execution_params(signal)
+        if execution_params.get("integrity_abort"):
+            reason = str(
+                execution_params.get("notes") or "INTEGRITY_ABORT: gate economics"
+            )
+            bus = get_lifecycle_bus()
+            bus.emit(STAGE_RISK, STATUS_FAIL, reason)
+            bus.finalize_rejected(reason, stage=STAGE_RISK)
+            return ExecutionResult(
+                success=False,
+                action="REJECTED",
+                rejection_reason=reason,
+                execution_params=execution_params,
+            )
         trace_execution(
             "RISK",
             "RiskManager.assess",
@@ -447,12 +545,52 @@ class ExecutionEngine:
 
         from execution.size_floors import apply_operational_size_floor
 
+        floored_size = apply_operational_size_floor(risk.size, signal.epic)
         execution_params = {
             **execution_params,
-            "size": apply_operational_size_floor(risk.size, signal.epic),
+            "size": floored_size,
             "risk": risk.stop_distance,
             "limit": risk.limit_distance,
         }
+        from execution.economic_check import check_risk_cap
+
+        cap_ok, risk_gbp, cap_gbp = check_risk_cap(
+            size=floored_size,
+            stop_pts=risk.stop_distance,
+            cfg=self.config,
+            confidence=float(
+                execution_params.get("sizing_confidence") or signal.adjusted_confidence
+            ),
+            risk_band_label=str(execution_params.get("risk_band") or ""),
+        )
+        if not cap_ok:
+            reason = (
+                f"FLOOR_EXCEEDS_CAP: £{risk_gbp:.2f} > £{cap_gbp:.0f} "
+                "after RiskManager floor"
+            )
+            bus = get_lifecycle_bus()
+            bus.emit(STAGE_RISK, STATUS_FAIL, reason)
+            bus.finalize_rejected(reason, stage=STAGE_RISK)
+            return ExecutionResult(
+                success=False,
+                action="REJECTED",
+                rejection_reason=reason,
+                execution_params=execution_params,
+            )
+        execution_params["risk_gbp_at_submit"] = round(risk_gbp, 2)
+        execution_params["risk_cap_gbp"] = cap_gbp
+
+        integrity_reason = self._gate_integrity_after_mutations(execution_params)
+        if integrity_reason:
+            bus = get_lifecycle_bus()
+            bus.emit(STAGE_RISK, STATUS_FAIL, integrity_reason)
+            bus.finalize_rejected(integrity_reason, stage=STAGE_RISK)
+            return ExecutionResult(
+                success=False,
+                action="REJECTED",
+                rejection_reason=integrity_reason,
+                execution_params=execution_params,
+            )
 
         if self.mode.uses_broker():
             from execution.margin_preflight import apply_margin_preflight
@@ -473,6 +611,17 @@ class ExecutionEngine:
             execution_params = apply_margin_preflight(
                 self.config, execution_params, account_available
             )
+            integrity_reason = self._gate_integrity_after_mutations(execution_params)
+            if integrity_reason:
+                bus = get_lifecycle_bus()
+                bus.emit(STAGE_RISK, STATUS_FAIL, integrity_reason)
+                bus.finalize_rejected(integrity_reason, stage=STAGE_RISK)
+                return ExecutionResult(
+                    success=False,
+                    action="REJECTED",
+                    rejection_reason=integrity_reason,
+                    execution_params=execution_params,
+                )
             if execution_params.pop("_margin_skip", False):
                 reason = "Insufficient margin for minimum size"
                 bus = get_lifecycle_bus()

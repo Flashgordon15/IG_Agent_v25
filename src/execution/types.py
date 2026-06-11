@@ -70,6 +70,9 @@ def normalize_gate_execution_params(
     }
     if risk_gbp is not None:
         out["risk_gbp"] = risk_gbp
+    for optional in ("risk_band", "risk_cap_gbp", "sizing_confidence"):
+        if raw.get(optional) is not None:
+            out[optional] = raw.get(optional)
     return out
 
 

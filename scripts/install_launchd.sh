@@ -2,6 +2,8 @@
 # Install IG Agent v29 launchd jobs.
 #
 # Scheduled ops (always installed & bootstrapped):
+#   - v29 daily digest 07:30 daily (operator briefing markdown)
+#   - v29 roadmap morning 07:05 daily (snapshot + optional Telegram delta)
 #   - v29 nightly 22:30 daily (Finnhub calendar + feature store)
 #   - v29 synthetic replay 23:30 UTC (ML filter calibration via synthetic_replay.py)
 #   - gate coherence 4×/day
@@ -38,6 +40,8 @@ PROFIT_PLIST="com.igagent.v25.profitability.plist"
 V29_WEEKLY_PLIST="com.igagent.v29weekly.plist"
 GATE_COHERENCE_PLIST="com.igagent.v25.gatecoherence.plist"
 V29_NIGHTLY_PLIST="com.igagent.v29nightly.plist"
+V29_ROADMAP_PLIST="com.igagent.v29roadmap.plist"
+V29_DIGEST_PLIST="com.igagent.v29digest.plist"
 V29_REPLAY_PLIST="com.igagent.v29replay.plist"
 LEGACY_V26_WEEKLY_PLIST="com.igagent.v25.v26weekly.plist"
 LEGACY_V26_NIGHTLY_PLIST="com.igagent.v25.v26nightly.plist"
@@ -153,6 +157,8 @@ install_plist "${PROFIT_PLIST}"
 install_plist "${V29_WEEKLY_PLIST}"
 install_plist "${GATE_COHERENCE_PLIST}"
 install_plist "${V29_NIGHTLY_PLIST}"
+install_plist "${V29_ROADMAP_PLIST}"
+install_plist "${V29_DIGEST_PLIST}"
 install_plist "${V29_REPLAY_PLIST}"
 
 echo "Unloading legacy v26 scheduled job labels (if present)..."
@@ -163,6 +169,8 @@ echo "Loading scheduled ops jobs..."
 launchctl_bootstrap_job "${V29_WEEKLY_PLIST}"
 launchctl_bootstrap_job "${GATE_COHERENCE_PLIST}"
 launchctl_bootstrap_job "${V29_NIGHTLY_PLIST}"
+launchctl_bootstrap_job "${V29_ROADMAP_PLIST}"
+launchctl_bootstrap_job "${V29_DIGEST_PLIST}"
 launchctl_bootstrap_job "${V29_REPLAY_PLIST}"
 
 if [ "${WEEKLY_ONLY}" -eq 0 ]; then
@@ -202,6 +210,8 @@ echo ""
 echo "Installed plists to ${LAUNCH_AGENTS}"
 echo "v29 weekly: Sunday 08:30 → scripts/v26_weekly_pack.py (log: src/data/logs/v29_weekly.log)"
 echo "gate coherence: 00:30/06:30/12:30/18:30 → scripts/run_gate_coherence_check.py (log: src/data/logs/gate_coherence.log)"
+echo "v29 daily digest: 07:30 → scripts/daily_operator_digest.py (log: src/data/logs/v29_daily_digest.log)"
+echo "v29 roadmap morning: 07:05 → scripts/roadmap_morning_report.py (snapshot; log: src/data/logs/v29_roadmap_morning.log)"
 echo "v29 nightly: 22:30 → scripts/v26_nightly.py (Finnhub calendar + feature store; log: src/data/logs/v29_nightly.log)"
 echo "v29 replay: 23:30 UTC → src/system/synthetic_replay.py (ML filter calibration; log: src/data/logs/synthetic_replay_launchd.log)"
 echo "Logs: ${ROOT}/src/data/logs/launchd_stdout.log"

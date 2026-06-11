@@ -185,12 +185,11 @@ def _configured_epics() -> list[str]:
     if epics:
         return epics
     try:
-        from system.config_loader import get_config_loader
+        from system.config_loader import get_config
+        from trading.instrument_registry import InstrumentRegistry
 
-        cfg = get_config_loader().load()
-        for _iid, inst in (cfg.instruments or {}).items():
-            if not inst.get("enabled", True):
-                continue
+        cfg = get_config()
+        for _iid, inst in InstrumentRegistry(cfg.as_dict()).get_enabled_with_ids():
             epic = str(inst.get("epic") or "").strip()
             if epic:
                 epics.append(epic)
@@ -209,6 +208,13 @@ def _quotes_fresh_by_epic(
 
 def _epic_quote_exempt(epic: str) -> bool:
     """True when stale quotes for this epic are expected (closed or maintenance)."""
+    try:
+        from trading.ohlc_readiness import epic_quote_health_exempt
+
+        if epic_quote_health_exempt(epic):
+            return True
+    except Exception:
+        pass
     try:
         from system.market_watch.calendar import is_market_open
         from system.market_watch.japan225_session import (
@@ -251,9 +257,10 @@ def evaluate_trading_health(
     fresh_count = sum(1 for ok in quote_fresh.values() if ok)
     stale_epics = [e for e in epics if not quote_fresh.get(e, False)]
     exempt_stale = [e for e in stale_epics if _epic_quote_exempt(e)]
+    actionable_stale = [e for e in stale_epics if e not in exempt_stale]
     markets_open = _markets_open_count(epics)
-    quotes_required = markets_open > 0 and len(exempt_stale) < len(stale_epics)
-    quotes_fresh = bool(epics) and (not stale_epics or not quotes_required)
+    quotes_required = markets_open > 0 and len(actionable_stale) > 0
+    quotes_fresh = bool(epics) and (not actionable_stale or not quotes_required)
 
     issues: list[str] = []
     if not loops_running:
@@ -266,12 +273,10 @@ def evaluate_trading_health(
         issues.append("no_gate_activity_recorded")
     elif gate_age > 120.0:
         issues.append(f"gate_check_stale_{int(gate_age)}s")
-    if quotes_required and stale_epics:
-        actionable = [e for e in stale_epics if e not in exempt_stale]
-        if actionable:
-            issues.append(f"quotes_stale:{','.join(actionable)}")
-        elif stale_epics:
-            issues.append(f"quotes_maintenance:{','.join(stale_epics)}")
+    if quotes_required and actionable_stale:
+        issues.append(f"quotes_stale:{','.join(actionable_stale)}")
+    elif stale_epics and exempt_stale:
+        issues.append(f"quotes_maintenance:{','.join(stale_epics)}")
     if log_age is not None and log_age > 300.0:
         issues.append(f"engine_log_stale_{int(log_age)}s")
 
@@ -326,10 +331,19 @@ def build_health_status() -> dict[str, Any]:
     if env_scorer_fallback and "env_scorer_fallback_active" not in all_issues:
         all_issues.append("env_scorer_fallback_active")
 
+    gate_relaxations: dict[str, Any] = {}
+    try:
+        from system.gate_relaxation import relaxation_snapshot
+
+        gate_relaxations = relaxation_snapshot()
+    except Exception:
+        pass
+
     return {
         "ok": trading_healthy and watchdog and supervision_drift.get("ok", True),
         "agent_alive": True,
         "trading_healthy": trading_healthy,
+        "gate_relaxations": gate_relaxations,
         "trading_loops_running": loops_running,
         "trading_paused": paused,
         "port_bound": _port_bound(),
@@ -403,6 +417,7 @@ def _build_fast_health_status() -> dict[str, Any]:
         "independent_of_cursor": False,
         "overnight_armed": False,
         "env_scorer_fallback_active": _env_scorer_fallback_active(),
+        "gate_relaxations": {},
     }
 
 
@@ -425,6 +440,7 @@ def get_runtime_tick_fields() -> dict[str, Any]:
         "independent_of_cursor": fast.get("independent_of_cursor"),
         "overnight_armed": fast.get("overnight_armed"),
         "env_scorer_fallback_active": fast.get("env_scorer_fallback_active"),
+        "gate_relaxations": fast.get("gate_relaxations") or {},
     }
 
 
@@ -442,6 +458,7 @@ def _update_runtime_tick_fields(status: dict[str, Any]) -> None:
         "independent_of_cursor": status.get("independent_of_cursor"),
         "overnight_armed": status.get("overnight_armed"),
         "env_scorer_fallback_active": status.get("env_scorer_fallback_active"),
+        "gate_relaxations": status.get("gate_relaxations") or {},
     }
     with _RUNTIME_TICK_LOCK:
         global _RUNTIME_TICK_FIELDS

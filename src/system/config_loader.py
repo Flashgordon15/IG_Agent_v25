@@ -136,6 +136,12 @@ def get_config(*, reload: bool = False) -> Config:
         if _config is None or reload or _config_file_changed():
             _config = ConfigLoader().load_config()
             _update_config_mtime()
+            try:
+                from system.policy_cache import invalidate_policy_caches
+
+                invalidate_policy_caches()
+            except Exception:
+                pass
         return _config
 
 
@@ -161,6 +167,12 @@ def apply_runtime_overrides(**kwargs: Any) -> Config:
         if errors:
             raise ValueError("Runtime config validation failed: " + "; ".join(errors))
         _config = Config(_data=data)
+        try:
+            from system.policy_cache import invalidate_policy_caches
+
+            invalidate_policy_caches()
+        except Exception:
+            pass
         return _config
 
 

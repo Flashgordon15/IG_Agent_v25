@@ -134,7 +134,9 @@ def rehydrate_portfolio_from_store(
 
     daily_pnl = 0.0
     try:
-        daily_pnl = float(store.sum_daily_pnl(today))
+        from system.daily_loss_policy import effective_daily_pnl
+
+        daily_pnl = float(effective_daily_pnl(store, day=today))
     except Exception:
         pass
 

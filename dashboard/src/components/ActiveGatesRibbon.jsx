@@ -1,7 +1,9 @@
 import {
   APP_VERSION_LABEL,
   epicShortLabel,
+  isRotationFilterBypassed,
   resolveActiveEpics,
+  resolveGateRelaxations,
 } from "../utils/roadmapTelemetry.js";
 
 const RANK_BADGE_STYLES = [
@@ -13,14 +15,17 @@ const RANK_BADGE_STYLES = [
 const RANK_MEDALS = ["🥇", "🥈", "🥉"];
 
 export default function ActiveGatesRibbon({ state }) {
+  const relax = resolveGateRelaxations(state);
+  const soakActive = relax?.demo_soak_mode === true;
+  const rotationBypass = isRotationFilterBypassed(state);
   const activeEpics = resolveActiveEpics(state);
   const labels = state?.instrument_labels || {};
 
-  if (!activeEpics.length) {
+  if (!activeEpics.length && !rotationBypass) {
     return (
       <div className="border-b border-border/80 bg-card/40 px-3 py-2 text-[10px] text-muted sm:px-4 sm:text-[11px]">
         <span className="font-semibold uppercase tracking-wide text-muted/80">
-          Active Gates:
+          Top rotation:
         </span>{" "}
         <span className="inline-flex items-center gap-1 rounded-full border border-border bg-card/60 px-2.5 py-1 text-muted">
           INITIALIZING…
@@ -30,17 +35,56 @@ export default function ActiveGatesRibbon({ state }) {
     );
   }
 
+  if (rotationBypass) {
+    const fitnessMin = relax?.fitness_min;
+    const spreadMax = relax?.spread_to_atr_circuit_max;
+    const detailParts = [];
+    if (soakActive) detailParts.push("demo soak");
+    if (fitnessMin != null) detailParts.push(`fitness ≥${fitnessMin}%`);
+    if (spreadMax != null) detailParts.push(`spread/ATR ≤${spreadMax}`);
+    const detail = detailParts.length ? detailParts.join(" · ") : "rotation bypass active";
+
+    return (
+      <div className="border-b border-amber-500/30 bg-amber-500/10 px-3 py-2 sm:px-4">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5 text-[10px] sm:text-[11px]">
+          <span className="shrink-0 font-semibold uppercase tracking-wide text-amber-100/90">
+            Demo soak:
+          </span>
+          <span className="inline-flex shrink-0 items-center rounded-full border border-amber-400/50 bg-amber-500/20 px-3 py-1 text-[11px] font-bold uppercase tracking-wide text-amber-50">
+            All markets eligible — rotation bypassed
+          </span>
+          <span className="text-[10px] text-amber-100/80">{detail}</span>
+          {activeEpics.length > 0 && (
+            <span className="text-[9px] text-amber-100/60">
+              Ranked (info):{" "}
+              {activeEpics.slice(0, 3).map((epic, idx) => (
+                <span key={epic}>
+                  {idx > 0 ? ", " : ""}
+                  {RANK_MEDALS[idx] ?? ""}
+                  {epicShortLabel(epic, labels)}
+                </span>
+              ))}
+            </span>
+          )}
+          <span className="ml-auto text-[9px] font-medium uppercase tracking-wider text-amber-100/60">
+            {APP_VERSION_LABEL}
+          </span>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="border-b border-border/80 bg-card/40 px-3 py-2 sm:px-4">
       <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5 text-[10px] sm:text-[11px]">
         <span className="shrink-0 font-semibold uppercase tracking-wide text-muted/80">
-          Active Gates:
+          Top rotation:
         </span>
         {activeEpics.slice(0, 3).map((epic, idx) => (
           <span
             key={epic}
             role="status"
-            aria-label={`Active gate rank ${idx + 1}: ${epicShortLabel(epic, labels)}`}
+            aria-label={`Rotation rank ${idx + 1}: ${epicShortLabel(epic, labels)}`}
             className={[
               "inline-flex shrink-0 select-none items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] font-bold uppercase tracking-wide",
               RANK_BADGE_STYLES[idx] ?? RANK_BADGE_STYLES[2],

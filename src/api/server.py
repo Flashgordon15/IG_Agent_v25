@@ -299,7 +299,7 @@ class _StreamHub:
                 except asyncio.QueueEmpty:
                     pass
                 try:
-                    q.put_nowait(tick)
+                    q.put_nowait(enriched)
                 except asyncio.QueueFull:
                     pass
 

@@ -44,7 +44,7 @@ DEFAULT_SEED_EPICS = (
     "CS.D.EURUSD.CFD.IP",
     "CS.D.CFPGOLD.CFP.IP",
     "CS.D.GBPUSD.CFD.IP",
-    "CS.D.CRUDE.CFD.IP",
+    "IX.D.NIKKEI.IFM.IP",
     "IX.D.DOW.IFM.IP",
     "IX.D.NASDAQ.IFM.IP",
 )
@@ -242,13 +242,36 @@ def fetch_yahoo_ohlc_for_epic(
 
 
 def seed_default_instruments() -> dict[str, int]:
-    """Seed EUR/USD and Gold (default CLI targets)."""
+    """Seed default CLI targets (six active CFD markets)."""
     results: dict[str, int] = {}
     for epic in DEFAULT_SEED_EPICS:
         market = EPIC_YAHOO_MAP[epic][1]
         count = fetch_yahoo_ohlc_for_epic(epic, market=market)
         results[epic] = count
         print(f"OK {market}: {count} bars → {ohlc_cache_path(epic, market=market)}")
+    return results
+
+
+def seed_enabled_instruments() -> dict[str, int]:
+    """Seed Yahoo OHLC caches for all enabled instruments with a known epic mapping."""
+    from system.config_loader import get_config
+    from trading.instrument_registry import InstrumentRegistry
+
+    cfg = get_config()
+    registry = InstrumentRegistry(cfg.as_dict())
+    results: dict[str, int] = {}
+    for iid, inst in registry.get_enabled_with_ids():
+        epic = str(inst.get("epic") or "").strip()
+        if not epic:
+            print(f"SKIP {iid}: no epic", file=sys.stderr)
+            continue
+        if epic not in EPIC_YAHOO_MAP:
+            print(f"SKIP {iid}: no Yahoo mapping for {epic}", file=sys.stderr)
+            continue
+        market = EPIC_YAHOO_MAP[epic][1]
+        count = fetch_yahoo_ohlc_for_epic(epic, market=market)
+        results[epic] = count
+        print(f"OK {iid}: {count} bars → {ohlc_cache_path(epic, market=market)}")
     return results
 
 

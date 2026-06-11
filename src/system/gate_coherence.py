@@ -416,10 +416,12 @@ def audit_trading_readiness(
                 (today,),
             ):
                 daily += risk_gbp_from_row(row, cfg=cfg)
+            from system.daily_loss_policy import effective_daily_pnl
+
             rehydrate(
                 concurrent_risk_gbp=0.0,
                 daily_deployed_gbp=daily,
-                daily_pnl_gbp=float(store.sum_daily_pnl(today)),
+                daily_pnl_gbp=float(effective_daily_pnl(store, day=today)),
             )
             snap = snapshot()
             dep = float(snap.get("daily_deployed_gbp") or 0)

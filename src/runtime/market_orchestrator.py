@@ -343,6 +343,23 @@ class MarketOrchestrator:
         relative_spread_cost = self._relative_spread_cost(epic, loop)
         return trend_cleanliness / relative_spread_cost
 
+    def _strategy_session_eligible(self, epic: str) -> bool:
+        """True when epic's instrument whitelist includes the current strategy session."""
+        try:
+            from signals.indicators import session_name
+            from trading.instrument_registry import InstrumentRegistry
+
+            wl = InstrumentRegistry(self._config.as_dict()).session_whitelist_for_epic(
+                epic
+            )
+            if not wl:
+                wl = list(getattr(self._config, "trading_session_whitelist", []) or [])
+            if not wl:
+                return True
+            return session_name() in wl
+        except Exception:
+            return True
+
     def refresh_active_epics(self) -> list[str]:
         """Layer 3 Hot Market Selector — rank_score = trend_cleanliness / relative_spread_cost.
 
@@ -361,6 +378,8 @@ class MarketOrchestrator:
             if epic in feed_offline:
                 continue
             if not self._loop_providing_live_data(epic, loop):
+                continue
+            if not self._strategy_session_eligible(epic):
                 continue
             try:
                 rank_score = self._rotation_rank_score(epic, loop)
@@ -638,6 +657,12 @@ class MarketOrchestrator:
             "active_epics": self.get_active_epics(),
             "feed_offline_epics": self.get_feed_offline_epics(),
         }
+        try:
+            from system.gate_relaxation import relaxation_snapshot
+
+            merged["gate_relaxations"] = relaxation_snapshot()
+        except Exception:
+            pass
         try:
             publish_tick(merged)
         except Exception as e:

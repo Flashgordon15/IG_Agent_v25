@@ -416,48 +416,96 @@ class TradingLoop:
         if can_execute:
             cfg = self.execution_engine.config
             gate_exec = trade_signal.gate_execution_params
-            exec_size = float(
-                (gate_exec or {}).get("actual_size")
-                or self.execution_engine.config.trade_size
+            from execution.economic_check import integrity_gate_sourced_required
+
+            gate_norm = normalize_gate_execution_params(gate_exec)
+            gate_sourced = gate_norm is not None and bool(
+                (gate_norm or {}).get("gate_sourced")
             )
-            log_engine(
-                f"EXEC SUBMIT market={market} epic={epic} "
-                f"dir={sig.signal} conf={sig.adjusted_confidence:.1f}% "
-                f"size={exec_size} gate_sourced={bool(gate_exec)} "
-                f"allow_live_trading={cfg.allow_live_trading} "
-                f"dry_run={cfg.dry_run}"
-            )
-            trace_execution(
-                "EXECUTION",
-                "ExecutionEngine.execute_trade",
-                decision="calling execute_trade",
-                next_fn="ExecutionEngine.execute_trade",
-                params={"direction": sig.signal, "epic": epic},
-            )
-            update_demo_diagnostics(execute_trade_called=True)
-            log_trade_audit(
-                "execution_request",
-                market=market,
-                epic=epic,
-                signal=sig.signal,
-                signal_time=quote.time.isoformat(),
-            )
-            execution = self.execution_engine.execute_trade(
-                trade_signal, prevalidated=True
-            )
-            trace_execution(
-                "EXECUTION",
-                "ExecutionEngine.execute_trade",
-                decision=f"result success={execution.success} action={execution.action}",
-                next_fn="LiveExecutor.execute" if execution.success else "rejected",
-                params={
-                    "rejection": execution.rejection_reason,
-                    "deal_reference": execution.deal_reference,
-                },
-            )
-            if execution.action == "SUBMITTED":
+            if integrity_gate_sourced_required() and not gate_sourced:
+                block_reason = (
+                    "INTEGRITY_ABORT: gate_execution_params missing or invalid "
+                    "(Profile B requires gate-sourced sizing)"
+                )
+                log_engine(f"EXEC BLOCKED market={market} epic={epic} — {block_reason}")
+                can_execute = False
+            if can_execute:
+                exec_size = float(
+                    (gate_norm or {}).get("actual_size")
+                    or self.execution_engine.config.trade_size
+                )
+                stop_pts = float((gate_norm or {}).get("stop_points") or 0)
+                try:
+                    from system.learning_demo_policy import effective_policy_snapshot
+                    from trading.strictness_resolver import resolve_strictness
+
+                    policy = effective_policy_snapshot(
+                        getattr(self.execution_engine, "store", None)
+                    )
+                    strict = resolve_strictness(
+                        cfg, signal_engine=self.signal_engine, market=market
+                    )
+                    strictness_profile = strict.profile
+                except Exception:
+                    policy = {}
+                    strictness_profile = "unknown"
+                risk_gbp_gate = float((gate_norm or {}).get("risk_gbp") or 0)
+                log_engine(
+                    f"SUBMIT_TRUTH epic={epic} market={market} "
+                    f"dir={sig.signal} conf={sig.adjusted_confidence:.1f}% "
+                    f"gate_sourced={gate_sourced} size={exec_size} stop={stop_pts:.1f} "
+                    f"risk_gbp_gate={risk_gbp_gate:.2f} "
+                    f"cap={float((gate_norm or {}).get('risk_cap_gbp') or cfg.get('risk_cap_gbp') or 150):.0f} "
+                    f"band={str((gate_norm or {}).get('risk_band') or '')} "
+                    f"policy_id={policy.get('policy_id', '')} "
+                    f"profile={policy.get('profile', '')} "
+                    f"strictness={strictness_profile}"
+                )
+                log_engine(
+                    f"EXEC SUBMIT market={market} epic={epic} "
+                    f"dir={sig.signal} conf={sig.adjusted_confidence:.1f}% "
+                    f"size={exec_size} gate_sourced={gate_sourced} "
+                    f"allow_live_trading={cfg.allow_live_trading} "
+                    f"dry_run={cfg.dry_run}"
+                )
+            if can_execute:
+                trace_execution(
+                    "EXECUTION",
+                    "ExecutionEngine.execute_trade",
+                    decision="calling execute_trade",
+                    next_fn="ExecutionEngine.execute_trade",
+                    params={"direction": sig.signal, "epic": epic},
+                )
+                update_demo_diagnostics(execute_trade_called=True)
+                log_trade_audit(
+                    "execution_request",
+                    market=market,
+                    epic=epic,
+                    signal=sig.signal,
+                    signal_time=quote.time.isoformat(),
+                )
+                execution = self.execution_engine.execute_trade(
+                    trade_signal, prevalidated=True
+                )
+            else:
+                execution = None
+                block_reason = block_reason or (
+                    "INTEGRITY_ABORT: gate_execution_params missing or invalid"
+                )
+            if execution is not None:
+                trace_execution(
+                    "EXECUTION",
+                    "ExecutionEngine.execute_trade",
+                    decision=f"result success={execution.success} action={execution.action}",
+                    next_fn="LiveExecutor.execute" if execution.success else "rejected",
+                    params={
+                        "rejection": execution.rejection_reason,
+                        "deal_reference": execution.deal_reference,
+                    },
+                )
+            if execution is not None and execution.action == "SUBMITTED":
                 log_engine("Order submitted — background worker handling confirm")
-            elif not execution.success:
+            elif execution is not None and not execution.success:
                 update_demo_diagnostics(
                     last_rejection=execution.rejection_reason or execution.action
                 )
@@ -482,7 +530,7 @@ class TradingLoop:
                     signal=sig.signal,
                     reason=execution.rejection_reason or execution.action,
                 )
-            elif execution.action != "SUBMITTED":
+            elif execution is not None and execution.action != "SUBMITTED":
                 ref = execution.deal_reference or execution.deal_id or ""
                 if ref and ref not in self.session_executions:
                     self.session_executions.append(ref)

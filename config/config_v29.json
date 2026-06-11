@@ -1,9 +1,9 @@
 {
   "$schema": "./config_schema.json",
   "$extends": "config_v25.json",
-  "version": "29.0.0",
-  "app_version": "v29.0",
-  "_note": "v29.0 primary configuration tier \u2014 merges over config_v25.json at load time (Stage 1 workspace unification)",
+  "version": "29.1.0",
+  "app_version": "v29.1",
+  "_note": "v29.1 — Profile B integrity + daily loss baseline reset + £400 soft pause / £500 hard stop",
   "reward_multiple": 3.0,
   "adaptive_high_confidence_reward_multiple": 3.0,
   "adaptive_max_limit_atr_multiple": 4.0,
@@ -24,6 +24,35 @@
   "_deprecated_config_removals": {
     "environment_fitness_min_pct": "Unused — fitness floor comes from velocity strictness_resolver",
     "trading_strictness_profile": "Unused — strictness morphs from live ATR velocity per instrument"
+  },
+  "learning_demo_mode": {
+    "enabled": true,
+    "profile": "B",
+    "policy_id": "learning_demo_v1",
+    "require_gate_sourced_submit": true,
+    "suppress_v26_gate_relaxations": true,
+    "disable_dynamic_sizing": true,
+    "daily_loss_soft_pause_gbp": 400,
+    "daily_loss_reset": {
+      "enabled": true,
+      "upgrade_version": "v29.1",
+      "reset_on_upgrade": true,
+      "refresh_on_startup": true,
+      "_note": "On each agent start, archive today's raw P&L as baseline so effective daily loss is £0 and entries can fire. SQLite audit rows preserved."
+    },
+    "_note": "Profile B Learning Demo — labelled throughput relaxations via demo_soak_mode; integrity fixes require gate-sourced submit."
+  },
+  "demo_soak_mode": {
+    "enabled": true,
+    "_note": "Profile B entry permissiveness — fitness/rotation/ML bypass for learning throughput. Not sizing authority.",
+    "fitness_min": 50,
+    "warning_confidence_cap": 85,
+    "warning_use_instrument_threshold": true,
+    "relax_all_epics": true,
+    "disable_rotation_filter": true,
+    "bypass_ml_veto": true,
+    "spread_to_atr_circuit_max": 0.4,
+    "require_points_healthy": false
   },
   "instruments": {
     "gold": {
@@ -66,18 +95,33 @@
       ]
     },
     "eur_usd": {
-      "enabled": false
+      "enabled": true,
+      "reward_multiple": 3.0,
+      "trading_session_whitelist": [
+        "london_morning",
+        "london_us_overlap",
+        "us_afternoon"
+      ]
     },
     "japan_225": {
-      "enabled": false
+      "enabled": true,
+      "reward_multiple": 3.0,
+      "trading_session_whitelist": [
+        "asia_early"
+      ]
     },
     "us_oil": {
       "enabled": false,
-      "reward_multiple": 3.0
+      "_note": "Disabled 2026-06-11: no OHLC cache + no Lightstreamer ticks — blocked trading_healthy and watchdog restarts. Re-enable after seed_ohlc.",
+      "reward_multiple": 3.0,
+      "trading_session_whitelist": [
+        "london_us_overlap",
+        "us_afternoon"
+      ]
     },
     "germany_40": {
       "enabled": false,
-      "reward_multiple": 3.0
+      "_note": "Keep off until IG account streams IX.D.DAX.IFM.IP — DEMO often rejects this epic"
     }
   }
 }

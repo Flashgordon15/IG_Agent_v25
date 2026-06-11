@@ -94,9 +94,9 @@ trading_healthy() {
 
 wait_for_dashboard() {
   local mode="$1"
-  # Startup can take up to 3 minutes: Yahoo OHLC seeding + 22s REST stagger per market
-  # + self-test suite. Poll every 0.5s for up to 360s (720 attempts).
-  for _ in $(seq 1 720); do
+  # Startup can take up to ~12 minutes: OHLC bootstrap (22s stagger × 7 markets)
+  # + REST rate limits before :8080 binds and trading_healthy clears.
+  for _ in $(seq 1 1440); do
     if dashboard_healthy; then
       if trading_healthy; then
         open_dashboard
@@ -109,13 +109,13 @@ wait_for_dashboard() {
   done
   if dashboard_healthy; then
     open_dashboard
-    log "WARN: dashboard up but trading_healthy not confirmed within 360s (${mode})"
+    log "WARN: dashboard up but trading_healthy not confirmed within 720s (${mode})"
     notify_failure "Agent started but trading is not healthy. Check dashboard and engine.log."
     exit 0
   fi
-  log "WARN: dashboard did not become healthy within 360s (${mode})"
+  log "WARN: dashboard did not become healthy within 720s (${mode})"
   if [ -f "${ROOT}/src/data/logs/engine.log" ]; then
-    notify_failure "Agent did not reach healthy state in 6 minutes. Check src/data/logs/engine.log and watchdog.log — launchd may still be booting."
+    notify_failure "Agent did not reach healthy state in 12 minutes. Check src/data/logs/engine.log and watchdog.log — OHLC bootstrap may still be running."
   else
     notify_failure "IG Agent did not start. Check src/data/logs/launcher.log"
   fi

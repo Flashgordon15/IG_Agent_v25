@@ -124,7 +124,26 @@ def _fallback_thresholds_for_state(state: str | None) -> dict[str, int]:
     st = (state or "CAUTION").upper()
     if st == "WARNING":
         floor = int(CONF_HIGH)
-        min_size = int(CONF_HIGH)
+        try:
+            from system.gate_relaxation import (
+                demo_soak_enabled,
+                effective_trade_confidence_threshold,
+            )
+
+            if demo_soak_enabled():
+                floor = int(
+                    round(
+                        effective_trade_confidence_threshold(
+                            float(CONF_HIGH),
+                            points_state="WARNING",
+                            instrument_threshold=float(CONF_MARGINAL_MIN),
+                            epic="",
+                        )
+                    )
+                )
+        except Exception:
+            pass
+        min_size = floor
     elif st == "CAUTION":
         floor = int(CONF_MARGINAL_MIN)
         min_size = 88

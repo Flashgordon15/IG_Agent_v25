@@ -242,6 +242,20 @@ def build_market_orchestrator(
     _startup_mark("database")
 
     try:
+        from system.v291_upgrade import apply_v291_upgrade
+
+        upgrade = apply_v291_upgrade(store, cfg=cfg, points_engine=points_engine)
+        if upgrade.get("applied") or upgrade.get("refreshed"):
+            log_engine(
+                f"daily_loss_reset: effective_loss_gbp="
+                f"{upgrade.get('effective_loss_gbp')} baseline_pnl="
+                f"{upgrade.get('baseline_pnl')} "
+                f"first_install={upgrade.get('first_install')}"
+            )
+    except Exception as e:
+        log_engine(f"v29.1 upgrade skipped: {type(e).__name__}: {e}")
+
+    try:
         from execution.portfolio_hooks import rehydrate_risk_guards_from_store
 
         rehydrate_risk_guards_from_store(store, cfg=cfg)

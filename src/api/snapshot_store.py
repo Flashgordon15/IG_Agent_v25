@@ -415,6 +415,25 @@ def _tick_for_readers(tick: dict[str, Any]) -> dict[str, Any]:
             if _cached_uptime is not None:
                 out["uptime"] = _cached_uptime
 
+    if not out.get("gate_relaxations"):
+        try:
+            from system.gate_relaxation import relaxation_snapshot
+
+            out["gate_relaxations"] = relaxation_snapshot()
+        except Exception:
+            pass
+
+    if not out.get("effective_policy"):
+        try:
+            from data.learning_store import LearningStore
+            from system.config_loader import get_config
+            from system.learning_demo_policy import effective_policy_snapshot
+
+            store = LearningStore(str(get_config().learning_db))
+            out["effective_policy"] = effective_policy_snapshot(store)
+        except Exception:
+            pass
+
     # Position sync status from diagnostics snapshot
     if not out.get("position_sync_status"):
         global _cached_position_sync_status

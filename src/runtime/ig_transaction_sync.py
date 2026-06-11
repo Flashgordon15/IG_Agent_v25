@@ -376,6 +376,22 @@ class IgTransactionSync:
                 f"IG transaction sync: {len(txns)} raw txns, 0 deal closes in window"
             )
 
+        try:
+            from system.daily_loss_policy import (
+                effective_daily_loss_gbp,
+                effective_daily_pnl,
+            )
+
+            eff_pnl = effective_daily_pnl(self._store)
+            eff_loss = effective_daily_loss_gbp(self._store)
+            log_engine(
+                f"RECONCILE_TRUTH updated={updated} ig_rows={len(rows)} "
+                f"effective_daily_pnl={eff_pnl:+.2f} "
+                f"effective_loss_gbp={eff_loss:.2f}"
+            )
+        except Exception:
+            pass
+
         if (updated or rows) and self._on_changed:
             self._on_changed()
         return len(rows)

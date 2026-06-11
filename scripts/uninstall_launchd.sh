@@ -10,6 +10,8 @@ WATCHDOG_PLIST="com.igagent.v25.watchdog.plist"
 PROFIT_PLIST="com.igagent.v25.profitability.plist"
 GATE_COHERENCE_PLIST="com.igagent.v25.gatecoherence.plist"
 V29_NIGHTLY_PLIST="com.igagent.v29nightly.plist"
+V29_ROADMAP_PLIST="com.igagent.v29roadmap.plist"
+V29_DIGEST_PLIST="com.igagent.v29digest.plist"
 V29_WEEKLY_PLIST="com.igagent.v29weekly.plist"
 LEGACY_V26_NIGHTLY_PLIST="com.igagent.v25.v26nightly.plist"
 LEGACY_V26_WEEKLY_PLIST="com.igagent.v25.v26weekly.plist"
@@ -21,6 +23,8 @@ for job in \
   "${PROFIT_PLIST%.plist}" \
   "${GATE_COHERENCE_PLIST%.plist}" \
   "${V29_NIGHTLY_PLIST%.plist}" \
+  "${V29_ROADMAP_PLIST%.plist}" \
+  "${V29_DIGEST_PLIST%.plist}" \
   "${V29_WEEKLY_PLIST%.plist}" \
   "${LEGACY_V26_NIGHTLY_PLIST%.plist}" \
   "${LEGACY_V26_WEEKLY_PLIST%.plist}"
@@ -35,6 +39,8 @@ rm -f \
   "${LAUNCH_AGENTS}/${PROFIT_PLIST}" \
   "${LAUNCH_AGENTS}/${GATE_COHERENCE_PLIST}" \
   "${LAUNCH_AGENTS}/${V29_NIGHTLY_PLIST}" \
+  "${LAUNCH_AGENTS}/${V29_ROADMAP_PLIST}" \
+  "${LAUNCH_AGENTS}/${V29_DIGEST_PLIST}" \
   "${LAUNCH_AGENTS}/${V29_WEEKLY_PLIST}" \
   "${LAUNCH_AGENTS}/${LEGACY_V26_NIGHTLY_PLIST}" \
   "${LAUNCH_AGENTS}/${LEGACY_V26_WEEKLY_PLIST}"

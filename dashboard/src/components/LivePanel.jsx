@@ -6,6 +6,7 @@ import {
   isEpicRotationMuted,
   medalForRank,
   resolveActiveEpics,
+  resolveGateRelaxations,
 } from "../utils/roadmapTelemetry.js";
 import SentinelDiagnosticConsole from "./SentinelDiagnosticConsole.jsx";
 
@@ -60,11 +61,29 @@ function fmtLogLine(entry) {
   try { return JSON.stringify(entry); } catch { return "—"; }
 }
 
-const GATE_ORDER = ["session_open","cold_start_gap","environment_fitness","points_state","risk_validation","signal_confidence","execution"];
+const GATE_ORDER = [
+  "session_open",
+  "cold_start_gap",
+  "environment_fitness",
+  "points_state",
+  "correlation_ok",
+  "risk_validation",
+  "expectancy_ok",
+  "calendar_ok",
+  "signal_confidence",
+  "ml_veto",
+  "execution",
+];
 
 function orderGates(gates) {
   const byName = Object.fromEntries((gates || []).map((g) => [g.name, g]));
-  return GATE_ORDER.map((name) => byName[name] || { name, pass: false, detail: "—", value: null });
+  const ordered = GATE_ORDER.map(
+    (name) => byName[name] || { name, pass: false, detail: "—", value: null },
+  );
+  for (const g of gates || []) {
+    if (g?.name && !GATE_ORDER.includes(g.name)) ordered.push(g);
+  }
+  return ordered;
 }
 
 function shortenBlockReason(reason) {
@@ -114,12 +133,23 @@ function resolveAgentState(state) {
   return state?.agent_state ?? state?.points?.state ?? "—";
 }
 
-function agentStateMeta(stateName) {
+function agentStateMeta(stateName, state) {
   const s = String(stateName ?? "").toUpperCase();
+  const relax = resolveGateRelaxations(state);
+  const warningCap =
+    state?.signal?.threshold ??
+    relax?.warning_confidence_cap ??
+    92;
   switch (s) {
     case "HEALTHY": return { label: "HEALTHY", banner: "border-success/40 bg-success/10 text-success", description: "Full size bands available per confidence." };
     case "CAUTION":  return { label: "CAUTION",  banner: "border-warning/40 bg-warning/10 text-warning", description: "Reduced size bands — need cumulative above +10 pts for HEALTHY." };
-    case "WARNING":  return { label: "WARNING",  banner: "border-warning/40 bg-warning/10 text-warning", description: "Minimal size only at ≥92% confidence." };
+    case "WARNING":  return {
+      label: "WARNING",
+      banner: "border-warning/40 bg-warning/10 text-warning",
+      description: relax?.demo_soak_mode
+        ? `Minimal size only at ≥${warningCap}% confidence (demo soak — instrument floor may apply).`
+        : `Minimal size only at ≥${warningCap}% confidence.`,
+    };
     case "DANGER":   return { label: "DANGER",   banner: "border-danger/40 bg-danger/10 text-danger",    description: "Elevated risk — trading heavily restricted." };
     case "STOP":     return { label: "STOP",     banner: "border-danger/40 bg-danger/10 text-danger animate-pulse", description: "Trading halted — manual review required." };
     default:         return { label: s || "—",   banner: "border-border bg-card text-muted",             description: "Agent state unknown — awaiting data." };
@@ -566,7 +596,7 @@ function MarketGrid({ rawState, selectedEpic, onSelectEpic }) {
         const active = epic === selectedEpic;
         const status = marketStatusMeta(m.market_state, m.stream_status);
         const rotationRank = activeEpicRank(activeEpics, epic);
-        const rotationMuted = isEpicRotationMuted(activeEpics, epic);
+        const rotationMuted = isEpicRotationMuted(activeEpics, epic, rawState);
         const sessionGateVal = (m.health?.gates || []).find((g) => g.name === "session_open")?.value;
         const nextOpenIso = typeof sessionGateVal === "object" ? sessionGateVal?.next_open : null;
         const nextOpenTime = fmtNextOpen(nextOpenIso);
@@ -720,7 +750,7 @@ export default function LivePanel({ state, rawState, selectedEpic, onSelectEpic,
   const health    = state?.health || {};
   const signal    = state?.signal && typeof state.signal === "object" ? state.signal : {};
   const agentState = resolveAgentState(state);
-  const agent     = agentStateMeta(agentState);
+  const agent     = agentStateMeta(agentState, rawState ?? state);
   const positions = resolvePositions(state);
   const gateReason    = resolveGateBlockedReason(state);
   const gateBlockedAt = resolveGateBlockedAt(state);
@@ -907,7 +937,9 @@ export default function LivePanel({ state, rawState, selectedEpic, onSelectEpic,
               </li>
             ))}
           </ul>
-          <p className="mt-2 text-[10px] text-muted">Gate needs ≥{signal.fitness_threshold ?? 40}%.</p>
+          <p className="mt-2 text-[10px] text-muted">
+            Gate needs ≥{signal.fitness_threshold ?? signal.fitness_factors?.gate_min ?? 55}%.
+          </p>
         </Card>
       )}
 

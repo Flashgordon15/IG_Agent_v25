@@ -1,6 +1,10 @@
 import { useRef, useState } from "react";
 import { postEmergencyStop } from "../api.js";
 import resolveSupervisionAlert from "../utils/supervision.js";
+import {
+  resolveEffectivePolicy,
+  resolveGateRelaxations,
+} from "../utils/roadmapTelemetry.js";
 
 async function postJson(url) {
   const r = await fetch(url, { method: "POST" });
@@ -173,6 +177,8 @@ export default function SystemPanel({ state, wsConnected, reconnecting }) {
   const [agentResult, setAgentResult] = useState("");
   const [flattenLoading, setFlattenLoading] = useState(false);
   const [flattenResult, setFlattenResult] = useState("");
+  const [reconcileLoading, setReconcileLoading] = useState(false);
+  const [reconcileResult, setReconcileResult] = useState("");
 
   const openAgentModal = (type) => {
     setAgentModal(type);
@@ -254,9 +260,68 @@ export default function SystemPanel({ state, wsConnected, reconnecting }) {
   const uptime = stableUptime;
   const supervisionAlert = resolveSupervisionAlert(state);
   const overnight = state?.overnight_supervision || {};
+  const gateRelax = resolveGateRelaxations(state);
+  const effectivePolicy = resolveEffectivePolicy(state);
+  const dailyLoss = effectivePolicy?.daily_loss;
+
+  const handleReconcile = async () => {
+    setReconcileLoading(true);
+    setReconcileResult("");
+    const r = await postJson("/api/trades/reconcile");
+    setReconcileLoading(false);
+    setReconcileResult(
+      r.ok ? "Reconcile scheduled — check RECONCILE_TRUTH in engine.log" : "Reconcile failed",
+    );
+  };
 
   return (
     <div className="mx-auto max-w-5xl space-y-3 px-1 pb-4">
+      {effectivePolicy?.learning_demo_enabled && (
+        <div
+          className="rounded-lg border border-sky-500/35 bg-sky-500/10 px-3 py-2.5 text-[11px] leading-snug text-sky-100 sm:text-xs"
+          role="status"
+        >
+          <p className="font-semibold uppercase tracking-wide">
+            Operating policy — Profile {effectivePolicy.profile ?? "B"} ({effectivePolicy.policy_id ?? "—"})
+          </p>
+          <p className="mt-1 text-sky-100/90">
+            Gate-sourced submit:{" "}
+            {effectivePolicy.integrity?.require_gate_sourced_submit ? "required" : "off"}
+            {" · "}v26 relaxations:{" "}
+            {effectivePolicy.integrity?.suppress_v26_gate_relaxations ? "suppressed" : "active"}
+            {" · "}dynamic sizing:{" "}
+            {effectivePolicy.integrity?.disable_dynamic_sizing ? "disabled" : "on"}
+            {dailyLoss != null && (
+              <>
+                {" · "}effective loss £{dailyLoss.effective_loss_gbp ?? 0}
+                {" / "}soft £{dailyLoss.soft_pause_gbp ?? 400}
+                {" / "}hard £{dailyLoss.hard_limit_gbp ?? 500}
+              </>
+            )}
+            {dailyLoss?.reset?.version && (
+              <>
+                {" · "}reset {dailyLoss.reset.version} @ {dailyLoss.reset.reset_at ?? "—"}
+              </>
+            )}
+          </p>
+        </div>
+      )}
+      {gateRelax?.demo_soak_mode && (
+        <div
+          className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2.5 text-[11px] leading-snug text-amber-100 sm:text-xs"
+          role="status"
+        >
+          <p className="font-semibold uppercase tracking-wide">Demo soak mode active</p>
+          <p className="mt-1 text-amber-100/90">
+            Rotation bypassed · fitness floor {gateRelax.fitness_min ?? 50}% · WARNING cap{" "}
+            {gateRelax.warning_confidence_cap ?? 85}%
+            {gateRelax.spread_to_atr_circuit_max != null
+              ? ` · spread/ATR max ${gateRelax.spread_to_atr_circuit_max}`
+              : ""}
+            . Set <span className="font-mono">demo_soak_mode.enabled: false</span> in config_v29 before live.
+          </p>
+        </div>
+      )}
       {supervisionAlert && (
         <div
           className={[
@@ -329,6 +394,20 @@ export default function SystemPanel({ state, wsConnected, reconnecting }) {
                 {stablePositionSync}
               </span>
             </StatusRow>
+
+            <div className="pt-1">
+              <button
+                type="button"
+                onClick={handleReconcile}
+                disabled={reconcileLoading}
+                className="w-full rounded border border-border bg-background px-2 py-1.5 text-[11px] font-medium text-foreground hover:bg-card disabled:opacity-50"
+              >
+                {reconcileLoading ? "Reconciling…" : "Reconcile IG trades"}
+              </button>
+              {reconcileResult && (
+                <p className="mt-1 text-[10px] text-muted">{reconcileResult}</p>
+              )}
+            </div>
           </dl>
         </Card>
 
@@ -427,10 +506,18 @@ export default function SystemPanel({ state, wsConnected, reconnecting }) {
             </span>
           </StatusRow>
           <StatusRow label="Today P&L">
-            <span className={`tabular-nums font-medium ${(state?.today_pnl ?? state?.daily_pnl_gbp ?? 0) >= 0 ? "text-success" : "text-danger"}`}>
-              {(state?.today_pnl ?? state?.daily_pnl_gbp) != null
-                ? `${Number(state.today_pnl ?? state.daily_pnl_gbp) >= 0 ? "+" : ""}£${Math.abs(Number(state.today_pnl ?? state.daily_pnl_gbp)).toFixed(2)}`
-                : "—"}
+            <span className={`tabular-nums font-medium ${(state?.daily_pnl_gbp ?? state?.today_pnl ?? 0) >= 0 ? "text-success" : "text-danger"}`}>
+              {(() => {
+                const pnl =
+                  state?.daily_pnl_gbp ??
+                  state?.today_pnl ??
+                  (dailyLoss?.effective_loss_gbp != null
+                    ? -Number(dailyLoss.effective_loss_gbp)
+                    : null);
+                if (pnl == null) return "—";
+                const n = Number(pnl);
+                return `${n >= 0 ? "+" : ""}£${Math.abs(n).toFixed(2)}`;
+              })()}
             </span>
           </StatusRow>
           <StatusRow label="Points (cumul.)">
@@ -440,7 +527,16 @@ export default function SystemPanel({ state, wsConnected, reconnecting }) {
             </span>
           </StatusRow>
           <StatusRow label="Last Gate">
-            <span className="tabular-nums text-muted">{state?.last_gate_eval_ago ?? state?.gate_eval_ago ?? "—"}</span>
+            <span className="tabular-nums text-muted">
+              {(() => {
+                const sec = state?.last_gate_check_age_sec;
+                if (sec != null && Number.isFinite(Number(sec))) {
+                  const n = Math.round(Number(sec));
+                  return n < 60 ? `${n}s ago` : `${Math.round(n / 60)}m ago`;
+                }
+                return state?.last_gate_eval_ago ?? state?.gate_eval_ago ?? "—";
+              })()}
+            </span>
           </StatusRow>
           <StatusRow label="Win rate (last 20)">
             <span className="tabular-nums">{state?.win_rate_20 != null ? `${Math.round(state.win_rate_20)}%` : "—"}</span>

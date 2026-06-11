@@ -88,11 +88,11 @@ def _persist_session_end_journal(bot: Any, *, epic: str, closed: int, reason: st
         return
     daily_pnl = 0.0
     store = getattr(bot, "store", None)
-    if store is not None and hasattr(store, "sum_daily_pnl"):
-        from system.pnl_calculator import _today_str
-
+    if store is not None:
         try:
-            daily_pnl = float(store.sum_daily_pnl(_today_str()))
+            from system.daily_loss_policy import effective_daily_pnl
+
+            daily_pnl = float(effective_daily_pnl(store))
         except Exception:
             daily_pnl = 0.0
     try:

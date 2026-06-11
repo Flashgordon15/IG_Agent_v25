@@ -61,10 +61,22 @@ def _maybe_roll_utc_day() -> None:
     global _daily_deployed_gbp, _daily_pnl_gbp, _envelope_utc_day
     today = date.today().isoformat()
     with _lock:
-        if _envelope_utc_day and _envelope_utc_day != today:
+        rolled = bool(_envelope_utc_day and _envelope_utc_day != today)
+        if rolled:
             _daily_deployed_gbp = 0.0
             _daily_pnl_gbp = 0.0
         _envelope_utc_day = today
+    if rolled:
+        try:
+            from data.learning_store import LearningStore
+            from system.config_loader import get_config
+            from system.daily_loss_policy import effective_daily_pnl
+
+            store = LearningStore(str(get_config().learning_db))
+            with _lock:
+                _daily_pnl_gbp = float(effective_daily_pnl(store, day=today))
+        except Exception:
+            pass
 
 
 def rehydrate(
@@ -111,8 +123,21 @@ def can_allocate(risk_gbp: float) -> tuple[bool, str]:
         daily_dep = _daily_deployed_gbp
         daily_pnl = _daily_pnl_gbp
 
-    if daily_pnl <= -max_loss:
-        return False, f"daily loss limit £{max_loss:.0f} reached"
+    from system.daily_loss_policy import (
+        hard_daily_loss_limit_gbp,
+        soft_pause_threshold_gbp,
+    )
+
+    loss_gbp = max(0.0, -daily_pnl)
+    hard = hard_daily_loss_limit_gbp()
+    soft = soft_pause_threshold_gbp()
+    if loss_gbp >= hard:
+        return False, f"daily loss £{loss_gbp:.2f} >= £{hard:.0f} (hard stop)"
+    if loss_gbp >= soft:
+        return (
+            False,
+            f"soft pause — daily loss £{loss_gbp:.2f} >= £{soft:.0f} (entries blocked)",
+        )
     if concurrent + risk > max_concurrent:
         return (
             False,

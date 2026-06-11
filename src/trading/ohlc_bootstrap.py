@@ -397,7 +397,7 @@ def bootstrap_ohlc_parallel(
             rest_loops.append(loop)
 
     def _bootstrap_one(loop: Any) -> int:
-        return bootstrap_ohlc_for_session(
+        count = bootstrap_ohlc_for_session(
             rest_client,
             loop._signal_engine,
             loop._epic,
@@ -405,6 +405,10 @@ def bootstrap_ohlc_parallel(
             environment_scorer=loop._env,
             prefer_cache=True,
         )
+        from trading.ohlc_readiness import record_bootstrap
+
+        record_bootstrap(loop._epic, loop._market, count)
+        return count
 
     if cached_loops:
         workers = min(max(1, int(max_workers)), len(cached_loops))
@@ -429,3 +433,13 @@ def bootstrap_ohlc_parallel(
             log_engine(
                 f"OHLC REST bootstrap error {loop._epic}: {type(e).__name__}: {e}"
             )
+
+    from trading.ohlc_readiness import finalize_bootstrap_state
+
+    state = finalize_bootstrap_state()
+    not_ready = state.get("not_ready") or []
+    if not_ready:
+        log_engine(
+            "OHLC readiness: not ready (quotes exempt from health) — "
+            + ", ".join(str(e) for e in not_ready)
+        )

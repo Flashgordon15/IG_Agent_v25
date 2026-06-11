@@ -18,6 +18,8 @@ class LakeSummary:
     epics: set[str] = field(default_factory=set)
     signal_evals: int = 0
     would_fire: int = 0
+    trade_ready: int = 0
+    signal_actionable: int = 0
     order_intents: int = 0
     fill_closes: int = 0
     fill_pnl_gbp: float = 0.0
@@ -88,8 +90,11 @@ def summarize_day(day: str | None = None) -> LakeSummary:
         payload = row.get("payload") or {}
         if et == "signal_eval":
             summary.signal_evals += 1
-            if payload.get("would_fire"):
+            if payload.get("trade_ready") or payload.get("would_fire"):
                 summary.would_fire += 1
+                summary.trade_ready += 1
+            if payload.get("signal_actionable"):
+                summary.signal_actionable += 1
         elif et == "order_intent":
             summary.order_intents += 1
         elif et == "fill_close":

@@ -124,6 +124,8 @@ def emit_signal_eval(
     reason: str = "",
     snapshot: dict[str, Any] | None = None,
     gates_passed: list[str] | None = None,
+    signal_actionable: bool | None = None,
+    blocking_gate: str = "",
     ml_probability: float | None = None,
     threshold_pass: dict[str, bool] | None = None,
     risk_band: str = "",
@@ -135,8 +137,13 @@ def emit_signal_eval(
         "adjusted_score": adjusted_score,
         "setup_key": setup_key,
         "would_fire": would_fire,
+        "trade_ready": would_fire,
         "reason": reason,
     }
+    if signal_actionable is not None:
+        payload["signal_actionable"] = bool(signal_actionable)
+    if blocking_gate:
+        payload["blocking_gate"] = blocking_gate
     if gates_passed is not None:
         payload["gates_passed"] = gates_passed
     if ml_probability is not None:

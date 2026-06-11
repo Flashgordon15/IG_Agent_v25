@@ -1,1 +1,1 @@
-{"version":1,"saved_at":1781119015.8360431,"entry":{"entries":[]},"exit":{"exits":[]},"pending":{"orders":[{"epic":"CS.D.GBPUSD.CFD.IP","side":"SELL","order_type":"entry","local_created_at":1781118720.3990011,"broker_deal_reference":""}]},"daily_risk":{}}
+{"version":1,"saved_at":1781191595.136597,"entry":{"entries":[{"epic":"CS.D.CFPGOLD.CFP.IP","direction":"BUY","size":3.0,"local_created_at":1781191595.1321971,"broker_deal_reference":""}]},"exit":{"exits":[]},"pending":{"orders":[]},"daily_risk":{}}

@@ -21,6 +21,7 @@ import CertPanel from "./components/CertPanel.jsx";
 import SplashScreen from "./components/SplashScreen.jsx";
 import StartupSplash from "./components/StartupSplash.jsx";
 import StrategyHelpModal from "./components/StrategyHelpModal.jsx";
+import RoadmapProgressModal from "./components/RoadmapProgressModal.jsx";
 
 const TABS = [
   { id: "live", label: "LIVE" },
@@ -280,6 +281,7 @@ export default function App() {
   const [agentAlive, setAgentAlive] = useState(true);
   const [agentOfflineChecked, setAgentOfflineChecked] = useState(false);
   const [strategyHelpOpen, setStrategyHelpOpen] = useState(false);
+  const [roadmapOpen, setRoadmapOpen] = useState(false);
   const healthFailRef = useRef(0);
   const prevStateRef = useRef(null);
   const soundRef = useRef(null);
@@ -790,6 +792,7 @@ export default function App() {
     maxPositions: state?.max_open_positions ?? 10,
     onStopAgent: handleStopAgent,
     onOpenStrategyHelp: () => setStrategyHelpOpen(true),
+    onOpenRoadmap: () => setRoadmapOpen(true),
     supervisionDriftOk: state?.supervision_drift_ok,
     watchdogActive: state?.watchdog_active,
     sessionStyle: resolveSessionStyle(state, viewState),
@@ -1035,6 +1038,11 @@ export default function App() {
       <StrategyHelpModal
         open={strategyHelpOpen}
         onClose={() => setStrategyHelpOpen(false)}
+      />
+
+      <RoadmapProgressModal
+        open={roadmapOpen}
+        onClose={() => setRoadmapOpen(false)}
       />
 
       <nav className="sticky top-0 z-10 flex shrink-0 gap-0 overflow-x-auto border-b border-border bg-card px-1 sm:px-2">

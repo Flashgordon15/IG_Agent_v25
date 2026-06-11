@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { fmtPrice } from "../utils/fmtPrice.js";
 import { APP_VERSION_LABEL } from "../utils/roadmapTelemetry.js";
+import { RoadmapProgressButton } from "./RoadmapProgressModal.jsx";
 
 function isNil(v) {
   return v == null || v === "";
@@ -77,14 +78,16 @@ function spreadTextColor(current, normal) {
 }
 
 function resolveStreamStatus(streamStatus, wsConnected, reconnecting, marketState) {
-  if (!wsConnected || reconnecting) return "DISCONNECTED";
   const ms = String(marketState ?? "").toUpperCase();
   // When the market itself is closed or in maintenance, show that state rather
   // than the Lightstreamer stream health — the boxes are the source of truth.
   if (ms === "MAINTENANCE") return "MAINTENANCE";
   if (ms === "CLOSED") return "CLOSED";
   const s = String(streamStatus ?? "").toUpperCase();
-  if (s === "LIVE" || s === "STALE" || s === "DISCONNECTED") return s;
+  // IG stream status comes from polled /api/state — prefer it over dashboard WS.
+  if (s === "LIVE" || s === "STALE") return s;
+  if (!wsConnected || reconnecting) return "DISCONNECTED";
+  if (s === "DISCONNECTED") return s;
   return isNil(streamStatus) ? "DISCONNECTED" : s;
 }
 
@@ -226,6 +229,7 @@ export default function Header({
   maxPositions,
   onStopAgent,
   onOpenStrategyHelp,
+  onOpenRoadmap,
   supervisionDriftOk,
   watchdogActive,
   sessionStyle,
@@ -393,6 +397,7 @@ export default function Header({
             <span className="text-[12px] leading-none" aria-hidden>?</span>
             Strategy help
           </button>
+          <RoadmapProgressButton onClick={() => onOpenRoadmap?.()} />
           <button
             type="button"
             onClick={handleSafeToLeave}

@@ -29,7 +29,6 @@ from trading.environment_scorer import (
     FACTOR_SESSION_MAX,
     FACTOR_SPREAD_MAX,
     FACTOR_TREND_MAX,
-    GATE_PASS_MIN,
     SAFE_DEFAULT_SCORE,
     EnvironmentScorer,
 )
@@ -787,6 +786,9 @@ class TradingLoop:
                     pilot = epic == pilot_settings().get("primary_epic")
                 except Exception:
                     pass
+                trade_ready = all(g.passed for g in gates)
+                signal_actionable = bool(sig_gate.passed)
+                first_block = next((g for g in gates if not g.passed), None)
                 emit_signal_eval(
                     epic=epic,
                     market=market,
@@ -795,7 +797,9 @@ class TradingLoop:
                     raw_score=raw_score,
                     adjusted_score=eval_conf,
                     setup_key=setup_key or str(sig_gate.value.get("setup") or ""),
-                    would_fire=bool(sig_gate.passed),
+                    would_fire=trade_ready,
+                    signal_actionable=signal_actionable,
+                    blocking_gate=str(first_block.name if first_block else ""),
                     reason=reason,
                     gates_passed=gates_passed,
                     ml_probability=ml_f,
@@ -1030,6 +1034,9 @@ class TradingLoop:
                 "limit_points": limit_pts,
                 "stop_source": v.get("stop_source"),
                 "risk_gbp": v.get("risk_gbp"),
+                "risk_band": v.get("risk_band"),
+                "risk_cap_gbp": v.get("risk_cap_gbp"),
+                "sizing_confidence": v.get("sizing_confidence"),
             }
             return normalize_gate_execution_params(raw)
         return None
@@ -1264,12 +1271,29 @@ class TradingLoop:
 
             inst = InstrumentRegistry(self._config.as_dict()).get_by_epic(self._epic)
             if inst and inst.get("spread_to_atr_max") is not None:
-                return float(inst["spread_to_atr_max"])
+                default = float(inst["spread_to_atr_max"])
         except (TypeError, ValueError, ImportError):
             pass
-        return default
+        try:
+            from system.gate_relaxation import soak_spread_to_atr_max
+
+            return soak_spread_to_atr_max(default)
+        except Exception:
+            return default
 
     def _gate_active_rotation(self) -> GateResult:
+        try:
+            from system.gate_relaxation import rotation_filter_bypassed
+
+            if rotation_filter_bypassed():
+                return GateResult(
+                    name="active_rotation",
+                    passed=True,
+                    value={"bypass": True, "demo_soak": True},
+                    detail="rotation filter bypassed (demo soak)",
+                )
+        except Exception:
+            pass
         if not self._config.get("enforce_top3_rotation_filter", True):
             return GateResult(
                 name="active_rotation",
@@ -1459,7 +1483,7 @@ class TradingLoop:
                     "spread": FACTOR_SPREAD_MAX,
                 },
                 "total": round(float(last.total), 1),
-                "gate_min": GATE_PASS_MIN,
+                "gate_min": int(round(self._effective_fitness_gate_min())),
                 "capped_cold_start": bool(last.capped_cold_start),
                 "capped_gap_open": bool(last.capped_gap_open),
                 "session_style": str(
@@ -1471,6 +1495,24 @@ class TradingLoop:
         except Exception:
             return {}
 
+    def _effective_fitness_gate_min(self) -> float:
+        fitness_min = resolve_strictness(
+            self._config, signal_engine=self._signal_engine, market=self._market
+        ).fitness_floor
+        try:
+            from system.gate_relaxation import effective_fitness_min
+
+            fitness_min = min(
+                fitness_min,
+                effective_fitness_min(
+                    self._epic,
+                    points_state=self._points.get_state(),
+                ),
+            )
+        except Exception:
+            pass
+        return float(fitness_min)
+
     def _gate_environment_fitness(self, quote: Quote) -> GateResult:
         if not self._config.get("enforce_environment_fitness_filter", True):
             return GateResult(
@@ -1479,19 +1521,32 @@ class TradingLoop:
                 value={"bypass": True, "display": "bypass"},
                 detail="environment fitness filter bypassed (config)",
             )
+        score_error = ""
         try:
             quote_df = self._signal_engine.quote_df(self._market)
             score = float(self._env.score(self._market, quote=quote, quote_df=quote_df))
         except Exception as e:
+            score_error = f"{type(e).__name__}: {e}"
             log_engine(
                 f"environment_fitness gate: score failed for {self._market}: "
-                f"{type(e).__name__}: {e}"
+                f"{score_error}"
             )
+            try:
+                from system.learning_demo_policy import learning_demo_enabled
+
+                fail_closed = learning_demo_enabled()
+            except Exception:
+                fail_closed = True
+            if fail_closed:
+                return GateResult(
+                    name="environment_fitness",
+                    passed=False,
+                    value={"score": 0, "error": score_error},
+                    detail=f"environment scorer failed — entry blocked ({score_error})",
+                )
             score = float(SAFE_DEFAULT_SCORE)
         score_int = int(round(score))
-        fitness_min = resolve_strictness(
-            self._config, signal_engine=self._signal_engine, market=self._market
-        ).fitness_floor
+        fitness_min = self._effective_fitness_gate_min()
         passed = score >= fitness_min
         sent = {}
         if hasattr(self._env, "get_sentiment_factor"):
@@ -1510,6 +1565,7 @@ class TradingLoop:
             value={
                 "score": score_int,
                 "display": f"{score_int}%",
+                "fitness_min": int(round(fitness_min)),
                 "sentiment": sent,
                 "factors": factors_payload,
             },
@@ -1535,12 +1591,22 @@ class TradingLoop:
             )
 
     def _gate_points_state(self) -> GateResult:
+        from datetime import date
+
+        today = date.today().isoformat()
+        if getattr(self, "_daily_loss_alert_day", "") != today:
+            self._daily_loss_alert_day = today
+            self._daily_loss_alert_sent = False
+            self._daily_soft_pause_alert_sent = False
+
         state = self._points.get_state()
         paused = self._points.is_session_paused()
-        day_stopped = False  # disabled: max_daily_loss_gbp is the hard stop
-        loss_gbp = self._daily_loss_gbp()
-        daily_limit = self._config.max_daily_loss_gbp
-        passed = state != "STOP" and not paused and loss_gbp < daily_limit
+        from system.daily_loss_policy import daily_loss_gate_status
+
+        loss_ok, loss_detail, loss_meta = daily_loss_gate_status(
+            self._store, self._config
+        )
+        passed = state != "STOP" and not paused and loss_ok
         if state == "STOP":
             detail = "points state STOP"
         elif paused:
@@ -1549,9 +1615,10 @@ class TradingLoop:
                 f"session pause — skip {n} actionable signal(s) "
                 f"(BUY/SELL that would have fired)"
             )
-        elif loss_gbp >= daily_limit:
-            detail = f"daily loss £{loss_gbp:.2f} >= £{daily_limit:.0f}"
-            if not getattr(self, "_daily_loss_alert_sent", False):
+        elif not loss_ok:
+            detail = loss_detail
+            tier = str(loss_meta.get("tier") or "")
+            if tier == "hard" and not getattr(self, "_daily_loss_alert_sent", False):
                 self._daily_loss_alert_sent = True
                 try:
                     from system.telegram_notifier import send_critical_alert
@@ -1561,12 +1628,26 @@ class TradingLoop:
                     log_engine(
                         f"telegram daily-loss alert failed: {type(e).__name__}: {e}"
                     )
+            elif tier == "soft" and not getattr(
+                self, "_daily_soft_pause_alert_sent", False
+            ):
+                self._daily_soft_pause_alert_sent = True
+                try:
+                    from system.telegram_notifier import send_critical_alert
+
+                    send_critical_alert(
+                        f"⚠️ Daily soft pause — {loss_detail} (v29.1 entries blocked)"
+                    )
+                except Exception as e:
+                    log_engine(
+                        f"telegram soft-pause alert failed: {type(e).__name__}: {e}"
+                    )
         else:
-            detail = f"points {state}"
+            detail = f"points {state} — {loss_detail}"
         return GateResult(
             name="points_state",
             passed=passed,
-            value=state,
+            value={"state": state, **loss_meta},
             detail=detail,
         )
 
@@ -1808,14 +1889,15 @@ class TradingLoop:
         actual_size = apply_operational_size_floor(actual_size, self._epic)
 
         risk_gbp = stop * actual_size * point_value
-        risk_ok = risk_gbp <= risk_cap
+        effective_risk_cap = float(risk_cap)
         if risk_band_label == "probe":
             try:
                 from system.risk_bands import probe_risk_target_gbp
 
-                risk_ok = risk_gbp <= probe_risk_target_gbp(sizing_conf) * 1.05
+                effective_risk_cap = float(probe_risk_target_gbp(sizing_conf) * 1.05)
             except Exception:
-                risk_ok = risk_gbp <= 80.0
+                effective_risk_cap = 80.0
+        risk_ok = risk_gbp <= effective_risk_cap
 
         portfolio_ok = True
         portfolio_detail = ""
@@ -1846,10 +1928,11 @@ class TradingLoop:
         elif not total_slot_ok:
             detail = f"total open positions {open_total} (max {max_open_total})"
         elif not risk_ok:
+            band_hint = ", probe band" if risk_band_label == "probe" else ""
             detail = (
-                f"risk £{risk_gbp:.2f} > £{risk_cap:.0f} cap "
+                f"risk £{risk_gbp:.2f} > £{effective_risk_cap:.0f} cap "
                 f"(stop {stop:.1f} × size {actual_size:.2g} × £/pt {point_value:.2f}"
-                f"{', IG min' if actual_size > effective_size else ''})"
+                f"{', IG min' if actual_size > effective_size else ''}{band_hint})"
             )
         elif not portfolio_ok:
             detail = f"portfolio envelope: {portfolio_detail}"
@@ -1889,6 +1972,7 @@ class TradingLoop:
                 "points_state": self._points.get_state(),
                 "risk_band": risk_band_label,
                 "sizing_confidence": round(sizing_conf, 1),
+                "size_floor_applied": actual_size > effective_size,
             },
             detail=detail,
         )
@@ -1961,6 +2045,7 @@ class TradingLoop:
                 threshold,
                 points_state=self._points.get_state(),
                 instrument_threshold=float(self._config.signal_threshold),
+                epic=str(getattr(self, "_epic", "") or ""),
             )
         except Exception:
             pass
@@ -2133,6 +2218,18 @@ class TradingLoop:
         )
 
     def _gate_ml_veto(self) -> GateResult:
+        try:
+            from system.gate_relaxation import soak_ml_veto_bypassed
+
+            if soak_ml_veto_bypassed():
+                return GateResult(
+                    name="ml_veto",
+                    passed=True,
+                    value="soak_bypass",
+                    detail="ml_veto bypassed (demo soak)",
+                )
+        except Exception:
+            pass
         from system.v26_config import (
             epic_min_probability,
             epic_ml_veto_enabled,
@@ -2222,10 +2319,9 @@ class TradingLoop:
 
     def _daily_loss_gbp(self) -> float:
         try:
-            if self._store is None:
-                return 0.0
-            pnl = float(self._store.sum_daily_pnl())
-            return max(0.0, -pnl)
+            from system.daily_loss_policy import effective_daily_loss_gbp
+
+            return effective_daily_loss_gbp(self._store)
         except Exception:
             return 0.0
 
@@ -2750,7 +2846,7 @@ class TradingLoop:
                 "points_state": points_state,
                 "block_reason": block_reason or None,
                 "fitness": int(round(ctx.fitness)),
-                "fitness_threshold": int(round(strictness.fitness_floor)),
+                "fitness_threshold": int(round(self._effective_fitness_gate_min())),
                 "fitness_factors": self._fitness_factors_payload(),
                 "atr": round(atr, 1) if atr else 0.0,
                 "atr_threshold": (
@@ -3069,22 +3165,14 @@ class TradingLoop:
             return {}
 
     def _daily_pnl_signed_gbp(self, open_positions: list[Any] | None = None) -> float:
-        journal = 0.0
         if self._store is not None:
             try:
-                journal = float(self._store.sum_daily_pnl())
+                from system.daily_loss_policy import effective_daily_pnl
+
+                return float(effective_daily_pnl(self._store))
             except Exception:
-                journal = 0.0
-        has_open = bool(open_positions)
-        if has_open or journal != 0.0:
-            return journal
-        ig_pl = self._account_summary().get("profit_loss")
-        if ig_pl is not None:
-            try:
-                return float(ig_pl)
-            except (TypeError, ValueError):
                 pass
-        return journal
+        return 0.0
 
     def _positions_payload(self, quote: Quote | None = None) -> list[dict[str, Any]]:
         # Legacy GBP fallback; USD epics use INSTRUMENT_PNL_SPEC + FX in open_position_view.

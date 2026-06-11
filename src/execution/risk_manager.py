@@ -39,11 +39,13 @@ class RiskManager:
         size = float(execution_params.get("size", cfg.trade_size))
         stop = float(execution_params.get("risk", cfg.stop_distance_points))
         limit = float(execution_params.get("limit", stop * cfg.reward_multiple))
+        gate_sourced = bool(execution_params.get("gate_sourced"))
 
-        size = min(size, cfg.adaptive_max_trade_size)
-        size = max(size, cfg.adaptive_min_trade_size)
-        stop = min(stop, cfg.adaptive_max_risk_points)
-        stop = max(stop, cfg.adaptive_min_risk_points)
+        if not gate_sourced:
+            size = min(size, cfg.adaptive_max_trade_size)
+            size = max(size, cfg.adaptive_min_trade_size)
+            stop = min(stop, cfg.adaptive_max_risk_points)
+            stop = max(stop, cfg.adaptive_min_risk_points)
 
         if size <= 0 or stop <= 0:
             return RiskAssessment(
@@ -88,18 +90,17 @@ class RiskManager:
                     ),
                 )
 
-        if self._store is not None and cfg.max_daily_loss > 0:
-            daily_pnl = float(self._store.sum_daily_pnl())
-            if daily_pnl <= -cfg.max_daily_loss:
+        if self._store is not None and cfg.max_daily_loss_gbp > 0:
+            from system.daily_loss_policy import daily_loss_gate_status
+
+            loss_ok, loss_detail, _meta = daily_loss_gate_status(self._store, cfg)
+            if not loss_ok:
                 return RiskAssessment(
                     approved=False,
                     size=size,
                     stop_distance=stop,
                     limit_distance=limit,
-                    reason=(
-                        f"Daily loss limit reached ({daily_pnl:.2f} / "
-                        f"-{cfg.max_daily_loss:.2f})"
-                    ),
+                    reason=loss_detail,
                 )
 
         if self._store is not None and cfg.max_daily_trades > 0:
@@ -131,6 +132,29 @@ class RiskManager:
                         f"exceeds max {max_exposure:.1f}"
                     ),
                 )
+
+        from execution.economic_check import check_risk_cap
+
+        conf = float(execution_params.get("sizing_confidence") or 0)
+        band = str(execution_params.get("risk_band") or "")
+        cap_ok, risk_gbp, cap_gbp = check_risk_cap(
+            size=size,
+            stop_pts=stop,
+            cfg=cfg,
+            confidence=conf,
+            risk_band_label=band,
+        )
+        if not cap_ok:
+            return RiskAssessment(
+                approved=False,
+                size=size,
+                stop_distance=stop,
+                limit_distance=limit,
+                reason=(
+                    f"Risk £{risk_gbp:.2f} exceeds £{cap_gbp:.0f} cap "
+                    f"(sovereign pre-broker check)"
+                ),
+            )
 
         return RiskAssessment(
             approved=True,

@@ -306,7 +306,14 @@ class ExecutionTickPipelineTests(unittest.TestCase):
                 "execution.live_executor.epic_has_pending_open", return_value=False
             ):
                 outcome = tick_loop.process_tick(
-                    "Japan 225", "IX.D.NIKKEI.IFM.IP", _quote()
+                    "Japan 225",
+                    "IX.D.NIKKEI.IFM.IP",
+                    _quote(),
+                    gate_execution_params={
+                        "actual_size": 1.0,
+                        "stop_points": 45.0,
+                        "limit_points": 90.0,
+                    },
                 )
 
         self.assertIsNotNone(outcome.execution)
@@ -495,9 +502,15 @@ class TestRoadmapE2EIntegration(unittest.TestCase):
         mo._ORCHESTRATOR_REF = self._orch_ref_backup
         set_points_state_path_for_tests(None)
 
+    @patch.object(
+        MarketOrchestrator,
+        "_strategy_session_eligible",
+        return_value=True,
+    )
+    @patch("system.gate_relaxation.rotation_filter_bypassed", return_value=False)
     @patch("runtime.market_orchestrator.publish_tick")
     def test_multi_market_hub_ingress_ranks_active_epics_top_three(
-        self, _publish: MagicMock
+        self, _publish: MagicMock, _rotation_bypass: MagicMock, _session: MagicMock
     ) -> None:
         orch = _build_four_market_orchestrator()
         attach_snapshot_handlers(orch)
@@ -540,15 +553,37 @@ class TestRoadmapE2EIntegration(unittest.TestCase):
             ],
         )
 
+    @patch.object(
+        MarketOrchestrator,
+        "_strategy_session_eligible",
+        return_value=True,
+    )
+    @patch("system.gate_relaxation.demo_soak_enabled", return_value=False)
+    @patch(
+        "system.gate_relaxation.rotation_filter_bypassed",
+        return_value=False,
+    )
     @patch(
         "system.market_watch.japan225_session.japan225_strategy_paused",
         return_value=(False, ""),
     )
     def test_choppy_asset_outside_top_three_soft_blocked(
-        self, _j225: MagicMock
+        self,
+        _j225: MagicMock,
+        _rotation_bypass: MagicMock,
+        _soak: MagicMock,
+        _session: MagicMock,
     ) -> None:
         orch = _build_four_market_orchestrator()
         attach_snapshot_handlers(orch)
+        for epic, fitness in (
+            ("IX.D.NASDAQ.CASH.IP", 88.0),
+            ("CS.D.CFPGOLD.CFP.IP", 72.0),
+            ("CS.D.EURUSD.CFD.IP", 61.0),
+            ("IX.D.DAX.IG.IP", 34.0),
+        ):
+            loop = next(lo for lo in orch.loops if lo._epic == epic)
+            loop._env._last.total = fitness
         orch.refresh_active_epics()
 
         loop = _make_orchestrator(

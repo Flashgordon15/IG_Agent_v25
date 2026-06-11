@@ -269,6 +269,32 @@ def _v26_strategy_section(cfg: dict) -> list[str]:
     ]
 
 
+def _roadmap_section() -> list[str]:
+    """Roadmap checklist — prefers 07:05 snapshot if already written today."""
+    try:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from roadmap_morning_report import _find_prev_row, format_markdown_section
+
+        from api.roadmap_progress import build_roadmap_progress
+
+        latest = ROOT / "data_lake" / "state" / "roadmap_progress_latest.json"
+        day_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        payload = None
+        if latest.is_file():
+            try:
+                cached = json.loads(latest.read_text(encoding="utf-8"))
+                if str(cached.get("day") or "") == day_utc:
+                    payload = cached
+            except (OSError, json.JSONDecodeError):
+                payload = None
+        if payload is None:
+            payload = build_roadmap_progress(history_days=14, write_snapshot=False)
+        prev = _find_prev_row(payload)
+        return format_markdown_section(payload, prev)
+    except Exception as e:
+        return ["## Roadmap progress", "", f"(unavailable: {e})", ""]
+
+
 def _health() -> dict:
     try:
         import urllib.request
@@ -346,11 +372,16 @@ def main() -> int:
         f"| Orders SUBMITTED (recent log) | {overnight['orders_submitted']} |",
         f"| Trades closed (log lines) | {overnight['trades_closed_log']} |",
         "",
-        "## P&L (rolling fills from feeder)",
-        "",
-        f"- Trades: **{pf['n']}** | WR: **{pf['wr']:.1%}** | E£/trade: **{pf['e_gbp']:+.2f}** | Total: **£{pf['total_pnl_gbp']:+.2f}**",
-        "",
     ]
+    lines.extend(_roadmap_section())
+    lines.extend(
+        [
+            "## P&L (rolling fills from feeder)",
+            "",
+            f"- Trades: **{pf['n']}** | WR: **{pf['wr']:.1%}** | E£/trade: **{pf['e_gbp']:+.2f}** | Total: **£{pf['total_pnl_gbp']:+.2f}**",
+            "",
+        ]
+    )
     if setups:
         lines.append("### Top setups")
         lines.append("")

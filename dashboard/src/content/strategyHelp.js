@@ -25,15 +25,20 @@ export const HELP_SECTIONS = [
     table: {
       headers: ["Market", "Size", "Stop (pts)", "Risk cap", "Min conf.", "Sessions"],
       rows: [
-        ["Japan 225", "0.4", "45", "£100", "85%", "asia_early"],
-        ["Wall Street", "0.3", "80", "£150", "70%", "overlap, us_afternoon"],
-        ["Spot Gold", "6.0", "10", "£200", "80%", "london_morning, overlap, us_afternoon"],
-        ["US Tech 100", "0.25", "100", "£150", "75%", "overlap, us_afternoon"],
+        ["Japan 225", "0.4", "45", "£150", "55%", "asia_early"],
+        ["Spot Gold", "6.0", "10", "£200", "55%", "london_morning, overlap, us_afternoon"],
+        ["GBP/USD", "10", "5", "£500", "55%", "london_morning, overlap, us_afternoon"],
+        ["EUR/USD", "10", "5", "£500", "55%", "london_morning, overlap, us_afternoon"],
+        ["Wall Street", "0.3", "80", "£150", "55%", "overlap, us_afternoon, late"],
+        ["US Tech 100", "0.25", "100", "£150", "55%", "overlap, us_afternoon, late"],
+        ["US Oil WTI", "10", "30", "£1000", "55%", "overlap, us_afternoon"],
       ],
     },
     bullets: [
       "Session windows (BST): asia_early 00–07, london_morning 07–12, overlap 12–16, us_afternoon 16–22, late 22–00.",
-      "EUR/USD, GBP/USD, US Oil, Germany 40 are configured but currently disabled.",
+      "Demo soak mode (config_v29): lowers fitness floor, bypasses top-3 rotation, widens spread/ATR circuit — disable before live.",
+      "Germany 40 is configured but disabled — IG DEMO often rejects the DAX epic on Lightstreamer.",
+      "Each market also respects IG fund hours in config/market_watch/ (weekend close, daily breaks).",
     ],
   },
   {

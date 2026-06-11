@@ -14,6 +14,10 @@ def main() -> int:
     py = sys.executable
     cmds = [
         (
+            [py, str(ROOT / "scripts" / "roadmap_progress_snapshot.py")],
+            "roadmap progress snapshot",
+        ),
+        (
             [py, str(ROOT / "scripts" / "ingest_finnhub_calendar.py"), "--days", "7"],
             "Finnhub calendar",
         ),

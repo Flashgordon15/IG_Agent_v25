@@ -86,7 +86,9 @@ def get_startup_status() -> dict[str, Any]:
 @router.get("/state")
 def state() -> dict[str, Any]:
     """Full dashboard snapshot — same schema as WebSocket tick messages."""
-    tick = get_tick()
+    from api.agent_health import enrich_tick_runtime
+
+    tick = enrich_tick_runtime(get_tick())
     tick["trading_paused"] = is_paused()
     tick["trading_loops_running"] = is_trading_running()
     return tick
@@ -161,6 +163,45 @@ def api_system() -> dict[str, Any]:
     except Exception:
         pass
     return info
+
+
+@router.get("/api/roadmap/progress")
+def api_roadmap_progress(days: int = 7) -> dict[str, Any]:
+    """Gap audit checklist — certification, edge, coverage, daily flow."""
+    from api.roadmap_progress import build_roadmap_progress
+
+    return build_roadmap_progress(
+        history_days=min(30, max(1, days)),
+        write_snapshot=True,
+    )
+
+
+@router.get("/api/gates/attribution")
+def api_gates_attribution(days: int = 7, rotated: bool = True) -> dict[str, Any]:
+    """Ranked gate blockers from engine.log WAIT lines."""
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    scripts = root / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    from gate_attribution_report import rollup_gate_blocks
+
+    log_path = root / "src" / "data" / "logs" / "engine.log"
+    return rollup_gate_blocks(
+        log_path=log_path,
+        days=min(30, max(1, days)),
+        include_rotated=rotated,
+    )
+
+
+@router.get("/api/gates/binding-histogram")
+def api_gates_binding_histogram(days: int = 7) -> dict[str, Any]:
+    """Gate blockers + SUBMIT_TRUTH binding histogram for session audit."""
+    from api.gate_binding import build_gate_binding_report
+
+    return build_gate_binding_report(days=min(30, max(1, days)))
 
 
 @router.get("/api/config/strictness")

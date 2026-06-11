@@ -21,6 +21,36 @@ def load_v26_overlay() -> dict[str, Any]:
         return {}
 
 
+def reset_v26_overlay_cache_for_tests() -> None:
+    load_v26_overlay.cache_clear()
+    get_effective_overlay.cache_clear()
+
+
+@lru_cache(maxsize=1)
+def get_effective_overlay() -> dict[str, Any]:
+    """Single v26 overlay read — gate_relaxations + capital envelope + ml blocks."""
+    raw = load_v26_overlay()
+    gate_relax = raw.get("gate_relaxations") or {}
+    try:
+        from system.learning_demo_policy import v26_gate_relaxations_suppressed
+
+        v26_active = bool(gate_relax.get("enabled")) and not v26_gate_relaxations_suppressed()
+    except Exception:
+        v26_active = bool(gate_relax.get("enabled"))
+    try:
+        from system.config_loader import get_config
+
+        soak = get_config().get("demo_soak_mode") or {}
+    except Exception:
+        soak = {}
+    return {
+        **raw,
+        "gate_relaxations": gate_relax,
+        "v26_gate_relaxations_active": v26_active,
+        "demo_soak_mode": soak if isinstance(soak, dict) else {},
+    }
+
+
 def ml_veto_settings() -> dict[str, Any]:
     block = load_v26_overlay().get("ml_veto") or {}
     return {

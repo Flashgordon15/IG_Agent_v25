@@ -2,7 +2,7 @@
   "$schema": "./config_schema.json",
   "$extends": "config_v25.json",
   "version": "29.0.0",
-  "_note": "v29 profitability overlay — merge with config_v25.json at load time (v29 architecture)",
+  "_note": "v29 profitability overlay \u2014 merge with config_v25.json at load time (v29 architecture)",
   "capital_envelope": {
     "account_balance_gbp": 10000,
     "max_margin_pct": 0.2,
@@ -119,7 +119,7 @@
     }
   },
   "gate_relaxations": {
-    "enabled": true,
+    "enabled": false,
     "fitness_min": 52,
     "warning_confidence_cap": 85,
     "warning_use_instrument_threshold": true,

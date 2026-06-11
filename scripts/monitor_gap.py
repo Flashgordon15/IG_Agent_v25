@@ -5,7 +5,10 @@ import sys
 import time
 from datetime import datetime
 
-sys.path.insert(0, "/Users/chrisgordon/Desktop/IG_Agent_v25/src")
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
 from api.snapshot_store import get_tick  # noqa: E402
 
 SKIP = {"Germany 40"}
