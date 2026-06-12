@@ -42,7 +42,7 @@ class SessionSummaryFormatTests(unittest.TestCase):
             top_block="rsi block",
         )
         for needle in (
-            "IG Agent v25 — Session Summary",
+            "IG Agent v29 — Session Summary",
             "Date: 2026-05-27",
             "Session:",
             "BST",
@@ -132,7 +132,9 @@ class SessionSummaryWriteTests(unittest.TestCase):
         self.assertIn("£+0.00", msg)
         log_mock.assert_any_call("Session summary written: 0W/0L £+0.00")
 
-    @patch("trading.session_summary.subprocess.run", side_effect=OSError("no osascript"))
+    @patch(
+        "trading.session_summary.subprocess.run", side_effect=OSError("no osascript")
+    )
     def test_osascript_failure_does_not_raise(self, _run: MagicMock) -> None:
         notify_macos("0W/0L £+0.00 HEALTHY")
 
@@ -202,9 +204,7 @@ class SessionTradesFilterTests(unittest.TestCase):
             ),
         )
         self.store.conn.commit()
-        stats = collect_session_trades(
-            self.store, open_time=open_t, close_time=close_t
-        )
+        stats = collect_session_trades(self.store, open_time=open_t, close_time=close_t)
         self.assertEqual(stats.total, 1)
         self.assertEqual(stats.wins, 1)
         self.assertEqual(stats.pnl_gbp, 10.0)

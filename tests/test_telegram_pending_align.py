@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import sys
 import time
 import unittest
-
-import sys
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -29,13 +29,18 @@ class PendingReconcileTests(unittest.TestCase):
         reset_pending_state_for_tests()
 
     def test_stale_entry_pending_cleared_without_position(self) -> None:
-        mark_pending("EPIC.A", side="BUY", order_type=ORDER_TYPE_ENTRY, deal_reference="R1")
+        mark_pending(
+            "EPIC.A", side="BUY", order_type=ORDER_TYPE_ENTRY, deal_reference="R1"
+        )
         rec = get_pending("EPIC.A")
         assert rec is not None
-        # Simulate age > grace without sleeping — patch via reconcile with 0 grace
-        reconcile_pending_via_position_state(
-            "EPIC.A", position_present=False, stale_entry_grace_sec=0.0
-        )
+        with patch(
+            "execution.pending_order_reconcile.time.time",
+            return_value=rec.local_created_at + 5.0,
+        ):
+            reconcile_pending_via_position_state(
+                "EPIC.A", position_present=False, stale_entry_grace_sec=0.0
+            )
         self.assertIsNone(get_pending("EPIC.A"))
 
     def test_fresh_entry_pending_not_cleared_without_position(self) -> None:

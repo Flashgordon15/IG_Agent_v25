@@ -25,8 +25,11 @@ def _minimal_loop() -> TradingLoop:
 class MlVetoGateTests(unittest.TestCase):
     def test_ml_veto_off_by_default(self) -> None:
         loop = _minimal_loop()
-        with patch(
-            "system.v26_config.ml_veto_settings", return_value={"enabled": False}
+        with (
+            patch("system.gate_relaxation.soak_ml_veto_bypassed", return_value=False),
+            patch(
+                "system.v26_config.ml_veto_settings", return_value={"enabled": False}
+            ),
         ):
             gate = loop._gate_ml_veto()
         self.assertTrue(gate.passed)
@@ -41,6 +44,7 @@ class MlVetoGateTests(unittest.TestCase):
             "per_epic": {},
         }
         with (
+            patch("system.gate_relaxation.soak_ml_veto_bypassed", return_value=False),
             patch("system.v26_config.ml_veto_settings", return_value=settings),
             patch("system.v26_config.epic_ml_veto_enabled", return_value=True),
             patch("system.v26_config.epic_min_probability", return_value=0.58),

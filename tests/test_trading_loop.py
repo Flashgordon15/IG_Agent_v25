@@ -220,7 +220,10 @@ class TradingLoopTests(unittest.TestCase):
     def test_gate_safe_default_on_exception(self) -> None:
         loop = _make_loop()
         loop._env.score.side_effect = RuntimeError("scorer unavailable")
-        ctx = loop.run_once()
+        with patch(
+            "system.learning_demo_policy.learning_demo_enabled", return_value=False
+        ):
+            ctx = loop.run_once()
         assert ctx is not None
         env_gate = next(g for g in ctx.gates if g.name == "environment_fitness")
         self.assertTrue(env_gate.passed)
@@ -298,6 +301,7 @@ class TradingLoopTests(unittest.TestCase):
             {"result": "LOSS"},
             {"result": "WIN"},
         ]
+        loop._store.sum_daily_pnl.return_value = -12.5
         loop.run_once()
         payload = snap_mock.call_args[0][0]
         self.assertEqual(payload["balance_gbp"], 10_000.0)

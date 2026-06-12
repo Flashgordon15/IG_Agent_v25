@@ -213,9 +213,12 @@ class TradeManagerExtensionTests(unittest.TestCase):
         cfg = _cfg(adaptive_trailing_stop_enabled=False)
         mgr = TradeManager(cfg, self.store, skip_ig_synced_exits=True)
         px = entry + 35
-        msgs = mgr.update_from_quote(
-            "Japan 225", "IX.D.NIKKEI.IFM.IP", Quote(datetime.now(), px, px + 1)
-        )
+        with patch(
+            "execution.execution_protect.is_protect_enabled", return_value=False
+        ):
+            msgs = mgr.update_from_quote(
+                "Japan 225", "IX.D.NIKKEI.IFM.IP", Quote(datetime.now(), px, px + 1)
+            )
         self.assertTrue(any("BREAKEVEN" in m for m in msgs))
         stop = float(
             self.store.conn.execute(

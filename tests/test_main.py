@@ -25,10 +25,13 @@ class MainStartupTests(unittest.TestCase):
     def test_invalid_config_exits(self, load_mock: MagicMock) -> None:
         load_mock.return_value = {"epic": "X"}
         with patch("main.emergency_stop_lock_present", return_value=False):
-            with patch("main.merge_credentials_for_validation", side_effect=lambda d: d):
+            with patch(
+                "main.merge_credentials_for_validation", side_effect=lambda d: d
+            ):
                 code = main_mod.run_preflight()
         self.assertEqual(code, main_mod.EXIT_CONFIG)
 
+    @patch("system.demo_guard.validate_demo_only_startup", return_value=(True, "ok"))
     @patch("main.bootstrap_credentials")
     @patch("main.acquire_instance_lock", return_value=(False, "duplicate"))
     @patch("main.validate_config", return_value=(True, []))
@@ -41,6 +44,7 @@ class MainStartupTests(unittest.TestCase):
         _val_mock: MagicMock,
         _lock_mock: MagicMock,
         _boot_mock: MagicMock,
+        _demo_mock: MagicMock,
     ) -> None:
         load_mock.return_value = _full_config()
         merge_mock.side_effect = lambda d: d
@@ -48,6 +52,7 @@ class MainStartupTests(unittest.TestCase):
             code = main_mod.run_preflight()
         self.assertEqual(code, main_mod.EXIT_INSTANCE)
 
+    @patch("system.demo_guard.validate_demo_only_startup", return_value=(True, "ok"))
     @patch("main.bootstrap_credentials")
     @patch("main.acquire_instance_lock", return_value=(False, "duplicate Delete"))
     @patch("main.validate_config", return_value=(True, []))
@@ -62,6 +67,7 @@ class MainStartupTests(unittest.TestCase):
         _val_mock: MagicMock,
         _lock_mock: MagicMock,
         _boot_mock: MagicMock,
+        _demo_mock: MagicMock,
     ) -> None:
         load_mock.return_value = _full_config()
         merge_mock.side_effect = lambda d: d
@@ -70,6 +76,7 @@ class MainStartupTests(unittest.TestCase):
         self.assertEqual(code, main_mod.EXIT_INSTANCE)
         watchdog_mock.assert_not_called()
 
+    @patch("system.demo_guard.validate_demo_only_startup", return_value=(True, "ok"))
     @patch("main.bootstrap_credentials")
     @patch("main.acquire_instance_lock", return_value=(True, "ok"))
     @patch("main.validate_config", return_value=(True, []))
@@ -84,6 +91,7 @@ class MainStartupTests(unittest.TestCase):
         _val_mock: MagicMock,
         _lock_mock: MagicMock,
         boot_mock: MagicMock,
+        _demo_mock: MagicMock,
     ) -> None:
         load_mock.return_value = _full_config()
         merge_mock.side_effect = lambda d: d
