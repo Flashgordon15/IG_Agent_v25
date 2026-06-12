@@ -62,6 +62,79 @@ EQUITY_LOCK_SIGNAL_THRESHOLD = 65.0
 PROBE_MULTIPLIER_FLOOR = 0.5
 CORE_MULTIPLIER_FLOOR = 0.8
 
+MILESTONE_KINDS = frozenset({"breakeven", "trail", "limit_extension"})
+DEFAULT_MILESTONE_POINTS = {
+    "breakeven": 0.5,
+    "trail": 0.5,
+    "limit_extension": 0.25,
+}
+
+
+def milestone_settings(cfg: Any | None = None) -> dict[str, Any]:
+    if cfg is None:
+        from system.config_loader import get_config
+
+        cfg = get_config()
+    raw = cfg.get("points_milestones", {}) if hasattr(cfg, "get") else {}
+    if not isinstance(raw, dict):
+        raw = {}
+    return {
+        "enabled": bool(raw.get("enabled", True)),
+        "breakeven_points": float(
+            raw.get("breakeven_points", DEFAULT_MILESTONE_POINTS["breakeven"])
+        ),
+        "trail_points": float(
+            raw.get("trail_points", DEFAULT_MILESTONE_POINTS["trail"])
+        ),
+        "limit_extension_points": float(
+            raw.get(
+                "limit_extension_points",
+                DEFAULT_MILESTONE_POINTS["limit_extension"],
+            )
+        ),
+    }
+
+
+def next_tier_preview(
+    cumulative: float,
+    state: PointsStateName,
+) -> dict[str, Any]:
+    """Next cumulative milestone toward larger size / HEALTHY flywheel."""
+    cum = float(cumulative)
+    if state == "STOP":
+        return {
+            "label": "Release STOP latch (manual review)",
+            "points_to_next": None,
+            "target_cumulative": None,
+            "kind": "stop",
+        }
+    if cum <= HEALTHY_CUMULATIVE_MIN:
+        need = max(0.0, HEALTHY_CUMULATIVE_MIN - cum + 0.01)
+        return {
+            "label": "HEALTHY state (full size bands)",
+            "points_to_next": round(need, 2),
+            "target_cumulative": HEALTHY_CUMULATIVE_MIN,
+            "kind": "state",
+        }
+    for threshold, label in (
+        (ROADMAP_COMPOUND_ENTER_CUMULATIVE, "Compound boost (2.5× stack)"),
+        (25.0, "THRIVING size tier (2.5×)"),
+        (50.0, "EXCELLENT size tier (4×)"),
+    ):
+        if cum < threshold:
+            return {
+                "label": label,
+                "points_to_next": round(threshold - cum, 2),
+                "target_cumulative": threshold,
+                "kind": "size",
+            }
+    return {
+        "label": "Max size tier reached",
+        "points_to_next": 0.0,
+        "target_cumulative": cum,
+        "kind": "max",
+    }
+
 
 def _clamp_multiplier_to_trade_size_bounds(
     multiplier: float,
@@ -695,6 +768,67 @@ class PointsEngine:
                 f" ({type(exc).__name__}: {exc})"
             )
             return 0.0
+
+    def record_milestone(
+        self,
+        kind: str,
+        *,
+        market: str = "",
+        trade_id: int | None = None,
+    ) -> float:
+        """Award bonus points when open-trade protection improves the position."""
+        kind_u = str(kind or "").strip().lower()
+        if kind_u not in MILESTONE_KINDS:
+            return 0.0
+        settings = milestone_settings()
+        if not settings.get("enabled", True):
+            return 0.0
+        score = float(settings.get(f"{kind_u}_points", 0.0) or 0.0)
+        if score <= 0.0:
+            return 0.0
+        try:
+            with _lock:
+                self._cumulative += score
+                self._session_score += score
+                self._last_trade_score = score
+                new_nominal = _nominal_state(self._cumulative)
+                self._on_nominal_transition(new_nominal)
+                self._sync_stop_latch()
+                cumulative_after = float(self._cumulative)
+                self._persist()
+            log_engine(
+                f"POINTS MILESTONE +{score:.2f} ({kind_u}) "
+                f"trade={trade_id or '—'} {market or '—'} "
+                f"cumulative={cumulative_after:.2f}"
+            )
+            self._maybe_notify_telegram_state()
+            return score
+        except Exception as e:
+            log_engine(
+                f"points_engine record_milestone failed: {type(e).__name__}: {e}"
+            )
+            return 0.0
+
+    def get_next_tier(self) -> dict[str, Any]:
+        """Dashboard helper — points remaining to the next sizing/state tier."""
+        try:
+            with _lock:
+                cum = float(self._cumulative)
+            state = self.get_state()
+            preview = next_tier_preview(cum, state)
+            preview["cumulative"] = round(cum, 2)
+            preview["state"] = state
+            return preview
+        except Exception as e:
+            log_engine(f"points_engine get_next_tier failed: {type(e).__name__}: {e}")
+            return {
+                "label": "—",
+                "points_to_next": None,
+                "target_cumulative": None,
+                "kind": "unknown",
+                "cumulative": 0.0,
+                "state": "CAUTION",
+            }
 
     def is_session_paused(self) -> bool:
         try:

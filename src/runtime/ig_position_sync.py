@@ -221,6 +221,7 @@ class IgPositionSync:
         currency = str(p.currency or spec["currency"]).upper()
         point_value = float(spec["point_value"])
         pnl_gbp = round(pnl_currency_amount_to_gbp(float(p.upl), currency), 2)
+        current = p.bid if p.direction == "BUY" else p.offer
         return {
             "deal_id": p.deal_id,
             "epic": p.epic,
@@ -232,6 +233,9 @@ class IgPositionSync:
             "upl": p.upl,
             "pnl_currency": float(p.upl),
             "pnl_gbp": pnl_gbp,
+            "broker_pnl_gbp": pnl_gbp,
+            "broker_mark": current,
+            "broker_upl": float(p.upl),
             "market_name": p.market_name,
             "deal_reference": p.deal_reference,
             "stop_level": p.stop_level,
@@ -483,6 +487,24 @@ class IgPositionSync:
             self._stop.wait(self._effective_interval())
 
     @staticmethod
+    def _position_upl(pos: dict[str, Any], mkt: dict[str, Any]) -> float:
+        from system.ig_money import parse_ig_money
+
+        for src in (pos, mkt):
+            for key in ("upl", "profit", "profitLoss", "profitAndLoss", "pnl"):
+                raw = src.get(key)
+                if raw is None:
+                    continue
+                parsed = (
+                    parse_ig_money(raw)
+                    if not isinstance(raw, (int, float))
+                    else float(raw)
+                )
+                if parsed is not None and abs(float(parsed)) >= 0.001:
+                    return float(parsed)
+        return 0.0
+
+    @staticmethod
     def _parse_positions(raw: list[dict[str, Any]]) -> list[SyncedPosition]:
         out: list[SyncedPosition] = []
         for item in raw:
@@ -507,7 +529,7 @@ class IgPositionSync:
                     direction=str(pos.get("direction") or "").upper(),
                     size=size,
                     level=float(pos.get("level") or 0),
-                    upl=float(pos.get("upl") or 0),
+                    upl=IgPositionSync._position_upl(pos, mkt),
                     market_name=str(
                         mkt.get("instrumentName") or mkt.get("instrumentType") or ""
                     ),

@@ -59,6 +59,28 @@ def round_pnl_pts(pts: float, epic: str) -> float:
     return round(float(pts), display_pnl_pts_precision(epic))
 
 
+# IG FX CFD: ~$10 per pip per unit of deal size on USD-quoted majors (100k/lot).
+_FX_USD_PER_PIP_PER_UNIT = 10.0
+
+
+def fx_upl_per_ig_point(
+    epic: str, size: float, *, currency: str = "USD"
+) -> float | None:
+    """Quote-currency P&L per IG pip for FX CFD (size × $10/pip on USD majors)."""
+    if pip_size_for_epic(epic) is None:
+        return None
+    try:
+        sz = max(0.0, float(size))
+    except (TypeError, ValueError):
+        return None
+    if sz <= 0:
+        return None
+    ccy = str(currency or "USD").upper()
+    if ccy == "USD":
+        return sz * _FX_USD_PER_PIP_PER_UNIT
+    return sz * _FX_USD_PER_PIP_PER_UNIT
+
+
 def direction_multiplier(side: str) -> float:
     return 1.0 if str(side).upper() == "BUY" else -1.0
 

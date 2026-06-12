@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 
 import pytest
-
-from datetime import datetime, timezone
 
 from data.models import Quote
 from execution.scalping.atomic_protect import position_has_full_protection
@@ -52,6 +51,18 @@ def test_breakeven_trigger_includes_spread_commission_buffer():
     }
     trigger = breakeven_trigger_points(q, cfg)
     assert trigger == pytest.approx(2.0 + 1.0 + 2.0)
+
+
+def test_fx_breakeven_trigger_uses_pip_scale():
+    q = Quote(time=datetime.now(timezone.utc), bid=1.15710, offer=1.15719)
+    cfg = {
+        "scalping_framework": {
+            "commission_points_per_side": 0.5,
+            "breakeven_buffer_points": 2.0,
+        }
+    }
+    trigger = breakeven_trigger_points(q, cfg, epic="CS.D.EURUSD.CFD.IP")
+    assert trigger == pytest.approx(3.9, abs=0.2)
 
 
 def test_trail_distance_atr_half():

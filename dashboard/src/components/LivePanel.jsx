@@ -143,7 +143,7 @@ function agentStateMeta(stateName, state) {
     92;
   switch (s) {
     case "HEALTHY": return { label: "HEALTHY", banner: "border-success/40 bg-success/10 text-success", description: "Full size bands available per confidence." };
-    case "CAUTION":  return { label: "CAUTION",  banner: "border-warning/40 bg-warning/10 text-warning", description: "Reduced size bands — need cumulative above +10 pts for HEALTHY." };
+    case "CAUTION":  return { label: "CAUTION",  banner: "border-warning/40 bg-warning/10 text-warning", description: "Reduced size bands — need cumulative above +4 pts for HEALTHY." };
     case "WARNING":  return {
       label: "WARNING",
       banner: "border-warning/40 bg-warning/10 text-warning",
@@ -201,6 +201,23 @@ function resolveMlProbability(state) {
   const apiMl = state?.ml_confidence;
   if (apiMl != null && !Number.isNaN(Number(apiMl)) && Number(apiMl) <= 1) return Number(apiMl);
   return null;
+}
+
+const ML_BLEND_MIN_ROWS = 500;
+
+function resolveMlGauge(state) {
+  const value = resolveMlProbability(state);
+  if (value != null) {
+    return { value, disabled: false, disabledLabel: "ML disabled" };
+  }
+  if (state?.ml_enabled !== true) {
+    return { value: null, disabled: true, disabledLabel: "ML disabled" };
+  }
+  const rows = Number(state?.ml_training_records ?? 0);
+  if (rows < ML_BLEND_MIN_ROWS) {
+    return { value: null, disabled: true, disabledLabel: `${rows}/${ML_BLEND_MIN_ROWS} rows` };
+  }
+  return { value: null, disabled: true, disabledLabel: "Not trained" };
 }
 
 function resolvePositions(state) {
@@ -756,8 +773,10 @@ export default function LivePanel({ state, rawState, selectedEpic, onSelectEpic,
   const gateReason    = resolveGateBlockedReason(state);
   const gateBlockedAt = resolveGateBlockedAt(state);
   const failingGate   = firstFailingGate(health);
-  const mlProb    = resolveMlProbability(state);
-  const mlDisabled = mlProb == null && state?.ml_enabled !== true;
+  const mlGauge   = resolveMlGauge(state);
+  const mlProb    = mlGauge.value;
+  const mlDisabled = mlGauge.disabled;
+  const mlDisabledLabel = mlGauge.disabledLabel;
   const mlLog     = resolveMlDecisionLog(state);
   const allGatesPass = orderGates(health.gates).every((g) => g.pass);
   const riskGate  = orderGates(health.gates).find((g) => g.name === "risk_validation");
@@ -915,7 +934,7 @@ export default function LivePanel({ state, rawState, selectedEpic, onSelectEpic,
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 sm:gap-3">
         <SignalHeroDial signal={signal} state={state} />
         <SignalConfidenceBreakdown signal={signal} state={state} pointsState={state.points?.state} />
-        <Gauge label="ML confidence" value={mlProb} max={1} disabled={mlDisabled} disabledLabel="ML disabled" formatValue={(v) => v.toFixed(2)} />
+        <Gauge label="ML confidence" value={mlProb} max={1} disabled={mlDisabled} disabledLabel={mlDisabledLabel} formatValue={(v) => v.toFixed(2)} />
       </div>
 
       {/* 6b. v27 sentinel diagnostic console */}

@@ -260,6 +260,8 @@ def push_hub_quote_to_dashboard(
 
 
 def _point_value_gbp_for_epic(tick: dict[str, Any], epic: str) -> float:
+    from trading.open_position_view import point_value_gbp_for_epic
+
     markets = tick.get("markets")
     if isinstance(markets, dict):
         slice_tick = markets.get(epic)
@@ -276,7 +278,7 @@ def _point_value_gbp_for_epic(tick: dict[str, Any], epic: str) -> float:
             return float(raw)
         except (TypeError, ValueError):
             pass
-    return 1.0
+    return point_value_gbp_for_epic(epic, fallback=1.0)
 
 
 def wire_hub_quotes_to_dashboard(*, min_interval: float = 0.25) -> Callable[[], None]:

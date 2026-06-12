@@ -337,57 +337,58 @@ class TradeManager:
                         px,
                         quote,
                         entry_atr,
+                        epic=epic,
                         enable_atr_trail=scalping_trail,
                     )
                 )
                 stop = self._current_stop(trade_id, stop)
-            else:
-                if cfg.breakeven_enabled:
-                    be_trigger = self._effective_breakeven_trigger(entry_atr)
-                    messages.extend(
-                        self._apply_breakeven(
-                            market,
-                            side,
-                            trade_id,
-                            entry,
-                            stop,
-                            target,
-                            px,
-                            be_trigger,
-                            cfg.breakeven_lock_points,
-                        )
+            elif cfg.breakeven_enabled:
+                be_trigger = self._effective_breakeven_trigger(entry_atr, epic=epic)
+                messages.extend(
+                    self._apply_breakeven(
+                        market,
+                        side,
+                        trade_id,
+                        entry,
+                        stop,
+                        target,
+                        px,
+                        be_trigger,
+                        cfg.breakeven_lock_points,
+                        epic=epic,
                     )
-                    stop = self._current_stop(trade_id, stop)
+                )
+                stop = self._current_stop(trade_id, stop)
 
-                if cfg.adaptive_trailing_stop_enabled:
-                    trail_dist = trail_distance
-                    if trail_dist <= 0:
-                        trail_dist = float(cfg.trailing_stop_step_points)
-                    trail_trigger = self._effective_trail_trigger(entry_atr, epic=epic)
-                    messages.extend(
-                        self._apply_trailing(
-                            market,
-                            side,
-                            trade_id,
-                            entry,
-                            stop,
-                            target,
-                            px,
-                            trail_trigger,
-                            trail_dist,
-                        )
+            if cfg.adaptive_trailing_stop_enabled:
+                trail_dist = self._trail_distance_price(epic, trail_distance, cfg)
+                trail_trigger = self._effective_trail_trigger(entry_atr, epic=epic)
+                messages.extend(
+                    self._apply_trailing(
+                        market,
+                        side,
+                        trade_id,
+                        entry,
+                        stop,
+                        target,
+                        px,
+                        trail_trigger,
+                        trail_dist,
+                        epic=epic,
                     )
-                    stop = self._current_stop(trade_id, stop)
+                )
+                stop = self._current_stop(trade_id, stop)
 
             if getattr(cfg, "limit_extension_enabled", False) and entry_atr > 0:
                 ext_msgs, target = self._apply_limit_extension(
-                    market, side, trade_id, entry, target, px, entry_atr
+                    market, side, trade_id, entry, target, px, entry_atr, epic=epic
                 )
                 messages.extend(ext_msgs)
 
             if broker_managed:
-                stop_moved = abs(stop - prev_stop) >= 0.05
-                limit_moved = abs(target - prev_target) >= 0.05
+                tol = self._stop_tolerance(epic)
+                stop_moved = abs(stop - prev_stop) >= tol
+                limit_moved = abs(target - prev_target) >= tol
                 new_limit = target if limit_moved else None
                 if stop_moved or limit_moved:
                     pushed = self._sync_stop_to_ig(
@@ -561,6 +562,36 @@ class TradeManager:
         stop = self.store.get_stop(trade_id)
         return stop if stop is not None else fallback
 
+    def _award_protection_milestone(
+        self, trade_id: int, kind: str, market: str
+    ) -> float:
+        """Once-per-trade bonus when BE, trail, or limit extension fires."""
+        if self._points_engine is None:
+            return 0.0
+        marker = f"PTS_MILESTONE:{kind}"
+        row = self.store.conn.execute(
+            "SELECT notes FROM trades WHERE id=?", (trade_id,)
+        ).fetchone()
+        if row and marker in str(row["notes"] or ""):
+            return 0.0
+        try:
+            score = self._points_engine.record_milestone(
+                kind, market=market, trade_id=trade_id
+            )
+        except Exception as e:
+            log_engine(
+                f"protection milestone score failed trade={trade_id} "
+                f"{kind}: {type(e).__name__}: {e}"
+            )
+            return 0.0
+        if score > 0:
+            self.store.conn.execute(
+                "UPDATE trades SET notes=COALESCE(notes,'') || ? WHERE id=?",
+                (f" | {marker}", trade_id),
+            )
+            self.store.conn.commit()
+        return score
+
     def _entry_trail_meta(
         self, tr: Any, adjusted_confidence: float
     ) -> tuple[float, float, str]:
@@ -602,8 +633,56 @@ class TradeManager:
                 pass
         return self.get_trail_distance(confidence, entry_atr)
 
-    def _profit_points(self, side: str, entry: float, px: float) -> float:
-        return (px - entry) if side == "BUY" else (entry - px)
+    def _profit_ig_points(self, side: str, entry: float, px: float, epic: str) -> float:
+        """Unrealized move in IG dashboard points (pips for FX)."""
+        from system.pnl_math import price_delta_to_ig_points, realised_pnl_points
+
+        return price_delta_to_ig_points(epic, realised_pnl_points(side, entry, px))
+
+    def _profit_points(
+        self, side: str, entry: float, px: float, epic: str = ""
+    ) -> float:
+        return self._profit_ig_points(side, entry, px, epic)
+
+    def _offset_price(self, epic: str, offset_pts: float) -> float:
+        from system.pnl_math import ig_points_to_price_delta, pip_size_for_epic
+
+        if pip_size_for_epic(epic) is not None:
+            return ig_points_to_price_delta(epic, float(offset_pts))
+        return float(offset_pts)
+
+    def _trail_distance_price(
+        self, epic: str, trail_distance: float, cfg: Config
+    ) -> float:
+        """Trail distance as a price delta for stop placement."""
+        from system.pnl_math import ig_points_to_price_delta, pip_size_for_epic
+
+        if trail_distance > 0:
+            if pip_size_for_epic(epic) is not None and trail_distance >= 1.0:
+                return ig_points_to_price_delta(epic, trail_distance)
+            return float(trail_distance)
+        step = float(cfg.trailing_stop_step_points)
+        if pip_size_for_epic(epic) is not None:
+            return ig_points_to_price_delta(epic, step)
+        return step
+
+    def _fallback_trigger_ig_points(
+        self, epic: str, config_key: str, default: float
+    ) -> float:
+        from system.pnl_math import pip_size_for_epic
+
+        fallback = float(getattr(self._cfg, config_key, default) or default)
+        if pip_size_for_epic(epic) is None:
+            return fallback
+        try:
+            from execution.trade_risk import configured_stop_points
+
+            stop_pts = configured_stop_points(epic, self._cfg)
+            if config_key == "breakeven_trigger_points":
+                return min(fallback, max(1.0, stop_pts * 0.4))
+            return min(fallback, max(1.0, stop_pts * 0.75))
+        except Exception:
+            return fallback
 
     def _trade_age_minutes(self, tr: Any) -> float | None:
         opened_at_raw = tr["opened_at"] if "opened_at" in tr.keys() else None
@@ -884,8 +963,11 @@ class TradeManager:
     ) -> list[str]:
         if entry_atr <= 0:
             return []
-        profit = self._profit_points(side, entry, px)
-        if profit < HARD_CAP_ATR_MULTIPLE * entry_atr:
+        profit = self._profit_ig_points(side, entry, px, epic)
+        from system.pnl_math import price_delta_to_ig_points
+
+        atr_pts = price_delta_to_ig_points(epic, entry_atr)
+        if profit < HARD_CAP_ATR_MULTIPLE * atr_pts:
             return []
         from system.pnl_math import classify_result, realised_pnl_points
 
@@ -939,8 +1021,11 @@ class TradeManager:
             return []
         if self.store.is_partial_close_done(trade_id):
             return []
-        profit = self._profit_points(side, entry, px)
-        if profit < PARTIAL_CLOSE_ATR_MULTIPLE * entry_atr:
+        profit = self._profit_ig_points(side, entry, px, epic)
+        from system.pnl_math import price_delta_to_ig_points
+
+        atr_pts = price_delta_to_ig_points(epic, entry_atr)
+        if profit < PARTIAL_CLOSE_ATR_MULTIPLE * atr_pts:
             return []
 
         half_size = size * PARTIAL_CLOSE_FRACTION
@@ -999,27 +1084,39 @@ class TradeManager:
     def _effective_trail_trigger(
         self, entry_atr: float, *, epic: str | None = None
     ) -> float:
-        """ATR-scaled trailing trigger when entry_atr known; falls back to config points."""
+        """ATR-scaled trailing trigger in IG points (pips for FX)."""
+        epic_str = str(epic or "")
         mult = float(getattr(self._cfg, "trail_trigger_atr_multiple", 0.0))
-        if epic:
+        if epic_str:
             try:
                 from trading.trail_config import get_trail_overrides_for_epic
 
-                overrides = get_trail_overrides_for_epic(epic)
+                overrides = get_trail_overrides_for_epic(epic_str)
                 if overrides.get("trail_trigger_atr_multiple") is not None:
                     mult = float(overrides["trail_trigger_atr_multiple"])
             except Exception:
                 pass
         if mult > 0 and entry_atr > 0:
-            return mult * entry_atr
-        return float(self._cfg.trailing_stop_trigger_points)
+            from system.pnl_math import price_delta_to_ig_points
 
-    def _effective_breakeven_trigger(self, entry_atr: float) -> float:
-        """ATR-scaled breakeven trigger when entry_atr known; falls back to config points."""
+            return price_delta_to_ig_points(epic_str, mult * entry_atr)
+        return self._fallback_trigger_ig_points(
+            epic_str, "trailing_stop_trigger_points", 50.0
+        )
+
+    def _effective_breakeven_trigger(
+        self, entry_atr: float, *, epic: str | None = None
+    ) -> float:
+        """ATR-scaled breakeven trigger in IG points (pips for FX)."""
+        epic_str = str(epic or "")
         mult = float(getattr(self._cfg, "breakeven_trigger_atr_multiple", 0.0))
         if mult > 0 and entry_atr > 0:
-            return mult * entry_atr
-        return float(self._cfg.breakeven_trigger_points)
+            from system.pnl_math import price_delta_to_ig_points
+
+            return price_delta_to_ig_points(epic_str, mult * entry_atr)
+        return self._fallback_trigger_ig_points(
+            epic_str, "breakeven_trigger_points", 30.0
+        )
 
     def _apply_limit_extension(
         self,
@@ -1030,6 +1127,8 @@ class TradeManager:
         current_target: float,
         px: float,
         entry_atr: float,
+        *,
+        epic: str = "",
     ) -> tuple[list[str], float]:
         """
         Extend take-profit limit when trade trends strongly beyond the trigger threshold.
@@ -1045,19 +1144,25 @@ class TradeManager:
         trigger_mult = float(getattr(cfg, "limit_extension_trigger_atr_multiple", 1.5))
         step_mult = float(getattr(cfg, "limit_extension_step_atr_multiple", 1.0))
         max_ext = int(getattr(cfg, "limit_extension_max_extensions", 2))
-        step = step_mult * entry_atr
+        step_price = step_mult * entry_atr
 
         ext_count = self._limit_ext_count.get(trade_id, 0)
         if ext_count >= max_ext:
             return [], current_target
 
-        profit = self._profit_points(side, entry, px)
-        # Each successive extension requires one more step of profit above the trigger floor.
-        required = (trigger_mult + ext_count * step_mult) * entry_atr
+        profit = self._profit_ig_points(side, entry, px, epic)
+        from system.pnl_math import price_delta_to_ig_points
+
+        required_price = (trigger_mult + ext_count * step_mult) * entry_atr
+        required = price_delta_to_ig_points(epic, required_price)
         if profit < required:
             return [], current_target
 
-        new_target = current_target + step if side == "BUY" else current_target - step
+        new_target = (
+            current_target + step_price
+            if side == "BUY"
+            else current_target - step_price
+        )
 
         self.store.update_target(
             trade_id,
@@ -1074,6 +1179,7 @@ class TradeManager:
         log_engine(msg)
         if self.on_alert:
             self.on_alert(msg)
+        self._award_protection_milestone(trade_id, "limit_extension", market)
         return [msg], new_target
 
     def _apply_scalping_breakeven_trail(
@@ -1088,6 +1194,7 @@ class TradeManager:
         quote: Quote,
         entry_atr: float,
         *,
+        epic: str = "",
         enable_atr_trail: bool = False,
     ) -> list[str]:
         """Micro-milestone BE (spread+commission+2pts) then optional ATR trail."""
@@ -1098,9 +1205,9 @@ class TradeManager:
         )
 
         msgs: list[str] = []
-        be_trigger = breakeven_trigger_points(quote, self._cfg)
-        be_offset = breakeven_stop_offset(quote, self._cfg)
-        profit = self._profit_points(side, entry, px)
+        be_trigger = breakeven_trigger_points(quote, self._cfg, epic=epic)
+        be_offset = breakeven_stop_offset(quote, self._cfg, epic=epic)
+        profit = self._profit_ig_points(side, entry, px, epic)
 
         if trade_id not in self._scalping_be_armed:
             if side == "BUY":
@@ -1123,6 +1230,7 @@ class TradeManager:
                         f"BE locked | {market} BUY → {be_stop:.2f}",
                         dedupe_key=f"protect_be:{market}:{trade_id}",
                     )
+                    self._award_protection_milestone(trade_id, "breakeven", market)
             else:
                 be_stop = entry - be_offset
                 if profit >= be_trigger and stop > be_stop:
@@ -1143,11 +1251,18 @@ class TradeManager:
                         f"BE locked | {market} SELL → {be_stop:.2f}",
                         dedupe_key=f"protect_be:{market}:{trade_id}",
                     )
+                    self._award_protection_milestone(trade_id, "breakeven", market)
 
         if enable_atr_trail and trade_id in self._scalping_be_armed:
             atr = entry_atr if entry_atr > 0 else be_trigger
-            trail_dist = trail_distance_from_atr(atr, self._cfg)
-            if trail_dist > 0:
+            trail_dist_raw = trail_distance_from_atr(atr, self._cfg)
+            if trail_dist_raw > 0:
+                if entry_atr > 0:
+                    trail_dist = trail_dist_raw
+                else:
+                    trail_dist = self._trail_distance_price(
+                        epic, trail_dist_raw, self._cfg
+                    )
                 msgs.extend(
                     self._apply_trailing(
                         market,
@@ -1159,40 +1274,65 @@ class TradeManager:
                         px,
                         be_trigger,
                         trail_dist,
+                        epic=epic,
                     )
                 )
         return msgs
 
     def _apply_breakeven(
-        self, market, side, trade_id, entry, stop, target, px, trigger, offset
+        self,
+        market,
+        side,
+        trade_id,
+        entry,
+        stop,
+        target,
+        px,
+        trigger,
+        offset,
+        *,
+        epic: str = "",
     ):
         msgs: list[str] = []
+        profit = self._profit_ig_points(side, entry, px, epic)
+        offset_price = self._offset_price(epic, offset)
         if side == "BUY":
-            profit = px - entry
-            be_stop = entry + offset
+            be_stop = entry + offset_price
             if profit >= trigger and stop < be_stop:
                 self.store.update_stop(
-                    trade_id, be_stop, f" | Stop moved to breakeven {be_stop:.1f}"
+                    trade_id, be_stop, f" | Stop moved to breakeven {be_stop:.5f}"
                 )
-                msgs.append(f"BREAKEVEN STOP MOVED | {market} BUY | stop {be_stop:.1f}")
+                msgs.append(f"BREAKEVEN STOP MOVED | {market} BUY | stop {be_stop:.5f}")
+                self._award_protection_milestone(trade_id, "breakeven", market)
         else:
-            profit = entry - px
-            be_stop = entry - offset
+            be_stop = entry - offset_price
             if profit >= trigger and stop > be_stop:
                 self.store.update_stop(
-                    trade_id, be_stop, f" | Stop moved to breakeven {be_stop:.1f}"
+                    trade_id, be_stop, f" | Stop moved to breakeven {be_stop:.5f}"
                 )
                 msgs.append(
-                    f"BREAKEVEN STOP MOVED | {market} SELL | stop {be_stop:.1f}"
+                    f"BREAKEVEN STOP MOVED | {market} SELL | stop {be_stop:.5f}"
                 )
+                self._award_protection_milestone(trade_id, "breakeven", market)
         return msgs
 
     def _apply_trailing(
-        self, market, side, trade_id, entry, stop, target, px, trigger, distance
+        self,
+        market,
+        side,
+        trade_id,
+        entry,
+        stop,
+        target,
+        px,
+        trigger,
+        distance,
+        *,
+        epic: str = "",
     ):
         msgs: list[str] = []
+        profit = self._profit_ig_points(side, entry, px, epic)
         if side == "BUY":
-            profit = px - entry
             trail_stop = px - distance
             if trail_stop < stop:
                 if profit >= trigger:
@@ -1203,13 +1343,15 @@ class TradeManager:
                 return []
             if profit >= trigger and trail_stop > stop and trail_stop < target:
                 self.store.update_stop(
-                    trade_id, trail_stop, f" | Trailing stop raised to {trail_stop:.1f}"
+                    trade_id,
+                    trail_stop,
+                    f" | Trailing stop raised to {trail_stop:.5f}",
                 )
                 msgs.append(
-                    f"TRAILING STOP RAISED | {market} BUY | stop {trail_stop:.1f}"
+                    f"TRAILING STOP RAISED | {market} BUY | stop {trail_stop:.5f}"
                 )
+                self._award_protection_milestone(trade_id, "trail", market)
         else:
-            profit = entry - px
             trail_stop = px + distance
             if trail_stop > stop:
                 if profit >= trigger:
@@ -1219,14 +1361,25 @@ class TradeManager:
                 self.store.update_stop(
                     trade_id,
                     trail_stop,
-                    f" | Trailing stop lowered to {trail_stop:.1f}",
+                    f" | Trailing stop lowered to {trail_stop:.5f}",
                 )
                 msgs.append(
-                    f"TRAILING STOP LOWERED | {market} SELL | stop {trail_stop:.1f}"
+                    f"TRAILING STOP LOWERED | {market} SELL | stop {trail_stop:.5f}"
                 )
+                self._award_protection_milestone(trade_id, "trail", market)
         return msgs
 
-    def _ig_position_levels(self, deal_id: str) -> tuple[float | None, float | None]:
+    def _stop_tolerance(self, epic: str) -> float:
+        from system.pnl_math import pip_size_for_epic
+
+        return 0.00001 if pip_size_for_epic(epic) is not None else 0.05
+
+    def _round_stop_level(self, level: float, epic: str) -> float:
+        from system.pnl_math import pip_size_for_epic
+
+        if pip_size_for_epic(epic) is not None:
+            return round(float(level), 5)
+        return round(float(level), 1)
         client = self._rest
         if client is None:
             return None, None
@@ -1321,21 +1474,22 @@ class TradeManager:
         # Dedup the limit extension: skip if we already pushed this limit level.
         limit_cache_key = f"{deal_id}:{trade_id}:limit"
         last_pushed_limit = self._last_ig_limit.get(limit_cache_key)
+        tol = self._stop_tolerance(epic)
         if new_limit is not None and last_pushed_limit is not None:
-            if abs(last_pushed_limit - new_limit) < 0.05:
+            if abs(last_pushed_limit - new_limit) < tol:
                 new_limit = None
 
         stop_already_pushed = (
-            last_pushed_stop is not None and abs(last_pushed_stop - stop) < 0.05
+            last_pushed_stop is not None and abs(last_pushed_stop - stop) < tol
         )
         if stop_already_pushed and new_limit is None:
             return False
 
         ig_stop = self._ig_stop_level(deal_id)
         if ig_stop is not None:
-            if side == "BUY" and stop <= ig_stop + 0.05 and new_limit is None:
+            if side == "BUY" and stop <= ig_stop + tol and new_limit is None:
                 return False
-            if side == "SELL" and stop >= ig_stop - 0.05 and new_limit is None:
+            if side == "SELL" and stop >= ig_stop - tol and new_limit is None:
                 return False
 
         try:
@@ -1361,9 +1515,11 @@ class TradeManager:
             else:
                 _, effective_limit = self._ig_position_levels(deal_id)
 
-            kwargs: dict[str, float] = {"stop_level": round(stop, 1)}
+            kwargs: dict[str, float] = {
+                "stop_level": self._round_stop_level(stop, epic)
+            }
             if effective_limit is not None:
-                kwargs["limit_level"] = round(effective_limit, 1)
+                kwargs["limit_level"] = self._round_stop_level(effective_limit, epic)
             self._rest.update_position_stops(deal_id, **kwargs)
             self._last_ig_stop[cache_key] = stop
             if new_limit is not None:

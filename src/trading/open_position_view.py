@@ -8,7 +8,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 from data.models import Quote
-from system.pnl_math import pip_size_for_epic, realised_pnl_points, round_pnl_pts
+from system.pnl_math import (
+    fx_upl_per_ig_point,
+    pip_size_for_epic,
+    realised_pnl_points,
+    round_pnl_pts,
+)
 
 # Non-GBP CFD specs — point_value is in position currency per index point (per contract).
 INSTRUMENT_PNL_SPEC: dict[str, dict[str, float | str]] = {
@@ -68,7 +73,82 @@ def instrument_pnl_spec(epic: str) -> dict[str, float | str]:
             "point_value": float(spec.get("point_value") or 1.0),
             "currency": str(spec.get("currency") or "GBP").upper(),
         }
+    # IG FX CFD UPL is quoted in USD; contract £/pip is not ig_point_value_gbp.
+    if pip_size_for_epic(epic) is not None:
+        return {"point_value": 1.0, "currency": "USD"}
     return {"point_value": 1.0, "currency": "GBP"}
+
+
+def point_value_gbp_for_epic(epic: str, fallback: float = 1.0) -> float:
+    """Per-instrument £/point from config (indices); FX uses broker UPL scaling instead."""
+    try:
+        from execution.trade_risk import point_value_for_epic
+        from system.config_loader import get_config
+
+        return float(
+            point_value_for_epic(str(epic or "").strip(), get_config().as_dict())
+        )
+    except Exception:
+        return float(fallback)
+
+
+def _broker_pnl_baseline(
+    row: dict[str, Any],
+) -> tuple[float | None, float | None, float | None]:
+    """Return (broker_gbp, broker_mark, broker_upl currency) anchored to last IG sync."""
+    broker_gbp = row.get("broker_pnl_gbp")
+    if broker_gbp is None:
+        broker_gbp = row.get("pnl_gbp")
+    broker_mark = row.get("broker_mark")
+    if broker_mark is None:
+        broker_mark = row.get("current")
+    broker_upl = row.get("broker_upl")
+    if broker_upl is None:
+        broker_upl = row.get("pnl_currency")
+    if broker_upl is None:
+        broker_upl = row.get("upl")
+    try:
+        bg = float(broker_gbp) if broker_gbp is not None else None
+    except (TypeError, ValueError):
+        bg = None
+    try:
+        bm = float(broker_mark) if broker_mark is not None else None
+    except (TypeError, ValueError):
+        bm = None
+    try:
+        bu = float(broker_upl) if broker_upl is not None else None
+    except (TypeError, ValueError):
+        bu = None
+    return bg, bm, bu
+
+
+def _scale_pnl_from_broker_baseline(
+    *,
+    side: str,
+    entry: float,
+    epic: str,
+    new_mark: float,
+    broker_gbp: float,
+    broker_mark: float,
+    broker_upl: float | None,
+) -> tuple[float, float, float | None]:
+    """Scale IG-synced P&L linearly with pip move — matches IG contract sizing."""
+    from system.pnl_math import price_delta_to_ig_points
+
+    base_pts = price_delta_to_ig_points(
+        epic, realised_pnl_points(side, entry, broker_mark)
+    )
+    new_pts = price_delta_to_ig_points(epic, realised_pnl_points(side, entry, new_mark))
+    if abs(base_pts) >= 0.01:
+        ratio = new_pts / base_pts
+        gbp = float(broker_gbp) * ratio
+        upl: float | None = (
+            round(float(broker_upl) * ratio, 2) if broker_upl is not None else None
+        )
+    else:
+        gbp = float(broker_gbp)
+        upl = broker_upl
+    return new_pts, round(gbp, 2), upl
 
 
 def usd_to_gbp_rate() -> float:
@@ -185,12 +265,45 @@ def unrealized_from_quote(
         from system.pnl_math import price_delta_to_ig_points
 
         pts = price_delta_to_ig_points(epic, raw_delta)
+    per_point_fx = fx_upl_per_ig_point(epic, size, currency=currency) if epic else None
+    if per_point_fx is not None:
+        pnl_ccy = float(pts) * per_point_fx
+        gbp = pnl_currency_amount_to_gbp(pnl_ccy, currency)
+        return mark, pts, gbp
     pv = float(point_value)
     if point_value_gbp is not None and str(currency or "GBP").upper() == "GBP":
         pv = float(point_value_gbp)
     raw_pts = pts * max(0.0, float(size))
     gbp = raw_points_pnl_to_gbp(raw_pts, point_value=pv, currency=currency)
     return mark, pts, gbp
+
+
+def infer_protection_flags(row: dict[str, Any]) -> dict[str, bool]:
+    """Derive breakeven/trail UI flags from stop level and trade notes."""
+    side = str(row.get("side") or row.get("direction") or "").upper()
+    notes = str(row.get("notes") or "").lower()
+    breakeven_hit = any(
+        token in notes
+        for token in (
+            "breakeven",
+            "be locked",
+            "be+",
+            "capital recycle",
+            "exec_protect breakeven",
+        )
+    )
+    trail_active = "trailing" in notes
+    try:
+        entry_f = float(row.get("entry") or row.get("level") or 0)
+        stop_f = float(row.get("stop") or row.get("stop_level") or 0)
+        if entry_f > 0 and stop_f > 0:
+            if side == "BUY" and stop_f >= entry_f:
+                breakeven_hit = True
+            elif side == "SELL" and stop_f <= entry_f:
+                breakeven_hit = True
+    except (TypeError, ValueError):
+        pass
+    return {"breakeven_hit": breakeven_hit, "trail_active": trail_active}
 
 
 def normalize_sync_position(pos: dict[str, Any]) -> dict[str, Any]:
@@ -227,6 +340,8 @@ def normalize_sync_position(pos: dict[str, Any]) -> dict[str, Any]:
             )
         except (TypeError, ValueError):
             pnl_gbp = None
+    broker_mark = current
+    flags = infer_protection_flags(pos)
     return {
         "deal_id": pos.get("deal_id") or pos.get("dealId") or "",
         "side": side,
@@ -236,10 +351,14 @@ def normalize_sync_position(pos: dict[str, Any]) -> dict[str, Any]:
         "target": target,
         "pnl_currency": float(pnl_currency) if pnl_currency is not None else None,
         "pnl_gbp": pnl_gbp,
+        "broker_pnl_gbp": pnl_gbp,
+        "broker_mark": broker_mark,
+        "broker_upl": float(pnl_currency) if pnl_currency is not None else None,
         "pnl_pts": pos.get("pnl_pts"),
         "size": float(pos.get("size") or 0),
-        "trail_active": bool(pos.get("trail_active", False)),
-        "breakeven_hit": bool(pos.get("breakeven_hit", False)),
+        "trail_active": flags["trail_active"],
+        "breakeven_hit": flags["breakeven_hit"],
+        "notes": pos.get("notes"),
         "open_mins": _compute_open_mins(pos),
         "epic": epic,
         "point_value": point_value,
@@ -372,14 +491,36 @@ def enrich_positions_with_quote(
         if not _quote_mark_trustworthy(entry, mark, epic_str):
             out.append(row)
             continue
+        scaled_upl: float | None = None
+        broker_gbp, broker_mark, broker_upl = _broker_pnl_baseline(row)
+        use_broker_scale = (
+            broker_gbp is not None
+            and broker_mark is not None
+            and float(broker_mark) > 0
+            and (
+                abs(float(broker_gbp)) >= 0.01
+                or (broker_upl is not None and abs(float(broker_upl)) >= 0.01)
+            )
+        )
+        if use_broker_scale:
+            pts, gbp, scaled_upl = _scale_pnl_from_broker_baseline(
+                side=side,
+                entry=float(entry),
+                epic=epic_str,
+                new_mark=float(mark),
+                broker_gbp=float(broker_gbp),
+                broker_mark=float(broker_mark),
+                broker_upl=broker_upl,
+            )
         if mark:
             row["current"] = mark
         row["pnl_pts"] = round_pnl_pts(pts, epic_str)
         row["point_value"] = pv
         row["currency"] = ccy
-        # Streaming quote wins over stale IG sync UPL so open P&L tracks live prices.
         row["pnl_gbp"] = round(gbp, 2)
-        if gbp != 0.0:
+        if scaled_upl is not None:
+            row["pnl_currency"] = scaled_upl
+        elif gbp != 0.0:
             if ccy == "GBP":
                 row["pnl_currency"] = float(gbp)
             else:
@@ -483,7 +624,11 @@ def positions_from_store_rows(
             "epic": epic,
             "point_value": float(spec["point_value"]),
             "currency": str(spec["currency"]),
+            "notes": str(tr["notes"] or "") if "notes" in keys else "",
         }
+        flags = infer_protection_flags(row)
+        row["trail_active"] = flags["trail_active"]
+        row["breakeven_hit"] = flags["breakeven_hit"]
         upl = tr.get("unrealized_pnl") if hasattr(tr, "get") else None
         if upl is not None:
             try:

@@ -53,6 +53,12 @@
   "signal_threshold": 55,
   "confidence_floor": 55,
   "confidence_floor_recovery_per_win": 1.0,
+  "points_milestones": {
+    "enabled": true,
+    "breakeven_points": 0.5,
+    "trail_points": 0.5,
+    "limit_extension_points": 0.25
+  },
   "confidence_floor_notes": [
     "Bootstrap phase complete. Both signal_threshold and confidence_floor set to 80.",
     "Trades at <80% score zero points so can't exit CAUTION \u2014 80 is the effective floor.",

@@ -59,14 +59,20 @@ def _cfg(**overrides) -> Config:
 
 
 def _open_trade(
-    store: LearningStore, *, entry: float = 100.0, stop: float = 90.0
+    store: LearningStore,
+    *,
+    entry: float = 100.0,
+    stop: float = 90.0,
+    side: str = "BUY",
+    epic: str = "IX.D.NIKKEI.IFM.IP",
+    market: str = "Japan 225",
 ) -> int:
     return store.open_trade(
         TradeRecord(
             id=None,
-            market="Japan 225",
-            epic="IX.D.NIKKEI.IFM.IP",
-            side="BUY",
+            market=market,
+            epic=epic,
+            side=side,
             entry=entry,
             exit=None,
             size=2.0,
@@ -680,6 +686,70 @@ class CapitalRecycleTests(unittest.TestCase):
             "SELECT stop FROM trades WHERE id=?", (tid,)
         ).fetchone()
         self.assertAlmostEqual(float(row["stop"]), 90.0)
+
+
+class FxProtectionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.state_path = Path(self.tmp.name) / "points.json"
+        from trading.points_engine import set_points_state_path_for_tests
+
+        set_points_state_path_for_tests(self.state_path)
+        self.points = PointsEngine(state_path=self.state_path)
+        self.store = LearningStore(str(Path(self.tmp.name) / "fx.db"))
+        self.store.connect()
+        self.mgr = TradeManager(
+            _cfg(),
+            self.store,
+            skip_ig_synced_exits=True,
+            points_engine=self.points,
+        )
+
+    def tearDown(self) -> None:
+        from trading.points_engine import set_points_state_path_for_tests
+
+        set_points_state_path_for_tests(None)
+        self.store.close()
+        self.tmp.cleanup()
+
+    def test_fx_scalping_breakeven_fires_in_pips(self) -> None:
+        quote = Quote(datetime(2026, 6, 12, 14, 0), 1.15715, 1.15724)
+        tid = _open_trade(
+            self.store,
+            entry=1.15673,
+            stop=1.15593,
+            side="BUY",
+            epic="CS.D.EURUSD.CFD.IP",
+            market="EUR/USD",
+        )
+        msgs = self.mgr._apply_scalping_breakeven_trail(
+            "EUR/USD",
+            "BUY",
+            tid,
+            1.15673,
+            1.15593,
+            1.15913,
+            1.15715,
+            quote,
+            entry_atr=0.00080,
+            epic="CS.D.EURUSD.CFD.IP",
+            enable_atr_trail=False,
+        )
+        self.assertTrue(msgs)
+        stop = float(
+            self.store.conn.execute(
+                "SELECT stop FROM trades WHERE id=?", (tid,)
+            ).fetchone()["stop"]
+        )
+        self.assertGreater(stop, 1.15673)
+        notes = str(
+            self.store.conn.execute(
+                "SELECT notes FROM trades WHERE id=?", (tid,)
+            ).fetchone()["notes"]
+            or ""
+        )
+        self.assertIn("PTS_MILESTONE:breakeven", notes)
+        self.assertAlmostEqual(self.points.snapshot().cumulative, 0.5)
 
 
 if __name__ == "__main__":

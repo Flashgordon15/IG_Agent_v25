@@ -50,7 +50,7 @@ function agentStateMeta(stateName) {
         banner: "border-warning/40 bg-warning/10 text-warning",
         flash: false,
         description:
-          "Reduced size bands — need cumulative above +10 pts for HEALTHY.",
+          "Reduced size bands — need cumulative above +4 pts for HEALTHY.",
       };
     case "WARNING":
       return {
@@ -146,7 +146,7 @@ function agentStateDescription(state, stateName) {
 
   const detail = parts.join(", ");
   if (s === "CAUTION") {
-    return `${detail} — reduced bands; need cumulative above +10 pts for HEALTHY.`;
+    return `${detail} — reduced bands; need cumulative above +4 pts for HEALTHY.`;
   }
   if (s === "WARNING") {
     return `${detail} — minimal size only at ≥92% confidence.`;
@@ -293,6 +293,10 @@ export default function PointsPanel({ state }) {
   const lineColor =
     latestPnl != null && latestPnl < 0 ? "#ef4444" : "#22c55e";
 
+  const nextTier = pts?.next_tier;
+  const nextPts = nextTier?.points_to_next;
+  const nextLabel = nextTier?.label;
+
   return (
     <div className="mx-auto max-w-5xl space-y-3 px-1 pb-4">
       {/* 1. Score cards */}
@@ -322,6 +326,28 @@ export default function PointsPanel({ state }) {
       <p className="text-center text-[10px] text-muted">
         Points = strategy score (not £). Cumulative P&amp;L chart below uses IG-confirmed £ only.
       </p>
+
+      {nextLabel ? (
+        <Card title="Next tier">
+          <p className="text-center text-[13px] text-foreground">{nextLabel}</p>
+          {nextPts != null && Number.isFinite(Number(nextPts)) && Number(nextPts) > 0 ? (
+            <p className="mt-1 text-center font-mono text-lg tabular-nums text-success">
+              +{Number(nextPts).toFixed(1)} pts to unlock
+            </p>
+          ) : nextTier?.kind === "max" ? (
+            <p className="mt-1 text-center text-[12px] text-muted">
+              Largest configured size bands active
+            </p>
+          ) : nextTier?.kind === "stop" ? (
+            <p className="mt-1 text-center text-[12px] text-danger">
+              Trading halted until STOP is cleared
+            </p>
+          ) : null}
+          <p className="mt-2 text-center text-[10px] text-muted">
+            Protection milestones (BE +0.5, trail +0.5, limit ext +0.25) also add points while trades run.
+          </p>
+        </Card>
+      ) : null}
 
       {/* 2. Agent state */}
       <Card className="text-center">

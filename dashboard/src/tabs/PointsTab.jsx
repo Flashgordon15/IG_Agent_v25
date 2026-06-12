@@ -112,7 +112,7 @@ export default function PointsTab({ tick }) {
             : state === "WARNING"
               ? "Need cumulative above −5 pts or 3 recovery wins to return to CAUTION."
               : state === "CAUTION"
-                ? "Need cumulative above +10 pts to reach HEALTHY."
+                ? "Need cumulative above +4 pts to reach HEALTHY."
                 : "HEALTHY — full size bands available per confidence."}
         </p>
       </div>

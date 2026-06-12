@@ -2877,6 +2877,7 @@ class TradingLoop:
                 "session": float(ps.session_score),
                 "last_trade": float(ps.last_trade_score),
                 "size_multiplier": float(self._points.get_size_multiplier(confidence)),
+                "next_tier": self._points.get_next_tier(),
             },
             "positions": open_positions,
             "realized_daily_pnl_gbp": realized_daily_pnl,
@@ -3187,7 +3188,29 @@ class TradingLoop:
             pos_epic = str(pos.get("epic") or "")
             if self._epic and pos_epic and pos_epic != self._epic:
                 return
-            raw.append(normalize_sync_position(pos))
+            merged = dict(pos)
+            deal_id = str(merged.get("deal_id") or merged.get("dealId") or "")
+            if deal_id and self._store is not None:
+                try:
+                    for tr in self._store.active_trades(pos_epic or self._epic):
+                        tr_keys = tr.keys()
+                        tr_deal = (
+                            str(tr["ig_deal_id"] or "")
+                            if "ig_deal_id" in tr_keys
+                            else ""
+                        )
+                        if tr_deal != deal_id:
+                            continue
+                        if "notes" in tr_keys and tr["notes"]:
+                            merged["notes"] = tr["notes"]
+                        if merged.get("stop") in (None, 0) and tr.get("stop"):
+                            merged["stop"] = float(tr["stop"])
+                        if merged.get("target") in (None, 0) and tr.get("target"):
+                            merged["target"] = float(tr["target"])
+                        break
+                except Exception:
+                    pass
+            raw.append(normalize_sync_position(merged))
 
         try:
             snap = self._execution_loop.execution_engine.trade_tracker.snapshot()

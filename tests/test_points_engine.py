@@ -17,7 +17,9 @@ from data.learning_store import LearningStore
 from trading.points_engine import (  # noqa: E402
     EQUITY_LOCK_SESSION_MILESTONE,
     EQUITY_LOCK_SIGNAL_THRESHOLD,
+    HEALTHY_CUMULATIVE_MIN,
     PointsEngine,
+    next_tier_preview,
     set_points_state_path_for_tests,
 )
 
@@ -334,6 +336,44 @@ class PointsEnginePersistenceTests(unittest.TestCase):
 
         set_points_state_path_for_tests(None)
         tmp.cleanup()
+
+
+class PointsMilestoneTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.state_path = Path(self.tmp.name) / "points.json"
+        set_points_state_path_for_tests(self.state_path)
+        self.engine = PointsEngine(state_path=self.state_path)
+
+    def tearDown(self) -> None:
+        set_points_state_path_for_tests(None)
+        self.tmp.cleanup()
+
+    def test_record_milestone_adds_bonus_once_configured(self) -> None:
+        score = self.engine.record_milestone("breakeven", market="EUR/USD", trade_id=1)
+        self.assertAlmostEqual(score, 0.5)
+        snap = self.engine.snapshot()
+        self.assertAlmostEqual(snap.cumulative, 0.5)
+        self.assertAlmostEqual(snap.last_trade_score, 0.5)
+
+    def test_record_milestone_unknown_kind_is_zero(self) -> None:
+        self.assertEqual(self.engine.record_milestone("unknown"), 0.0)
+
+    def test_next_tier_preview_from_caution(self) -> None:
+        preview = next_tier_preview(0.0, "CAUTION")
+        self.assertEqual(preview["kind"], "state")
+        self.assertAlmostEqual(preview["points_to_next"], HEALTHY_CUMULATIVE_MIN + 0.01)
+
+    def test_next_tier_preview_compound_boost(self) -> None:
+        preview = next_tier_preview(12.0, "HEALTHY")
+        self.assertEqual(preview["label"], "Compound boost (2.5× stack)")
+        self.assertAlmostEqual(preview["points_to_next"], 3.0)
+
+    def test_get_next_tier_wrapper(self) -> None:
+        self.engine._cumulative = 12.0
+        tier = self.engine.get_next_tier()
+        self.assertEqual(tier["state"], "HEALTHY")
+        self.assertAlmostEqual(tier["points_to_next"], 3.0)
 
 
 if __name__ == "__main__":
