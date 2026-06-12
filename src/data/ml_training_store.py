@@ -79,6 +79,8 @@ def _is_excluded(deal_id: str, data: dict[str, Any]) -> bool:
     row.setdefault("ig_deal_id", deal_id)
     if is_excluded_display_row(row):
         return True
+    if is_ig_import_setup_key(data.get("setup_name") or data.get("setup_key")):
+        return True
     src = str(data.get("source") or "").lower()
     if src in EXCLUDED_SOURCES:
         return True
@@ -88,7 +90,9 @@ def _is_excluded(deal_id: str, data: dict[str, Any]) -> bool:
     return False
 
 
-def _normalize_record(entry: dict[str, Any], exit_data: dict[str, Any], deal_id: str) -> dict[str, Any]:
+def _normalize_record(
+    entry: dict[str, Any], exit_data: dict[str, Any], deal_id: str
+) -> dict[str, Any]:
     merged = {**entry, **exit_data}
     record = {
         "confidence": float(merged.get("confidence", 0.0)),
@@ -207,7 +211,9 @@ def _validate_store_on_startup(path: Path) -> None:
 class MLTrainingStore:
     """Buffers entry context until IG-confirmed exit, then appends one JSONL line."""
 
-    def __init__(self, path: Path | str | None = None, *, version: str = ML_VERSION) -> None:
+    def __init__(
+        self, path: Path | str | None = None, *, version: str = ML_VERSION
+    ) -> None:
         self._path = Path(path) if path else default_store_path()
         self._version = str(version)
         _validate_store_on_startup(self._path)
@@ -245,7 +251,9 @@ class MLTrainingStore:
             with _lock:
                 entry = _entry_buffer.get(did)
             if entry is None:
-                log_engine(f"ml_training_store exit skipped — no entry buffer deal={did}")
+                log_engine(
+                    f"ml_training_store exit skipped — no entry buffer deal={did}"
+                )
                 return
 
             if _is_excluded(did, {**entry, **exit_payload}):
@@ -299,7 +307,9 @@ class MLTrainingStore:
                         count += 1
             return count
         except Exception as e:
-            log_engine(f"ml_training_store record_count failed: {type(e).__name__}: {e}")
+            log_engine(
+                f"ml_training_store record_count failed: {type(e).__name__}: {e}"
+            )
             return 0
 
     @staticmethod

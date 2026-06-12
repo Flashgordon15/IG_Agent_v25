@@ -104,6 +104,36 @@ class SnapshotHubPositionsTests(unittest.TestCase):
         self.assertEqual(pos_second["current"], 4448.5)
         self.assertEqual(pos_second["pnl_pts"], 14.8)
 
+    def test_hub_refresh_updates_display_daily_pnl(self) -> None:
+        publish_tick(
+            {
+                "type": "tick",
+                "epic": "CS.D.CFPGOLD.CFP.IP",
+                "selected_epic": "CS.D.CFPGOLD.CFP.IP",
+                "realized_daily_pnl_gbp": 12.0,
+                "daily_pnl_gbp": 12.0,
+                "bid": 4454.79,
+                "offer": 4455.29,
+                "positions": [
+                    {
+                        "deal_id": "DIAAAAXNM2VYUAN",
+                        "epic": "CS.D.CFPGOLD.CFP.IP",
+                        "side": "SELL",
+                        "entry": 4463.25,
+                        "current": 4460.59,
+                        "pnl_pts": 2.7,
+                        "pnl_gbp": 0.0,
+                        "size": 10.0,
+                    }
+                ],
+            }
+        )
+
+        force_position_view_refresh("CS.D.CFPGOLD.CFP.IP", 4450.0, 4450.5)
+        tick = get_tick()
+        self.assertGreater(float(tick.get("open_unrealized_gbp") or 0), 0)
+        self.assertGreater(float(tick.get("daily_pnl_gbp") or 0), 12.0)
+
 
 if __name__ == "__main__":
     unittest.main()

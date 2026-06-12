@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import { postEmergencyStop } from "../api.js";
+import LearningHealthPanel from "./LearningHealthPanel.jsx";
 import resolveSupervisionAlert from "../utils/supervision.js";
 import {
   resolveEffectivePolicy,
@@ -491,6 +492,8 @@ export default function SystemPanel({ state, wsConnected, reconnecting }) {
           </dl>
         </Card>
       </div>
+
+      <LearningHealthPanel />
 
       {/* Health panel */}
       <Card title="Health">

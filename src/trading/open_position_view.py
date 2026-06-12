@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from data.models import Quote
-from system.pnl_math import realised_pnl_points
+from system.pnl_math import realised_pnl_points, round_pnl_pts
 
 # Non-GBP CFD specs — point_value is in position currency per index point (per contract).
 INSTRUMENT_PNL_SPEC: dict[str, dict[str, float | str]] = {
@@ -152,6 +152,7 @@ def unrealized_from_quote(
     size: float,
     quote: Quote,
     *,
+    epic: str = "",
     point_value: float = 1.0,
     currency: str = "GBP",
     point_value_gbp: float | None = None,
@@ -160,7 +161,12 @@ def unrealized_from_quote(
     mark = _mark_price(side, quote)
     if mark is None:
         return 0.0, 0.0, 0.0
-    pts = realised_pnl_points(side, entry, mark)
+    raw_delta = realised_pnl_points(side, entry, mark)
+    pts = raw_delta
+    if epic:
+        from system.pnl_math import price_delta_to_ig_points
+
+        pts = price_delta_to_ig_points(epic, raw_delta)
     pv = float(point_value)
     if point_value_gbp is not None and str(currency or "GBP").upper() == "GBP":
         pv = float(point_value_gbp)
@@ -340,27 +346,76 @@ def enrich_positions_with_quote(
             entry,
             size,
             quote,
+            epic=epic_str,
             point_value=pv,
             currency=ccy,
             point_value_gbp=point_value_gbp,
         )
         if mark:
             row["current"] = mark
-        row["pnl_pts"] = round(pts, 1)
+        row["pnl_pts"] = round_pnl_pts(pts, epic_str)
         row["point_value"] = pv
         row["currency"] = ccy
-        # Prefer broker UPL in position currency; quote math when UPL missing/zero.
-        try:
-            ig_amt = float(pnl_currency) if pnl_currency is not None else 0.0
-        except (TypeError, ValueError):
-            ig_amt = 0.0
-        if ig_amt != 0.0:
-            row["pnl_currency"] = ig_amt
-            row["pnl_gbp"] = round(pnl_currency_amount_to_gbp(ig_amt, ccy), 2)
-        else:
-            row["pnl_gbp"] = round(gbp, 2)
+        # Streaming quote wins over stale IG sync UPL so open P&L tracks live prices.
+        row["pnl_gbp"] = round(gbp, 2)
+        if gbp != 0.0:
+            if ccy == "GBP":
+                row["pnl_currency"] = float(gbp)
+            else:
+                row["pnl_currency"] = round(
+                    float(gbp) / max(usd_to_gbp_rate(), 1e-9), 2
+                )
         out.append(row)
     return out
+
+
+def sum_open_unrealized_gbp(tick: dict[str, Any]) -> float:
+    """Sum unrealized £ P&L from top-level and per-market position rows."""
+    total = 0.0
+    seen_deals: set[str] = set()
+
+    def _add(pos: dict[str, Any]) -> None:
+        nonlocal total
+        deal = str(pos.get("deal_id") or "")
+        if deal and deal in seen_deals:
+            return
+        if deal:
+            seen_deals.add(deal)
+        try:
+            total += float(pos.get("pnl_gbp") or 0.0)
+        except (TypeError, ValueError):
+            pass
+
+    positions = tick.get("positions")
+    if isinstance(positions, list):
+        for pos in positions:
+            if isinstance(pos, dict):
+                _add(pos)
+
+    markets = tick.get("markets")
+    if isinstance(markets, dict):
+        for mslice in markets.values():
+            if not isinstance(mslice, dict):
+                continue
+            for pos in mslice.get("positions") or []:
+                if isinstance(pos, dict):
+                    _add(pos)
+    return round(total, 2)
+
+
+def apply_display_daily_pnl(tick: dict[str, Any]) -> None:
+    """Dashboard Today P&L = realized (closed) + open unrealized."""
+    realized_raw = tick.get("realized_daily_pnl_gbp")
+    if realized_raw is None:
+        realized_raw = tick.get("daily_pnl_gbp")
+    try:
+        realized = float(realized_raw or 0.0)
+    except (TypeError, ValueError):
+        realized = 0.0
+    tick["realized_daily_pnl_gbp"] = round(realized, 2)
+    open_upl = sum_open_unrealized_gbp(tick)
+    tick["open_unrealized_gbp"] = open_upl
+    tick["daily_pnl_gbp"] = round(realized + open_upl, 2)
 
 
 def positions_from_store_rows(

@@ -164,7 +164,16 @@ def effective_fitness_min(epic: str, *, points_state: str) -> float:
             floor = float(soak.get("fitness_min") or 50)
         except (TypeError, ValueError):
             floor = 50.0
-        return max(45.0, min(GATE_PASS_MIN, floor))
+        out = max(45.0, min(GATE_PASS_MIN, floor))
+        try:
+            from system.protective_learning import fitness_min_floor
+
+            prot = fitness_min_floor()
+            if prot is not None:
+                out = max(out, min(GATE_PASS_MIN, float(prot)))
+        except Exception:
+            pass
+        return out
 
     block = _relaxation_block()
     if not _v26_relaxation_active():
@@ -193,13 +202,17 @@ def relaxation_snapshot() -> dict[str, Any]:
         "enabled": relaxation_enabled(),
         "v26_gate_relaxations_active": v26_active,
         "demo_soak_mode": bool(soak.get("enabled")),
-        "fitness_min": soak.get("fitness_min") if demo_soak_enabled() else block.get("fitness_min"),
+        "fitness_min": soak.get("fitness_min")
+        if demo_soak_enabled()
+        else block.get("fitness_min"),
         "warning_confidence_cap": (
             soak.get("warning_confidence_cap")
             if demo_soak_enabled()
             else block.get("warning_confidence_cap")
         ),
-        "relax_all_epics": bool(soak.get("relax_all_epics", True)) if demo_soak_enabled() else False,
+        "relax_all_epics": bool(soak.get("relax_all_epics", True))
+        if demo_soak_enabled()
+        else False,
         "disable_rotation_filter": rotation_filter_bypassed(),
         "bypass_ml_veto": soak_ml_veto_bypassed(),
         "spread_to_atr_circuit_max": soak.get("spread_to_atr_circuit_max"),
@@ -209,9 +222,7 @@ def relaxation_snapshot() -> dict[str, Any]:
             if demo_soak_enabled()
             else block.get("require_points_healthy", True)
         ),
-        "note": str(
-            soak.get("_note") or block.get("_note") or ""
-        ),
+        "note": str(soak.get("_note") or block.get("_note") or ""),
     }
     try:
         from system.learning_demo_policy import (
@@ -223,9 +234,7 @@ def relaxation_snapshot() -> dict[str, Any]:
         snap["learning_demo_profile"] = (
             learning_demo_profile() if learning_demo_enabled() else ""
         )
-        snap["policy_id"] = (
-            learning_demo_policy_id() if learning_demo_enabled() else ""
-        )
+        snap["policy_id"] = learning_demo_policy_id() if learning_demo_enabled() else ""
     except Exception:
         pass
     return snap

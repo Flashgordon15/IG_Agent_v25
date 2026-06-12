@@ -2641,6 +2641,7 @@ class TradingLoop:
         points_state = self._points.get_state()
         ps = self._points.snapshot()
         open_positions = self._positions_payload(quote)
+        realized_daily_pnl = self._daily_pnl_signed_gbp(open_positions)
 
         session_open = False
         for g in ctx.gates:
@@ -2878,7 +2879,8 @@ class TradingLoop:
                 "size_multiplier": float(self._points.get_size_multiplier(confidence)),
             },
             "positions": open_positions,
-            "daily_pnl_gbp": self._daily_pnl_signed_gbp(open_positions),
+            "realized_daily_pnl_gbp": realized_daily_pnl,
+            "daily_pnl_gbp": realized_daily_pnl,
             "balance_gbp": self._balance_gbp(),
             "win_rate_20": self._win_rate_20_pct(),
             "max_open_positions": int(self._config.max_open_positions),

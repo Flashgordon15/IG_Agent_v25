@@ -238,10 +238,28 @@ class EnvironmentScorer:
             long_pct = 50.0
         long_pct = max(0.0, min(100.0, long_pct))
         self._sentiment_cache[key] = long_pct
-        if long_pct > 80.0:
+        crowded_long = 80.0
+        crowded_short = 20.0
+        log_raw = True
+        try:
+            from system.config_loader import get_config
+
+            block = get_config().get("sentiment_guard") or {}
+            if isinstance(block, dict):
+                crowded_long = float(block.get("crowded_long_pct") or crowded_long)
+                crowded_short = float(block.get("crowded_short_pct") or crowded_short)
+                log_raw = bool(block.get("log_raw", True))
+        except Exception:
+            pass
+        if log_raw:
+            log_engine(
+                f"sentiment epic={key} long_pct={long_pct:.1f} "
+                f"(crowded>{crowded_long:.0f} or <{crowded_short:.0f})"
+            )
+        if long_pct > crowded_long:
             label = "crowded_long"
             adjustment = -10.0
-        elif long_pct < 20.0:
+        elif long_pct < crowded_short:
             label = "crowded_short"
             adjustment = -10.0
         else:

@@ -176,6 +176,36 @@ def api_roadmap_progress(days: int = 7) -> dict[str, Any]:
     )
 
 
+@router.get("/api/daily-digest")
+def api_daily_digest() -> dict[str, Any]:
+    """Daily operator briefing markdown for the dashboard popup."""
+    from api.daily_digest import load_daily_digest
+
+    try:
+        return load_daily_digest(regenerate_if_stale=True)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"daily digest unavailable: {type(exc).__name__}: {exc}",
+        ) from exc
+
+
+@router.get("/api/learning-health")
+def api_learning_health(refresh_registry: bool = False) -> dict[str, Any]:
+    """Learning pipeline status — ML, registry, agent P&L, policy."""
+    from system.learning_health import build_learning_health_report
+
+    try:
+        return build_learning_health_report(refresh_registry=refresh_registry)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"learning health unavailable: {type(exc).__name__}: {exc}",
+        ) from exc
+
+
 @router.get("/api/gates/attribution")
 def api_gates_attribution(days: int = 7, rotated: bool = True) -> dict[str, Any]:
     """Ranked gate blockers from engine.log WAIT lines."""

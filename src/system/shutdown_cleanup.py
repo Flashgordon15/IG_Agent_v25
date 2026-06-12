@@ -246,9 +246,15 @@ def perform_shutdown_cleanup(
 
     if not skip_port_cleanup:
         try:
-            import main as _main
+            import sys
 
-            _main._force_cleanup_port()
+            mod = sys.modules.get("__main__")
+            if mod is not None and hasattr(mod, "_force_cleanup_port"):
+                mod._force_cleanup_port(8080)
+            else:
+                import main as _main
+
+                _main._force_cleanup_port(8080)
         except Exception as e:
             log_engine(f"shutdown cleanup: port cleanup error (continuing): {e}")
 

@@ -483,6 +483,14 @@ class PointsEngine:
             prot = self.protected_signal_threshold_floor()
             if prot is not None:
                 threshold = max(threshold, prot)
+            try:
+                from system.protective_learning import signal_threshold_floor
+
+                floor = signal_threshold_floor()
+                if floor is not None:
+                    threshold = max(threshold, floor)
+            except Exception:
+                pass
             return threshold
         except Exception:
             return CONF_MARGINAL_MIN

@@ -47,6 +47,7 @@ export const api = {
     fetchJson(`/api/v27/sentinel/diagnostics?limit=${limit}`),
   roadmapProgress: (days = 7) =>
     fetchJson(`/api/roadmap/progress?days=${days}`),
+  dailyDigest: () => fetchJson("/api/daily-digest"),
   approveStrategyProposal: (proposalId) =>
     fetchJson("/api/v27/sentinel/approve", {
       method: "POST",

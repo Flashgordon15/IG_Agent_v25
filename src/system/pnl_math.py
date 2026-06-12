@@ -6,6 +6,58 @@ from __future__ import annotations
 
 BREAKEVEN_EPSILON = 0.05
 
+# FX CFD epics: IG stop_distance_points are pip-style (not raw price units).
+_FX_PIP_2DP = ("USDJPY", "EURJPY", "GBPJPY")
+_FX_PIP_4DP = (
+    "EURUSD",
+    "GBPUSD",
+    "AUDUSD",
+    "EURGBP",
+    "USDCAD",
+    "NZDUSD",
+    "USDCHF",
+)
+
+
+def pip_size_for_epic(epic: str) -> float | None:
+    """Return one IG pip in price units, or None for non-FX instruments."""
+    key = str(epic or "").upper()
+    if not key.startswith("CS.D.") or "CFD" not in key:
+        return None
+    if any(
+        token in key for token in ("CFPGOLD", "CFPSILVER", "CFPPLAT", "CRUDE", "OIL")
+    ):
+        return None
+    if any(token in key for token in _FX_PIP_2DP):
+        return 0.01
+    if any(token in key for token in _FX_PIP_4DP):
+        return 0.0001
+    return None
+
+
+def price_delta_to_ig_points(epic: str, price_delta: float) -> float:
+    """Convert a raw price move into IG dashboard points (pips for FX)."""
+    pip = pip_size_for_epic(epic)
+    if pip is None or pip <= 0:
+        return float(price_delta)
+    return float(price_delta) / pip
+
+
+def ig_points_to_price_delta(epic: str, ig_points: float) -> float:
+    """Convert IG points back to a price move (inverse of price_delta_to_ig_points)."""
+    pip = pip_size_for_epic(epic)
+    if pip is None or pip <= 0:
+        return float(ig_points)
+    return float(ig_points) * pip
+
+
+def display_pnl_pts_precision(epic: str) -> int:
+    return 2 if pip_size_for_epic(epic) is not None else 1
+
+
+def round_pnl_pts(pts: float, epic: str) -> float:
+    return round(float(pts), display_pnl_pts_precision(epic))
+
 
 def direction_multiplier(side: str) -> float:
     return 1.0 if str(side).upper() == "BUY" else -1.0

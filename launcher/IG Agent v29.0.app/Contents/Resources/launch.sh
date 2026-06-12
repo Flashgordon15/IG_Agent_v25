@@ -315,33 +315,8 @@ fi
 
 log "launch: cd ${ROOT} && PYTHONPATH=src ${CAFF_ARGS[*]:-} ${PY} src/main.py"
 
-WATCHDOG_SCRIPT="${ROOT}/scripts/watchdog.sh"
-
-# Start (or restart) the watchdog — skip if launchd owns supervision.
-if command -v launchctl >/dev/null 2>&1; then
-  if launchctl print "gui/$(id -u)/com.igagent.v25.watchdog" >/dev/null 2>&1; then
-    log "launchd watchdog active — skipping manual watchdog spawn"
-  elif [ -x "${WATCHDOG_SCRIPT}" ]; then
-    bash "${WATCHDOG_SCRIPT}" >> "${ROOT}/src/data/logs/watchdog.log" 2>&1 &
-    WATCHDOG_PID=$!
-    disown "${WATCHDOG_PID}" 2>/dev/null || true
-    log "watchdog started pid=${WATCHDOG_PID}"
-  else
-    log "WARN: watchdog not found or not executable at ${WATCHDOG_SCRIPT}"
-  fi
-else
-  pkill -f "watchdog.sh" 2>/dev/null || true
-  sleep 0.5
-  WATCHDOG_SCRIPT="${ROOT}/scripts/watchdog.sh"
-  if [ -x "${WATCHDOG_SCRIPT}" ]; then
-      bash "${WATCHDOG_SCRIPT}" >> "${ROOT}/src/data/logs/watchdog.log" 2>&1 &
-      WATCHDOG_PID=$!
-      disown "${WATCHDOG_PID}" 2>/dev/null || true
-      log "watchdog started pid=${WATCHDOG_PID}"
-  else
-      log "WARN: watchdog not found or not executable at ${WATCHDOG_SCRIPT}"
-  fi
-fi
+# Watchdog is started by main.py (_ensure_watchdog_running) after the API port binds —
+# spawning here races bootstrap and causes duplicate restarts during OHLC load.
 
 # Launcher opens the dashboard once health is up; tell main.py not to open again.
 export IG_AGENT_FROM_LAUNCHER=1

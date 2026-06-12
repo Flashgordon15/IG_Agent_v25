@@ -630,16 +630,14 @@ def test_pre_startup_cleanup_kills_duplicate_processes() -> None:
 
 
 def test_ensure_watchdog_called_after_preflight() -> None:
-    """Manual launches must start watchdog when launcher did not."""
+    """Manual launches must start watchdog once the API port is listening."""
     source = _MAIN_PY.read_text(encoding="utf-8")
     assert "def _ensure_watchdog_running(" in source
-    run_idx = source.index("def run(self)")
-    run_body = source[run_idx : run_idx + 2500]
-    assert "_ensure_watchdog_running()" in run_body
-    assert "run_preflight()" in run_body
-    assert run_body.index("run_preflight()") < run_body.index(
-        "_ensure_watchdog_running()"
-    )
+    assert "register_api_startup(_ensure_watchdog_running)" in source
+    assert "register_api_startup(_start_live_engines)" in source
+    assert source.index(
+        "register_api_startup(_ensure_watchdog_running)"
+    ) < source.index("register_api_startup(_start_live_engines)")
 
 
 def test_agent_fully_started_detects_duplicate_processes() -> None:

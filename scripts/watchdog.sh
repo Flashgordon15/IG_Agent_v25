@@ -23,12 +23,35 @@ STARTUP_GRACE_SEC=720
 
 mkdir -p "$AGENT_DIR/src/data/logs"
 
+main_py_booting() {
+    /usr/bin/pgrep -f "${AGENT_DIR}/src/main.py" >/dev/null 2>&1 \
+        || /usr/bin/pgrep -f "[Pp]ython.*src/main.py" >/dev/null 2>&1 \
+        || /usr/bin/pgrep -f "[Pp]ython.*main.py" >/dev/null 2>&1
+}
+
+watchdog_already_running() {
+    if [ ! -f "$PID_FILE" ]; then
+        return 1
+    fi
+    local old_pid
+    old_pid="$(tr -d '[:space:]' < "$PID_FILE" 2>/dev/null || true)"
+    if [ -z "$old_pid" ] || [ "$old_pid" = "$$" ]; then
+        return 1
+    fi
+    kill -0 "$old_pid" 2>/dev/null
+}
+
 log() {
     printf '%s | %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG"
 }
 
 trap 'rm -f "$PID_FILE"; log "WATCHDOG: received SIGTERM — exiting cleanly"; exit 0' TERM
 trap 'rm -f "$PID_FILE"; log "WATCHDOG: received SIGINT — exiting cleanly"; exit 0' INT
+
+if watchdog_already_running; then
+    log "WATCHDOG: already running pid=$(tr -d '[:space:]' < "$PID_FILE") — exiting duplicate"
+    exit 0
+fi
 
 echo "$$" > "$PID_FILE"
 
@@ -117,9 +140,14 @@ resolve_python_bin() {
     printf '%s\n' "${PY}"
 }
 
-# Cold start: if nothing is listening, do not wait 300s before first restart.
+# Fresh watchdog process: always grant startup grace (never restart-storm on boot).
+last_restart_epoch=$(date +%s)
 if ! agent_alive; then
-    last_restart_epoch=$(( $(date +%s) - STARTUP_GRACE_SEC - 1 ))
+    if main_py_booting; then
+        log "WATCHDOG: main.py booting — startup grace from now"
+    else
+        log "WATCHDOG: agent not ready yet — startup grace from now"
+    fi
 fi
 
 cleanup_stale() {
@@ -132,13 +160,18 @@ cleanup_stale() {
         echo "$stale_pids" | xargs kill -9 2>/dev/null || true
     fi
 
-    if [ -f "$LOCK_FILE" ]; then
+    if [ -f "$LOCK_FILE" ] && ! main_py_booting; then
         rm -f "$LOCK_FILE"
         log "WATCHDOG: removed stale lock file"
     fi
 }
 
 restart_agent() {
+    if main_py_booting; then
+        log "WATCHDOG: main.py already running — skip duplicate restart"
+        last_restart_epoch=$(date +%s)
+        return 0
+    fi
     log "WATCHDOG: waiting 5s before restart..."
     sleep 5
 
@@ -222,6 +255,11 @@ while true; do
         restart_reason="trading zombie (unhealthy x${UNHEALTHY_STREAK})"
         UNHEALTHY_STREAK=0
     else
+        if main_py_booting; then
+            log "WATCHDOG: main.py booting (port $PORT not ready) — waiting"
+            sleep "$CHECK_INTERVAL"
+            continue
+        fi
         if in_startup_grace; then
             log "WATCHDOG: agent not up yet — startup grace (${STARTUP_GRACE_SEC}s)"
             sleep "$CHECK_INTERVAL"

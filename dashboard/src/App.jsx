@@ -22,6 +22,10 @@ import SplashScreen from "./components/SplashScreen.jsx";
 import StartupSplash from "./components/StartupSplash.jsx";
 import StrategyHelpModal from "./components/StrategyHelpModal.jsx";
 import RoadmapProgressModal from "./components/RoadmapProgressModal.jsx";
+import DailyDigestModal, {
+  fetchDigestDay,
+  isDigestUnread,
+} from "./components/DailyDigestModal.jsx";
 
 const TABS = [
   { id: "live", label: "LIVE" },
@@ -282,6 +286,9 @@ export default function App() {
   const [agentOfflineChecked, setAgentOfflineChecked] = useState(false);
   const [strategyHelpOpen, setStrategyHelpOpen] = useState(false);
   const [roadmapOpen, setRoadmapOpen] = useState(false);
+  const [digestOpen, setDigestOpen] = useState(false);
+  const [digestAutoOpened, setDigestAutoOpened] = useState(false);
+  const [digestDay, setDigestDay] = useState(null);
   const healthFailRef = useRef(0);
   const prevStateRef = useRef(null);
   const soundRef = useRef(null);
@@ -327,6 +334,23 @@ export default function App() {
     }
     dismissSplash();
   }, [splashData]);
+
+  // Daily operator report: auto-popup once per calendar day after startup.
+  useEffect(() => {
+    if (!startupDone || splashVisible) return;
+    let cancelled = false;
+    fetchDigestDay().then((day) => {
+      if (cancelled || !day) return;
+      setDigestDay(day);
+      if (isDigestUnread(day)) {
+        setDigestAutoOpened(true);
+        setDigestOpen(true);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [startupDone, splashVisible]);
 
   useEffect(() => {
     const epics = listMarketEpics(state);
@@ -794,6 +818,11 @@ export default function App() {
     onStopAgent: handleStopAgent,
     onOpenStrategyHelp: () => setStrategyHelpOpen(true),
     onOpenRoadmap: () => setRoadmapOpen(true),
+    onOpenDailyDigest: () => {
+      setDigestAutoOpened(false);
+      setDigestOpen(true);
+    },
+    digestUnread: isDigestUnread(digestDay),
     supervisionDriftOk: state?.supervision_drift_ok,
     watchdogActive: state?.watchdog_active,
     sessionStyle: resolveSessionStyle(state, viewState),
@@ -1044,6 +1073,16 @@ export default function App() {
       <RoadmapProgressModal
         open={roadmapOpen}
         onClose={() => setRoadmapOpen(false)}
+      />
+
+      <DailyDigestModal
+        open={digestOpen}
+        autoOpened={digestAutoOpened}
+        onClose={() => {
+          setDigestOpen(false);
+          setDigestAutoOpened(false);
+          if (digestDay) setDigestDay(digestDay);
+        }}
       />
 
       <nav className="sticky top-0 z-10 flex shrink-0 gap-0 overflow-x-auto border-b border-border bg-card px-1 sm:px-2">

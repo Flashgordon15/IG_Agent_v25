@@ -12,8 +12,10 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from data.models import Quote
 from trading.open_position_view import (
+    apply_display_daily_pnl,
     enrich_positions_with_quote,
     normalize_sync_position,
+    sum_open_unrealized_gbp,
     unrealized_from_quote,
 )
 
@@ -35,7 +37,7 @@ class TestOpenPositionView(unittest.TestCase):
         self.assertEqual(row["entry"], 65000.0)
         self.assertEqual(row["pnl_gbp"], 12.5)
 
-    def test_enrich_keeps_ig_upl_when_present(self) -> None:
+    def test_enrich_prefers_live_quote_over_stale_ig_upl(self) -> None:
         quote = Quote(datetime(2026, 5, 27, 12, 0), 65100.0, 65107.0)
         base = [
             normalize_sync_position(
@@ -55,7 +57,7 @@ class TestOpenPositionView(unittest.TestCase):
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0]["current"], 65100.0)
         self.assertEqual(out[0]["pnl_pts"], 100.0)
-        self.assertEqual(out[0]["pnl_gbp"], 5.0)
+        self.assertEqual(out[0]["pnl_gbp"], 200.0)
 
     def test_enrich_quote_pnl_when_no_ig_upl(self) -> None:
         quote = Quote(datetime(2026, 5, 27, 12, 0), 65100.0, 65107.0)
@@ -83,6 +85,57 @@ class TestOpenPositionView(unittest.TestCase):
         self.assertEqual(mark, 65105.0)
         self.assertEqual(pts, -5.0)
         self.assertEqual(gbp, -5.0)
+
+    def test_fx_unrealized_uses_pip_scale(self) -> None:
+        quote = Quote(datetime(2026, 6, 11, 12, 0), 1.08510, 1.08512)
+        mark, pts, gbp = unrealized_from_quote(
+            "BUY",
+            1.08500,
+            10.0,
+            quote,
+            epic="CS.D.EURUSD.CFD.IP",
+            point_value_gbp=1.0,
+            currency="GBP",
+        )
+        self.assertAlmostEqual(mark, 1.08510)
+        self.assertAlmostEqual(pts, 1.0)
+        self.assertAlmostEqual(gbp, 10.0)
+
+    def test_fx_sub_pip_move_updates_pnl(self) -> None:
+        quote = Quote(datetime(2026, 6, 11, 12, 0), 1.08501, 1.08503)
+        mark, pts, gbp = unrealized_from_quote(
+            "BUY",
+            1.08500,
+            10.0,
+            quote,
+            epic="CS.D.EURUSD.CFD.IP",
+            point_value_gbp=1.0,
+            currency="GBP",
+        )
+        self.assertAlmostEqual(pts, 0.1)
+        self.assertAlmostEqual(gbp, 1.0)
+
+    def test_sum_open_unrealized_dedupes_deal_ids(self) -> None:
+        tick = {
+            "positions": [{"deal_id": "D1", "pnl_gbp": 12.5}],
+            "markets": {
+                "CS.D.CFPGOLD.CFP.IP": {
+                    "positions": [{"deal_id": "D1", "pnl_gbp": 99.0}],
+                }
+            },
+        }
+        self.assertEqual(sum_open_unrealized_gbp(tick), 12.5)
+
+    def test_apply_display_daily_pnl_adds_open_unrealized(self) -> None:
+        tick = {
+            "realized_daily_pnl_gbp": 10.0,
+            "daily_pnl_gbp": 10.0,
+            "positions": [{"deal_id": "D1", "pnl_gbp": -3.25}],
+        }
+        apply_display_daily_pnl(tick)
+        self.assertEqual(tick["realized_daily_pnl_gbp"], 10.0)
+        self.assertEqual(tick["open_unrealized_gbp"], -3.25)
+        self.assertEqual(tick["daily_pnl_gbp"], 6.75)
 
 
 if __name__ == "__main__":

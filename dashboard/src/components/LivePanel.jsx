@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api/client.js";
 import { fmtPrice } from "../utils/fmtPrice.js";
+import { fmtPts } from "../utils/fmtPts.js";
 import {
   activeEpicRank,
   isEpicRotationMuted,
@@ -853,7 +854,7 @@ export default function LivePanel({ state, rawState, selectedEpic, onSelectEpic,
                   const stop = pos.stop ?? pos.stop_level;
                   const trailLabel = stop != null ? `${fmtPrice(stop, pos.epic ?? epic)}${pos.trail_active ? " ↕" : ""}` : "—";
                   const key = pos.deal_id ?? pos.id ?? `${pos.epic ?? "row"}-${idx}`;
-                  const ptsSign = ptsNum != null ? (ptsNum >= 0 ? "+" : "") : "";
+                  const ptsLabel = ptsNum != null ? `${fmtPts(ptsNum, pos.epic ?? epic)}pts` : "—";
                   return (
                     <tr key={key} className="border-b border-border/60 last:border-0 hover:bg-card/60 transition-colors">
                       <td className="px-2 py-2 text-foreground text-[11px]">{pos.market || pos.epic || "—"}</td>
@@ -861,9 +862,9 @@ export default function LivePanel({ state, rawState, selectedEpic, onSelectEpic,
                       <td className="px-2 py-2 font-mono tabular-nums">{fmtPrice(pos.entry ?? pos.entry_price ?? pos.level, pos.epic ?? epic)}</td>
                       <td className="px-2 py-2 font-mono tabular-nums">{fmtPrice(pos.current ?? pos.mark, pos.epic ?? epic)}</td>
                       <td className={`px-2 py-2 font-mono tabular-nums font-semibold ${pnlColor}`}>
-                        <span>{pnlNum != null ? fmtGbp(pnlNum) : (ptsNum != null ? `${ptsSign}${ptsNum.toFixed(1)}pts` : "—")}</span>
-                        {ptsNum != null && (
-                          <span className="ml-1 text-[10px] font-normal opacity-70">{`${ptsSign}${ptsNum.toFixed(1)}pts`}</span>
+                        <span>{pnlNum != null ? fmtGbp(pnlNum) : ptsLabel}</span>
+                        {pnlNum != null && ptsNum != null && (
+                          <span className="ml-1 text-[10px] font-normal opacity-70">{ptsLabel}</span>
                         )}
                       </td>
                       <td className="px-2 py-2 font-mono tabular-nums text-muted">{trailLabel}</td>

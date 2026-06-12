@@ -691,14 +691,21 @@ class LearningStore:
         return ok
 
     def _rebuild_stats_for(self, setup_key: str) -> None:
+        if is_ig_import_setup_key(setup_key):
+            return
         # Only count strategy-originated trades so IG-imported rows don't dilute
         # the setup statistics used by the adaptive engine.
+        from system.learning_trade_policy import (
+            agent_trades_sql_clause,
+        )
+
+        clause = agent_trades_sql_clause()
         rows = list(
             self.conn.execute(
-                """
+                f"""
                 SELECT pnl_points, ig_pnl_currency, result FROM trades
                 WHERE setup_key=? AND closed_at IS NOT NULL
-                  AND (source IS NULL OR source IN ('strategy', 'shadow'))
+                  AND {clause}
                 """,
                 (setup_key,),
             )
@@ -1569,6 +1576,65 @@ class LearningStore:
             else:
                 break
         return count
+
+    @_locked
+    def effective_consecutive_losses(self, n: int = 5) -> int:
+        """Consecutive losses minus operator reset baseline (test-session archive)."""
+        raw = self.consecutive_losses(n)
+        baseline_raw = self.get_runtime_state("circuit_breaker_streak_baseline")
+        try:
+            baseline = int(baseline_raw or 0)
+        except (TypeError, ValueError):
+            baseline = 0
+        return max(0, raw - baseline)
+
+    @_locked
+    def reset_consecutive_loss_streak(
+        self, *, reason: str = "operator_reset"
+    ) -> dict[str, int]:
+        """Archive trailing loss streak so circuit breaker starts fresh (audit rows kept)."""
+        archived = self.archive_trailing_loss_streak(reason=reason)
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.set_runtime_state("circuit_breaker_streak_baseline", "0")
+        self.set_runtime_state("circuit_breaker_streak_reset_at", now)
+        self.set_runtime_state("circuit_breaker_streak_reset_reason", str(reason))
+        return {"archived_streak": archived, "effective_streak": 0}
+
+    @_locked
+    def archive_trailing_loss_streak(self, *, reason: str = "operator_reset") -> int:
+        """Relabel trailing strategy losses as test_archive — excluded from circuit breaker count."""
+        rows = list(
+            self.conn.execute(
+                """
+                SELECT rowid, result FROM trades
+                WHERE closed_at IS NOT NULL
+                  AND dry_run = 0
+                  AND (source IS NULL OR source = 'strategy')
+                ORDER BY closed_at DESC
+                LIMIT 10
+                """
+            )
+        )
+        tag = f"test_archive:{reason}"
+        archived = 0
+        for row in rows:
+            if str(row[1]) != "LOSS":
+                break
+            self.conn.execute(
+                "UPDATE trades SET source=? WHERE rowid=?",
+                (tag, row[0]),
+            )
+            archived += 1
+        if archived:
+            self.conn.commit()
+        self.clear_circuit_breaker_state()
+        return archived
+
+    @_locked
+    def clear_all_cooldowns(self) -> int:
+        cur = self.conn.execute("DELETE FROM cooldowns")
+        self.conn.commit()
+        return int(cur.rowcount or 0)
 
     @_locked
     def get_runtime_state(self, key: str) -> str | None:

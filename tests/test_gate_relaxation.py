@@ -162,12 +162,23 @@ class GateRelaxationTests(unittest.TestCase):
             self.assertTrue(relaxation_enabled())
 
     def test_soak_fitness_floor_profile_b(self) -> None:
-        with patch(
-            "system.gate_relaxation.demo_soak_enabled",
-            return_value=True,
-        ), patch(
-            "system.gate_relaxation._soak_block",
-            return_value={"enabled": True, "fitness_min": 50, "relax_all_epics": True},
+        with (
+            patch(
+                "system.gate_relaxation.demo_soak_enabled",
+                return_value=True,
+            ),
+            patch(
+                "system.gate_relaxation._soak_block",
+                return_value={
+                    "enabled": True,
+                    "fitness_min": 50,
+                    "relax_all_epics": True,
+                },
+            ),
+            patch(
+                "system.protective_learning.protective_learning_enabled",
+                return_value=False,
+            ),
         ):
             self.assertEqual(
                 effective_fitness_min("IX.D.DOW.IFM.IP", points_state="HEALTHY"),

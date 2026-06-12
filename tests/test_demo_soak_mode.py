@@ -16,8 +16,12 @@ from system.gate_relaxation import (
 
 
 @pytest.fixture(autouse=True)
-def _clear_relax_cache():
+def _clear_relax_cache(monkeypatch):
     reset_gate_relaxation_cache_for_tests()
+    monkeypatch.setattr(
+        "system.protective_learning.protective_learning_enabled",
+        lambda: False,
+    )
     yield
     reset_gate_relaxation_cache_for_tests()
 

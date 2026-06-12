@@ -70,6 +70,14 @@ class SignalEngine:
                     threshold = max(threshold, float(prot))
         except Exception:
             pass
+        try:
+            from system.protective_learning import signal_threshold_floor
+
+            floor = signal_threshold_floor()
+            if floor is not None:
+                threshold = max(threshold, floor)
+        except Exception:
+            pass
         return threshold
 
     def _resolve_market_key(self, market: str) -> str:
@@ -552,6 +560,49 @@ class SignalEngine:
             side_score = buy if candidate == "BUY" else sell
             delta, learn_note = self.learning_adjustment(setup)
             adjusted = max(0, min(99, side_score + delta))
+            stop_pts = max(1.0, float(cfg.stop_distance_points))
+            atr_ratio = float(last.get("atr", 0) or 0) / stop_pts
+            try:
+                from system.ml_filter_overrides import evaluate_filter_block
+
+                ml_blocked, ml_block_reason = evaluate_filter_block(
+                    adjusted_score=float(adjusted),
+                    raw_score=float(side_score),
+                    rsi=float(last.get("rsi", 0) or 0),
+                    atr_ratio=atr_ratio,
+                )
+            except Exception:
+                ml_blocked, ml_block_reason = False, ""
+            if ml_blocked:
+                notes = (
+                    f"raw={raw_sig}, buy_score={buy:.1f}, sell_score={sell:.1f}, "
+                    f"threshold={threshold:.0f}, blocked: {ml_block_reason}, {learn_note}"
+                )
+                snapshot = {
+                    "last": last,
+                    "trend15": trend15,
+                    "trend60": trend60,
+                    "setup_key": setup,
+                    "raw_signal": raw_sig,
+                    "raw_confidence": raw_conf,
+                    "adjusted_confidence": adjusted,
+                    "learning_delta": delta,
+                    "buy_score": buy,
+                    "sell_score": sell,
+                    "ml_filter_block": ml_block_reason,
+                    "h1_bearish": h1_bearish,
+                    "h1_bullish": h1_bullish,
+                }
+                self.last_snapshot[market] = snapshot
+                return SignalResult(
+                    "WAIT",
+                    float(raw_conf),
+                    float(adjusted),
+                    float(delta),
+                    setup,
+                    notes,
+                    snapshot,
+                )
             if (
                 cfg.get("enforce_1h_ema_filter", True)
                 and candidate == "SELL"

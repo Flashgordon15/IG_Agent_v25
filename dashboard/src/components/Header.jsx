@@ -10,6 +10,7 @@ import {
 import { fmtPrice } from "../utils/fmtPrice.js";
 import { APP_VERSION_LABEL } from "../utils/roadmapTelemetry.js";
 import { RoadmapProgressButton } from "./RoadmapProgressModal.jsx";
+import { DailyDigestButton } from "./DailyDigestModal.jsx";
 
 function isNil(v) {
   return v == null || v === "";
@@ -230,6 +231,8 @@ export default function Header({
   onStopAgent,
   onOpenStrategyHelp,
   onOpenRoadmap,
+  onOpenDailyDigest,
+  digestUnread,
   supervisionDriftOk,
   watchdogActive,
   sessionStyle,
@@ -397,6 +400,7 @@ export default function Header({
             <span className="text-[12px] leading-none" aria-hidden>?</span>
             Strategy help
           </button>
+          <DailyDigestButton onClick={() => onOpenDailyDigest?.()} unread={digestUnread} />
           <RoadmapProgressButton onClick={() => onOpenRoadmap?.()} />
           <button
             type="button"

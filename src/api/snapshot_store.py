@@ -23,6 +23,7 @@ from api.snapshot import (
 from system.paths import data_dir
 from system.state_manager import atomic_write_json, read_json_file
 from trading.open_position_view import (
+    apply_display_daily_pnl,
     apply_position_view_refresh,
     tick_has_open_positions_for_epic,
 )
@@ -115,6 +116,7 @@ def write_tick_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
     """
     global _cached, _cached_mtime
     tick = normalize_tick(payload)
+    apply_display_daily_pnl(tick)
     path = snapshot_path()
     atomic_write_json(path, tick)
     with _lock:
@@ -350,6 +352,7 @@ def _tick_for_readers(tick: dict[str, Any]) -> dict[str, Any]:
                     all_positions.append(enriched)
         if all_positions:
             out["positions"] = all_positions
+    apply_display_daily_pnl(out)
     # Inject live OHLC market count so SystemPanel can show it without an extra API call
     if "ohlc_markets_cached" not in out:
         global _cached_ohlc_markets_cached

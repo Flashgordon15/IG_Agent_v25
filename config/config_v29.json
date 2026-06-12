@@ -7,6 +7,19 @@
   "demo_only_deployment": true,
   "allow_live_trading": false,
   "_note": "v29.1 — DEMO-only deployment; Profile B integrity + daily loss baseline reset + £400 soft pause / £500 hard stop",
+  "protective_learning": {
+    "enabled": true,
+    "signal_threshold_floor": 62,
+    "fitness_min_floor": 55,
+    "_note": "Phase 2 — raise entry bar while collecting agent-labelled trades; works with demo_soak relaxations reduced below."
+  },
+  "sentiment_guard": {
+    "enabled": true,
+    "crowded_long_pct": 70,
+    "crowded_short_pct": 30,
+    "log_raw": true,
+    "_note": "IG client positioning — logs raw API value; -10 fitness when crowded."
+  },
   "reward_multiple": 3.0,
   "adaptive_high_confidence_reward_multiple": 3.0,
   "adaptive_max_limit_atr_multiple": 4.0,
@@ -34,7 +47,7 @@
     "policy_id": "learning_demo_v1",
     "require_gate_sourced_submit": true,
     "suppress_v26_gate_relaxations": true,
-    "disable_dynamic_sizing": true,
+    "disable_dynamic_sizing": false,
     "daily_loss_soft_pause_gbp": 400,
     "daily_loss_reset": {
       "enabled": true,
@@ -73,15 +86,15 @@
   },
   "demo_soak_mode": {
     "enabled": true,
-    "_note": "Profile B entry permissiveness — fitness/rotation/ML bypass for learning throughput. Not sizing authority.",
-    "fitness_min": 50,
+    "_note": "Profile B entry permissiveness — reduced for protective learning phase.",
+    "fitness_min": 55,
     "warning_confidence_cap": 85,
     "warning_use_instrument_threshold": true,
     "relax_all_epics": true,
-    "disable_rotation_filter": true,
-    "bypass_ml_veto": true,
-    "spread_to_atr_circuit_max": 0.4,
-    "require_points_healthy": false
+    "disable_rotation_filter": false,
+    "bypass_ml_veto": false,
+    "spread_to_atr_circuit_max": 0.35,
+    "require_points_healthy": true
   },
   "instruments": {
     "gold": {

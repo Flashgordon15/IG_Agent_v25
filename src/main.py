@@ -21,6 +21,7 @@ from typing import Any
 
 from api.agent_control import register_trading_loop
 from api.server import create_app, register_api_startup
+from system.app_identity import APP_DISPLAY_NAME, APP_VERSION_LABEL
 from system.config import Config
 from system.config_loader import ConfigLoader
 from system.config_validator import (
@@ -31,11 +32,12 @@ from system.config_validator import (
 from system.credentials_holder import bootstrap_credentials, get_credentials_holder
 from system.credentials_loader import try_load_credentials
 from system.engine_log import log_engine
-from system.app_identity import APP_DISPLAY_NAME, APP_VERSION_LABEL
 from system.instance_lock import (
     acquire_instance_lock,
-    lock_path as instance_lock_path,
     release_instance_lock,
+)
+from system.instance_lock import (
+    lock_path as instance_lock_path,
 )
 from system.paths import logs_dir, project_root
 
@@ -584,8 +586,6 @@ class AgentRuntime:
             release_instance_lock()
             sys.exit(1)
 
-        _ensure_watchdog_running()
-
         os.environ.setdefault("IG_AGENT_ROOT", str(project_root()))
         os.environ.setdefault("PYTHONPATH", str(project_root() / "src"))
         logs_dir().mkdir(parents=True, exist_ok=True)
@@ -643,6 +643,25 @@ class AgentRuntime:
                 start_replay_daily_scheduler()
                 start_health_cache_refresher()
                 start_trading_health_monitor()
+                try:
+                    from data.learning_store import LearningStore
+                    from system.paths import data_dir
+                    from system.setup_registry_refresh import (
+                        refresh_setup_registry_from_store,
+                    )
+
+                    store = LearningStore(data_dir() / "learning_db.sqlite3")
+                    summary = refresh_setup_registry_from_store(store, enabled=True)
+                    log_engine(
+                        "setup_registry refreshed at startup: "
+                        f"banned={summary.get('banned_count')} "
+                        f"gate={'on' if summary.get('enabled') else 'off'}"
+                    )
+                except Exception as e:
+                    log_engine(
+                        f"setup_registry startup refresh skipped: "
+                        f"{type(e).__name__}: {e}"
+                    )
                 from system.gate_coherence_scheduler import (
                     start_gate_coherence_scheduler,
                 )
@@ -680,6 +699,7 @@ class AgentRuntime:
                         f"(stream/hub quotes every {iv:.0f}s per epic)"
                     )
 
+            register_api_startup(_ensure_watchdog_running)
             register_api_startup(_start_live_engines)
 
             app = create_app(watch_snapshot=True)

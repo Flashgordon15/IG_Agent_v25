@@ -276,7 +276,10 @@ class OrderValidator:
 
     def check_execution_protect_spread(self, signal: TradeSignal) -> tuple[bool, str]:
         try:
-            from execution.execution_protect import check_signal_spread, is_protect_enabled
+            from execution.execution_protect import (
+                check_signal_spread,
+                is_protect_enabled,
+            )
 
             if not is_protect_enabled(self._cfg):
                 return True, ""
@@ -363,7 +366,7 @@ class OrderValidator:
         if max_losses <= 0 or self._store is None:
             return True, ""
         try:
-            consecutive = self._store.consecutive_losses(max_losses + 2)
+            consecutive = self._store.effective_consecutive_losses(max_losses + 2)
             if consecutive < max_losses:
                 self._store.clear_circuit_breaker_state()
                 return True, ""
