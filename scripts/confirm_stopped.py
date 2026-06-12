@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify IG Agent v25 is fully stopped after dashboard Stop Agent."""
+"""Verify IG Agent v29 is fully stopped after dashboard Stop Agent."""
 
 from __future__ import annotations
 
@@ -34,7 +34,9 @@ def main() -> int:
     ok, issues = agent_fully_stopped()
     checks = stopped_verification_checks(issues)
     print()
-    print("IG Agent v25 — CONFIRM STOPPED")
+    from system.app_identity import APP_DISPLAY_NAME, APP_VERSION_LABEL
+
+    print(f"{APP_DISPLAY_NAME} {APP_VERSION_LABEL} — CONFIRM STOPPED")
     print("=" * 40)
     for row in checks:
         label = str(row.get("label") or "")

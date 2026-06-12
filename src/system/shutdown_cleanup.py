@@ -285,7 +285,9 @@ def _port_bound(port: int = 8080) -> bool:
 
 
 def _instance_lock_holder_pid() -> int | None:
-    lock = data_dir() / ".ig_agent_v25.lock"
+    from system.instance_lock import lock_path
+
+    lock = lock_path()
     if not lock.is_file():
         return None
     try:
@@ -468,7 +470,9 @@ def post_cleanup_shutdown_checks(*, exclude_pid: int) -> list[dict[str, object]]
             "detail": "" if not port_bound else "port still bound",
         }
     )
-    lock = data_dir() / ".ig_agent_v25.lock"
+    from system.instance_lock import lock_path
+
+    lock = lock_path()
     checks.append(
         {
             "label": "Instance lock released",
@@ -599,7 +603,9 @@ def agent_fully_stopped(
     if _port_bound():
         issues.append("port 8080 still bound")
 
-    lock = data_dir() / ".ig_agent_v25.lock"
+    from system.instance_lock import lock_path
+
+    lock = lock_path()
     if lock.is_file():
         issues.append("instance lock file present")
 

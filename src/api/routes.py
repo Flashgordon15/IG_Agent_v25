@@ -86,7 +86,7 @@ def get_startup_status() -> dict[str, Any]:
 @router.get("/state")
 def state() -> dict[str, Any]:
     """Full dashboard snapshot — same schema as WebSocket tick messages."""
-    from api.agent_health import enrich_tick_runtime
+    from api.agent_control import enrich_tick_runtime
 
     tick = enrich_tick_runtime(get_tick())
     tick["trading_paused"] = is_paused()

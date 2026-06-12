@@ -128,6 +128,10 @@ class LaunchdKeepAliveRegressionTests(unittest.TestCase):
             ),
             patch("system.instance_lock.release_instance_lock"),
             patch("main._force_cleanup_port"),
+            patch(
+                "system.overnight_supervision.launchd_watchdog_active",
+                return_value=True,
+            ),
             patch("api.agent_health.stop_watchdog") as mock_stop,
         ):
             perform_shutdown_cleanup(source="dashboard", skip_port_cleanup=True)

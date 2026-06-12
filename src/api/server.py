@@ -70,7 +70,9 @@ router = APIRouter()
 
 @router.get("/health")
 def health() -> dict[str, Any]:
-    return {"status": "ok", "version": "v25"}
+    from system.app_identity import APP_VERSION_LABEL
+
+    return {"status": "ok", "version": APP_VERSION_LABEL}
 
 
 @router.get("/api/state")

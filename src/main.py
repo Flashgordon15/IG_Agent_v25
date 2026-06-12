@@ -1,7 +1,7 @@
 """
-IG Agent v25 entry point — launchd / manual start (Section 4.5 Step 12).
+IG Agent v29 entry point — launchd / manual start.
 
-Preflight: emergency lock, config validation, instance lock, credentials.
+Preflight: emergency lock, config validation, demo guard, instance lock, credentials.
 Runtime: trading loop (background) + FastAPI on :8080 (foreground).
 """
 
@@ -31,7 +31,12 @@ from system.config_validator import (
 from system.credentials_holder import bootstrap_credentials, get_credentials_holder
 from system.credentials_loader import try_load_credentials
 from system.engine_log import log_engine
-from system.instance_lock import acquire_instance_lock, release_instance_lock
+from system.app_identity import APP_DISPLAY_NAME, APP_VERSION_LABEL
+from system.instance_lock import (
+    acquire_instance_lock,
+    lock_path as instance_lock_path,
+    release_instance_lock,
+)
 from system.paths import logs_dir, project_root
 
 try:
@@ -154,7 +159,7 @@ def _port_in_use_banner(port: int) -> str:
     return (
         "\n"
         "================================================================================\n"
-        f"IG Agent v25: port {port} is already in use\n"
+        f"{APP_DISPLAY_NAME}: port {port} is already in use\n"
         "\n"
         f"Another process is listening on http://{_API_HOST}:{port}/\n"
         "\n"
@@ -290,7 +295,7 @@ def _pre_startup_cleanup() -> None:
     import os
 
     my_pid = os.getpid()
-    lock_path = Path(__file__).parent / "data" / ".ig_agent_v25.lock"
+    lock_file = instance_lock_path()
     killed_pids: list[int] = []
 
     # 1. Find and SIGTERM any other agent processes
@@ -317,8 +322,8 @@ def _pre_startup_cleanup() -> None:
 
     # 3. Remove stale lock
     try:
-        if lock_path.exists():
-            lock_path.unlink()
+        if lock_file.exists():
+            lock_file.unlink()
             log_engine("pre-startup: removed stale instance lock")
     except Exception as e:
         log_engine(f"pre-startup: could not remove lock: {e}")
@@ -448,15 +453,14 @@ def _force_cleanup_port(port: int = 8080) -> None:
                 log_engine(f"cleanup: could not kill PID {pid}: {e}")
     except Exception:
         pass
-    lock = Path(__file__).parent / "data" / ".ig_agent_v25.lock"
-    lock.unlink(missing_ok=True)
+    instance_lock_path().unlink(missing_ok=True)
 
 
 def run_preflight() -> int:
     """Steps 1–4. Returns exit code (0 = continue)."""
     if emergency_stop_lock_present():
         print(
-            "IG Agent v25: emergency_stop.lock present — delete it to restart.",
+            f"{APP_DISPLAY_NAME}: emergency_stop.lock present — delete it to restart.",
             file=sys.stderr,
         )
         return EXIT_LOCK
@@ -464,7 +468,7 @@ def run_preflight() -> int:
     try:
         raw = load_raw_config_dict()
     except Exception as e:
-        print(f"IG Agent v25: config load failed: {e}", file=sys.stderr)
+        print(f"{APP_DISPLAY_NAME}: config load failed: {e}", file=sys.stderr)
         return EXIT_CONFIG
 
     validation_cfg = merge_credentials_for_validation(raw)
@@ -472,8 +476,19 @@ def run_preflight() -> int:
     if not valid:
         for line in messages:
             if line.startswith("ERROR:"):
-                print(f"IG Agent v25: {line}", file=sys.stderr)
+                print(f"{APP_DISPLAY_NAME}: {line}", file=sys.stderr)
         return EXIT_CONFIG
+
+    try:
+        from system.demo_guard import validate_demo_only_startup
+
+        demo_ok, demo_msg = validate_demo_only_startup(validation_cfg)
+        if not demo_ok:
+            print(f"{APP_DISPLAY_NAME}: {demo_msg}", file=sys.stderr)
+            return EXIT_CONFIG
+        log_engine(f"preflight: {demo_msg}")
+    except Exception as e:
+        log_engine(f"preflight: demo guard error (continuing): {type(e).__name__}: {e}")
 
     ok, msg = acquire_instance_lock()
     if not ok:
@@ -484,7 +499,7 @@ def run_preflight() -> int:
                 record_startup_failure(msg)
         except Exception:
             pass
-        print(f"IG Agent v25: {msg}", file=sys.stderr)
+        print(f"{APP_DISPLAY_NAME}: {msg}", file=sys.stderr)
         return EXIT_INSTANCE
     try:
         from system.watchdog_banner import record_startup_success
@@ -696,7 +711,7 @@ def _install_signal_handlers(runtime: AgentRuntime) -> None:
 def main() -> None:
     atexit.register(_force_cleanup_port)
     _rotate_oversized_logs()
-    log_engine("=== IG Agent v25 full restart ===")
+    log_engine(f"=== {APP_DISPLAY_NAME} {APP_VERSION_LABEL} full restart ===")
     _pre_startup_cleanup()
     runtime = AgentRuntime()
     _install_signal_handlers(runtime)

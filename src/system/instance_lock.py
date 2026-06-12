@@ -8,12 +8,19 @@ import atexit
 import os
 from pathlib import Path
 
+from system.app_identity import INSTANCE_LOCK_FILE, LEGACY_LOCK_FILES
 from system.engine_log import log_engine
 from system.paths import data_dir
 
-_LOCK_PATH = data_dir() / ".ig_agent_v25.lock"
-_LEGACY_LOCK_PATH = data_dir() / ".ig_agent_v24.lock"
 _acquired = False
+
+
+def lock_path() -> Path:
+    return data_dir() / INSTANCE_LOCK_FILE
+
+
+def _legacy_lock_paths() -> list[Path]:
+    return [data_dir() / name for name in LEGACY_LOCK_FILES]
 
 
 def _clear_stale_lock_file(path: Path, pid: int) -> None:
@@ -56,19 +63,21 @@ def acquire_instance_lock() -> tuple[bool, str]:
         return True, "multi-instance override"
 
     pid = os.getpid()
-    _clear_stale_lock_file(_LEGACY_LOCK_PATH, pid)
-    if _LOCK_PATH.exists():
+    lock = lock_path()
+    for legacy in _legacy_lock_paths():
+        _clear_stale_lock_file(legacy, pid)
+    if lock.exists():
         try:
-            raw = _LOCK_PATH.read_text(encoding="utf-8").strip()
+            raw = lock.read_text(encoding="utf-8").strip()
             other = int(raw.split()[0]) if raw else 0
         except (ValueError, OSError):
             other = 0
         if other and other != pid and _pid_alive(other):
             return False, f"Another IG Agent instance is running (pid {other}). Quit it first."
-        _clear_stale_lock_file(_LOCK_PATH, pid)
+        _clear_stale_lock_file(lock, pid)
 
     try:
-        _LOCK_PATH.write_text(f"{pid}\n", encoding="utf-8")
+        lock.write_text(f"{pid}\n", encoding="utf-8")
         _acquired = True
         atexit.register(release_instance_lock)
         log_engine(f"Instance lock acquired pid={pid}")
@@ -81,7 +90,7 @@ def release_instance_lock() -> None:
     global _acquired
     if not _acquired:
         return
-    _unlink_lock_if_owned(_LOCK_PATH)
+    _unlink_lock_if_owned(lock_path())
     _acquired = False
 
 
@@ -101,6 +110,7 @@ def _unlink_lock_if_owned(path: Path) -> None:
 def force_release_instance_lock() -> None:
     """Shutdown path — drop lock even if acquire tracking was lost."""
     global _acquired
-    _unlink_lock_if_owned(_LOCK_PATH)
-    _unlink_lock_if_owned(_LEGACY_LOCK_PATH)
+    _unlink_lock_if_owned(lock_path())
+    for legacy in _legacy_lock_paths():
+        _unlink_lock_if_owned(legacy)
     _acquired = False

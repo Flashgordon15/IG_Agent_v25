@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# IG Agent v25 Watchdog — auto-restarts the agent if it dies
+# IG Agent v29 Watchdog — auto-restarts the agent if it dies
 # Runs as a background process independent of the agent itself.
 # Checks every 30 s; restarts on death; caps at 10 restarts/hour.
 
@@ -11,7 +11,7 @@ if [ -n "${IG_AGENT_ROOT:-}" ]; then
 else
     AGENT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 fi
-LOCK_FILE="$AGENT_DIR/src/data/.ig_agent_v25.lock"
+LOCK_FILE="$AGENT_DIR/src/data/.ig_agent_v29.lock"
 LOG="$AGENT_DIR/src/data/logs/watchdog.log"
 RESTART_LOG="$AGENT_DIR/src/data/logs/agent_restart.log"
 PID_FILE="$AGENT_DIR/src/data/watchdog.pid"

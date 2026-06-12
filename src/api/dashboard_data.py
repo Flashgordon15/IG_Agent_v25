@@ -35,7 +35,7 @@ def _build_date() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
-CURRENT_VERSION = "29.0.0"
+CURRENT_VERSION = "29.1.0"
 
 
 def read_version_state() -> dict[str, Any]:

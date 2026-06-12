@@ -766,6 +766,7 @@ class TestSession6DynamicSizing:
     def test_confidence_tiered_sizing(self):
         """confidence=95 → multiplier 1.0; confidence=82 → multiplier 0.25."""
         import sys
+        from unittest.mock import patch
 
         sys.path.insert(0, str(SRC))
         from execution.execution_engine import ExecutionEngine
@@ -777,15 +778,22 @@ class TestSession6DynamicSizing:
         engine = object.__new__(ExecutionEngine)
         engine.config = config
 
-        # Top tier: confidence ≥ 95 → 1.0×
-        size_top = engine._confidence_adjusted_size(1.0, 95.0)
-        assert size_top == 1.0, f"Tier 95 should give 1.0× multiplier, got {size_top}"
+        # Profile B demo integrity disables dynamic_sizing globally — isolate tier math.
+        with patch(
+            "system.learning_demo_policy.learning_demo_integrity_enabled",
+            return_value=False,
+        ):
+            # Top tier: confidence ≥ 95 → 1.0×
+            size_top = engine._confidence_adjusted_size(1.0, 95.0)
+            assert size_top == 1.0, (
+                f"Tier 95 should give 1.0× multiplier, got {size_top}"
+            )
 
-        # Bottom tier: confidence 82 (≥80 but <85) → 0.25×
-        size_bottom = engine._confidence_adjusted_size(1.0, 82.0)
-        assert size_bottom == 0.25, (
-            f"Tier 80 (conf=82) should give 0.25× multiplier, got {size_bottom}"
-        )
+            # Bottom tier: confidence 82 (≥80 but <85) → 0.25×
+            size_bottom = engine._confidence_adjusted_size(1.0, 82.0)
+            assert size_bottom == 0.25, (
+                f"Tier 80 (conf=82) should give 0.25× multiplier, got {size_bottom}"
+            )
 
     def test_nasdaq_base_size_updated(self):
         """Nasdaq base trade_size must be 0.25 (up from 0.05) for dynamic sizing."""

@@ -459,6 +459,37 @@ def test_safe_to_leave_script_exists() -> None:
     assert "trading_healthy" in source or "/api/health" in source
 
 
+def test_app_identity_v29_centralized() -> None:
+    """Version and lock file identity must be v29 — not scattered v25 strings."""
+    from system.app_identity import (
+        APP_DISPLAY_NAME,
+        APP_VERSION_LABEL,
+        INSTANCE_LOCK_FILE,
+    )
+
+    assert "v29" in APP_DISPLAY_NAME
+    assert APP_VERSION_LABEL.startswith("v29")
+    assert INSTANCE_LOCK_FILE == ".ig_agent_v29.lock"
+
+
+def test_demo_only_guard_in_config_and_preflight() -> None:
+    """v29 config and main preflight must enforce demo-only deployment."""
+    cfg_path = _ROOT / "config" / "config_v29.json"
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    assert cfg.get("demo_only_deployment") is True
+    assert cfg.get("allow_live_trading") is False
+    assert str(cfg.get("operating_mode", "")).upper() == "DEMO"
+
+    main_src = _MAIN_PY.read_text(encoding="utf-8")
+    assert "validate_demo_only_startup" in main_src
+    assert "APP_DISPLAY_NAME" in main_src
+
+    from system.demo_guard import validate_demo_only_startup
+
+    ok, _ = validate_demo_only_startup(cfg)
+    assert ok is True
+
+
 def test_shutdown_cleanup_module_covers_full_teardown() -> None:
     """Stop Agent must tear down streams, IG session, watchdog (launchd-aware), orphans, lock."""
     path = _SRC / "system" / "shutdown_cleanup.py"
@@ -715,17 +746,14 @@ def test_confirm_started_script_exists() -> None:
 
 def test_startup_shutdown_symmetry() -> None:
     """Startup and shutdown checks must mirror process, lock, port, and watchdog."""
-    path = _SRC / "system" / "shutdown_cleanup.py"
-    source = path.read_text(encoding="utf-8")
-    assert "agent_fully_stopped" in source
-    assert "agent_fully_started" in source
-    for needle in (
-        "main.py",
-        "watchdog",
-        "8080",
-        ".ig_agent_v25.lock",
-    ):
-        assert needle in source
+    shutdown_src = (_SRC / "system" / "shutdown_cleanup.py").read_text(encoding="utf-8")
+    identity_src = (_SRC / "system" / "app_identity.py").read_text(encoding="utf-8")
+    assert "agent_fully_stopped" in shutdown_src
+    assert "agent_fully_started" in shutdown_src
+    for needle in ("main.py", "watchdog", "8080", "lock_path"):
+        assert needle in shutdown_src, f"shutdown_cleanup missing {needle}"
+    assert "INSTANCE_LOCK_FILE" in identity_src
+    assert ".ig_agent_v29.lock" in identity_src
 
 
 def test_ig_rest_client_has_end_session() -> None:

@@ -1,5 +1,5 @@
 {
-  "version": "29.0.0",
+  "version": "29.1.0",
   "shown": true,
   "build_date": "2026-06-07",
   "changelog": [
@@ -51,6 +51,6 @@
       ]
     }
   ],
-  "shown_for_version": "29.0.0",
+  "shown_for_version": "29.1.0",
   "dismissed_at": "2026-06-10T17:49:22.426Z"
 }

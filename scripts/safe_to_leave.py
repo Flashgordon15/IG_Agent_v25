@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-IG Agent v25 — SAFE TO LEAVE check.
+IG Agent v29 — SAFE TO LEAVE check.
 
 Run before walking away from a live session. Every line must PASS before
 the agent can be trusted to trade overnight without babysitting.
@@ -129,7 +129,9 @@ def _telegram_configured() -> tuple[bool, str]:
         from system.paths import config_dir
         from system.telegram_notifier import configure_telegram, get_telegram_notifier
 
-        raw = json.loads((config_dir() / "config_v25.json").read_text(encoding="utf-8"))
+        from system.config_loader import _primary_config_path
+
+        raw = json.loads(_primary_config_path().read_text(encoding="utf-8"))
         merged = apply_config_defaults(raw)
         _sync_operating_mode_from_credentials(merged)
         configure_telegram(Config(_data=merged))
@@ -151,7 +153,7 @@ def _quick_mode() -> bool:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="IG Agent v25 safe-to-leave check")
+    parser = argparse.ArgumentParser(description="IG Agent v29 safe-to-leave check")
     parser.add_argument(
         "--quick",
         action="store_true",
@@ -161,7 +163,9 @@ def main() -> int:
     quick = bool(args.quick) or _quick_mode()
 
     print()
-    print("IG Agent v25 — SAFE TO LEAVE CHECK")
+    from system.app_identity import APP_DISPLAY_NAME, APP_VERSION_LABEL
+
+    print(f"{APP_DISPLAY_NAME} {APP_VERSION_LABEL} — SAFE TO LEAVE CHECK")
     print("=" * 48)
     if quick:
         print("[MODE] quick — deployment pytest skipped (live agent)")

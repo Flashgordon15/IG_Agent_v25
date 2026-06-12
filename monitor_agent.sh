@@ -1,11 +1,11 @@
 #!/bin/bash
-# IG Agent v25 — external health watchdog
+# IG Agent v29 — external health watchdog
 # Run this in a separate terminal: bash monitor_agent.sh
 # Pings /health every 60s; if 3 consecutive failures, restarts the agent.
 
 PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
 HEALTH_URL="http://localhost:8080/health"
-LOCK_FILE="${PROJECT_ROOT}/src/data/.ig_agent_v25.lock"
+LOCK_FILE="${PROJECT_ROOT}/src/data/.ig_agent_v29.lock"
 LOG="${PROJECT_ROOT}/src/data/logs/watchdog.log"
 FAIL_COUNT=0
 MAX_FAILS=3
@@ -13,7 +13,7 @@ CHECK_INTERVAL=60
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') | $*" | tee -a "$LOG"; }
 
-log "=== IG Agent v25 watchdog started (check every ${CHECK_INTERVAL}s, restart after ${MAX_FAILS} fails) ==="
+log "=== IG Agent v29 watchdog started (check every ${CHECK_INTERVAL}s, restart after ${MAX_FAILS} fails) ==="
 
 while true; do
     if curl -sf --max-time 5 "$HEALTH_URL" >/dev/null 2>&1; then

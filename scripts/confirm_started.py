@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify IG Agent v25 finished startup and is trading-ready."""
+"""Verify IG Agent v29 finished startup and is trading-ready."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="IG Agent v25 — confirm startup succeeded"
+        description="IG Agent v29 — confirm startup succeeded"
     )
     parser.add_argument(
         "--within-minutes",
@@ -64,7 +64,9 @@ def main() -> int:
     stream_ok = "stream_ready not in recent engine.log" not in issues
 
     print()
-    print("IG Agent v25 — CONFIRM STARTED")
+    from system.app_identity import APP_DISPLAY_NAME, APP_VERSION_LABEL
+
+    print(f"{APP_DISPLAY_NAME} {APP_VERSION_LABEL} — CONFIRM STARTED")
     print("=" * 40)
     checks = [
         (

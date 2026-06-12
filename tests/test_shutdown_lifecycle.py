@@ -66,7 +66,9 @@ class InstanceLockTests(unittest.TestCase):
         from system import instance_lock as il
         from system.paths import data_dir
 
-        lock = data_dir() / ".ig_agent_v25.lock"
+        from system.instance_lock import lock_path
+
+        lock = lock_path()
         lock.parent.mkdir(parents=True, exist_ok=True)
         lock.write_text("99999999\n", encoding="utf-8")
         il.force_release_instance_lock()
@@ -89,7 +91,9 @@ class ShutdownVerificationTests(unittest.TestCase):
         from system.paths import data_dir
         from system.shutdown_cleanup import agent_fully_stopped
 
-        lock = data_dir() / ".ig_agent_v25.lock"
+        from system.instance_lock import lock_path
+
+        lock = lock_path()
         wd_pid = data_dir() / "watchdog.pid"
         lock.unlink(missing_ok=True)
         wd_pid.unlink(missing_ok=True)

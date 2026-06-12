@@ -45,7 +45,7 @@ V29_DIGEST_PLIST="com.igagent.v29digest.plist"
 V29_REPLAY_PLIST="com.igagent.v29replay.plist"
 LEGACY_V26_WEEKLY_PLIST="com.igagent.v25.v26weekly.plist"
 LEGACY_V26_NIGHTLY_PLIST="com.igagent.v25.v26nightly.plist"
-LOCK_FILE="${ROOT}/src/data/.ig_agent_v25.lock"
+LOCK_FILE="${ROOT}/src/data/.ig_agent_v29.lock"
 
 mkdir -p "${ROOT}/src/data/logs"
 mkdir -p "${LAUNCH_AGENTS}"

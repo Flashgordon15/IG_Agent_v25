@@ -260,7 +260,7 @@ def build_summary_text(
     close_label = format_bst_time(close_time)
     win_rate = (100.0 * trades.wins / trades.total) if trades.total else 0.0
     return (
-        "IG Agent v25 — Session Summary\n"
+        "IG Agent v29 — Session Summary\n"
         f"Date: {date_str}\n"
         f"Session: {open_label} — {close_label} BST\n"
         f"{_SUMMARY_SEP}\n"
@@ -285,7 +285,7 @@ def notify_macos(message: str) -> None:
             [
                 "osascript",
                 "-e",
-                f'display notification "{safe}" with title "IG Agent v25"',
+                f'display notification "{safe}" with title "IG Agent v29"',
             ],
             check=False,
             capture_output=True,

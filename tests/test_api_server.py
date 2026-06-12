@@ -46,7 +46,7 @@ class ApiServerTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         body = r.json()
         self.assertEqual(body["status"], "ok")
-        self.assertEqual(body["version"], "v25")
+        self.assertEqual(body["version"], "v29.1")
 
     def test_state_default_tick_schema(self) -> None:
         r = self.client.get("/state")

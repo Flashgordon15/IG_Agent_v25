@@ -1,0 +1,8 @@
+........................................F............................... [ 97%]
+..                                                                       [100%]
+=================================== FAILURES ===================================
+E   assert 'INSTANCE_LOCK_FILE' in '"""Graceful agent teardown and startup/stop deployment verification."""\n\nfrom __future__ import annotations\n\nimpo...s_file() and not launchd_wd:\n        issues.append("watchdog.pid present")\n\n    return (len(issues) == 0, issues)\n'
+/Users/chrisgordon/Projects/IG_Agent_v25/tests/test_deployment_verified.py:760: assert 'INSTANCE_LOCK_FILE' in '"""Graceful agent teardown and startup/stop deployment verification."""\n\nfrom __future__ import annotations\n\nimpo...s_file() and not launchd_wd:\n        issues.append("watchdog.pid present")\n\n    return (len(issues) == 0, issues)\n'
+=========================== short test summary info ============================
+FAILED tests/test_deployment_verified.py::test_startup_shutdown_symmetry - as...
+1 failed, 73 passed in 4.77s

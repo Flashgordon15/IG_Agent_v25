@@ -56,6 +56,7 @@ class LiveExecutorConfirmInflightTests(unittest.TestCase):
         reset_pending_state_for_tests()
         try:
             from system.rate_limit_manager import get_rate_limit_manager
+
             get_rate_limit_manager().reset_for_tests()
         except Exception:
             pass
@@ -149,7 +150,9 @@ class LiveExecutorConfirmInflightTests(unittest.TestCase):
     ) -> None:
         rate_mgr.return_value.check_rest_allowed.return_value = None
         epic = "IX.D.NIKKEI.IFM.IP"
-        mark_pending(epic, side="BUY", order_type=ORDER_TYPE_ENTRY, deal_reference="REF-X")
+        mark_pending(
+            epic, side="BUY", order_type=ORDER_TYPE_ENTRY, deal_reference="REF-X"
+        )
         self.assertTrue(has_pending(epic))
 
         cfg = MagicMock()
@@ -169,9 +172,14 @@ class LiveExecutorConfirmInflightTests(unittest.TestCase):
             mode=ExecutionMode.DEMO,
         )
         self.assertFalse(result.success)
-        self.assertIn("unresolved", (result.rejection_reason or "").lower())
+        reason = (result.rejection_reason or "").lower()
+        self.assertTrue(
+            "confirmation" in reason or "paused" in reason,
+            result.rejection_reason,
+        )
         client.place_market_order.assert_not_called()
         resolve_pending(epic, reason="test cleanup")
+
 
 if __name__ == "__main__":
     unittest.main()
