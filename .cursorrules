@@ -1,13 +1,14 @@
-# .cursorrules - Production Guardrails for IG_Agent_v29.0
+# .cursorrules - Production Guardrails for IG_Agent_v29.1
 
 [Architecture Priorities]
-CorePipeline=src/trading/trading_loop.py -> src/trading/environment_scorer.py -> src/trading/ml_scorer.py -> src/trading/points_engine.py -> src/execution/risk_manager.py
-DatabaseRetention=Do NOT alter or touch SQLite history tables, JSON schema fallback structures, or relative log paths on disk.
+CorePipeline=src/trading/trading_loop.py -> src/trading/environment_scorer.py -> src/signals/signal_engine.py -> src/trading/points_engine.py -> src/execution/risk_manager.py
+SpecReference=IG_Agent_v29.1_COMPLETE_SPEC.md and docs/V29.1_ARCHITECTURE.md are authoritative for v29.1 behaviour
+DatabaseRetention=Do NOT alter or touch SQLite history tables, JSON schema fallback structures, or relative log paths on disk without explicit operator request.
 
 [Strict Safety Constraints]
-TradingMathGuard=NEVER modify, refactor, or optimize the 72% floor calibration parameters, position lot calculations, or hard risk limits.
-RefactoringDepth=Restrict structural edits to pure presentation, testing assertions, or telemetry injection handlers. Do not rewrite working modules.
+TradingMathGuard=NEVER modify hard risk limits (max_daily_loss_gbp, REST budget, instance lock semantics) without spec update.
+RefactoringDepth=Restrict structural edits to isolated fixes with test coverage. Prefer extending open_position_view, learning_trade_policy, protective_learning over rewriting trading_loop.
 
 [Multi-Agent Delegation Roles]
-ArchitectAgent=Focus exclusively on system routing, data hub ingress validation, and identifying file boundaries or logic clashes.
-WorkerAgent=Focus strictly on isolated function patches, test class appending, and log instrumentation.
+ArchitectAgent=Focus on snapshot/P&L data flow, learning plane boundaries, config merge chain (v29 -> v25).
+WorkerAgent=Focus on isolated patches, tests in tests/, dashboard dist rebuild after JSX changes.

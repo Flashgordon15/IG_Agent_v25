@@ -1,6 +1,8 @@
-# IG Agent v25 Dashboard
+# IG Agent v29.1 Dashboard
 
-React 18 + Vite 5 + Tailwind 3 (Section 5).
+React 18 + Vite + Tailwind — served by FastAPI at `http://localhost:8080/` from `dist/`.
+
+Spec reference: `../IG_Agent_v29.1_COMPLETE_SPEC.md` §9.
 
 ## Development
 
@@ -15,4 +17,12 @@ npm run dev   # http://localhost:5173 — proxies API to :8080
 npm run build   # output → dashboard/dist/
 ```
 
-FastAPI serves `dist/` at `http://localhost:8080/` when the build exists.
+**Required after any `src/` edit** before restart — the agent serves `dist/` only.
+
+## v29.1 panels
+
+| Area | Component |
+|------|-----------|
+| System → Learning Health | `LearningHealthPanel.jsx` |
+| Daily digest | `DailyDigestModal.jsx` |
+| Live P&L / FX pts | `LivePanel.jsx`, `utils/fmtPts.js` |

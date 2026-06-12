@@ -2,6 +2,9 @@
 
 **FINAL v8 | June 2026 | CONFIDENTIAL**
 
+> **Live operations:** superseded for day-to-day use by **`IG_Agent_v29.1_COMPLETE_SPEC.md`** (v29.1.0).  
+> This v8 document remains the detailed historical reference for the v25.5 chassis.
+
 | Field | Value |
 |-------|-------|
 | Application version | **25.5.0** |

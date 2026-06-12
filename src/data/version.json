@@ -1,8 +1,24 @@
 {
   "version": "29.1.0",
   "shown": true,
-  "build_date": "2026-06-07",
+  "build_date": "2026-06-12",
   "changelog": [
+    {
+      "version": "29.1.0",
+      "date": "2026-06-12",
+      "title": "Protective learning, live P&L accuracy, learning health",
+      "changes": [
+        "New: Protective learning phase — 62% conf / 55 fitness floors; demo soak tightened",
+        "New: Learning Health panel + GET /api/learning-health + CLI report",
+        "New: Clean learning — IG-import setups excluded from stats, ML, registry",
+        "New: Setup registry rebuild from agent-only closes at startup",
+        "Fixed: Live open P&L — streaming quotes, FX pip scaling, quote-scale trust guard",
+        "Fixed: Daily P&L idempotent on dashboard re-read; v29.1 daily loss baseline reset",
+        "Fixed: ML training + learning stats silent failures (missing imports)",
+        "Fixed: Shadow log on all signal evaluate paths; FX stop/risk pip math",
+        "Docs: IG_Agent_v29.1_COMPLETE_SPEC.md + docs/V29.1_ARCHITECTURE.md"
+      ]
+    },
     {
       "version": "25.5.0",
       "date": "2026-06-07",
@@ -52,5 +68,5 @@
     }
   ],
   "shown_for_version": "29.1.0",
-  "dismissed_at": "2026-06-10T17:49:22.426Z"
+  "dismissed_at": "2026-06-12T11:19:26.990Z"
 }

@@ -2,6 +2,8 @@
 
 **v2 | June 2026 | CONFIDENTIAL**
 
+> **Current shipped agent:** v29.1 (`IG_Agent_v29.1_COMPLETE_SPEC.md`). This framework describes the **future** multi-strategy brain; v29 embeds v26 profitability config but not a separate v26 process yet.
+
 | Field | Value |
 |-------|-------|
 | Lineage | v25.6+ operational chassis → **v26 profit engine** |
