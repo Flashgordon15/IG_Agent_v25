@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from system.pnl_math import ig_points_to_price_delta, price_delta_to_ig_points
+
 
 def instrument_for_epic(epic: str, cfg: Any | None) -> dict[str, Any] | None:
     if cfg is None:
@@ -54,8 +56,11 @@ def stop_price_from_distance(
     entry: float,
     side: str,
     stop_distance_pts: float,
+    epic: str = "",
 ) -> float:
-    dist = max(0.0, float(stop_distance_pts))
+    dist = ig_points_to_price_delta(
+        str(epic or "").strip(), max(0.0, float(stop_distance_pts))
+    )
     side_u = str(side or "BUY").upper()
     if side_u == "BUY":
         return float(entry) - dist
@@ -71,14 +76,23 @@ def resolve_stop_price(
     cfg: Any | None,
 ) -> float:
     """Absolute stop price for DB storage (never 0, never entry-as-placeholder)."""
+    epic_str = str(epic or "").strip()
     entry_f = float(entry or 0)
     if entry_f <= 0:
         return 0.0
     level = float(stop_level or 0)
-    if level > 0 and abs(level - entry_f) <= 500:
+    max_reasonable = 500.0
+    if ig_points_to_price_delta(epic_str, 1.0) < 0.01:
+        max_reasonable = 1.0
+    if level > 0 and abs(level - entry_f) <= max_reasonable:
         return level
-    dist = configured_stop_points(str(epic or "").strip(), cfg)
-    return stop_price_from_distance(entry=entry_f, side=side, stop_distance_pts=dist)
+    dist = configured_stop_points(epic_str, cfg)
+    return stop_price_from_distance(
+        entry=entry_f,
+        side=side,
+        stop_distance_pts=dist,
+        epic=epic_str,
+    )
 
 
 def stop_distance_points(row: Any, *, cfg: Any | None = None) -> float:
@@ -93,8 +107,11 @@ def stop_distance_points(row: Any, *, cfg: Any | None = None) -> float:
     if not epic:
         return 0.0
     price_diff = abs(entry - stop) if stop > 0 else 0.0
-    if 0 < price_diff <= 500:
-        return price_diff
+    max_reasonable = 500.0
+    if ig_points_to_price_delta(epic, 1.0) < 0.01:
+        max_reasonable = 1.0
+    if 0 < price_diff <= max_reasonable:
+        return price_delta_to_ig_points(epic, price_diff)
     return configured_stop_points(epic, cfg)
 
 

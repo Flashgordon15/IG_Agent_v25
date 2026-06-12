@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-_IG_SETUP_RE = re.compile(r"^IG[\|_]|IMPORT", re.IGNORECASE)
+_IG_SETUP_RE = re.compile(r"^(?:IG[\|_]|IMPORT)", re.IGNORECASE)
 _AGENT_SOURCES = frozenset({"strategy", "shadow", "agent"})
 
 

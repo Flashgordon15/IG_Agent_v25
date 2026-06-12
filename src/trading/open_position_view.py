@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from data.models import Quote
-from system.pnl_math import realised_pnl_points, round_pnl_pts
+from system.pnl_math import pip_size_for_epic, realised_pnl_points, round_pnl_pts
 
 # Non-GBP CFD specs — point_value is in position currency per index point (per contract).
 INSTRUMENT_PNL_SPEC: dict[str, dict[str, float | str]] = {
@@ -144,6 +144,24 @@ def _mark_price(side: str, quote: Quote) -> float | None:
     if side == "SELL":
         return float(quote.offer) if quote.offer else None
     return float(quote.mid) if quote.mid else None
+
+
+def _quote_mark_trustworthy(entry: float | None, mark: float | None, epic: str) -> bool:
+    """Reject streaming marks on a wildly different price scale than entry."""
+    if entry is None or mark is None:
+        return False
+    try:
+        entry_f = float(entry)
+        mark_f = float(mark)
+    except (TypeError, ValueError):
+        return False
+    if entry_f <= 0 or mark_f <= 0:
+        return False
+    if pip_size_for_epic(epic) is not None:
+        return abs(mark_f - entry_f) < 1.0
+    if entry_f > 1000:
+        return abs(mark_f - entry_f) / entry_f < 0.25
+    return abs(mark_f - entry_f) < max(500.0, entry_f * 0.5)
 
 
 def unrealized_from_quote(
@@ -351,6 +369,9 @@ def enrich_positions_with_quote(
             currency=ccy,
             point_value_gbp=point_value_gbp,
         )
+        if not _quote_mark_trustworthy(entry, mark, epic_str):
+            out.append(row)
+            continue
         if mark:
             row["current"] = mark
         row["pnl_pts"] = round_pnl_pts(pts, epic_str)
@@ -407,7 +428,14 @@ def apply_display_daily_pnl(tick: dict[str, Any]) -> None:
     """Dashboard Today P&L = realized (closed) + open unrealized."""
     realized_raw = tick.get("realized_daily_pnl_gbp")
     if realized_raw is None:
-        realized_raw = tick.get("daily_pnl_gbp")
+        daily_raw = tick.get("daily_pnl_gbp")
+        if daily_raw is not None and tick.get("open_unrealized_gbp") is not None:
+            try:
+                realized_raw = float(daily_raw) - float(tick["open_unrealized_gbp"])
+            except (TypeError, ValueError):
+                realized_raw = daily_raw
+        else:
+            realized_raw = daily_raw
     try:
         realized = float(realized_raw or 0.0)
     except (TypeError, ValueError):

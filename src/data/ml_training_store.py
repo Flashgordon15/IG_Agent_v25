@@ -15,6 +15,7 @@ from typing import Any
 
 from system.closed_trades_display import EXCLUDED_SOURCES, is_excluded_display_row
 from system.engine_log import log_engine
+from system.learning_trade_policy import is_ig_import_setup_key
 from system.paths import data_dir
 
 ML_VERSION = "25.1.0"

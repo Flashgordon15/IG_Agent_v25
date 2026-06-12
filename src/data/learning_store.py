@@ -13,6 +13,7 @@ from typing import Any
 from data.models import TradeRecord
 from system.closed_trades_display import is_excluded_display_row
 from system.ig_transactions import _raw_has_clock_time
+from system.learning_trade_policy import is_ig_import_setup_key
 from system.pnl_math import classify_result
 
 
@@ -705,7 +706,7 @@ class LearningStore:
                 f"""
                 SELECT pnl_points, ig_pnl_currency, result FROM trades
                 WHERE setup_key=? AND closed_at IS NOT NULL
-                  AND {clause}
+                  AND ({clause} OR source = 'shadow')
                 """,
                 (setup_key,),
             )
@@ -974,6 +975,7 @@ class LearningStore:
                 entry=float(entry),
                 side=str(side or "BUY"),
                 stop_distance_pts=dist,
+                epic=epic_s,
             )
         else:
             target = float(entry)

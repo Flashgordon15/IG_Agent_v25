@@ -331,6 +331,31 @@ class SignalEngine:
         except Exception:
             pass
 
+    def _log_evaluation_shadow(
+        self,
+        market: str,
+        result: SignalResult,
+        *,
+        threshold: float | None = None,
+    ) -> None:
+        snap = result.snapshot or {}
+        th = (
+            float(threshold)
+            if threshold is not None
+            else float(self._effective_signal_threshold(self._cfg))
+        )
+        would_fire = (
+            result.signal in ("BUY", "SELL") and float(result.adjusted_confidence) >= th
+        )
+        self._append_shadow_log(
+            market,
+            direction=result.signal,
+            raw_score=float(result.raw_confidence),
+            adjusted_score=float(result.adjusted_confidence),
+            would_have_fired=would_fire,
+            snapshot=snap,
+        )
+
     def evaluate(self, market: str) -> SignalResult:
         cfg = self._cfg
         from trading.strictness_resolver import resolve_strictness
@@ -389,7 +414,7 @@ class SignalEngine:
             raw = float(snap.get("raw_confidence", 0) or 0)
             adjusted = float(snap.get("adjusted_confidence", 0) or 0)
             delta = float(snap.get("learning_delta", 0) or 0)
-            return SignalResult(
+            result = SignalResult(
                 "WAIT",
                 raw,
                 adjusted,
@@ -398,6 +423,8 @@ class SignalEngine:
                 "Awaiting next closed bar (duplicate suppressed)",
                 snap,
             )
+            self._log_evaluation_shadow(market, result)
+            return result
 
         atr_ok = (
             cfg.min_atr_points <= 0 or float(last.get("atr", 0)) >= cfg.min_atr_points
@@ -546,7 +573,7 @@ class SignalEngine:
                     "h1_bullish": h1_bullish,
                 }
                 self.last_snapshot[market] = snapshot
-                return SignalResult(
+                result = SignalResult(
                     "WAIT",
                     float(raw_conf),
                     float(adjusted),
@@ -555,6 +582,8 @@ class SignalEngine:
                     notes,
                     snapshot,
                 )
+                self._log_evaluation_shadow(market, result, threshold=threshold)
+                return result
 
             setup = self.setup_key(candidate, last, trend15, atr_series)
             side_score = buy if candidate == "BUY" else sell
@@ -594,7 +623,7 @@ class SignalEngine:
                     "h1_bullish": h1_bullish,
                 }
                 self.last_snapshot[market] = snapshot
-                return SignalResult(
+                result = SignalResult(
                     "WAIT",
                     float(raw_conf),
                     float(adjusted),
@@ -603,6 +632,8 @@ class SignalEngine:
                     notes,
                     snapshot,
                 )
+                self._log_evaluation_shadow(market, result, threshold=threshold)
+                return result
             if (
                 cfg.get("enforce_1h_ema_filter", True)
                 and candidate == "SELL"

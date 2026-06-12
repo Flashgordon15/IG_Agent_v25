@@ -115,6 +115,36 @@ class TestOpenPositionView(unittest.TestCase):
         self.assertAlmostEqual(pts, 0.1)
         self.assertAlmostEqual(gbp, 1.0)
 
+    def test_enrich_keeps_ig_upl_when_quote_scale_mismatch(self) -> None:
+        quote = Quote(datetime(2026, 5, 27, 12, 0), 100.0, 100.5)
+        base = [
+            normalize_sync_position(
+                {
+                    "deal_id": "D1",
+                    "direction": "BUY",
+                    "level": 65000.0,
+                    "upl": 8.0,
+                    "size": 1.0,
+                    "epic": "IX.D.NIKKEI.IFM.IP",
+                }
+            )
+        ]
+        out = enrich_positions_with_quote(
+            base, quote, point_value_gbp=1.0, epic="IX.D.NIKKEI.IFM.IP"
+        )
+        self.assertEqual(out[0]["pnl_gbp"], 8.0)
+
+    def test_apply_display_daily_pnl_is_idempotent(self) -> None:
+        tick = {
+            "realized_daily_pnl_gbp": 10.0,
+            "daily_pnl_gbp": 10.0,
+            "positions": [{"deal_id": "D1", "pnl_gbp": -3.25}],
+        }
+        apply_display_daily_pnl(tick)
+        apply_display_daily_pnl(tick)
+        self.assertEqual(tick["daily_pnl_gbp"], 6.75)
+        self.assertEqual(tick["open_unrealized_gbp"], -3.25)
+
     def test_sum_open_unrealized_dedupes_deal_ids(self) -> None:
         tick = {
             "positions": [{"deal_id": "D1", "pnl_gbp": 12.5}],

@@ -45,8 +45,8 @@ class PortfolioRehydrationTests(unittest.TestCase):
 
     def test_risk_gbp_from_trade_row(self) -> None:
         row = {
-            "entry": 100.0,
-            "stop": 90.0,
+            "entry": 1.0850,
+            "stop": 1.0840,
             "size": 2.0,
             "epic": "CS.D.EURUSD.CFD.IP",
         }
@@ -63,7 +63,7 @@ class PortfolioRehydrationTests(unittest.TestCase):
             if k == "instruments"
             else d
         )
-        self.assertEqual(risk_gbp_from_trade_row(row, cfg=cfg), 20.0)
+        self.assertAlmostEqual(risk_gbp_from_trade_row(row, cfg=cfg), 20.0, places=2)
 
     def test_rehydrate_from_open_trades(self) -> None:
         store = MagicMock()
