@@ -7,6 +7,8 @@ from __future__ import annotations
 import threading
 from typing import Any, Callable
 
+import pandas as pd
+
 from api.snapshot import _iso_now
 from api.snapshot_store import publish_tick
 from system.config import Config

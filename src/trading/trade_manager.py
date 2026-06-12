@@ -1380,6 +1380,8 @@ class TradeManager:
         if pip_size_for_epic(epic) is not None:
             return round(float(level), 5)
         return round(float(level), 1)
+
+    def _ig_position_levels(self, deal_id: str) -> tuple[float | None, float | None]:
         client = self._rest
         if client is None:
             return None, None

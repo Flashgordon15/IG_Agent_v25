@@ -21,7 +21,6 @@ from execution.japan225_daily_risk import (
 from execution.pending_order_reconcile import (
     ORDER_TYPE_ENTRY,
     has_pending,
-    log_unresolved_if_due,
     mark_pending,
     resolve_pending,
 )
@@ -489,9 +488,7 @@ class LiveExecutor:
                         execution_params=execution_params,
                     )
             except Exception as e:
-                log_engine(
-                    f"EXEC_PROTECT spread check error: {type(e).__name__}: {e}"
-                )
+                log_engine(f"EXEC_PROTECT spread check error: {type(e).__name__}: {e}")
 
         use_limit = False
         if protect_on:
@@ -874,12 +871,25 @@ class LiveExecutor:
             try:
                 from execution.correlation_guard import confirm_direction_risk
 
-                entry_risk = stop_pts * size * point_value
+                entry_risk = (
+                    float(
+                        execution_params.get("risk")
+                        or execution_params.get("stop_distance")
+                        or execution_params.get("stop_pts")
+                        or 0
+                    )
+                    * size
+                    * float(cfg.get("ig_point_value_gbp", 1.0))
+                )
                 if entry_risk > 0:
                     confirm_direction_risk(signal.direction, entry_risk)
             except Exception:
                 pass
-        if not protect_on and deal_id and hasattr(self._client, "ensure_protective_stops"):
+        if (
+            not protect_on
+            and deal_id
+            and hasattr(self._client, "ensure_protective_stops")
+        ):
             try:
                 self._client.ensure_protective_stops(
                     deal_id,

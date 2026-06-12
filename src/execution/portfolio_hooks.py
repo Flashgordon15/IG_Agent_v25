@@ -5,13 +5,11 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
+from execution.trade_risk import risk_gbp_from_row as risk_gbp_from_trade_row
 from execution.types import TradeSignal
 from system.engine_log import log_engine
 
 _deal_risk_gbp: dict[str, float] = {}
-
-
-from execution.trade_risk import risk_gbp_from_row as risk_gbp_from_trade_row
 
 
 def reset_portfolio_hooks_for_tests() -> None:
