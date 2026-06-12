@@ -43,7 +43,9 @@ class MLFilterOverridesTests(unittest.TestCase):
         )
         from unittest.mock import patch
 
-        with patch.object(self.mod, "_meta_path", return_value=meta):
+        with patch.object(self.mod, "_meta_path", return_value=meta), patch.object(
+            self.mod, "_overrides_enabled", return_value=True
+        ), patch.object(self.mod, "training_record_count", return_value=500):
             blocked, reason = self.mod.evaluate_filter_block(
                 adjusted_score=70,
                 raw_score=70,

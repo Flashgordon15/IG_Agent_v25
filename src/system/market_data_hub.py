@@ -16,6 +16,7 @@ from datetime import datetime
 from typing import Any
 
 from data.models import Quote
+from ig_api.exceptions import IGAPIError, RateLimitError
 from system.engine_log import log_engine
 
 # Passive read-only ECN wholesale baseline observer (RAM-only, no order authority).
@@ -241,6 +242,7 @@ class MarketDataHub:
         max_age: float | None = None,
         stream_connecting: bool = False,
         connecting_grace_seconds: float = 90.0,
+        propagate_transient_errors: bool = False,
     ) -> QuoteSnapshot | None:
         """
         Return cached quote if fresh enough; otherwise fetch from IG REST.
@@ -327,7 +329,22 @@ class MarketDataHub:
             if hasattr(rest, "record_rest_success"):
                 rest.record_rest_success(f"/markets/{epic[:32]}")
             return self.publish(epic, bid, offer, source="rest")
+        except RateLimitError:
+            if propagate_transient_errors:
+                raise
+            log_engine("MarketDataHub fetch rate limited — using cache")
+            return cached
+        except IGAPIError as e:
+            if propagate_transient_errors and getattr(e, "status_code", None) == 429:
+                raise
+            log_engine(f"MarketDataHub fetch failed: {type(e).__name__}: {e}")
+            return cached
         except Exception as e:
+            if propagate_transient_errors:
+                from ig_api.rest_poll_backoff import is_connection_timeout
+
+                if is_connection_timeout(e):
+                    raise
             log_engine(f"MarketDataHub fetch failed: {type(e).__name__}: {e}")
             return cached
 

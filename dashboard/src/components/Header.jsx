@@ -11,6 +11,7 @@ import { fmtPrice } from "../utils/fmtPrice.js";
 import { APP_VERSION_LABEL } from "../utils/roadmapTelemetry.js";
 import { RoadmapProgressButton } from "./RoadmapProgressModal.jsx";
 import { DailyDigestButton } from "./DailyDigestModal.jsx";
+import MarketStatusTimer, { buildMarketStatusTimerProps } from "./MarketStatusTimer.jsx";
 
 function isNil(v) {
   return v == null || v === "";
@@ -221,6 +222,8 @@ export default function Header({
   dailyPnl,
   streamStatus,
   marketState,
+  markets,
+  marketsOpenCount,
   spreadCurrent,
   spreadNormal,
   sentiment,
@@ -324,6 +327,15 @@ export default function Header({
           <Dot className={streamUi.dot} pulse={streamUi.pulse} />
           <span className="font-medium">{streamUi.label}</span>
         </div>
+        {stream === "CLOSED" && (
+          <MarketStatusTimer
+            {...buildMarketStatusTimerProps(
+              { markets, market_state: marketState, markets_open_count: marketsOpenCount },
+              epic,
+            )}
+            variant="inline"
+          />
+        )}
 
         {/* Bid/Offer */}
         <div className="flex shrink-0 items-center gap-1 font-mono">

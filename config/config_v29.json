@@ -84,6 +84,15 @@
     "halt_entries_on_protection_failure": true,
     "_note": "HFT scalping: limit-at-touch entries, atomic SL/TP verify, spread MA filter, micro BE + ATR trail, 1.5% daily equity circuit breaker."
   },
+  "ml_filter_overrides_enabled": false,
+  "_ml_filter_overrides_note": "TEMP 2026-06-12: disabled while ML store has ~14 rows — synthetic replay max_rsi≈16 was blocking 83–100% wins at signal_confidence. Re-enable after ≥500 training records.",
+  "milestone_webhooks": {
+    "enabled": false,
+    "webhook_url": "",
+    "slack_webhook_url": "",
+    "discord_webhook_url": "",
+    "_note": "Slack/Discord incoming webhook URLs — fires at 100/250/500 ML training records."
+  },
   "demo_soak_mode": {
     "enabled": true,
     "_note": "Profile B entry permissiveness — reduced for protective learning phase.",
@@ -95,6 +104,11 @@
     "bypass_ml_veto": false,
     "spread_to_atr_circuit_max": 0.35,
     "require_points_healthy": true
+  },
+  "manual_intervention": {
+    "daily_drawdown_shield_enabled": true,
+    "daily_drawdown_shield_gbp": 500,
+    "_note": "Admin safety shield — blocks new entries when closed-day loss exceeds threshold until midnight. Distinct from max_daily_loss_gbp hard stop."
   },
   "instruments": {
     "gold": {

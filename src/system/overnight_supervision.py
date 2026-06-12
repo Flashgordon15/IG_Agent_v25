@@ -28,11 +28,13 @@ _LAUNCHD_CAFF_LABEL = "com.igagent.v25.caffeinate"
 _LAUNCHD_AGENT_LABEL = "com.igagent.v25"
 _LAUNCHD_NIGHTLY_LABEL = "com.igagent.v29nightly"
 _LAUNCHD_WEEKLY_LABEL = "com.igagent.v29weekly"
+_LAUNCHD_BACKUP_LABEL = "com.igagent.v25backup"
 _SUPERVISION_PLISTS: tuple[str, ...] = (
     "com.igagent.v25.caffeinate.plist",
     "com.igagent.v25.watchdog.plist",
 )
 _SCHEDULED_PLISTS: tuple[str, ...] = (
+    "com.igagent.v25backup.plist",
     "com.igagent.v29nightly.plist",
     "com.igagent.v29weekly.plist",
 )
@@ -242,6 +244,7 @@ def overnight_supervision_summary(*, port: int = 8080) -> dict[str, Any]:
         "launchd_watchdog": launchd_watchdog_active(),
         "nightly_job_loaded": _launchd_job_loaded(_LAUNCHD_NIGHTLY_LABEL),
         "weekly_job_loaded": _launchd_job_loaded(_LAUNCHD_WEEKLY_LABEL),
+        "backup_job_loaded": _launchd_job_loaded(_LAUNCHD_BACKUP_LABEL),
         "scheduled_plists": list(_SCHEDULED_PLISTS),
         "agent_supervision_ok": agent_ok,
         "agent_supervision_detail": agent_detail,

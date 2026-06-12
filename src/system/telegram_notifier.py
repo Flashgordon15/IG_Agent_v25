@@ -16,12 +16,12 @@ All sends are fire-and-forget; API failures are logged only and never block trad
 
 from __future__ import annotations
 
-import json
 import threading
 import time
-import urllib.error
-import urllib.request
 from datetime import datetime
+
+import requests
+from requests.exceptions import RequestException, Timeout
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
@@ -269,25 +269,21 @@ class TelegramNotifier:
 
     def _send_sync(self, text: str) -> bool:
         url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
-        payload = json.dumps(
-            {"chat_id": self.chat_id, "text": text, "disable_web_page_preview": True}
-        ).encode("utf-8")
-        req = urllib.request.Request(
-            url,
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
+        payload = {
+            "chat_id": self.chat_id,
+            "text": text,
+            "disable_web_page_preview": True,
+        }
         try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                if resp.status >= 400:
-                    log_engine(f"telegram API HTTP {resp.status}")
-                    return False
-                return True
-        except urllib.error.HTTPError as e:
-            log_engine(f"telegram API HTTP error: {e.code} {e.reason}")
-        except urllib.error.URLError as e:
-            log_engine(f"telegram API network error: {e.reason}")
+            resp = requests.post(url, json=payload, timeout=15)
+            if resp.status_code >= 400:
+                log_engine(f"telegram API HTTP {resp.status_code}")
+                return False
+            return True
+        except Timeout:
+            log_engine("telegram API network error: timeout")
+        except RequestException as e:
+            log_engine(f"telegram API network error: {e}")
         except Exception as e:
             log_engine(f"telegram send failed: {type(e).__name__}: {e}")
         return False

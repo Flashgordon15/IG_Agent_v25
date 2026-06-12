@@ -143,6 +143,21 @@ class ExecutionEngine:
     def update_positions(self, market: str, epic: str, quote: Quote) -> list[str]:
         return self._trade_manager.update_from_quote(market, epic, quote)
 
+    def update_positions_fast(self, tick: Any) -> list[str]:
+        """Hub-stream fast path — trailing/BE only, decoupled from GUI snapshots."""
+        epic = str(getattr(tick, "epic", "") or "")
+        bid = float(getattr(tick, "bid", 0) or 0)
+        offer = float(getattr(tick, "offer", 0) or 0)
+        if not epic or bid <= 0 or offer <= 0:
+            return []
+        return self._trade_manager.update_from_hub_quote(epic, bid, offer)
+
+    def has_open_positions(self, epic: str) -> bool:
+        try:
+            return bool(self.store.count_open_trades(epic))
+        except Exception:
+            return False
+
     def margin_preflight(
         self,
         *,

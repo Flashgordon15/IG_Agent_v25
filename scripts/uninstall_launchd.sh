@@ -13,6 +13,7 @@ V29_NIGHTLY_PLIST="com.igagent.v29nightly.plist"
 V29_ROADMAP_PLIST="com.igagent.v29roadmap.plist"
 V29_DIGEST_PLIST="com.igagent.v29digest.plist"
 V29_WEEKLY_PLIST="com.igagent.v29weekly.plist"
+V25_BACKUP_PLIST="com.igagent.v25backup.plist"
 LEGACY_V26_NIGHTLY_PLIST="com.igagent.v25.v26nightly.plist"
 LEGACY_V26_WEEKLY_PLIST="com.igagent.v25.v26weekly.plist"
 
@@ -26,6 +27,7 @@ for job in \
   "${V29_ROADMAP_PLIST%.plist}" \
   "${V29_DIGEST_PLIST%.plist}" \
   "${V29_WEEKLY_PLIST%.plist}" \
+  "${V25_BACKUP_PLIST%.plist}" \
   "${LEGACY_V26_NIGHTLY_PLIST%.plist}" \
   "${LEGACY_V26_WEEKLY_PLIST%.plist}"
 do
@@ -42,6 +44,7 @@ rm -f \
   "${LAUNCH_AGENTS}/${V29_ROADMAP_PLIST}" \
   "${LAUNCH_AGENTS}/${V29_DIGEST_PLIST}" \
   "${LAUNCH_AGENTS}/${V29_WEEKLY_PLIST}" \
+  "${LAUNCH_AGENTS}/${V25_BACKUP_PLIST}" \
   "${LAUNCH_AGENTS}/${LEGACY_V26_NIGHTLY_PLIST}" \
   "${LAUNCH_AGENTS}/${LEGACY_V26_WEEKLY_PLIST}"
 

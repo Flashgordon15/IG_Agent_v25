@@ -21,10 +21,16 @@ from typing import Any
 
 from data.ml_training_store import MLTrainingStore, default_store_path
 from system.engine_log import log_engine
+from system.ml_filter_overrides import (
+    BASELINE_MAX_RSI,
+    ML_MIN_TRAINING_RECORDS,
+    ML_RAMP_MIN_RECORDS,
+)
 from system.paths import data_dir
 
 LOOKBACK_HOURS = 24
 PERMUTATION_CYCLES = 10_000
+BASELINE_FILTER_OVERRIDES = {"max_rsi": BASELINE_MAX_RSI}
 _META_PATH = data_dir() / "ml_model" / "meta.json"
 _DEFAULT_STOP_PTS = 45.0
 _ATR_BUCKET_RE = re.compile(r"atr(\d+)(?:-(\d+))?", re.IGNORECASE)
@@ -331,6 +337,37 @@ def run_permutation_sweep(
     return best
 
 
+def shadow_training_record_count() -> int:
+    """Rows in shadow_training_registry (IG imports isolated from live learning)."""
+    try:
+        from data.learning_store import LearningStore
+        from data.shadow_training_registry import count_rows
+        from system.paths import data_dir
+
+        db = data_dir() / "learning_db.sqlite3"
+        if not db.is_file():
+            return 0
+        store = LearningStore(str(db))
+        return count_rows(store.conn)
+    except Exception:
+        return 0
+
+
+def training_record_count(store: MLTrainingStore) -> int:
+    """Effective ML training row count (live store + replay labels + shadow registry)."""
+    live = store.record_count()
+    shadow = shadow_training_record_count()
+    training_meta_path = data_dir() / "ml_model" / "training_meta.json"
+    try:
+        if training_meta_path.is_file():
+            meta = json.loads(training_meta_path.read_text(encoding="utf-8"))
+            replay = int(meta.get("labelled_rows") or 0)
+            return max(live + shadow, replay)
+    except (json.JSONDecodeError, OSError, TypeError, ValueError):
+        pass
+    return live + shadow
+
+
 def load_meta(path: Path = _META_PATH) -> dict[str, Any]:
     if not path.is_file():
         return {"features": list(FEATURE_KEYS)}
@@ -381,6 +418,8 @@ def run_synthetic_replay(
             )
             return 0
 
+        records = training_record_count(store)
+
         best = run_permutation_sweep(losses, history, cycles=cycles)
         if best is None or best.losses_blocked < best.loss_total:
             log_engine(
@@ -389,25 +428,37 @@ def run_synthetic_replay(
             )
             return 0
 
+        strict_bounds = best.filters.active_bounds()
         meta = load_meta(meta_path)
         meta.setdefault("features", list(FEATURE_KEYS))
-        meta["filter_overrides"] = best.filters.active_bounds()
+        meta["filter_overrides"] = strict_bounds
+        progressive_mode = (
+            "strict"
+            if records >= ML_MIN_TRAINING_RECORDS
+            else "baseline"
+            if records < ML_RAMP_MIN_RECORDS
+            else "ramp"
+        )
         meta["synthetic_replay"] = {
             "updated_at": MLTrainingStore.iso_now(),
             "lookback_hours": lookback_hours,
             "loss_count": len(losses),
             "history_count": len(history),
+            "training_record_count": records,
+            "progressive_mode": progressive_mode,
             "permutations": cycles,
             "loss_block_rate": round(best.losses_blocked / max(best.loss_total, 1), 4),
             "win_block_rate": round(best.wins_blocked / max(best.win_total, 1), 4),
+            "strict_filter_overrides": strict_bounds,
             "source_store": str(store.path),
         }
         write_meta(meta, meta_path)
         log_engine(
             "synthetic_replay: wrote filter_overrides to meta.json "
+            f"records={records} progressive_mode={progressive_mode} "
             f"loss_block={best.losses_blocked}/{best.loss_total} "
             f"win_block={best.wins_blocked}/{best.win_total} "
-            f"bounds={best.filters.active_bounds()}"
+            f"strict_bounds={strict_bounds}"
         )
         return 0
     except Exception as exc:

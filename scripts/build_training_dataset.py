@@ -26,6 +26,7 @@ OUT_PATH = data_dir() / "training_dataset.csv"
 
 REPLAY_WEIGHT = 1.0
 ML_WEIGHT = 3.0
+SHADOW_WEIGHT = 1.0
 
 
 def _warn(message: str) -> None:
@@ -87,16 +88,37 @@ def _flatten_row(row: dict[str, Any], sample_weight: float) -> dict[str, str]:
     return out
 
 
+def _load_shadow_rows() -> list[dict[str, Any]]:
+    try:
+        from data.learning_store import LearningStore
+        from data.shadow_training_registry import list_for_ml_training
+        from system.paths import data_dir
+
+        db = data_dir() / "learning_db.sqlite3"
+        if not db.is_file():
+            _warn("build_training_dataset: no learning_db for shadow registry")
+            return []
+        store = LearningStore(str(db))
+        store.connect()
+        return list_for_ml_training(store.conn)
+    except Exception as exc:
+        _warn(f"build_training_dataset: shadow registry load failed: {exc}")
+        return []
+
+
 def main() -> int:
     replay_raw = _load_jsonl(REPLAY_PATH, label="replay_results.jsonl")
     ml_raw = _load_jsonl(ML_PATH, label="ml_training_store.jsonl")
+    shadow_raw = _load_shadow_rows()
 
     replay_sorted = sorted(replay_raw, key=_stable_key)
     ml_sorted = sorted(ml_raw, key=_stable_key)
+    shadow_sorted = sorted(shadow_raw, key=_stable_key)
 
     replay_rows = [_flatten_row(r, REPLAY_WEIGHT) for r in replay_sorted]
     ml_rows = [_flatten_row(r, ML_WEIGHT) for r in ml_sorted]
-    all_rows = replay_rows + ml_rows
+    shadow_rows = [_flatten_row(r, SHADOW_WEIGHT) for r in shadow_sorted]
+    all_rows = replay_rows + ml_rows + shadow_rows
 
     all_keys: set[str] = set()
     for row in all_rows:
@@ -113,8 +135,12 @@ def main() -> int:
 
     replay_n = len(replay_rows)
     ml_n = len(ml_rows)
+    shadow_n = len(shadow_rows)
     total = len(all_rows)
-    print(f"Replay rows: {replay_n} | Training rows: {ml_n} | Total: {total}")
+    print(
+        f"Replay rows: {replay_n} | Training rows: {ml_n} | "
+        f"Shadow rows: {shadow_n} | Total: {total}"
+    )
     return 0
 
 

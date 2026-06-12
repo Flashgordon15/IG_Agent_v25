@@ -62,7 +62,11 @@ class LearningStore:
 
     @_locked
     def connect(self) -> None:
-        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self._conn = sqlite3.connect(
+            self.db_path,
+            check_same_thread=False,
+            timeout=5.0,
+        )
         self._apply_connection_pragmas()
         self._conn.row_factory = sqlite3.Row
         self._init_schema()
@@ -180,7 +184,14 @@ class LearningStore:
             )
             """
         )
+        from data.shadow_training_registry import backfill_from_trades, ensure_schema
+
+        ensure_schema(c)
         self.conn.commit()
+        try:
+            backfill_from_trades(self.conn)
+        except Exception:
+            pass
 
     @_locked
     def open_trade(self, record: TradeRecord) -> int:
@@ -438,6 +449,21 @@ class LearningStore:
                 params,
             )
             self.conn.commit()
+            detail = self.conn.execute(
+                """
+                SELECT setup_key, source, deal_reference, ig_deal_id, market, epic,
+                       side, entry, exit, size, pnl_points, ig_pnl_currency, notes,
+                       opened_at, closed_at, result
+                FROM trades WHERE id=?
+                """,
+                (int(existing["id"]),),
+            ).fetchone()
+            if detail is not None:
+                from data.shadow_training_registry import is_shadow_registry_row
+
+                row_dict = dict(detail)
+                if is_shadow_registry_row(row_dict):
+                    self._route_ig_import_to_shadow(row_dict)
             return True
 
         from execution.trade_risk import infer_epic_from_row, resolve_stop_price
@@ -538,7 +564,37 @@ class LearningStore:
                 ),
             )
         self.conn.commit()
+        self._route_ig_import_to_shadow(
+            {
+                **row,
+                "deal_reference": ref,
+                "ig_deal_id": ref,
+                "setup_key": "IG|imported",
+                "source": "ig_import",
+                "ig_pnl_currency": ig_pnl,
+                "result": result,
+                "closed_at": closed_at,
+            }
+        )
         return True
+
+    def _route_ig_import_to_shadow(self, row: dict[str, Any]) -> None:
+        try:
+            from data.shadow_training_registry import upsert_ig_import
+
+            upsert_ig_import(self.conn, row)
+        except Exception as e:
+            from system.engine_log import log_engine
+
+            log_engine(
+                f"shadow_training_registry ingest failed: {type(e).__name__}: {e}"
+            )
+
+    @_locked
+    def shadow_training_count(self) -> int:
+        from data.shadow_training_registry import count_rows
+
+        return count_rows(self.conn)
 
     @_locked
     def apply_ig_transaction_pnl(

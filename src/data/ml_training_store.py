@@ -277,7 +277,17 @@ class MLTrainingStore:
                 return
 
             record = _normalize_record(entry, exit_payload, did)
+            prev_count = self.record_count()
             _append_line(self._path, record)
+            new_count = prev_count + 1
+            try:
+                from system.milestone_notifications import on_training_records_changed
+
+                on_training_records_changed(prev_count, new_count)
+            except Exception as exc:
+                log_engine(
+                    f"milestone notification hook failed: {type(exc).__name__}: {exc}"
+                )
             with _lock:
                 _entry_buffer.pop(did, None)
         except Exception as e:

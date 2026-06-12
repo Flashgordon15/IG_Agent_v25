@@ -1,0 +1,14 @@
+---
+description: Mac Mini 24/7 host — migration handoff (Jun 2026)
+alwaysApply: true
+---
+
+# Mac Mini — IG Agent v29 host
+
+- Project: `/Users/chrisgordon/Projects/IG_Agent_v25`
+- MacBook agent: **stopped**; Mini is 24/7 host
+- Dashboard: `ssh -L 8080:127.0.0.1:8080 chrisgordon@192.168.6.44` → http://localhost:8080
+- `streaming_transport`: **rest_poll** in config_v25.json (Lightstreamer fails on Mini)
+- Telegram tokens in `config/credentials/credentials.json`
+- Health: `curl -s http://127.0.0.1:8080/api/health`
+- Full notes: `docs/MAC_MINI_HANDOFF.md`

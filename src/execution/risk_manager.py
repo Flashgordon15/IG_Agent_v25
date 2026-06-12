@@ -103,6 +103,19 @@ class RiskManager:
                     reason=loss_detail,
                 )
 
+        if self._store is not None:
+            from trading.manual_intervention import entries_blocked_by_shield
+
+            shield_blocked, shield_reason = entries_blocked_by_shield(self._store, cfg)
+            if shield_blocked:
+                return RiskAssessment(
+                    approved=False,
+                    size=size,
+                    stop_distance=stop,
+                    limit_distance=limit,
+                    reason=shield_reason,
+                )
+
         if self._store is not None and cfg.max_daily_trades > 0:
             opened_today = int(self._store.count_trades_opened_today())
             if opened_today >= cfg.max_daily_trades:

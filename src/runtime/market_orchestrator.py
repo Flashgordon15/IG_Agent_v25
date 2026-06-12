@@ -49,6 +49,9 @@ GLOBAL_ROTATION_UNIVERSE: tuple[str, ...] = (
 )
 
 TOP_ROTATION_SLOTS = 3
+MAX_ROTATION_SLOTS = 5
+ROTATION_EXPAND_THRESHOLD_PCT = 10.0
+ROTATION_GRACE_CYCLES = 3
 ROTATION_MIN_ONLINE_FOR_FILTER = 3
 _ROTATION_ONLINE_MAX_AGE_SEC = 30.0
 _ROTATION_RANK_FLOOR = 0.01
@@ -89,6 +92,40 @@ def compute_rotation_trend_cleanliness(
         vol_mult = 1.0
 
     return max(alignment * momentum_mult * vol_mult, _ROTATION_RANK_FLOOR)
+
+
+def select_active_rotation_epics(
+    ranked_assets: list[tuple[str, float]],
+    *,
+    base_slots: int = TOP_ROTATION_SLOTS,
+    max_slots: int = MAX_ROTATION_SLOTS,
+    expand_threshold_pct: float = ROTATION_EXPAND_THRESHOLD_PCT,
+    min_online: int = ROTATION_MIN_ONLINE_FOR_FILTER,
+) -> list[str]:
+    """Build the active rotation window from pre-sorted volatility rank scores.
+
+    Ranking source (same as ``MarketOrchestrator.refresh_active_epics``):
+    ``rank_score = trend_cleanliness / relative_spread_cost``, where
+    ``trend_cleanliness`` is 15m EMA+RSI alignment (bull or bear), momentum
+    from |EMA gap|/ATR, and an ATR volatility boost (see
+    ``compute_rotation_trend_cleanliness`` and ``_rotation_rank_score``).
+
+    Default: top ``base_slots`` (3) epics. Expands up to ``max_slots`` (5) when
+    4th/5th ranked assets have rank_score within ``expand_threshold_pct`` of the
+    3rd-ranked score (score >= third * (1 - pct/100)).
+    """
+    if len(ranked_assets) < min_online:
+        return [epic for epic, _ in ranked_assets]
+
+    third_score = ranked_assets[2][1]
+    threshold = third_score * (1.0 - expand_threshold_pct / 100.0)
+    slot_count = base_slots
+    for i in range(base_slots, min(max_slots, len(ranked_assets))):
+        if ranked_assets[i][1] >= threshold:
+            slot_count = i + 1
+        else:
+            break
+    return [epic for epic, _ in ranked_assets[:slot_count]]
 
 
 class MarketOrchestrator:
@@ -391,10 +428,21 @@ class MarketOrchestrator:
 
         ranked_assets.sort(key=lambda item: item[1], reverse=True)
 
+        cfg = self._config.as_dict() if hasattr(self._config, "as_dict") else {}
+        base_slots = int(cfg.get("rotation_base_slots") or TOP_ROTATION_SLOTS)
+        max_slots = int(cfg.get("rotation_max_slots") or MAX_ROTATION_SLOTS)
+        expand_pct = float(
+            cfg.get("rotation_expand_threshold_pct") or ROTATION_EXPAND_THRESHOLD_PCT
+        )
         if len(ranked_assets) < ROTATION_MIN_ONLINE_FOR_FILTER:
             active = [epic for epic, _ in ranked_assets]
         else:
-            active = [epic for epic, _ in ranked_assets[:TOP_ROTATION_SLOTS]]
+            active = select_active_rotation_epics(
+                ranked_assets,
+                base_slots=base_slots,
+                max_slots=max_slots,
+                expand_threshold_pct=expand_pct,
+            )
 
         with self._lock:
             self._active_epics = active

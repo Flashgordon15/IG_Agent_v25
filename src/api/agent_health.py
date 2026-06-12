@@ -16,6 +16,8 @@ from system.paths import data_dir, logs_dir
 
 _API_HOST = "127.0.0.1"
 _API_PORT = 8080
+_DEFAULT_QUOTE_MAX_AGE_SEC = 45.0
+_REST_POLL_QUOTE_MAX_AGE_FLOOR_SEC = 120.0
 _WATCHDOG_MARKER = "scripts/watchdog.sh"
 _WATCHDOG_LAUNCHD_MARKER = "watchdog_launchd.py"
 _WATCHDOG_PID_FILE = data_dir() / "watchdog.pid"
@@ -198,16 +200,76 @@ def _configured_epics() -> list[str]:
     return epics
 
 
+def _snapshot_market_state(epic: str) -> str | None:
+    """Live dashboard snapshot market_state for one epic (OPEN/CLOSED/…)."""
+    try:
+        from api.snapshot_store import get_tick
+
+        tick = get_tick()
+        markets = tick.get("markets")
+        if isinstance(markets, dict):
+            slice_tick = markets.get(epic)
+            if isinstance(slice_tick, dict):
+                state = str(slice_tick.get("market_state") or "").strip().upper()
+                if state:
+                    return state
+        top_epic = str(tick.get("selected_epic") or tick.get("epic") or "")
+        if top_epic == epic:
+            state = str(tick.get("market_state") or "").strip().upper()
+            if state:
+                return state
+    except Exception:
+        pass
+    return None
+
+
+def _is_rest_poll_transport() -> bool:
+    try:
+        from ig_api.streaming_factory import resolve_streaming_transport
+        from system.config_loader import get_config
+
+        cfg = get_config()
+        mode, _ = resolve_streaming_transport(cfg.streaming_transport)
+        return mode == "rest_poll"
+    except Exception:
+        return False
+
+
+def _health_quote_max_age_sec(*, epic_count: int = 1) -> float:
+    """Quote freshness window for /api/health — wider under REST poll (Mac Mini)."""
+    if not _is_rest_poll_transport():
+        return _DEFAULT_QUOTE_MAX_AGE_SEC
+    try:
+        from system.config_loader import get_config
+
+        cfg = get_config()
+        raw = cfg._data.get("health_quote_max_age_rest_poll_sec")
+        if raw is not None:
+            return max(float(raw), _DEFAULT_QUOTE_MAX_AGE_SEC)
+        refresh = float(cfg.refresh_seconds)
+    except Exception:
+        refresh = 5.0
+    n = max(1, int(epic_count))
+    return max(_REST_POLL_QUOTE_MAX_AGE_FLOOR_SEC, refresh * n * 4.0)
+
+
 def _quotes_fresh_by_epic(
-    epics: list[str], *, max_age: float = 45.0
+    epics: list[str], *, max_age: float | None = None
 ) -> dict[str, bool]:
     from system.rest_api_budget import hub_quote_stream_fresh
 
-    return {epic: hub_quote_stream_fresh(epic=epic, max_age=max_age) for epic in epics}
+    age = (
+        float(max_age)
+        if max_age is not None
+        else _health_quote_max_age_sec(epic_count=len(epics))
+    )
+    return {epic: hub_quote_stream_fresh(epic=epic, max_age=age) for epic in epics}
 
 
 def _epic_quote_exempt(epic: str) -> bool:
     """True when stale quotes for this epic are expected (closed or maintenance)."""
+    if _snapshot_market_state(epic) == "CLOSED":
+        return True
     try:
         from trading.ohlc_readiness import epic_quote_health_exempt
 
@@ -238,7 +300,13 @@ def _markets_open_count(epics: list[str]) -> int:
     try:
         from system.market_watch.calendar import is_market_open
 
-        return sum(1 for epic in epics if is_market_open(epic))
+        count = 0
+        for epic in epics:
+            if _snapshot_market_state(epic) == "CLOSED":
+                continue
+            if is_market_open(epic):
+                count += 1
+        return count
     except Exception:
         return len(epics)
 
@@ -339,10 +407,27 @@ def build_health_status() -> dict[str, Any]:
     except Exception:
         pass
 
+    system_status: dict[str, Any] = {}
+    try:
+        from system.shadow_analytics import shadow_vs_live_metrics, system_status_snapshot
+        from system.milestone_notifications import milestone_status_block
+
+        shadow_block = system_status_snapshot()
+        system_status = {
+            "shadow_analytics": shadow_block,
+            "milestones": milestone_status_block(),
+            "metrics": {
+                "shadow_vs_live": shadow_vs_live_metrics(),
+            },
+        }
+    except Exception:
+        system_status = {}
+
     return {
         "ok": trading_healthy and watchdog and supervision_drift.get("ok", True),
         "agent_alive": True,
         "trading_healthy": trading_healthy,
+        "system_status": system_status,
         "gate_relaxations": gate_relaxations,
         "trading_loops_running": loops_running,
         "trading_paused": paused,

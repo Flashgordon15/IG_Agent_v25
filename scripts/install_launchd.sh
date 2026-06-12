@@ -8,6 +8,7 @@
 #   - v29 synthetic replay 23:30 UTC (ML filter calibration via synthetic_replay.py)
 #   - gate coherence 4×/day
 #   - v29 weekly Sunday 08:30
+#   - v25 app backup Sunday 07:00 (2-slot rotation → ~/Backups/IG_Agent_v25/)
 #
 # Flags:
 #   (no flag)       — install supervision (caffeinate + watchdog) + scheduled ops
@@ -43,6 +44,7 @@ V29_NIGHTLY_PLIST="com.igagent.v29nightly.plist"
 V29_ROADMAP_PLIST="com.igagent.v29roadmap.plist"
 V29_DIGEST_PLIST="com.igagent.v29digest.plist"
 V29_REPLAY_PLIST="com.igagent.v29replay.plist"
+V25_BACKUP_PLIST="com.igagent.v25backup.plist"
 LEGACY_V26_WEEKLY_PLIST="com.igagent.v25.v26weekly.plist"
 LEGACY_V26_NIGHTLY_PLIST="com.igagent.v25.v26nightly.plist"
 LOCK_FILE="${ROOT}/src/data/.ig_agent_v29.lock"
@@ -160,6 +162,7 @@ install_plist "${V29_NIGHTLY_PLIST}"
 install_plist "${V29_ROADMAP_PLIST}"
 install_plist "${V29_DIGEST_PLIST}"
 install_plist "${V29_REPLAY_PLIST}"
+install_plist "${V25_BACKUP_PLIST}"
 
 echo "Unloading legacy v26 scheduled job labels (if present)..."
 launchctl_bootout_job "${LEGACY_V26_WEEKLY_PLIST}"
@@ -172,6 +175,7 @@ launchctl_bootstrap_job "${V29_NIGHTLY_PLIST}"
 launchctl_bootstrap_job "${V29_ROADMAP_PLIST}"
 launchctl_bootstrap_job "${V29_DIGEST_PLIST}"
 launchctl_bootstrap_job "${V29_REPLAY_PLIST}"
+launchctl_bootstrap_job "${V25_BACKUP_PLIST}"
 
 if [ "${WEEKLY_ONLY}" -eq 0 ]; then
   stop_manual_agent_if_running
@@ -208,6 +212,7 @@ fi
 
 echo ""
 echo "Installed plists to ${LAUNCH_AGENTS}"
+echo "v25 app backup: Sunday 07:00 → scripts/weekly_app_backup.sh (log: src/data/logs/backup.log)"
 echo "v29 weekly: Sunday 08:30 → scripts/v26_weekly_pack.py (log: src/data/logs/v29_weekly.log)"
 echo "gate coherence: 00:30/06:30/12:30/18:30 → scripts/run_gate_coherence_check.py (log: src/data/logs/gate_coherence.log)"
 echo "v29 daily digest: 07:30 → scripts/daily_operator_digest.py (log: src/data/logs/v29_daily_digest.log)"

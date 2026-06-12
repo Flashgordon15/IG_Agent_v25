@@ -53,4 +53,15 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ proposal_id: proposalId }),
     }),
+  adminForceClose: (epic) =>
+    fetchJson("/api/admin/force-close", {
+      method: "POST",
+      body: JSON.stringify({ epic }),
+    }),
+  adminForceBreakeven: (epic) =>
+    fetchJson("/api/admin/force-breakeven", {
+      method: "POST",
+      body: JSON.stringify({ epic }),
+    }),
+  adminRiskStatus: () => fetchJson("/api/admin/risk-status"),
 };

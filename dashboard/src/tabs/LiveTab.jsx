@@ -334,7 +334,7 @@ export default function LiveTab({ tick }) {
         <p className={`price-lg mt-1 ${badgeColor}`}>{badge}</p>
         <p className="text-muted text-[11px] mt-1 leading-snug">
           {badge === "READY"
-            ? "All gates passing"
+            ? "Armed — executing this tick"
             : marketMaint
               ? sessionGate?.detail ||
                 "Japan 225 daily maintenance (~22:00 BST) — prices resume automatically"

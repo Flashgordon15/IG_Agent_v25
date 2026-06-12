@@ -814,12 +814,24 @@ def test_watchdog_launchd_keeper_plist() -> None:
     plist = _ROOT / "scripts" / "com.igagent.v25.watchdog.plist"
     assert plist.is_file()
     source = plist.read_text(encoding="utf-8")
+    assert "<key>RunAtLoad</key>" in source
     assert "<key>KeepAlive</key>" in source
-    assert "<true/>" in source
+    assert "<key>PathState</key>" in source
+    assert "NetworkInterfaces.plist" in source
+    assert "<key>SuccessfulExit</key>" in source
     assert "watchdog_launchd.py" in source
     assert (_ROOT / "scripts" / "watchdog_launchd.py").is_file()
     install = (_ROOT / "scripts" / "install_launchd.sh").read_text(encoding="utf-8")
     assert "com.igagent.v25.watchdog.plist" in install
+
+
+def test_start_agent_launchd_boot_grace() -> None:
+    """launchd start path must grace-sleep when local port/network is not ready."""
+    launcher = _ROOT / "scripts" / "start_agent_launchd.py"
+    source = launcher.read_text(encoding="utf-8")
+    assert "boot_grace_sleep_if_needed" in source
+    assert "NetworkInterfaces.plist" in source
+    assert "time.sleep" in source
 
 
 def test_dashboard_shows_agent_offline_banner() -> None:

@@ -195,7 +195,7 @@
     },
     "wall_street": {
       "enabled": true,
-      "_note": "v26 expectancy pilot — target 60% WR × 2.5R; probe sizing 72–80%",
+      "_note": "v26 expectancy pilot \u2014 target 60% WR \u00d7 2.5R; probe sizing 72\u201380%",
       "execution_priority": 70,
       "epic": "IX.D.DOW.IFM.IP",
       "name": "Wall Street",
@@ -241,7 +241,7 @@
     },
     "germany_40": {
       "enabled": false,
-      "_note": "Disabled: IG DEMO Lightstreamer rejects IX.D.DAX.IFM.IP — verify epic on account before enabling",
+      "_note": "Disabled: IG DEMO Lightstreamer rejects IX.D.DAX.IFM.IP \u2014 verify epic on account before enabling",
       "name": "Germany 40",
       "epic": "IX.D.DAX.IFM.IP",
       "best_session": "08:00-16:30 BST",
@@ -286,7 +286,7 @@
   },
   "engine_log_intermittent": true,
   "engine_log_intermittent_seconds": 30,
-  "allow_live_trading": true,
+  "allow_live_trading": false,
   "max_open_positions": 5,
   "correlation_guard": {
     "max_concurrent_us_index_shorts": 2,
@@ -326,7 +326,7 @@
   "closed_trades_pnl_tolerance": 0.05,
   "session_refresh_minutes": 10,
   "stream_poll_seconds": 30,
-  "streaming_transport": "auto",
+  "streaming_transport": "rest_poll",
   "position_sync_seconds": 60,
   "position_sync_open_fast_seconds": 20,
   "position_sync_open_relaxed_seconds": 60,
@@ -375,17 +375,29 @@
     "probe_risk_gbp_min": 50,
     "probe_risk_gbp_max": 80,
     "core_size_multiplier": 0.65,
-    "_note": "Operator override 2026-06-09: floor 55% aligns with config_v25 signal_threshold; probe 55–80% → £50–80 risk"
+    "_note": "Operator override 2026-06-09: floor 55% aligns with config_v25 signal_threshold; probe 55\u201380% \u2192 \u00a350\u201380 risk"
   },
   "dynamic_sizing": {
     "enabled": true,
     "account_balance_gbp": 10000,
     "max_margin_pct": 0.15,
     "tiers": [
-      {"min_confidence": 95, "size_multiplier": 1.0},
-      {"min_confidence": 90, "size_multiplier": 0.65},
-      {"min_confidence": 85, "size_multiplier": 0.4},
-      {"min_confidence": 80, "size_multiplier": 0.25}
+      {
+        "min_confidence": 95,
+        "size_multiplier": 1.0
+      },
+      {
+        "min_confidence": 90,
+        "size_multiplier": 0.65
+      },
+      {
+        "min_confidence": 85,
+        "size_multiplier": 0.4
+      },
+      {
+        "min_confidence": 80,
+        "size_multiplier": 0.25
+      }
     ]
   }
 }

@@ -1,1 +1,1 @@
-{"version":1,"saved_at":1781215604.1581812,"entry":{"entries":[]},"exit":{"exits":[]},"pending":{"orders":[]},"daily_risk":{}}
+{"version":1,"saved_at":1781301366.3225029,"entry":{"entries":[]},"exit":{"exits":[{"epic":"CS.D.CFPGOLD.CFP.IP","local_created_at":1781301336.320089,"broker_deal_reference":""}]},"pending":{"orders":[{"epic":"CS.D.CFPGOLD.CFP.IP","side":"SELL","order_type":"exit","local_created_at":1781301366.322103,"broker_deal_reference":"DIAAAAXQ9HEHJA9"}]},"daily_risk":{}}

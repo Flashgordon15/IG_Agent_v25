@@ -1,6 +1,10 @@
 import { useRef, useState } from "react";
 import { postEmergencyStop } from "../api.js";
+import ActiveGatesRibbon from "./ActiveGatesRibbon.jsx";
 import LearningHealthPanel from "./LearningHealthPanel.jsx";
+import ShadowVsLivePerformanceCard from "./ShadowVsLivePerformanceCard.jsx";
+import ManualInterventionControlCard from "./ManualInterventionControlCard.jsx";
+import SentinelDiagnosticConsole from "./SentinelDiagnosticConsole.jsx";
 import resolveSupervisionAlert from "../utils/supervision.js";
 import {
   resolveEffectivePolicy,
@@ -277,6 +281,14 @@ export default function SystemPanel({ state, wsConnected, reconnecting }) {
 
   return (
     <div className="mx-auto max-w-5xl space-y-3 px-1 pb-4">
+      <div className="-mx-1 overflow-hidden rounded-lg border border-border">
+        <ActiveGatesRibbon state={state} />
+      </div>
+
+      <SentinelDiagnosticConsole />
+
+      <ManualInterventionControlCard state={state} />
+
       {effectivePolicy?.learning_demo_enabled && (
         <div
           className="rounded-lg border border-sky-500/35 bg-sky-500/10 px-3 py-2.5 text-[11px] leading-snug text-sky-100 sm:text-xs"
@@ -494,6 +506,8 @@ export default function SystemPanel({ state, wsConnected, reconnecting }) {
       </div>
 
       <LearningHealthPanel />
+
+      <ShadowVsLivePerformanceCard state={state} />
 
       {/* Health panel */}
       <Card title="Health">

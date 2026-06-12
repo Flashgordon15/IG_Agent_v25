@@ -45,6 +45,11 @@ def _agent_pnl_summary(store: Any) -> dict[str, Any]:
     wins = int(row["wins"] or 0) if row else 0
     losses = int(row["losses"] or 0) if row else 0
     ig_n = int(ig_row["n"] or 0) if ig_row else 0
+    shadow_n = 0
+    try:
+        shadow_n = int(store.shadow_training_count())
+    except Exception:
+        pass
     wr = round(wins / n, 4) if n else 0.0
     return {
         "agent_closed_trades": n,
@@ -52,6 +57,7 @@ def _agent_pnl_summary(store: Any) -> dict[str, Any]:
         "agent_losses": losses,
         "agent_win_rate": wr,
         "ig_import_rows_excluded": ig_n,
+        "shadow_training_registry_rows": shadow_n,
     }
 
 
@@ -147,6 +153,21 @@ def _calendar_status() -> dict[str, Any]:
     }
 
 
+def _shadow_analytics_status(store: Any) -> dict[str, Any]:
+    from system.shadow_analytics import build_shadow_vs_live_comparison
+
+    try:
+        return build_shadow_vs_live_comparison(store.conn)
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _milestone_status() -> dict[str, Any]:
+    from system.milestone_notifications import milestone_status_block
+
+    return milestone_status_block()
+
+
 def _recommendations(report: dict[str, Any]) -> list[str]:
     out: list[str] = []
     ml = report.get("ml") or {}
@@ -170,9 +191,10 @@ def _recommendations(report: dict[str, Any]) -> list[str]:
             "IG imports are excluded from stats."
         )
     if (pnl.get("ig_import_rows_excluded") or 0) > 0:
+        shadow_n = pnl.get("shadow_training_registry_rows") or 0
         out.append(
-            f"{pnl['ig_import_rows_excluded']} IG-import rows excluded from learning — "
-            "review Trades tab with agent-only filter."
+            f"{pnl['ig_import_rows_excluded']} IG-import rows excluded from live learning — "
+            f"{shadow_n} mirrored in shadow_training_registry for ML augmentation."
         )
     prot = (report.get("policy") or {}).get("protective_learning") or {}
     if not prot.get("enabled"):
@@ -195,6 +217,8 @@ def build_learning_health_report(*, refresh_registry: bool = False) -> dict[str,
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "agent_pnl": _agent_pnl_summary(store),
         "ml": _ml_status(),
+        "shadow_analytics": _shadow_analytics_status(store),
+        "milestones": _milestone_status(),
         "setup_registry": _registry_status(),
         "policy": _policy_status(),
         "sentiment": _sentiment_status(),

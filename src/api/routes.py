@@ -6,13 +6,14 @@ from __future__ import annotations
 
 import os
 import signal
+import sqlite3
 import threading
 import time
 from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from api.agent_control import (
     is_paused,
@@ -151,6 +152,110 @@ def api_reconcile_trades() -> dict[str, Any]:
 @router.get("/api/signals")
 def api_signals(limit: int = 50) -> dict[str, Any]:
     return {"signals": get_signal_log(limit=min(100, max(1, limit)))}
+
+
+@router.post("/api/admin/force-close")
+async def api_admin_force_close(request: Request) -> JSONResponse:
+    """Admin override — immediate MARKET close for one epic (bypasses trailing delays)."""
+    from system.engine_log import log_engine
+    from trading.manual_intervention import force_terminate_position
+
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="invalid JSON body") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+    epic = str(body.get("epic") or "").strip()
+    if not epic:
+        raise HTTPException(status_code=400, detail="epic required in JSON body")
+
+    try:
+        result = force_terminate_position(epic)
+        return JSONResponse(result)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        log_engine(f"admin/force-close failed: {type(exc).__name__}: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/api/admin/force-breakeven")
+async def api_admin_force_breakeven(request: Request) -> JSONResponse:
+    """Admin override — move stop to entry immediately (bypasses trailing thresholds)."""
+    from system.engine_log import log_engine
+    from trading.manual_intervention import force_breakeven_now
+
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="invalid JSON body") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+    epic = str(body.get("epic") or "").strip()
+    if not epic:
+        raise HTTPException(status_code=400, detail="epic required in JSON body")
+
+    try:
+        result = force_breakeven_now(epic)
+        return JSONResponse(result)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        log_engine(f"admin/force-breakeven failed: {type(exc).__name__}: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/api/admin/risk-status")
+def api_admin_risk_status() -> dict[str, Any]:
+    """Admin view — drawdown shield latch, closed-day loss, and daily loss gate."""
+    from system.engine_log import log_engine
+    from trading.manual_intervention import risk_status
+
+    try:
+        return risk_status()
+    except Exception as exc:
+        log_engine(f"admin/risk-status failed: {type(exc).__name__}: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/api/admin/export-shadow", response_model=None)
+def api_admin_export_shadow(download: bool = True) -> Response | dict[str, Any]:
+    """
+    Admin audit export — read-only dump of shadow_training_registry as CSV.
+
+    ?download=false returns JSON summary + inline csv_text for GUI preview.
+    """
+    from system.data_exporter import export_shadow_registry_to_csv
+    from system.engine_log import log_engine
+
+    try:
+        result = export_shadow_registry_to_csv()
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except sqlite3.Error as exc:
+        log_engine(f"admin/export-shadow failed: {type(exc).__name__}: {exc}")
+        raise HTTPException(status_code=500, detail="shadow registry read failed") from exc
+
+    if not download:
+        return result
+
+    summary = result.get("summary") or {}
+    stamp = str(summary.get("exported_at") or "export").replace(":", "").replace("-", "")
+    filename = f"shadow_registry_{stamp}.csv"
+    return Response(
+        content=result.get("csv_text") or "",
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Shadow-Row-Count": str(summary.get("row_count", 0)),
+            "X-Shadow-Win-Rate": str(summary.get("overall_win_rate", 0)),
+        },
+    )
 
 
 @router.get("/api/system")

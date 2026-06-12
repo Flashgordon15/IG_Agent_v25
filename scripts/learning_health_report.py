@@ -42,6 +42,7 @@ def main() -> int:
         f"WR: {float(pnl.get('agent_win_rate') or 0) * 100:.1f}%"
     )
     print(f"  IG import rows excluded: {pnl.get('ig_import_rows_excluded')}")
+    print(f"  Shadow training registry: {pnl.get('shadow_training_registry_rows')}")
     print()
     print("ML")
     print(f"  USE_ML_SIGNAL: {ml.get('use_ml_signal')}")
@@ -50,6 +51,28 @@ def main() -> int:
     )
     print(f"  ML blend ready: {ml.get('ml_blend_ready')}")
     print(f"  Filter overrides active: {ml.get('filter_overrides_active')}")
+    print()
+    sa = report.get("shadow_analytics") or {}
+    if sa.get("shadow"):
+        sh = sa["shadow"]
+        lv = sa.get("live") or {}
+        print("Shadow vs live analytics")
+        print(
+            f"  Shadow WR/PF: {float(sh.get('win_rate') or 0) * 100:.1f}% / "
+            f"{sh.get('profit_factor')}  ({sh.get('trade_count')} trades)"
+        )
+        print(
+            f"  Live WR/PF:   {float(lv.get('win_rate') or 0) * 100:.1f}% / "
+            f"{lv.get('profit_factor')}  ({lv.get('trade_count')} trades)"
+        )
+    ms = report.get("milestones") or {}
+    if ms:
+        print()
+        print("ML milestones")
+        print(
+            f"  Records: {ms.get('training_records')}/{ms.get('training_records_required')}  "
+            f"Next: {ms.get('next_milestone')}  Sent: {ms.get('milestones_sent')}"
+        )
     print()
     print("Setup registry")
     print(f"  Gate enabled: {reg.get('enabled')}  Banned: {reg.get('banned_count')}")

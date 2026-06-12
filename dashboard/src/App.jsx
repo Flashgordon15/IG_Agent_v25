@@ -5,7 +5,6 @@ import { fetchState, fetchSplash, dismissSplash } from "./api.js";
 const HEARTBEAT_INTERVAL_MS = 25000; // ping every 25 s (server times out at 10 min)
 import Header from "./components/Header.jsx";
 import SupervisionBanner from "./components/SupervisionBanner.jsx";
-import ActiveGatesRibbon from "./components/ActiveGatesRibbon.jsx";
 import {
   persistStopSupervision,
   loadStopSupervision,
@@ -807,6 +806,8 @@ export default function App() {
     dailyPnl: state?.daily_pnl_gbp,
     streamStatus: viewState?.stream_status,
     marketState: viewState?.market_state,
+    markets: state?.markets,
+    marketsOpenCount: state?.markets_open_count,
     epic: viewState?.epic ?? selectedEpic,
     spreadCurrent: viewState?.spread_current ?? viewState?.spread,
     spreadNormal: viewState?.spread_normal,
@@ -989,8 +990,6 @@ export default function App() {
   return (
     <div className="flex min-h-screen min-w-0 flex-col bg-bg text-foreground">
       <Header {...headerProps} />
-
-      <ActiveGatesRibbon state={state} />
 
       <SupervisionBanner state={state} />
 

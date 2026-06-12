@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Callable
 
 from data.learning_store import LearningStore
 from data.models import Quote, TradeRecord
+from execution.trailing_stop_engine import BreakevenEval, TrailEval, eval_breakeven_stop, eval_trailing_stop
 from system.config import Config
 from system.engine_log import log_engine
 from system.trade_lifecycle_bus import (
@@ -51,6 +53,24 @@ class TradeManager:
         self._gone_deals: set[str] = set()
         self._capital_recycle_applied: set[int] = set()
         self._scalping_be_armed: set[int] = set()
+        self._protect_active = False
+        self._scalping_trail = False
+        self._refresh_exec_protect_flags()
+        if os.environ.get("IG_AGENT_SYNC_STOP_DISPATCH", "").strip() == "1":
+            from execution.stop_dispatch_worker import configure_sync_mode
+
+            configure_sync_mode(True)
+
+    def _refresh_exec_protect_flags(self) -> None:
+        try:
+            from execution.execution_protect import is_protect_enabled
+            from execution.scalping.config import is_scalping_enabled
+
+            self._protect_active = is_protect_enabled(self._cfg)
+            self._scalping_trail = is_scalping_enabled(self._cfg)
+        except Exception:
+            self._protect_active = False
+            self._scalping_trail = False
 
     @staticmethod
     def confidence_band(confidence: float) -> str:
@@ -227,7 +247,19 @@ class TradeManager:
         )
         return trade_id
 
-    def update_from_quote(self, market: str, epic: str, quote: Quote) -> list[str]:
+    def update_from_hub_quote(self, epic: str, bid: float, offer: float) -> list[str]:
+        """Lightweight hub-stream path — trailing/BE only, no dashboard coupling."""
+        quote = Quote(datetime.utcnow(), float(bid), float(offer))
+        return self.update_from_quote("", epic, quote, fast_path=True)
+
+    def update_from_quote(
+        self,
+        market: str,
+        epic: str,
+        quote: Quote,
+        *,
+        fast_path: bool = False,
+    ) -> list[str]:
         cfg = self._cfg
         messages: list[str] = []
 
@@ -313,17 +345,12 @@ class TradeManager:
             if row_after_partial:
                 size = float(row_after_partial["size"])
 
-            protect_active = False
-            scalping_trail = False
-            try:
-                from execution.execution_protect import is_protect_enabled
-                from execution.scalping.config import is_scalping_enabled
-
-                protect_active = is_protect_enabled(cfg)
-                scalping_trail = is_scalping_enabled(cfg)
-            except Exception:
-                protect_active = False
-                scalping_trail = False
+            protect_active = self._protect_active
+            scalping_trail = self._scalping_trail
+            if not fast_path:
+                self._refresh_exec_protect_flags()
+                protect_active = self._protect_active
+                scalping_trail = self._scalping_trail
 
             if protect_active and cfg.breakeven_enabled:
                 messages.extend(
@@ -398,8 +425,9 @@ class TradeManager:
                         stop=stop,
                         epic=epic,
                         new_limit=new_limit,
+                        fast_path=fast_path,
                     )
-                    if pushed and stop_moved:
+                    if pushed and stop_moved and not fast_path:
                         msg = (
                             messages[-1]
                             if messages
@@ -1296,24 +1324,19 @@ class TradeManager:
         msgs: list[str] = []
         profit = self._profit_ig_points(side, entry, px, epic)
         offset_price = self._offset_price(epic, offset)
+        be_stop = eval_breakeven_stop(
+            BreakevenEval(side, entry, stop, target, px, profit, trigger, offset_price)
+        )
+        if be_stop is None:
+            return msgs
+        self.store.update_stop(
+            trade_id, be_stop, f" | Stop moved to breakeven {be_stop:.5f}"
+        )
         if side == "BUY":
-            be_stop = entry + offset_price
-            if profit >= trigger and stop < be_stop:
-                self.store.update_stop(
-                    trade_id, be_stop, f" | Stop moved to breakeven {be_stop:.5f}"
-                )
-                msgs.append(f"BREAKEVEN STOP MOVED | {market} BUY | stop {be_stop:.5f}")
-                self._award_protection_milestone(trade_id, "breakeven", market)
+            msgs.append(f"BREAKEVEN STOP MOVED | {market} BUY | stop {be_stop:.5f}")
         else:
-            be_stop = entry - offset_price
-            if profit >= trigger and stop > be_stop:
-                self.store.update_stop(
-                    trade_id, be_stop, f" | Stop moved to breakeven {be_stop:.5f}"
-                )
-                msgs.append(
-                    f"BREAKEVEN STOP MOVED | {market} SELL | stop {be_stop:.5f}"
-                )
-                self._award_protection_milestone(trade_id, "breakeven", market)
+            msgs.append(f"BREAKEVEN STOP MOVED | {market} SELL | stop {be_stop:.5f}")
+        self._award_protection_milestone(trade_id, "breakeven", market)
         return msgs
 
     def _apply_trailing(
@@ -1332,41 +1355,33 @@ class TradeManager:
     ):
         msgs: list[str] = []
         profit = self._profit_ig_points(side, entry, px, epic)
-        if side == "BUY":
-            trail_stop = px - distance
-            if trail_stop < stop:
-                if profit >= trigger:
+        trail_stop = eval_trailing_stop(
+            TrailEval(side, entry, stop, target, px, profit, trigger, distance)
+        )
+        if trail_stop is None:
+            if profit >= trigger:
+                if side == "BUY" and (px - distance) < stop:
                     log_engine(
                         f"ERROR: Trail would move stop backwards — rejected. "
-                        f"current={stop} proposed={trail_stop}"
+                        f"current={stop} proposed={px - distance:.5f}"
                     )
-                return []
-            if profit >= trigger and trail_stop > stop and trail_stop < target:
-                self.store.update_stop(
-                    trade_id,
-                    trail_stop,
-                    f" | Trailing stop raised to {trail_stop:.5f}",
-                )
-                msgs.append(
-                    f"TRAILING STOP RAISED | {market} BUY | stop {trail_stop:.5f}"
-                )
-                self._award_protection_milestone(trade_id, "trail", market)
-        else:
-            trail_stop = px + distance
-            if trail_stop > stop:
-                if profit >= trigger:
+                elif side == "SELL" and (px + distance) > stop:
                     log_engine("ERROR: Trail would move stop backwards — rejected.")
-                return []
-            if profit >= trigger and trail_stop < stop and trail_stop > target:
-                self.store.update_stop(
-                    trade_id,
-                    trail_stop,
-                    f" | Trailing stop lowered to {trail_stop:.5f}",
-                )
-                msgs.append(
-                    f"TRAILING STOP LOWERED | {market} SELL | stop {trail_stop:.5f}"
-                )
-                self._award_protection_milestone(trade_id, "trail", market)
+            return msgs
+        self.store.update_stop(
+            trade_id,
+            trail_stop,
+            f" | Trailing stop {'raised' if side == 'BUY' else 'lowered'} to {trail_stop:.5f}",
+        )
+        if side == "BUY":
+            msgs.append(
+                f"TRAILING STOP RAISED | {market} BUY | stop {trail_stop:.5f}"
+            )
+        else:
+            msgs.append(
+                f"TRAILING STOP LOWERED | {market} SELL | stop {trail_stop:.5f}"
+            )
+        self._award_protection_milestone(trade_id, "trail", market)
         return msgs
 
     def _stop_tolerance(self, epic: str) -> float:
@@ -1448,6 +1463,16 @@ class TradeManager:
             f"IG position gone — closed local trade id={trade_id} epic={epic} deal={deal_id}"
         )
 
+    def _execute_stop_dispatch_job(self, job: StopDispatchJob) -> bool:
+        return self._execute_stop_sync(
+            job.deal_id,
+            trade_id=job.trade_id,
+            side=job.side,
+            stop=job.stop,
+            epic=job.epic,
+            new_limit=job.new_limit,
+        )
+
     def _sync_stop_to_ig(
         self,
         deal_id: str,
@@ -1457,9 +1482,10 @@ class TradeManager:
         stop: float,
         epic: str,
         new_limit: float | None = None,
+        fast_path: bool = False,
     ) -> bool:
         """
-        Push updated stop (and optionally a new limit) to the IG broker via PUT.
+        Queue broker stop/limit PUT on the async worker (non-blocking tick path).
 
         ``new_limit`` should be passed when a limit extension has fired — it is used
         directly in the PUT payload, skipping an extra GET to read the current IG limit
@@ -1473,7 +1499,6 @@ class TradeManager:
         cache_key = f"{deal_id}:{trade_id}"
         last_pushed_stop = self._last_ig_stop.get(cache_key)
 
-        # Dedup the limit extension: skip if we already pushed this limit level.
         limit_cache_key = f"{deal_id}:{trade_id}:limit"
         last_pushed_limit = self._last_ig_limit.get(limit_cache_key)
         tol = self._stop_tolerance(epic)
@@ -1487,13 +1512,41 @@ class TradeManager:
         if stop_already_pushed and new_limit is None:
             return False
 
-        ig_stop = self._ig_stop_level(deal_id)
-        if ig_stop is not None:
-            if side == "BUY" and stop <= ig_stop + tol and new_limit is None:
-                return False
-            if side == "SELL" and stop >= ig_stop - tol and new_limit is None:
-                return False
+        if not fast_path:
+            ig_stop = self._ig_stop_level(deal_id)
+            if ig_stop is not None:
+                if side == "BUY" and stop <= ig_stop + tol and new_limit is None:
+                    return False
+                if side == "SELL" and stop >= ig_stop - tol and new_limit is None:
+                    return False
 
+        from execution.stop_dispatch_worker import StopDispatchJob, enqueue_stop_dispatch
+
+        job = StopDispatchJob(
+            deal_id=str(deal_id),
+            trade_id=int(trade_id),
+            side=str(side),
+            stop=float(stop),
+            epic=str(epic),
+            new_limit=float(new_limit) if new_limit is not None else None,
+        )
+        return enqueue_stop_dispatch(job)
+
+    def _execute_stop_sync(
+        self,
+        deal_id: str,
+        *,
+        trade_id: int,
+        side: str,
+        stop: float,
+        epic: str,
+        new_limit: float | None = None,
+    ) -> bool:
+        """Blocking IG REST stop/limit update — runs on stop_dispatch_worker thread."""
+        if not self._rest or not deal_id:
+            return False
+        cache_key = f"{deal_id}:{trade_id}"
+        limit_cache_key = f"{deal_id}:{trade_id}:limit"
         try:
             from ig_api.exceptions import IGAPIError, RateLimitError
             from system.rate_limit_manager import get_rate_limit_manager
@@ -1510,8 +1563,6 @@ class TradeManager:
                 )
                 return False
 
-            # When new_limit is provided (limit extension), use it directly — no GET.
-            # Otherwise read current IG limit to preserve it in the PUT payload.
             if new_limit is not None:
                 effective_limit: float | None = new_limit
             else:

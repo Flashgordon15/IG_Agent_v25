@@ -43,6 +43,9 @@ _hub_push_min_interval: float = 0.25
 _cached_uptime: str | None = None
 _cached_position_sync_status: str | None = None
 _cached_ohlc_markets_cached: int | None = None
+_SLOW_ENRICH_TTL_SEC = 60.0
+_slow_enrich_ts: float = 0.0
+_slow_enrich_blob: dict[str, Any] = {}
 
 
 def snapshot_path() -> Path:
@@ -69,6 +72,7 @@ def reset_snapshot_store_for_tests() -> None:
         _last_hub_push_ts, \
         _hub_push_min_interval
     global _cached_uptime, _cached_position_sync_status, _cached_ohlc_markets_cached
+    global _slow_enrich_ts, _slow_enrich_blob
     with _lock:
         _path_override = None
         _cached = build_default_tick()
@@ -79,6 +83,8 @@ def reset_snapshot_store_for_tests() -> None:
         _cached_uptime = None
         _cached_position_sync_status = None
         _cached_ohlc_markets_cached = None
+        _slow_enrich_ts = 0.0
+        _slow_enrich_blob = {}
 
 
 def subscribe(callback: Callable[[dict[str, Any]], None]) -> Callable[[], None]:
@@ -94,9 +100,162 @@ def subscribe(callback: Callable[[dict[str, Any]], None]) -> Callable[[], None]:
     return _unsub
 
 
+def _raw_tick_copy() -> dict[str, Any]:
+    """Shallow copy of cached tick — avoids slow reader enrichment on quote-only paths."""
+    with _lock:
+        tick = dict(_cached)
+    markets = tick.get("markets")
+    if isinstance(markets, dict):
+        tick["markets"] = {
+            k: dict(v) if isinstance(v, dict) else v for k, v in markets.items()
+        }
+    sig = tick.get("signal")
+    if isinstance(sig, dict):
+        tick["signal"] = dict(sig)
+    return tick
+
+
+def _build_slow_enrichment_blob(*, force: bool = False) -> dict[str, Any]:
+    """Expensive dashboard fields (DB, filesystem) — cached to protect hot tick path."""
+    global _slow_enrich_ts, _slow_enrich_blob
+    global _cached_uptime, _cached_position_sync_status, _cached_ohlc_markets_cached
+    now = time.time()
+    with _lock:
+        if (
+            not force
+            and _slow_enrich_blob
+            and (now - _slow_enrich_ts) < _SLOW_ENRICH_TTL_SEC
+        ):
+            return dict(_slow_enrich_blob)
+
+    blob: dict[str, Any] = {}
+    try:
+        from system.paths import data_dir as _data_dir
+
+        ohlc_dir = _data_dir() / "ohlc_cache"
+        count = sum(
+            1
+            for f in ohlc_dir.iterdir()
+            if f.suffix == ".jsonl" and not f.name.endswith(".synthetic")
+        )
+        _cached_ohlc_markets_cached = count
+        blob["ohlc_markets_cached"] = count
+    except Exception:
+        if _cached_ohlc_markets_cached is not None:
+            blob["ohlc_markets_cached"] = _cached_ohlc_markets_cached
+
+    try:
+        import json as _json
+        from datetime import datetime as _dt
+
+        from system.paths import data_dir as _data_dir
+
+        meta_file = _data_dir() / "ml_model" / "meta.json"
+        if meta_file.exists():
+            meta = _json.loads(meta_file.read_text())
+            blob["model_version"] = meta.get("version") or meta.get("trained_at") or "—"
+            blob["last_retrain_time"] = meta.get("trained_at") or "—"
+        else:
+            model_file = _data_dir() / "ml_model" / "model.pkl"
+            if model_file.exists():
+                mtime = model_file.stat().st_mtime
+                ts = _dt.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+                blob["model_version"] = ts
+                blob["last_retrain_time"] = ts
+            else:
+                blob["model_version"] = "No model"
+                blob["last_retrain_time"] = "—"
+    except Exception:
+        blob.setdefault("model_version", "—")
+        blob.setdefault("last_retrain_time", "—")
+
+    try:
+        import time as _time
+
+        from system.paths import data_dir as _data_dir
+
+        lock = _data_dir() / ".ig_agent_v25.lock"
+        if lock.exists():
+            secs = int(_time.time() - lock.stat().st_mtime)
+            h, m = divmod(secs // 60, 60)
+            uptime_str = f"{h}h {m:02d}m" if h else f"{m}m {secs % 60:02d}s"
+            _cached_uptime = uptime_str
+            blob["uptime"] = uptime_str
+        elif _cached_uptime is not None:
+            blob["uptime"] = _cached_uptime
+    except Exception:
+        if _cached_uptime is not None:
+            blob["uptime"] = _cached_uptime
+
+    try:
+        from system.gate_relaxation import relaxation_snapshot
+
+        blob["gate_relaxations"] = relaxation_snapshot()
+    except Exception:
+        pass
+
+    try:
+        from data.learning_store import LearningStore
+        from system.config_loader import get_config
+        from system.learning_demo_policy import effective_policy_snapshot
+
+        store = LearningStore(str(get_config().learning_db))
+        blob["effective_policy"] = effective_policy_snapshot(store)
+    except Exception:
+        pass
+
+    try:
+        from system.shadow_analytics import shadow_vs_live_metrics
+
+        blob["metrics_shadow_vs_live"] = shadow_vs_live_metrics()
+    except Exception:
+        pass
+
+    try:
+        from system.demo_execution_trace import get_demo_diagnostics_snapshot
+
+        diag = get_demo_diagnostics_snapshot()
+        status = diag.ig_position_sync_status
+        if status:
+            _cached_position_sync_status = status
+            blob["position_sync_status"] = status
+        elif _cached_position_sync_status is not None:
+            blob["position_sync_status"] = _cached_position_sync_status
+    except Exception:
+        if _cached_position_sync_status is not None:
+            blob["position_sync_status"] = _cached_position_sync_status
+
+    with _lock:
+        _slow_enrich_blob = dict(blob)
+        _slow_enrich_ts = now
+    return dict(blob)
+
+
+def _apply_slow_enrichments(out: dict[str, Any]) -> None:
+    """Merge TTL-cached slow fields when absent from the trading-loop tick."""
+    blob = _build_slow_enrichment_blob()
+    for key in (
+        "ohlc_markets_cached",
+        "model_version",
+        "last_retrain_time",
+        "uptime",
+        "gate_relaxations",
+        "effective_policy",
+        "position_sync_status",
+    ):
+        if not out.get(key) and key in blob:
+            out[key] = blob[key]
+    shadow = blob.get("metrics_shadow_vs_live")
+    if shadow:
+        metrics = dict(out.get("metrics") or {})
+        if "shadow_vs_live" not in metrics:
+            metrics["shadow_vs_live"] = shadow
+            out["metrics"] = metrics
+
+
 def _deliver_tick_to_subscribers(tick: dict[str, Any]) -> None:
-    """Push a JSON-safe copy to WebSocket subscribers (may run on engine thread)."""
-    payload = json.loads(json.dumps(_tick_for_readers(tick), default=str))
+    """Push an enriched copy to WebSocket subscribers (may run on engine thread)."""
+    payload = _tick_for_readers(tick)
     with _lock:
         subscribers = list(_subscribers)
     for cb in subscribers:
@@ -243,10 +402,7 @@ def push_hub_quote_to_dashboard(
         return
     _last_hub_push_ts = now
 
-    tick = dict(get_tick())
-    sig = tick.get("signal")
-    if isinstance(sig, dict):
-        tick["signal"] = dict(sig)
+    tick = _raw_tick_copy()
 
     _merge_hub_quote_into_tick(
         tick,
@@ -355,107 +511,7 @@ def _tick_for_readers(tick: dict[str, Any]) -> dict[str, Any]:
         if all_positions:
             out["positions"] = all_positions
     apply_display_daily_pnl(out)
-    # Inject live OHLC market count so SystemPanel can show it without an extra API call
-    if "ohlc_markets_cached" not in out:
-        global _cached_ohlc_markets_cached
-        try:
-            from system.paths import data_dir as _data_dir
-
-            ohlc_dir = _data_dir() / "ohlc_cache"
-            count = sum(
-                1
-                for f in ohlc_dir.iterdir()
-                if f.suffix == ".jsonl" and not f.name.endswith(".synthetic")
-            )
-            _cached_ohlc_markets_cached = count
-            out["ohlc_markets_cached"] = count
-        except Exception:
-            if _cached_ohlc_markets_cached is not None:
-                out["ohlc_markets_cached"] = _cached_ohlc_markets_cached
-
-    # ML model metadata for SystemPanel — always populate so dashboard never flickers
-    try:
-        import json as _json
-        from datetime import datetime as _dt
-
-        from system.paths import data_dir as _data_dir
-
-        meta_file = _data_dir() / "ml_model" / "meta.json"
-        if meta_file.exists():
-            meta = _json.loads(meta_file.read_text())
-            out["model_version"] = meta.get("version") or meta.get("trained_at") or "—"
-            out["last_retrain_time"] = meta.get("trained_at") or "—"
-        else:
-            model_file = _data_dir() / "ml_model" / "model.pkl"
-            if model_file.exists():
-                mtime = model_file.stat().st_mtime
-                ts = _dt.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
-                out["model_version"] = ts
-                out["last_retrain_time"] = ts
-            else:
-                out.setdefault("model_version", "No model")
-                out.setdefault("last_retrain_time", "—")
-    except Exception:
-        out.setdefault("model_version", "—")
-        out.setdefault("last_retrain_time", "—")
-
-    # Agent uptime derived from lock-file mtime
-    if not out.get("uptime"):
-        global _cached_uptime
-        try:
-            import time as _time
-
-            from system.paths import data_dir as _data_dir
-
-            lock = _data_dir() / ".ig_agent_v25.lock"
-            if lock.exists():
-                secs = int(_time.time() - lock.stat().st_mtime)
-                h, m = divmod(secs // 60, 60)
-                uptime_str = f"{h}h {m:02d}m" if h else f"{m}m {secs % 60:02d}s"
-                _cached_uptime = uptime_str
-                out["uptime"] = uptime_str
-            elif _cached_uptime is not None:
-                out["uptime"] = _cached_uptime
-        except Exception:
-            if _cached_uptime is not None:
-                out["uptime"] = _cached_uptime
-
-    if not out.get("gate_relaxations"):
-        try:
-            from system.gate_relaxation import relaxation_snapshot
-
-            out["gate_relaxations"] = relaxation_snapshot()
-        except Exception:
-            pass
-
-    if not out.get("effective_policy"):
-        try:
-            from data.learning_store import LearningStore
-            from system.config_loader import get_config
-            from system.learning_demo_policy import effective_policy_snapshot
-
-            store = LearningStore(str(get_config().learning_db))
-            out["effective_policy"] = effective_policy_snapshot(store)
-        except Exception:
-            pass
-
-    # Position sync status from diagnostics snapshot
-    if not out.get("position_sync_status"):
-        global _cached_position_sync_status
-        try:
-            from system.demo_execution_trace import get_demo_diagnostics_snapshot
-
-            diag = get_demo_diagnostics_snapshot()
-            status = diag.ig_position_sync_status
-            if status:
-                _cached_position_sync_status = status
-                out["position_sync_status"] = status
-            elif _cached_position_sync_status is not None:
-                out["position_sync_status"] = _cached_position_sync_status
-        except Exception:
-            if _cached_position_sync_status is not None:
-                out["position_sync_status"] = _cached_position_sync_status
-
+    _apply_slow_enrichments(out)
     return out
 
 

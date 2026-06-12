@@ -590,6 +590,7 @@ class TestRoadmapE2EIntegration(unittest.TestCase):
             epic="IX.D.DAX.IG.IP",
             market="DAX",
         )
+        loop._rotation_grace_remaining = 0
         gates = loop._evaluate_gates_core(_quote())
         self.assertFalse(any(g.passed for g in gates))
         self.assertTrue(

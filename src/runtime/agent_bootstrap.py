@@ -175,6 +175,15 @@ def _build_single_loop(
     if position_sync is not None:
         exec_engine.attach_position_sync(position_sync)
 
+    from execution.position_protect_hub import (
+        ensure_stop_dispatch_configured,
+        register_execution_engine,
+        register_trade_manager,
+    )
+
+    register_execution_engine(epic, exec_engine)
+    register_trade_manager(epic, exec_engine._trade_manager)
+
     journal_path = str(cfg.get("decision_log_file", "") or "")
     journal = DecisionJournal(journal_path) if journal_path else None
     execution_loop = ExecutionTickLoop(
@@ -369,6 +378,20 @@ def build_market_orchestrator(
         send_startup_test()
     except Exception as e:
         log_engine(f"telegram configure failed: {type(e).__name__}: {e}")
+
+    try:
+        from system.ml_filter_overrides import load_filter_overrides
+
+        load_filter_overrides(force=True)
+    except Exception as e:
+        log_engine(f"ml_filter_overrides init log failed: {type(e).__name__}: {e}")
+
+    try:
+        from system.milestone_notifications import sync_milestones_on_startup
+
+        sync_milestones_on_startup()
+    except Exception as e:
+        log_engine(f"milestone sync failed: {type(e).__name__}: {e}")
 
     exec_mode = mode
     if exec_mode is None:
@@ -596,6 +619,10 @@ def build_market_orchestrator(
             )
     except Exception as e:
         log_engine(f"telegram startup notify failed: {type(e).__name__}: {e}")
+
+    from execution.position_protect_hub import ensure_stop_dispatch_configured
+
+    ensure_stop_dispatch_configured()
 
     return orch
 

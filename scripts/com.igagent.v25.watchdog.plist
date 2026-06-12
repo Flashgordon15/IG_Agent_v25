@@ -21,7 +21,15 @@
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>
-	<true/>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+		<key>PathState</key>
+		<dict>
+			<key>/Library/Preferences/SystemConfiguration/NetworkInterfaces.plist</key>
+			<true/>
+		</dict>
+	</dict>
 	<key>StandardOutPath</key>
 	<string>__IG_AGENT_ROOT__/src/data/logs/watchdog_launchd.log</string>
 	<key>StandardErrorPath</key>

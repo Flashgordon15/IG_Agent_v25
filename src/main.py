@@ -629,6 +629,11 @@ class AgentRuntime:
                 from api.agent_control import start_trading
 
                 wire_hub_quotes_to_dashboard(min_interval=0.25)
+                from execution.position_protect_hub import (
+                    wire_hub_quotes_to_position_protect,
+                )
+
+                wire_hub_quotes_to_position_protect(min_interval=0.05)
                 self._stream_client = start_market_stream(cfg, rest_client=rest)
                 _startup_mark("stream")
                 # Auto-start trading loops — no dashboard Start button required.

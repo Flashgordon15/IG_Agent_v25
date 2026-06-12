@@ -13,6 +13,12 @@ from typing import Any
 
 from ig_api.auth import SessionTokens
 from ig_api.exceptions import IGStreamError, RateLimitError
+from ig_api.rest_poll_backoff import (
+    RestPollBackoff,
+    format_backoff_warning,
+    is_retryable_poll_error,
+    soft_streaming_status,
+)
 from ig_api.price_subscribers import CallbackList
 from system.rate_limit_manager import get_rate_limit_manager
 from system.credentials_loader import Credentials
@@ -71,6 +77,7 @@ class IGStreamingClient:
         self._max_backoff = 30.0
         self._heartbeat_interval = 120.0
         self._first_tick_received = False
+        self._poll_backoff = RestPollBackoff(poll_interval_seconds)
 
     @property
     def state(self) -> ConnectionState:
@@ -176,9 +183,10 @@ class IGStreamingClient:
         tick = 0
         last_heartbeat = time.time()
         mgr = get_rate_limit_manager()
+        backoff = self._poll_backoff
         while self._running:
             if not self._epics:
-                time.sleep(self._poll_interval)
+                time.sleep(backoff.normal_interval)
                 continue
 
             if mgr.is_rest_blocked():
@@ -202,96 +210,135 @@ class IGStreamingClient:
                 continue
 
             try:
-                from system.market_data_hub import get_market_data_hub
-
-                hub = get_market_data_hub()
-                hub.attach_rest(self._rest)
-                hub.set_min_fetch_interval(self._poll_interval)
-                for epic in list(self._epics):
-                    snap = hub.fetch_if_stale(epic, min_interval=self._poll_interval)
-                    if not snap or snap.bid <= 0:
-                        continue
-                    bid, offer = snap.bid, snap.offer
-                    pu = PriceUpdate(
-                        epic=epic,
-                        bid=bid,
-                        offer=offer,
-                        timestamp=time.time(),
-                    )
-                    if tick == 0 or tick % 30 == 0:
-                        trace_execution(
-                            "STREAM",
-                            "IGStreamingClient._poll_loop",
-                            decision="tick received",
-                            params={"epic": epic, "bid": pu.bid, "offer": pu.offer},
-                        )
-                    self._price_subs.emit(pu)
-                    self._mark_connected_on_first_tick()
-                self._failures = 0
+                last_heartbeat = self._poll_once(tick, last_heartbeat)
                 tick += 1
-                now = time.time()
-                if self._on_account and now - last_heartbeat >= self._heartbeat_interval:
-                    try:
-                        summary = (
-                            self._rest.maybe_refresh_account_summary(min_interval=60.0)
-                            if hasattr(self._rest, "maybe_refresh_account_summary")
-                            else (
-                                self._rest.refresh_account_summary()
-                                if hasattr(self._rest, "refresh_account_summary")
-                                else {}
-                            )
-                        )
-                        bal = summary.get("balance") or self._rest.fetch_account_balance()
-                        self._on_account(AccountUpdate(balance=bal, available=bal))
-                        trace_execution(
-                            "STREAM",
-                            "IGStreamingClient._poll_loop",
-                            decision="heartbeat",
-                            params={"balance": bal},
-                        )
-                    except Exception:
-                        pass
-                    last_heartbeat = now
-                time.sleep(self._poll_interval)
+                sleep_s = backoff.on_success()
+                if self._first_tick_received:
+                    update_demo_diagnostics(
+                        streaming_status="connected",
+                        streaming_auth_status="authenticated",
+                    )
+                time.sleep(sleep_s)
             except RateLimitError as e:
-                self._failures += 1
-                log_engine(f"stream rate limited: {e}")
-                self._set_state(ConnectionState.RECONNECTING)
-                update_demo_diagnostics(
-                    streaming_status="rate limited",
-                    streaming_auth_status=str(e),
-                )
-                wait = mgr.seconds_until_stream_reset()
-                time.sleep(min(max(wait, 5.0), 60.0))
+                self._handle_retryable_poll_error(e, backoff, mgr)
             except Exception as e:
-                self._failures += 1
-                log_engine(f"stream poll error #{self._failures}: {type(e).__name__}")
-                update_demo_diagnostics(
-                    streaming_status=f"error: {type(e).__name__}",
-                    streaming_auth_status=f"error: {e}",
-                )
-                log_demo_rest("stream poll error", failure=self._failures, error=str(e))
+                if is_retryable_poll_error(e):
+                    self._handle_retryable_poll_error(e, backoff, mgr)
+                    continue
+                self._handle_poll_error(e, backoff, mgr)
+
+    def _poll_once(self, tick: int, last_heartbeat: float) -> float:
+        """One REST poll cycle across subscribed epics. Updates last_heartbeat in-place."""
+        from system.market_data_hub import get_market_data_hub
+
+        hub = get_market_data_hub()
+        hub.attach_rest(self._rest)
+        hub.set_min_fetch_interval(self._poll_interval)
+        backoff = self._poll_backoff
+        backoff.set_normal_interval(self._poll_interval)
+
+        got_tick = False
+        for epic in list(self._epics):
+            snap = hub.fetch_if_stale(
+                epic,
+                min_interval=self._poll_interval,
+                propagate_transient_errors=True,
+            )
+            if not snap or snap.bid <= 0:
+                continue
+            got_tick = True
+            bid, offer = snap.bid, snap.offer
+            pu = PriceUpdate(
+                epic=epic,
+                bid=bid,
+                offer=offer,
+                timestamp=time.time(),
+            )
+            if tick == 0 or tick % 30 == 0:
                 trace_execution(
                     "STREAM",
                     "IGStreamingClient._poll_loop",
-                    decision=f"disconnect/error #{self._failures}",
-                    params={"error": str(e)},
+                    decision="tick received",
+                    params={"epic": epic, "bid": pu.bid, "offer": pu.offer},
                 )
-                if self._failures == 1:
-                    self._set_state(ConnectionState.RECONNECTING)
-                if mgr.is_rest_blocked() or mgr.is_stream_blocked():
-                    wait = max(mgr.seconds_until_rest_reset(), mgr.seconds_until_stream_reset())
-                    time.sleep(min(max(wait, 5.0), 60.0))
-                    continue
-                backoff = min(self._max_backoff, 2.0 ** min(self._failures, 4))
-                time.sleep(backoff)
-                try:
-                    mgr.check_rest_allowed()
-                    self._rest.ensure_session()
-                    self._resubscribe()
-                    self._first_tick_received = False
-                    self._set_state(ConnectionState.CONNECTING)
-                except RateLimitError:
-                    pass
-                except Exception:
-                    pass
+            self._price_subs.emit(pu)
+            self._mark_connected_on_first_tick()
+
+        if got_tick:
+            self._failures = 0
+
+        now = time.time()
+        if self._on_account and now - last_heartbeat >= self._heartbeat_interval:
+            try:
+                summary = (
+                    self._rest.maybe_refresh_account_summary(min_interval=60.0)
+                    if hasattr(self._rest, "maybe_refresh_account_summary")
+                    else (
+                        self._rest.refresh_account_summary()
+                        if hasattr(self._rest, "refresh_account_summary")
+                        else {}
+                    )
+                )
+                bal = summary.get("balance") or self._rest.fetch_account_balance()
+                self._on_account(AccountUpdate(balance=bal, available=bal))
+                trace_execution(
+                    "STREAM",
+                    "IGStreamingClient._poll_loop",
+                    decision="heartbeat",
+                    params={"balance": bal},
+                )
+            except Exception:
+                pass
+            return now
+        return last_heartbeat
+
+    def _handle_retryable_poll_error(
+        self,
+        exc: BaseException,
+        backoff: RestPollBackoff,
+        mgr: Any,
+    ) -> None:
+        """429 / timeout — short soak-safe back-off, no panic or session teardown."""
+        wait_s, label = backoff.on_retryable_error(exc)
+        log_engine(format_backoff_warning(label, wait_s, strike=backoff.strike))
+        update_demo_diagnostics(
+            streaming_status=soft_streaming_status(label, wait_s),
+            streaming_auth_status="backoff (transient)",
+        )
+        if not self._first_tick_received:
+            self._set_state(ConnectionState.RECONNECTING)
+        time.sleep(wait_s)
+
+    def _handle_poll_error(
+        self,
+        exc: BaseException,
+        backoff: RestPollBackoff,
+        mgr: Any,
+    ) -> None:
+        """Non-transient errors — gentle recovery without health-monitor panic."""
+        self._failures += 1
+        log_engine(
+            f"rest_poll warning #{self._failures}: {type(exc).__name__}: {exc}"
+        )
+        update_demo_diagnostics(
+            streaming_status=f"rest_poll recover #{self._failures}",
+            streaming_auth_status=f"{type(exc).__name__}",
+        )
+        if self._failures == 1 and not self._first_tick_received:
+            self._set_state(ConnectionState.RECONNECTING)
+        if mgr.is_rest_blocked() or mgr.is_stream_blocked():
+            wait = max(mgr.seconds_until_rest_reset(), mgr.seconds_until_stream_reset())
+            time.sleep(min(max(wait, 5.0), 60.0))
+            return
+        sleep_s = min(self._max_backoff, 2.0 ** min(self._failures, 4))
+        time.sleep(sleep_s)
+        try:
+            mgr.check_rest_allowed()
+            self._rest.ensure_session()
+            self._resubscribe()
+            if not self._first_tick_received:
+                self._set_state(ConnectionState.CONNECTING)
+        except RateLimitError as rate_exc:
+            self._handle_retryable_poll_error(rate_exc, backoff, mgr)
+        except Exception:
+            pass

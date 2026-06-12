@@ -1,7 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { api } from "../api/client.js";
 import { fmtPrice } from "../utils/fmtPrice.js";
 import { fmtPts } from "../utils/fmtPts.js";
+import MarketStatusTimer, {
+  buildMarketStatusTimerProps,
+  marketStatusTimerPropsEqual,
+} from "./MarketStatusTimer.jsx";
 import {
   activeEpicRank,
   isEpicRotationMuted,
@@ -9,7 +13,6 @@ import {
   resolveActiveEpics,
   resolveGateRelaxations,
 } from "../utils/roadmapTelemetry.js";
-import SentinelDiagnosticConsole from "./SentinelDiagnosticConsole.jsx";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -95,14 +98,27 @@ function shortenBlockReason(reason) {
   return reason;
 }
 
-function getBlockingReason(health, signal) {
+function resolveRawBlockReason(health, signal, state) {
+  if (state?.gate_blocked_reason) return String(state.gate_blocked_reason);
   const ordered = orderGates(health?.gates);
   for (const g of ordered) {
     if (g.pass) continue;
-    if (g.name === "signal_confidence" && g.value?.block_reason) return shortenBlockReason(String(g.value.block_reason));
+    if (g.name === "signal_confidence" && g.value?.block_reason) {
+      return String(g.value.block_reason);
+    }
+  }
+  if (signal?.block_reason) return String(signal.block_reason);
+  return null;
+}
+
+function getBlockingReason(health, signal, state) {
+  const raw = resolveRawBlockReason(health, signal, state);
+  if (raw) return shortenBlockReason(raw);
+  const ordered = orderGates(health?.gates);
+  for (const g of ordered) {
+    if (g.pass) continue;
     if (g.detail) return String(g.detail).replace(/^WAIT\s*[—-]\s*/i, "").trim();
   }
-  if (signal?.block_reason) return shortenBlockReason(signal.block_reason);
   const summary = health?.summary || "";
   const dash = summary.indexOf("—");
   if (dash >= 0) {
@@ -117,8 +133,7 @@ function firstFailingGate(health) {
 }
 
 function resolveGateBlockedReason(state) {
-  if (state?.gate_blocked_reason) return state.gate_blocked_reason;
-  return getBlockingReason(state?.health || {}, state?.signal || {});
+  return getBlockingReason(state?.health || {}, state?.signal || {}, state);
 }
 
 function resolveGateBlockedAt(state) {
@@ -163,11 +178,37 @@ function safePct(value, fallback = 0) {
   return Math.min(100, Math.max(0, Math.round(Number(value))));
 }
 
-function resolveSignalConfidence(state) {
-  const raw = state?.signal?.confidence ?? state?.signal_strength ??
-    state?.health?.gates?.find((g) => g.name === "signal_confidence")?.value?.confidence;
-  if (raw == null || Number.isNaN(Number(raw))) return null;
-  return safePct(raw, 0);
+function resolveRawSignalConfidence(state) {
+  const gateConf = state?.health?.gates?.find((g) => g.name === "signal_confidence")?.value?.confidence;
+  if (gateConf != null && !Number.isNaN(Number(gateConf))) return safePct(gateConf, 0);
+  const signal = state?.signal || {};
+  const rules = signal?.rules_confidence;
+  if (rules != null && !Number.isNaN(Number(rules))) return safePct(rules, 0);
+  const core = signal?.signal_core_score;
+  if (core != null && !Number.isNaN(Number(core))) return safePct(core, 0);
+  const fromSig = signal?.confidence ?? state?.signal_strength;
+  if (fromSig != null && !Number.isNaN(Number(fromSig))) return safePct(fromSig, 0);
+  return null;
+}
+
+function resolveMarketRawConfidence(mslice) {
+  const gateConf = (mslice?.health?.gates || []).find((g) => g.name === "signal_confidence")?.value?.confidence;
+  if (gateConf != null && !Number.isNaN(Number(gateConf))) return safePct(gateConf, 0);
+  return safePct(mslice?.signal?.confidence ?? mslice?.signal_strength, 0);
+}
+
+function resolveRawDirection(signal) {
+  const raw = signal?.raw_direction;
+  if (raw && String(raw).toUpperCase() !== "WAIT") return String(raw).toUpperCase();
+  return resolveSignalDirection(signal);
+}
+
+function resolveGateProgress(health) {
+  const gates = orderGates(health?.gates);
+  const total = gates.length;
+  const passing = gates.filter((g) => g.pass).length;
+  const pct = total > 0 ? Math.round((passing / total) * 100) : 0;
+  return { passing, total, pct };
 }
 
 function resolveSignalDirection(signal) {
@@ -287,6 +328,40 @@ function PriceHero({ label, value, epic }) {
   );
 }
 
+function priceHeroPropsEqual(prev, next) {
+  return prev.label === next.label && prev.value === next.value && prev.epic === next.epic;
+}
+
+const MemoPriceHero = memo(PriceHero, priceHeroPropsEqual);
+
+function LivePriceBlock({ bid, offer, epic, ts, wsConnected }) {
+  return (
+    <div className="rounded-lg border border-border bg-card p-3 py-4 sm:p-4">
+      <div className="flex items-stretch justify-center gap-2 sm:gap-6">
+        <MemoPriceHero label="Bid" value={bid} epic={epic} />
+        <div className="hidden w-px self-stretch bg-border sm:block" aria-hidden />
+        <MemoPriceHero label="Offer" value={offer} epic={epic} />
+      </div>
+      <p className="mt-3 text-center text-[11px] text-muted">
+        Last update <span className="tabular-nums text-foreground">{fmtTs(ts)}</span>
+        {!wsConnected && <span className="ml-2 text-warning">· polling</span>}
+      </p>
+    </div>
+  );
+}
+
+function livePriceBlockPropsEqual(prev, next) {
+  return (
+    prev.bid === next.bid
+    && prev.offer === next.offer
+    && prev.epic === next.epic
+    && prev.ts === next.ts
+    && prev.wsConnected === next.wsConnected
+  );
+}
+
+const MemoLivePriceBlock = memo(LivePriceBlock, livePriceBlockPropsEqual);
+
 function Card({ title, children, className = "", titleRight = null }) {
   return (
     <section className={["rounded-lg border border-border bg-card p-3 sm:p-4", className].join(" ")}>
@@ -301,28 +376,136 @@ function Card({ title, children, className = "", titleRight = null }) {
   );
 }
 
-function GateRow({ gate }) {
-  const { name, pass, detail } = gate;
+function EntryStatusCard({ signal = {}, state, health = {}, isReady = false, gateBlockedAt = null }) {
+  const direction = resolveSignalDirection(signal);
+  const rawDirection = resolveRawDirection(signal);
+  const confidence = resolveRawSignalConfidence(state);
+  const blocked = direction === "WAIT" && rawDirection !== "WAIT";
+  const gateProgress = resolveGateProgress(health);
+  const rawBlockReason = isReady ? null : resolveRawBlockReason(health, signal, state);
+  const blocker = isReady ? null : (rawBlockReason || getBlockingReason(health, signal, state));
+  const displayDir = blocked ? rawDirection : (direction !== "WAIT" ? direction : rawDirection);
+  const isBuy = displayDir === "BUY";
+  const isSell = displayDir === "SELL";
+  const dirColor = isBuy ? "text-success" : isSell ? "text-danger" : "text-muted";
+  const coreScore = resolveSignalCoreScore(signal, state);
+
   return (
-    <li className="flex items-start gap-2 text-[11px]">
-      <span className={`mt-0.5 h-2 w-2 shrink-0 rounded-full ${pass ? "bg-success" : "bg-danger"}`} />
-      <span className={`font-medium ${pass ? "text-muted" : "text-foreground"}`}>
-        {name.replace(/_/g, " ")}
-      </span>
-      {!pass && detail && detail !== "—" && (
-        <span className="min-w-0 truncate text-muted ml-auto max-w-[180px]" title={String(detail)}>
-          {String(detail).length > 40 ? String(detail).slice(0, 37) + "…" : String(detail)}
-        </span>
+    <div className="flex flex-col rounded-lg border border-border bg-card p-4 lg:col-span-2">
+      <div className="mb-4">
+        <p className="label-caps mb-1.5">Signal</p>
+        <div className="flex flex-wrap items-center gap-2">
+          {displayDir && displayDir !== "WAIT" ? (
+            <span className={`font-mono text-2xl font-semibold tabular-nums ${dirColor}`}>
+              {displayDir} {confidence != null ? `${confidence}%` : "—"}
+            </span>
+          ) : (
+            <span className="font-mono text-2xl font-semibold text-muted">WAIT</span>
+          )}
+          {blocked && (
+            <span className="inline-flex rounded-full border border-warning/50 bg-warning/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-warning">
+              blocked
+            </span>
+          )}
+          {isReady && displayDir && displayDir !== "WAIT" && (
+            <span className="inline-flex rounded-full border border-success/50 bg-success/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-success">
+              armed
+            </span>
+          )}
+        </div>
+        {coreScore != null && (
+          <p className="mt-1.5 text-[10px] text-muted">
+            Core score <span className="font-mono font-semibold tabular-nums text-blue-400/90">{coreScore}%</span>
+          </p>
+        )}
+      </div>
+
+      <div className="mb-4">
+        <div className="mb-1.5 flex items-center justify-between gap-2">
+          <p className="label-caps">Gates</p>
+          <span className="text-[12px] font-medium tabular-nums text-foreground">
+            {gateProgress.passing} of {gateProgress.total} passing
+          </span>
+        </div>
+        <div className="h-2 overflow-hidden rounded-full bg-border">
+          <div
+            className={[
+              "h-full rounded-full transition-all duration-500",
+              isReady ? "bg-success" : gateProgress.pct >= 80 ? "bg-warning" : "bg-accent",
+            ].join(" ")}
+            style={{ width: `${gateProgress.pct}%` }}
+          />
+        </div>
+      </div>
+
+      {isReady ? (
+        <p className="rounded-md border border-success/30 bg-success/5 px-2.5 py-2 text-[12px] font-medium text-success leading-snug">
+          Armed — executing this tick
+        </p>
+      ) : blocker ? (
+        <div
+          className={[
+            "rounded-lg border px-3 py-3",
+            rawBlockReason
+              ? "border-danger/50 bg-danger/10"
+              : "border-warning/50 bg-warning/10",
+          ].join(" ")}
+        >
+          <p className={["label-caps mb-1.5", rawBlockReason ? "text-danger" : "text-warning"].join(" ")}>
+            Blocker
+          </p>
+          {rawBlockReason ? (
+            <p className="text-sm font-bold leading-snug text-danger sm:text-base">
+              {rawBlockReason}
+            </p>
+          ) : (
+            <p className="text-sm font-semibold leading-snug text-warning">
+              {blocker}
+            </p>
+          )}
+          {gateBlockedAt && (
+            <p className="mt-1.5 text-[10px] text-muted">Blocked since {fmtTs(gateBlockedAt)}</p>
+          )}
+        </div>
+      ) : (
+        <p className="text-[12px] text-muted">No active blocker — awaiting signal</p>
       )}
-    </li>
+    </div>
   );
 }
 
-function SignalConfidenceBreakdown({ signal = {}, state, pointsState }) {
+function entryStatusPropsEqual(prev, next) {
+  if (prev.isReady !== next.isReady) return false;
+  if (prev.gateBlockedAt !== next.gateBlockedAt) return false;
+  const ps = prev.signal || {};
+  const ns = next.signal || {};
+  if (
+    ps.direction !== ns.direction
+    || ps.confidence !== ns.confidence
+    || ps.raw_direction !== ns.raw_direction
+    || ps.adjusted_score !== ns.adjusted_score
+    || ps.raw_score !== ns.raw_score
+  ) {
+    return false;
+  }
+  const ph = prev.health || {};
+  const nh = next.health || {};
+  if (ph.badge !== nh.badge) return false;
+  const pg = ph.gates || [];
+  const ng = nh.gates || [];
+  if (pg.length !== ng.length) return false;
+  for (let i = 0; i < pg.length; i += 1) {
+    if (pg[i].pass !== ng[i].pass || pg[i].name !== ng[i].name) return false;
+  }
+  return true;
+}
+
+const MemoEntryStatusCard = memo(EntryStatusCard, entryStatusPropsEqual);
+
+function SignalThresholds({ signal = {}, state, pointsState }) {
   const sigGate = (state?.health?.gates || []).find((g) => g.name === "signal_confidence");
   const gate = sigGate?.value;
   const direction = resolveSignalDirection(signal);
-  const isWait = direction === "WAIT";
   const pick = (sigKey, topKey, gateKey) => {
     const fromSig = signal?.[sigKey];
     if (fromSig != null && !Number.isNaN(Number(fromSig))) return Number(fromSig);
@@ -332,30 +515,24 @@ function SignalConfidenceBreakdown({ signal = {}, state, pointsState }) {
     if (fromGate != null && !Number.isNaN(Number(fromGate))) return Number(fromGate);
     return null;
   };
-  const primaryDial = pick("confidence", "signal_strength", "confidence");
-  const coreScore = resolveSignalCoreScore(signal, state);
-  const config  = pick("config_signal_threshold", "config_signal_threshold", "config_signal_threshold");
+  const signalConf = resolveRawSignalConfidence(state);
+  const config = pick("config_signal_threshold", "config_signal_threshold", "config_signal_threshold");
   const effective = pick("threshold", "signal_threshold", "threshold");
   const minSize = pick("min_size_threshold", "min_size_threshold", "min_size_threshold");
   const stateLabel = pointsState || signal?.points_state || state?.points?.state || gate?.points_state || "—";
 
   const rows = [
+    { label: "Signal confidence", value: signalConf, highlight: true },
     { label: "Config threshold", value: config, highlight: false },
     { label: `Gate (${stateLabel})`, value: effective, highlight: false },
     { label: "Min size threshold", value: minSize, highlight: false },
-    {
-      label: isWait ? "Entry readiness (dial)" : `${direction} confidence (dial)`,
-      value: primaryDial,
-      highlight: true,
-    },
-    { label: "Signal core score", value: coreScore, diagnostic: true },
   ];
 
   return (
     <div className="rounded-lg border border-border bg-card p-3">
-      <p className="label-caps mb-2">{isWait ? "Tradability breakdown" : "Signal confidence"}</p>
+      <p className="label-caps mb-2">Thresholds</p>
       <ul className="space-y-1.5 text-[12px]">
-        {rows.map(({ label, value, highlight, diagnostic }) => {
+        {rows.map(({ label, value, highlight }) => {
           const n = value != null && !Number.isNaN(Number(value)) ? Number(value) : null;
           const belowMin = highlight && n != null && minSize != null && n < Number(minSize);
           const belowGate = highlight && n != null && effective != null && n < Number(effective) && !belowMin;
@@ -364,123 +541,19 @@ function SignalConfidenceBreakdown({ signal = {}, state, pointsState }) {
               key={label}
               className={[
                 "flex justify-between gap-3 tabular-nums",
-                diagnostic ? "text-muted" : highlight ? "font-semibold text-foreground" : "text-muted",
-                diagnostic ? "" : belowMin ? "text-danger" : belowGate ? "text-warning" : "",
+                highlight ? "font-semibold text-foreground" : "text-muted",
+                belowMin ? "text-danger" : belowGate ? "text-warning" : "",
               ].join(" ")}
             >
               <span>{label}</span>
-              <span className={diagnostic ? "font-mono text-blue-400/90" : ""}>
-                {diagnostic
-                  ? `${safePct(value, 0)}%`
-                  : n != null
-                    ? `${Math.round(n)}%`
-                    : "—"}
-              </span>
+              <span>{n != null ? `${Math.round(n)}%` : "—"}</span>
             </li>
           );
         })}
       </ul>
-      {isWait && (
-        <p className="mt-2 text-[10px] leading-snug text-muted">
-          Dial = share of entry gates satisfied (100% only when execution is armed).
-        </p>
-      )}
-      {!isWait && primaryDial != null && minSize != null && Number(primaryDial) < Number(minSize) && (
+      {direction !== "WAIT" && signalConf != null && minSize != null && Number(signalConf) < Number(minSize) && (
         <p className="mt-2 text-[11px] text-danger leading-snug">
           Need ≥{Math.round(Number(minSize))}% for 0.5× size in {stateLabel}.
-        </p>
-      )}
-    </div>
-  );
-}
-
-function SignalHeroDial({ signal = {}, state }) {
-  const direction = resolveSignalDirection(signal);
-  const isWait = direction === "WAIT";
-  const isBuy = direction === "BUY";
-  const isSell = direction === "SELL";
-  const displayValue = resolveSignalConfidence(state);
-  const coreScore = resolveSignalCoreScore(signal, state);
-  const max = 100;
-  const pct = safePct(displayValue, 0);
-  const r = 44;
-  const c = 2 * Math.PI * r;
-  const offset = c - (pct / 100) * c;
-
-  let strokeClass = "stroke-accent";
-  let valueClass = "text-foreground";
-  let ringClass = "border-border";
-  if (!isWait) {
-    if (isBuy) {
-      strokeClass = "stroke-success";
-      valueClass = "text-success";
-      ringClass = "border-success/40 bg-success/5";
-    } else if (isSell) {
-      strokeClass = "stroke-danger";
-      valueClass = "text-danger";
-      ringClass = "border-danger/40 bg-danger/5";
-    }
-  } else if (displayValue != null) {
-    const ratio = Number(displayValue) / max;
-    if (ratio >= 0.7) strokeClass = "stroke-success";
-    else if (ratio >= 0.4) strokeClass = "stroke-warning";
-    else strokeClass = "stroke-danger";
-  }
-
-  const dialLabel = isWait ? "Entry Readiness" : "Signal Confidence";
-
-  return (
-    <div className={`flex flex-col items-center rounded-lg border p-4 ${ringClass}`}>
-      <div className="flex w-full flex-col items-center gap-1">
-        <p className="label-caps">{dialLabel}</p>
-        {!isWait && (isBuy || isSell) && (
-          <span
-            className={[
-              "inline-flex rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide",
-              isBuy
-                ? "border-success/50 bg-success/15 text-success"
-                : "border-danger/50 bg-danger/15 text-danger",
-            ].join(" ")}
-          >
-            {direction}
-          </span>
-        )}
-      </div>
-      <div className="relative my-3 h-[112px] w-[112px]">
-        <svg viewBox="0 0 112 112" className="h-full w-full -rotate-90">
-          <circle cx="56" cy="56" r={r} fill="none" className="stroke-border" strokeWidth="9" />
-          {(displayValue != null || isWait) && (
-            <circle
-              cx="56"
-              cy="56"
-              r={r}
-              fill="none"
-              className={`${strokeClass} transition-all duration-500`}
-              strokeWidth="9"
-              strokeLinecap="round"
-              strokeDasharray={c}
-              strokeDashoffset={offset}
-            />
-          )}
-        </svg>
-        <div className="absolute inset-0 flex flex-col items-center justify-center">
-          <span className={`font-mono text-3xl font-semibold tabular-nums leading-none ${valueClass}`}>
-            {displayValue != null ? `${safePct(displayValue, 0)}%` : "—"}
-          </span>
-        </div>
-      </div>
-      <div
-        className="mt-1 inline-flex items-center gap-1.5 rounded-md border border-border/80 bg-surface/60 px-2.5 py-1 text-[10px] text-muted"
-        title="Raw momentum score before gate blocking — diagnostic only"
-      >
-        <span className="uppercase tracking-wide">Signal Core Score</span>
-        <span className="font-mono font-semibold tabular-nums text-blue-400/90">
-          {coreScore}%
-        </span>
-      </div>
-      {isWait && (
-        <p className="mt-2 text-center text-[10px] leading-snug text-muted">
-          Entry readiness — 100% only when all gates pass and execution is armed.
         </p>
       )}
     </div>
@@ -594,89 +667,272 @@ function marketStatusMeta(marketState, streamStatus) {
   return { label: "—", color: "text-muted", dot: "bg-border" };
 }
 
+function MarketCard({
+  epic,
+  markets,
+  labels,
+  selectedEpic,
+  onSelectEpic,
+  activeEpics,
+  rawState,
+  variant = "compact",
+  rotationRank = -1,
+}) {
+  const m = markets?.[epic] || {};
+  const name = m.market || labels[epic] || epic;
+  const bid = m.bid;
+  const isOpen = String(m.market_state ?? "").toUpperCase() === "OPEN";
+  const conf = resolveMarketRawConfidence(m);
+  const showConf = isOpen && conf != null;
+  const active = epic === selectedEpic;
+  const status = marketStatusMeta(m.market_state, m.stream_status);
+  const rotationMuted = isEpicRotationMuted(activeEpics, epic, rawState);
+  const sessionGateVal = (m.health?.gates || []).find((g) => g.name === "session_open")?.value;
+  const nextOpenIso = typeof sessionGateVal === "object" ? sessionGateVal?.next_open : null;
+  const nextOpenTime = fmtNextOpen(nextOpenIso);
+  const featured = variant === "featured";
+
+  return (
+    <button
+      type="button"
+      onClick={() => onSelectEpic?.(epic)}
+      disabled={rotationMuted}
+      className={[
+        "rounded-lg border transition-all duration-300",
+        featured ? "p-3 text-center sm:p-4" : "p-2 text-left",
+        rotationMuted
+          ? "pointer-events-none border-border/60 bg-surface/50 opacity-40 grayscale"
+          : active
+            ? "border-accent bg-accent/10 ring-1 ring-accent/30"
+            : featured
+              ? "border-border bg-card hover:border-accent/50 hover:bg-accent/5"
+              : "border-border bg-surface hover:border-accent/40 hover:bg-card",
+      ].join(" ")}
+    >
+      <div
+        className={[
+          "flex items-center gap-1",
+          featured ? "mb-2 justify-center" : "mb-1 justify-between",
+        ].join(" ")}
+      >
+        <span
+          className={[
+            "font-semibold uppercase tracking-wide",
+            featured ? "text-base sm:text-lg" : "truncate text-[10px]",
+            active ? "text-accent" : "text-foreground",
+          ].join(" ")}
+        >
+          {rotationRank >= 0 && medalForRank(rotationRank) ? (
+            <span className="mr-0.5" aria-hidden>{medalForRank(rotationRank)}</span>
+          ) : null}
+          {marketPillLabel(epic, name)}
+        </span>
+        <span className={`shrink-0 rounded-full ${featured ? "h-2 w-2" : "h-1.5 w-1.5"} ${status.dot}`} />
+      </div>
+      {rotationMuted && (
+        <div className={featured ? "mb-2" : "mb-1"}>
+          <span className="inline-flex rounded border border-border bg-muted/20 px-1 py-0.5 text-[8px] font-bold uppercase tracking-wide text-muted">
+            MUTED — ROTATION
+          </span>
+        </div>
+      )}
+      <div
+        className={[
+          "font-mono tabular-nums",
+          featured ? "text-xl font-bold text-foreground sm:text-2xl" : "text-[11px] text-muted",
+        ].join(" ")}
+      >
+        {isOpen && bid != null ? fmtPrice(bid, epic) : "—"}
+      </div>
+      <div
+        className={[
+          "flex items-center gap-1",
+          featured ? "mt-2 justify-center" : "mt-1 justify-between",
+        ].join(" ")}
+      >
+        <span
+          className={[
+            "font-bold uppercase tracking-wider",
+            featured ? "text-[11px]" : "text-[9px]",
+            status.color,
+          ].join(" ")}
+        >
+          {status.label}
+        </span>
+        {showConf && (
+          <span
+            className={[
+              "tabular-nums font-medium",
+              featured ? "text-base" : "text-[10px]",
+              signalDot(conf) === "bg-success"
+                ? "text-success"
+                : signalDot(conf) === "bg-warning"
+                  ? "text-warning"
+                  : "text-muted",
+            ].join(" ")}
+          >
+            {conf}%
+          </span>
+        )}
+      </div>
+      {!isOpen && nextOpenTime && (
+        <div className={`text-muted/70 tabular-nums ${featured ? "mt-1 text-[10px]" : "mt-0.5 text-[9px]"}`}>
+          Opens {nextOpenTime}
+        </div>
+      )}
+    </button>
+  );
+}
+
+function marketSliceQuoteKey(markets, epic) {
+  const m = markets?.[epic];
+  if (!m || typeof m !== "object") return "";
+  const sig = m.signal && typeof m.signal === "object" ? m.signal : {};
+  return [
+    m.bid,
+    m.offer,
+    m.spread,
+    m.market_state,
+    m.stream_status,
+    m.tick_age_s,
+    sig.confidence,
+    sig.direction,
+  ].join("|");
+}
+
+function marketCardPropsEqual(prev, next) {
+  if (
+    prev.epic !== next.epic
+    || prev.selectedEpic !== next.selectedEpic
+    || prev.variant !== next.variant
+    || prev.rotationRank !== next.rotationRank
+  ) {
+    return false;
+  }
+  const prevActive = (prev.activeEpics || []).join(",");
+  const nextActive = (next.activeEpics || []).join(",");
+  if (prevActive !== nextActive) return false;
+  return marketSliceQuoteKey(prev.markets, prev.epic) === marketSliceQuoteKey(next.markets, next.epic);
+}
+
+const MemoMarketCard = memo(MarketCard, marketCardPropsEqual);
+
+function marketGridPropsEqual(prev, next) {
+  if (prev.selectedEpic !== next.selectedEpic) return false;
+  const rawPrev = prev.rawState || {};
+  const rawNext = next.rawState || {};
+  const activePrev = (resolveActiveEpics(rawPrev) || []).join(",");
+  const activeNext = (resolveActiveEpics(rawNext) || []).join(",");
+  if (activePrev !== activeNext) return false;
+  const enabledPrev = (rawPrev.enabled_epics || Object.keys(rawPrev.markets || {})).join(",");
+  const enabledNext = (rawNext.enabled_epics || Object.keys(rawNext.markets || {})).join(",");
+  if (enabledPrev !== enabledNext) return false;
+  const marketsPrev = rawPrev.markets || {};
+  const marketsNext = rawNext.markets || {};
+  const epics = enabledPrev.split(",").filter(Boolean);
+  for (const epic of epics) {
+    if (marketSliceQuoteKey(marketsPrev, epic) !== marketSliceQuoteKey(marketsNext, epic)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function MarketGrid({ rawState, selectedEpic, onSelectEpic }) {
   const markets = rawState?.markets;
-  const labels  = rawState?.instrument_labels || {};
+  const labels = rawState?.instrument_labels || {};
   const enabled = Array.isArray(rawState?.enabled_epics) ? rawState.enabled_epics.filter(Boolean) : [];
-  const epics   = enabled.length ? enabled : (markets ? Object.keys(markets) : []);
+  const epics = enabled.length ? enabled : (markets ? Object.keys(markets) : []);
   const activeEpics = resolveActiveEpics(rawState);
   if (epics.length <= 1) return null;
 
-  return (
-    <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-6">
-      {epics.map((epic) => {
-        const m = markets?.[epic] || {};
-        const name = m.market || labels[epic] || epic;
-        const bid  = m.bid;
-        const isOpen = String(m.market_state ?? "").toUpperCase() === "OPEN";
-        const conf = safePct(m.signal?.confidence ?? m.signal_strength, 0);
-        const showConf = isOpen && (m.signal?.confidence != null || m.signal_strength != null);
-        const active = epic === selectedEpic;
-        const status = marketStatusMeta(m.market_state, m.stream_status);
-        const rotationRank = activeEpicRank(activeEpics, epic);
-        const rotationMuted = isEpicRotationMuted(activeEpics, epic, rawState);
-        const sessionGateVal = (m.health?.gates || []).find((g) => g.name === "session_open")?.value;
-        const nextOpenIso = typeof sessionGateVal === "object" ? sessionGateVal?.next_open : null;
-        const nextOpenTime = fmtNextOpen(nextOpenIso);
+  const featured =
+    activeEpics.length > 0
+      ? activeEpics.slice(0, 3)
+      : epics
+          .filter((epic) => String(markets?.[epic]?.market_state ?? "").toUpperCase() === "OPEN")
+          .slice(0, 3);
+  const featuredSet = new Set(featured);
+  const secondary = epics.filter((epic) => !featuredSet.has(epic));
 
-        return (
-          <button
-            key={epic}
-            type="button"
-            onClick={() => onSelectEpic?.(epic)}
-            disabled={rotationMuted}
+  return (
+    <div className="space-y-2">
+      {featured.length > 0 && (
+        <div className="mx-auto max-w-3xl">
+          <p className="label-caps mb-1.5 text-center">Active markets</p>
+          <div
             className={[
-              "rounded-lg border p-2 text-left transition-all duration-300",
-              rotationMuted
-                ? "pointer-events-none border-border/60 bg-surface/50 opacity-40 grayscale"
-                : active
-                  ? "border-accent bg-accent/10"
-                  : "border-border bg-surface hover:border-accent/40 hover:bg-card",
+              "grid gap-2 sm:gap-3",
+              featured.length === 1
+                ? "grid-cols-1 max-w-xs mx-auto"
+                : featured.length === 2
+                  ? "grid-cols-2 max-w-lg mx-auto"
+                  : "grid-cols-1 sm:grid-cols-3",
             ].join(" ")}
           >
-            {/* Name + stream dot */}
-            <div className="flex items-center justify-between gap-1 mb-1">
-              <span className={`text-[10px] font-semibold uppercase tracking-wide truncate ${active ? "text-accent" : "text-foreground"}`}>
-                {rotationRank >= 0 && medalForRank(rotationRank) ? (
-                  <span className="mr-0.5" aria-hidden>{medalForRank(rotationRank)}</span>
-                ) : null}
-                {marketPillLabel(epic, name)}
-              </span>
-              <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${status.dot}`} />
-            </div>
-            {rotationMuted && (
-              <div className="mb-1">
-                <span className="inline-flex rounded border border-border bg-muted/20 px-1 py-0.5 text-[8px] font-bold uppercase tracking-wide text-muted">
-                  MUTED — ROTATION
-                </span>
-              </div>
-            )}
-            {/* Price */}
-            <div className="font-mono text-[11px] tabular-nums text-muted">
-              {isOpen && bid != null ? fmtPrice(bid, epic) : "—"}
-            </div>
-            {/* Status badge + next open */}
-            <div className="mt-1 flex items-center justify-between gap-1">
-              <span className={`text-[9px] font-bold uppercase tracking-wider ${status.color}`}>
-                {status.label}
-              </span>
-              {showConf && (
-                <span className={`text-[10px] tabular-nums ${signalDot(conf) === "bg-success" ? "text-success" : signalDot(conf) === "bg-warning" ? "text-warning" : "text-muted"}`}>
-                  {conf}%
-                </span>
-              )}
-            </div>
-            {!isOpen && nextOpenTime && (
-              <div className="mt-0.5 text-[9px] text-muted/70 tabular-nums">
-                Opens {nextOpenTime}
-              </div>
-            )}
-          </button>
-        );
-      })}
+            {featured.map((epic) => (
+              <MemoMarketCard
+                key={epic}
+                epic={epic}
+                markets={markets}
+                labels={labels}
+                selectedEpic={selectedEpic}
+                onSelectEpic={onSelectEpic}
+                activeEpics={activeEpics}
+                rawState={rawState}
+                variant="featured"
+                rotationRank={activeEpicRank(activeEpics, epic)}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+      {secondary.length > 0 && (
+        <div>
+          {featured.length > 0 && (
+            <p className="label-caps mb-1 text-center text-muted/80">Other markets</p>
+          )}
+          <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-6">
+            {secondary.map((epic) => (
+              <MemoMarketCard
+                key={epic}
+                epic={epic}
+                markets={markets}
+                labels={labels}
+                selectedEpic={selectedEpic}
+                onSelectEpic={onSelectEpic}
+                activeEpics={activeEpics}
+                rawState={rawState}
+                variant="compact"
+                rotationRank={activeEpicRank(activeEpics, epic)}
+              />
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
+
+const MemoMarketGrid = memo(MarketGrid, marketGridPropsEqual);
+
+function liveMarketStatusProps(rawState, epic) {
+  return buildMarketStatusTimerProps(rawState, epic);
+}
+
+function LiveMarketStatusHeader({ rawState, epic }) {
+  return <MarketStatusTimer {...liveMarketStatusProps(rawState, epic)} variant="banner" />;
+}
+
+const MemoLiveMarketStatusHeader = memo(
+  LiveMarketStatusHeader,
+  (prev, next) =>
+    prev.epic === next.epic
+    && marketStatusTimerPropsEqual(
+      liveMarketStatusProps(prev.rawState, prev.epic),
+      liveMarketStatusProps(next.rawState, next.epic),
+    ),
+);
 
 // ---------------------------------------------------------------------------
 // Position capacity bar
@@ -772,7 +1028,6 @@ export default function LivePanel({ state, rawState, selectedEpic, onSelectEpic,
   const positions = resolvePositions(state);
   const gateReason    = resolveGateBlockedReason(state);
   const gateBlockedAt = resolveGateBlockedAt(state);
-  const failingGate   = firstFailingGate(health);
   const mlGauge   = resolveMlGauge(state);
   const mlProb    = mlGauge.value;
   const mlDisabled = mlGauge.disabled;
@@ -812,23 +1067,23 @@ export default function LivePanel({ state, rawState, selectedEpic, onSelectEpic,
   return (
     <div className="mx-auto max-w-5xl space-y-3 px-1 pb-4">
 
+      {(rawState ?? state) && (
+        <MemoLiveMarketStatusHeader rawState={rawState ?? state} epic={epic} />
+      )}
+
       {/* 1. Market grid */}
       {(rawState ?? state) && (
-        <MarketGrid rawState={rawState ?? state} selectedEpic={selectedEpic} onSelectEpic={onSelectEpic} />
+        <MemoMarketGrid rawState={rawState ?? state} selectedEpic={selectedEpic} onSelectEpic={onSelectEpic} />
       )}
 
       {/* 2. Bid/Offer hero */}
-      <Card className="py-4">
-        <div className="flex items-stretch justify-center gap-2 sm:gap-6">
-          <PriceHero label="Bid" value={state.bid} epic={epic} />
-          <div className="hidden w-px self-stretch bg-border sm:block" aria-hidden />
-          <PriceHero label="Offer" value={state.offer} epic={epic} />
-        </div>
-        <p className="mt-3 text-center text-[11px] text-muted">
-          Last update <span className="tabular-nums text-foreground">{fmtTs(state.ts)}</span>
-          {!wsConnected && <span className="ml-2 text-warning">· polling</span>}
-        </p>
-      </Card>
+      <MemoLivePriceBlock
+        bid={state.bid}
+        offer={state.offer}
+        epic={epic}
+        ts={state.ts}
+        wsConnected={wsConnected}
+      />
 
       {/* 3. Agent state banner */}
       <div className={["w-full rounded-lg border px-3 py-2.5 sm:px-4", agent.banner].join(" ")}>
@@ -909,36 +1164,18 @@ export default function LivePanel({ state, rawState, selectedEpic, onSelectEpic,
         {positions.length > 1 && <FlattenAllButton />}
       </Card>
 
-      {/* 5. Gate status */}
-      <Card title="Entry gates">
-        {allGatesPass && !gateReason ? (
-          <p className="text-[12px] text-success font-medium">All gates passing — ready when signal fires.</p>
-        ) : (
-          <div className="space-y-2">
-            <ul className="grid grid-cols-1 gap-1 sm:grid-cols-2">
-              {orderGates(health.gates).map((g) => <GateRow key={g.name} gate={g} />)}
-            </ul>
-            {gateReason && (
-              <p className="mt-1 rounded-md border border-warning/30 bg-warning/5 px-2.5 py-1.5 text-[11px] text-warning leading-snug">
-                {gateReason}
-              </p>
-            )}
-            {gateBlockedAt && (
-              <p className="text-[10px] text-muted">Blocked since {fmtTs(gateBlockedAt)}</p>
-            )}
-          </div>
-        )}
-      </Card>
-
-      {/* 6. Entry readiness / signal confidence + ML gauge */}
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 sm:gap-3">
-        <SignalHeroDial signal={signal} state={state} />
-        <SignalConfidenceBreakdown signal={signal} state={state} pointsState={state.points?.state} />
+      {/* 5. Entry status + thresholds + ML gauge */}
+      <div className="grid grid-cols-1 gap-2 lg:grid-cols-3 sm:gap-3">
+        <MemoEntryStatusCard
+          signal={signal}
+          state={state}
+          health={health}
+          isReady={allGatesPass && !gateReason}
+          gateBlockedAt={gateBlockedAt}
+        />
+        <SignalThresholds signal={signal} state={state} pointsState={state.points?.state} />
         <Gauge label="ML confidence" value={mlProb} max={1} disabled={mlDisabled} disabledLabel={mlDisabledLabel} formatValue={(v) => v.toFixed(2)} />
       </div>
-
-      {/* 6b. v27 sentinel diagnostic console */}
-      <SentinelDiagnosticConsole />
 
       {/* 7. Environment fitness */}
       {signal.fitness_factors && typeof signal.fitness_factors === "object" && (

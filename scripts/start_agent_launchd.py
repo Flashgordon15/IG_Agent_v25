@@ -4,8 +4,17 @@
 from __future__ import annotations
 
 import os
+import socket
 import sys
+import time
 from pathlib import Path
+
+_BOOT_GRACE_SEC = 15.0
+_API_HOST = "127.0.0.1"
+_API_PORT = 8080
+_NETWORK_INTERFACES_PLIST = Path(
+    "/Library/Preferences/SystemConfiguration/NetworkInterfaces.plist"
+)
 
 
 def _agent_root() -> Path:
@@ -32,6 +41,43 @@ def resolve_python(root: Path) -> Path:
     return Path(sys.executable)
 
 
+def check_port_available(host: str = _API_HOST, port: int = _API_PORT) -> bool:
+    """Return True when nothing is accepting TCP on host:port."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        return sock.connect_ex((host, port)) != 0
+
+
+def network_interfaces_ready() -> bool:
+    """Match launchd PathState gate — wait for OS network driver config."""
+    return _NETWORK_INTERFACES_PLIST.is_file()
+
+
+def boot_grace_sleep_if_needed(*, grace_sec: float = _BOOT_GRACE_SEC) -> None:
+    """
+    Post-reboot grace: slow Wi-Fi / stale port bind can fail the first local check.
+
+    Sleeps once before exec so IG auth and uvicorn bind happen after the stack settles.
+    """
+    port_ok = check_port_available()
+    net_ok = network_interfaces_ready()
+    if port_ok and net_ok:
+        return
+
+    reasons: list[str] = []
+    if not port_ok:
+        reasons.append(f"port {_API_PORT} busy")
+    if not net_ok:
+        reasons.append("network interfaces not ready")
+    print(
+        f"start_agent_launchd: boot grace — sleeping {grace_sec:.0f}s "
+        f"({', '.join(reasons) or 'waiting for stack'})",
+        file=sys.stderr,
+        flush=True,
+    )
+    time.sleep(max(0.0, float(grace_sec)))
+
+
 def main() -> int:
     root = _agent_root()
     py = resolve_python(root)
@@ -39,6 +85,8 @@ def main() -> int:
     if not main_py.is_file():
         print(f"start_agent_launchd: missing {main_py}", file=sys.stderr)
         return 1
+
+    boot_grace_sleep_if_needed()
 
     os.chdir(root)
     os.environ["IG_AGENT_ROOT"] = str(root)

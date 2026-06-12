@@ -37,3 +37,44 @@ data_lake/backups/config_snapshot*.json
 **/* 2
 **/* 2.*
 .node-local/
+
+# Accidental shell-redirect artifact files at repo root (never commit)
+/0
+/50:
+/=
+/account_id=*
+/account_type=*
+/all_pass
+/break
+/c
+/dealId:
+/direction:
+/elif
+/else:
+/epic:
+/forceOpen:
+/from
+/guaranteedStop:
+/if
+/import
+/order
+/orderType:
+/passes
+/password=*
+/point_value
+/raw_sell
+/risk_gbp
+/rsi_block
+/size
+/size:
+/spread_ok
+/stopDistance:
+/stop_pts
+/threshold
+/timeInForce
+/timeInForce:
+/trade_size
+/trailingStop:
+/username=*
+/}
+/.pytest_last.txt

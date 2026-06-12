@@ -260,6 +260,13 @@ class TradingLoop:
         self._last_sig_direction: str = "WAIT"
         self._gate_signal_cache: SignalResult | None = None
         self._entry_circuit_breaker: str = ""
+        from runtime.market_orchestrator import ROTATION_GRACE_CYCLES
+
+        try:
+            grace = int(config.get("rotation_grace_cycles") or ROTATION_GRACE_CYCLES)
+        except (TypeError, ValueError):
+            grace = ROTATION_GRACE_CYCLES
+        self._rotation_grace_remaining: int = max(0, grace)
 
     @property
     def config(self) -> Config:
@@ -1281,6 +1288,15 @@ class TradingLoop:
         except Exception:
             return default
 
+    def _rotation_grace_cycles(self) -> int:
+        from runtime.market_orchestrator import ROTATION_GRACE_CYCLES
+
+        try:
+            v = self._config.get("rotation_grace_cycles")
+            return int(v) if v is not None else ROTATION_GRACE_CYCLES
+        except (TypeError, ValueError):
+            return ROTATION_GRACE_CYCLES
+
     def _gate_active_rotation(self) -> GateResult:
         try:
             from system.gate_relaxation import rotation_filter_bypassed
@@ -1301,26 +1317,39 @@ class TradingLoop:
                 value={"bypass": True},
                 detail="rotation filter bypassed (config)",
             )
-        from runtime.market_orchestrator import MarketOrchestrator
+        from runtime.market_orchestrator import TOP_ROTATION_SLOTS, MarketOrchestrator
 
         active = MarketOrchestrator.get_global_active_epics()
-        if len(active) < 3:
+        if len(active) < TOP_ROTATION_SLOTS:
             return GateResult(
                 name="active_rotation",
                 passed=True,
                 value={"active_epics": active},
                 detail="rotation filter inactive (<3 markets)",
             )
-        passed = self._epic in active
-        detail = (
-            f"in top-{len(active)} rotation"
-            if passed
-            else NOT_IN_TOP_3_VOLATILITY_ROTATION
-        )
+        grace_cycles = self._rotation_grace_cycles()
+        in_active = self._epic in active
+        if in_active:
+            self._rotation_grace_remaining = grace_cycles
+            passed = True
+            detail = f"in top-{len(active)} rotation"
+        elif self._rotation_grace_remaining > 0:
+            self._rotation_grace_remaining -= 1
+            passed = True
+            detail = (
+                f"rotation grace ({self._rotation_grace_remaining} cycles until mute)"
+            )
+        else:
+            passed = False
+            detail = NOT_IN_TOP_3_VOLATILITY_ROTATION
         return GateResult(
             name="active_rotation",
             passed=passed,
-            value={"active_epics": active, "epic": self._epic},
+            value={
+                "active_epics": active,
+                "epic": self._epic,
+                "grace_remaining": self._rotation_grace_remaining,
+            },
             detail=detail,
         )
 
@@ -1502,7 +1531,7 @@ class TradingLoop:
         try:
             from system.gate_relaxation import effective_fitness_min
 
-            fitness_min = min(
+            fitness_min = max(
                 fitness_min,
                 effective_fitness_min(
                     self._epic,
@@ -1606,7 +1635,12 @@ class TradingLoop:
         loss_ok, loss_detail, loss_meta = daily_loss_gate_status(
             self._store, self._config
         )
-        passed = state != "STOP" and not paused and loss_ok
+        from trading.manual_intervention import entries_blocked_by_shield
+
+        shield_blocked, shield_reason = entries_blocked_by_shield(
+            self._store, self._config
+        )
+        passed = state != "STOP" and not paused and loss_ok and not shield_blocked
         if state == "STOP":
             detail = "points state STOP"
         elif paused:
@@ -1615,6 +1649,8 @@ class TradingLoop:
                 f"session pause — skip {n} actionable signal(s) "
                 f"(BUY/SELL that would have fired)"
             )
+        elif shield_blocked:
+            detail = shield_reason
         elif not loss_ok:
             detail = loss_detail
             tier = str(loss_meta.get("tier") or "")
@@ -2794,8 +2830,6 @@ class TradingLoop:
         market_label = epic_market_label(self._epic)
         signal_core_score = int(round(confidence))
         display_confidence = float(confidence)
-        if direction == "WAIT":
-            display_confidence = float(readiness.get("pct", 0))
         return {
             "type": "tick",
             "epic": self._epic,

@@ -134,7 +134,7 @@ fi
 LOG_DIR="${ROOT}/src/data/logs"
 LOG_FILE="${LOG_DIR}/launcher.log"
 mkdir -p "${LOG_DIR}"
-LOCK_FILE="${ROOT}/src/data/.ig_agent_v25.lock"
+LOCK_FILE="${ROOT}/src/data/.ig_agent_v29.lock"
 LEGACY_LOCK_FILE="${ROOT}/src/data/.ig_agent_v24.lock"
 
 log "=== IG Agent ${APP_VERSION_LABEL} launch ==="
