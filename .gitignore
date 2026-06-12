@@ -27,6 +27,7 @@ src/data/watchdog*.pid
 data_lake/events/*.jsonl
 data_lake/features/
 data_lake/models/
+data_lake/*.sqlite3
 data_lake/shadow_v26/*.jsonl
 data_lake/state/*.json
 data_lake/state/*.jsonl

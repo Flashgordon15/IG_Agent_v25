@@ -41,13 +41,17 @@ _OVERNIGHT_ARMED_FILE = data_dir() / "state" / "overnight_armed.json"
 
 def _launchd_job_loaded(label: str) -> bool:
     uid = os.getuid()
-    result = subprocess.run(
-        ["launchctl", "print", f"gui/{uid}/{label}"],
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
-    return result.returncode == 0
+    try:
+        result = subprocess.run(
+            ["launchctl", "print", f"gui/{uid}/{label}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        # launchctl is macOS-only — treat as "not loaded" on Linux CI/dev hosts.
+        return False
 
 
 def launchd_supervision_status() -> tuple[bool, str]:
@@ -80,18 +84,21 @@ def _bootstrap_launchd_plist(plist_name: str) -> tuple[bool, str]:
     if not path.is_file():
         return False, f"missing {plist_name}"
     domain = f"gui/{os.getuid()}"
-    subprocess.run(
-        ["launchctl", "bootout", f"{domain}/{label}"],
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
-    result = subprocess.run(
-        ["launchctl", "bootstrap", domain, str(path)],
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
+    try:
+        subprocess.run(
+            ["launchctl", "bootout", f"{domain}/{label}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        result = subprocess.run(
+            ["launchctl", "bootstrap", domain, str(path)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return False, "launchctl unavailable (macOS only)"
     if result.returncode == 0 or _launchd_job_loaded(label):
         return True, label
     err = (result.stderr or result.stdout or "").strip().splitlines()
