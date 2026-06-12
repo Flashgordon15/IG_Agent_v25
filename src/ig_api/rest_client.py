@@ -1146,6 +1146,174 @@ class IGRestClient:
         )
         return data
 
+    def place_limit_entry_atomic(
+        self,
+        *,
+        epic: str,
+        direction: str,
+        size: float,
+        level: float,
+        stop_distance: float,
+        limit_distance: float | None = None,
+        currency_code: str = "GBP",
+    ) -> dict[str, Any]:
+        """
+        LIMIT entry at touch price with stopDistance + limitDistance in one POST payload.
+        BUY at offer (ask); SELL at bid — marketable limit for immediate fill without slippage.
+        """
+        self.ensure_session()
+        size, stop_distance, limit_distance, currency_code = (
+            self.normalize_order_params(
+                epic,
+                size=size,
+                stop_distance=stop_distance,
+                limit_distance=limit_distance,
+                currency_code=currency_code,
+            )
+        )
+        payload: dict[str, Any] = {
+            "epic": epic,
+            "expiry": "-",
+            "direction": direction.upper(),
+            "size": float(size),
+            "orderType": "LIMIT",
+            "level": float(level),
+            "guaranteedStop": False,
+            "forceOpen": True,
+            "currencyCode": currency_code,
+            "stopDistance": float(stop_distance),
+        }
+        if limit_distance is not None and float(limit_distance) > 0:
+            payload["limitDistance"] = float(limit_distance)
+
+        url = f"{self._base}/positions/otc"
+        log_demo_rest(
+            "POST /positions/otc — atomic limit entry",
+            url=url,
+            account_id=self.account_id,
+            payload=payload,
+        )
+        trace_execution(
+            "REST",
+            "IGRestClient.place_limit_entry_atomic",
+            decision="POST limit at touch",
+            params={"url": url, "payload": payload},
+        )
+
+        r = self.request(
+            "POST",
+            "/positions/otc",
+            headers=self._auth_headers("2"),
+            json=payload,
+        )
+        body_preview = (r.text or "")[:500]
+        log_demo_rest(
+            "POST /positions/otc — atomic limit response",
+            status_code=r.status_code,
+            body=body_preview,
+        )
+
+        if r.status_code in (401, 403):
+            self._raise_auth_or_api(r, "Limit entry placement")
+        if r.status_code not in (200, 201):
+            trace_execution(
+                "REST",
+                "IGRestClient.place_limit_entry_atomic",
+                decision=f"FAILED HTTP {r.status_code}",
+                params={"response_body": body_preview},
+            )
+            raise IGOrderError(
+                f"Limit entry failed: HTTP {r.status_code} — {body_preview}",
+                status_code=r.status_code,
+            )
+
+        data = r.json()
+        trace_execution(
+            "REST",
+            "IGRestClient.place_limit_entry_atomic",
+            decision="success",
+            params={"response": data, "dealReference": data.get("dealReference")},
+        )
+        return data
+
+    def position_protection_status(self, deal_id: str) -> bool:
+        """True when open deal has both stop and limit protection attached."""
+        row = self.find_open_position(deal_id)
+        if not row:
+            return False
+        pos = row.get("position") or {}
+        has_stop = float(pos.get("stopLevel") or 0) > 0 or float(
+            pos.get("stopDistance") or 0
+        ) > 0
+        has_limit = float(pos.get("limitLevel") or 0) > 0 or float(
+            pos.get("limitDistance") or 0
+        ) > 0
+        return has_stop and has_limit
+
+    def cancel_all_working_orders(self, epic: str | None = None) -> int:
+        """Cancel pending working orders; optional epic filter."""
+        self.ensure_session()
+        r = self.request("GET", "/workingorders", headers=self._auth_headers("2"))
+        if r.status_code != 200:
+            return 0
+        cancelled = 0
+        for item in r.json().get("workingOrders", []):
+            market = item.get("market") or {}
+            pos = item.get("workingOrderData") or item.get("workingOrder") or {}
+            deal_id = str(
+                pos.get("dealId")
+                or pos.get("dealID")
+                or item.get("dealId")
+                or ""
+            ).strip()
+            item_epic = str(market.get("epic") or pos.get("epic") or "")
+            if epic and item_epic != epic:
+                continue
+            if not deal_id:
+                continue
+            try:
+                dr = self.request(
+                    "DELETE",
+                    f"/workingorders/otc/{deal_id}",
+                    headers=self._auth_headers("2"),
+                )
+                if dr.status_code in (200, 201, 204):
+                    cancelled += 1
+            except Exception:
+                pass
+        return cancelled
+
+    def flatten_all_positions(self) -> int:
+        """Emergency flatten — market close every open position."""
+        from system.config_loader import get_config
+
+        cfg = get_config()
+        ccy = cfg.currency_code
+        closed = 0
+        for item in self.open_positions():
+            market = item.get("market") or {}
+            pos = item.get("position") or {}
+            did = str(pos.get("dealId") or "")
+            side = str(pos.get("direction") or "BUY").upper()
+            size = float(pos.get("size") or 0)
+            epic = str(market.get("epic") or "")
+            if not did or size <= 0:
+                continue
+            close_dir = "SELL" if side == "BUY" else "BUY"
+            try:
+                self.close_position(
+                    did,
+                    direction=close_dir,
+                    size=size,
+                    epic=epic or None,
+                    currency_code=ccy,
+                    verify=True,
+                )
+                closed += 1
+            except Exception:
+                pass
+        return closed
+
     def find_open_position(self, deal_id: str) -> dict[str, Any] | None:
         """Return raw IG positions entry for dealId, or None."""
         want = str(deal_id).strip()

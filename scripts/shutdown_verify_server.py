@@ -149,11 +149,26 @@ def main() -> int:
 
     ok = False
     issues: list[str] = ["verification timeout"]
+    watchdog_repaired = False
     for attempt in range(60):
         ok, issues = agent_fully_stopped()
         if ok:
             _log(f"fully stopped confirmed on attempt {attempt + 1}")
             break
+        stale_watchdog = any(
+            i in issues for i in ("watchdog.sh still running", "watchdog.pid present")
+        )
+        if stale_watchdog and not watchdog_repaired:
+            from system.shutdown_cleanup import repair_stale_watchdog_after_stop
+
+            repaired, detail = repair_stale_watchdog_after_stop()
+            watchdog_repaired = True
+            _log(f"watchdog repair: ok={repaired} ({detail})")
+            if repaired:
+                ok, issues = agent_fully_stopped()
+                if ok:
+                    _log("fully stopped after watchdog repair")
+                    break
         time.sleep(0.25)
     else:
         _log(f"verify failed: {', '.join(issues)}")

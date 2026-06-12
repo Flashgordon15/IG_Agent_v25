@@ -186,26 +186,82 @@ def log_unresolved_if_due(
         if now - last < _UNRESOLVED_LOG_INTERVAL_SEC:
             return
         _last_unresolved_log_ts[key] = now
+    rec = get_pending(key)
+    age_s = (now - rec.local_created_at) if rec else 0.0
+    ref = rec.broker_deal_reference if rec else ""
     log_engine(
-        f"Order confirmation unresolved for {key} — trading paused until reconciliation"
+        f"Order confirmation overdue for {key} ({age_s:.0f}s, ref={ref or '-'}) "
+        f"— entries paused until broker reconcile"
     )
     try:
-        from system.telegram_notifier import send_critical_alert
+        from system.telegram_notifier import send_unresolved_order_alert
 
-        send_critical_alert(f"{key} order confirmation unresolved")
+        send_unresolved_order_alert(
+            key,
+            age_seconds=age_s,
+            order_type=str(rec.order_type if rec else ""),
+            deal_reference=ref,
+        )
     except Exception as e:
         log_engine(f"telegram unresolved-order alert failed: {type(e).__name__}: {e}")
 
 
-def reconcile_pending_via_position_state(epic: str, *, position_present: bool) -> None:
-    """Clear pending entry when broker shows a position; clear pending exit when absent."""
+def reconcile_pending_via_position_state(
+    epic: str,
+    *,
+    position_present: bool,
+    stale_entry_grace_sec: float = DEFAULT_PENDING_TIMEOUT_SEC,
+) -> None:
+    """
+    Clear pending entry when broker shows a position.
+
+    Clear pending exit when broker shows no position.
+
+    Clear stale pending entry when no position after *stale_entry_grace_sec*
+    (order never filled / confirm lost) — prevents ghost blocks and false
+    'unresolved' Telegram alerts.
+    """
     rec = get_pending(epic)
     if rec is None:
         return
+    age = time.time() - rec.local_created_at
     if rec.order_type == ORDER_TYPE_ENTRY and position_present:
         resolve_pending(epic, reason="entry confirmed by broker reconciliation")
+    elif (
+        rec.order_type == ORDER_TYPE_ENTRY
+        and not position_present
+        and age >= max(1.0, float(stale_entry_grace_sec))
+    ):
+        resolve_pending(
+            epic,
+            reason=(
+                f"no broker position after {age:.0f}s — cleared stale pending entry"
+            ),
+        )
     elif rec.order_type == ORDER_TYPE_EXIT and not position_present:
         resolve_pending(epic, reason="exit confirmed by broker reconciliation")
+
+
+def reconcile_all_pending_from_broker(
+    by_epic_open_count: dict[str, int],
+    *,
+    stale_entry_grace_sec: float = DEFAULT_PENDING_TIMEOUT_SEC,
+) -> int:
+    """Reconcile every tracked pending order against broker open counts. Returns clears."""
+    cleared = 0
+    with _lock:
+        epics = [p.epic for p in _pending.values()]
+    for epic in epics:
+        open_n = int(by_epic_open_count.get(epic, 0) or 0)
+        before = get_pending(epic)
+        reconcile_pending_via_position_state(
+            epic,
+            position_present=open_n > 0,
+            stale_entry_grace_sec=stale_entry_grace_sec,
+        )
+        if before is not None and get_pending(epic) is None:
+            cleared += 1
+    return cleared
 
 
 def recover_pending_state_for_startup() -> int:

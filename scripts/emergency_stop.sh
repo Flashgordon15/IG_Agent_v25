@@ -84,7 +84,13 @@ if command -v pgrep >/dev/null 2>&1; then
     [[ -z "$wpid" ]] && continue
     kill -TERM "$wpid" 2>/dev/null || true
   done < <(pgrep -f "${ROOT}/scripts/watchdog.sh" 2>/dev/null || true)
+  sleep 0.5
+  while read -r wpid; do
+    [[ -z "$wpid" ]] && continue
+    kill -KILL "$wpid" 2>/dev/null || true
+  done < <(pgrep -f "${ROOT}/scripts/watchdog.sh" 2>/dev/null || true)
 fi
+rm -f "${ROOT}/src/data/watchdog.pid"
 
 # 4. Kill all agent processes (not this script)
 SELF=$$

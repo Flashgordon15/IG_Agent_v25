@@ -558,37 +558,9 @@ def _overnight_health_fields() -> dict[str, Any]:
         }
 
 
-def stop_watchdog(*, preserve_launchd: bool = True) -> None:
-    """
-    Stop watchdog processes.
-
-    When preserve_launchd=True (default), leave the launchd supervision job loaded
-    so overnight Safe to Leave survives dashboard Stop Agent.
-    """
-    if not preserve_launchd:
-        try:
-            uid = os.getuid()
-            subprocess.run(
-                ["launchctl", "bootout", f"gui/{uid}/com.igagent.v25.watchdog"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-        except Exception:
-            pass
-
-    try:
-        if _WATCHDOG_PID_FILE.is_file():
-            pid_str = _WATCHDOG_PID_FILE.read_text(encoding="utf-8").strip()
-            if pid_str.isdigit() and not preserve_launchd:
-                subprocess.run(["/bin/kill", "-TERM", pid_str], timeout=3)
-                _WATCHDOG_PID_FILE.unlink(missing_ok=True)
-    except Exception:
-        pass
-
-    if preserve_launchd:
-        return
-
+def _standalone_watchdog_pids() -> list[int]:
+    """PIDs for project watchdog.sh (excludes macOS /usr/libexec/watchdogd)."""
+    pids: list[int] = []
     try:
         result = subprocess.run(
             ["/usr/bin/pgrep", "-f", _WATCHDOG_MARKER],
@@ -597,7 +569,7 @@ def stop_watchdog(*, preserve_launchd: bool = True) -> None:
             timeout=3,
         )
         if result.returncode != 0:
-            return
+            return pids
         for line in result.stdout.strip().splitlines():
             pid_str = line.strip()
             if not pid_str.isdigit():
@@ -610,9 +582,68 @@ def stop_watchdog(*, preserve_launchd: bool = True) -> None:
             )
             cmd = (proc.stdout or "").strip()
             if _WATCHDOG_MARKER in cmd:
-                subprocess.run(["/bin/kill", "-TERM", pid_str], timeout=3)
+                pids.append(int(pid_str))
     except Exception:
         pass
+    return pids
+
+
+def stop_watchdog(*, preserve_launchd: bool = True) -> None:
+    """
+    Stop watchdog processes.
+
+    When preserve_launchd=True and launchd watchdog is loaded, leave supervision
+    in place so overnight Safe to Leave survives dashboard Stop Agent.
+    Otherwise terminate standalone watchdog.sh and clear watchdog.pid.
+    """
+    launchd_active = False
+    if preserve_launchd:
+        try:
+            from system.overnight_supervision import launchd_watchdog_active
+
+            launchd_active = launchd_watchdog_active()
+        except Exception:
+            launchd_active = False
+        if launchd_active:
+            return
+
+    if not preserve_launchd:
+        try:
+            uid = os.getuid()
+            subprocess.run(
+                ["launchctl", "bootout", f"gui/{uid}/com.igagent.v25.watchdog"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except Exception:
+            pass
+
+    signaled: set[int] = set()
+    try:
+        if _WATCHDOG_PID_FILE.is_file():
+            pid_str = _WATCHDOG_PID_FILE.read_text(encoding="utf-8").strip()
+            if pid_str.isdigit():
+                pid = int(pid_str)
+                subprocess.run(["/bin/kill", "-TERM", str(pid)], timeout=3)
+                signaled.add(pid)
+    except Exception:
+        pass
+
+    for pid in _standalone_watchdog_pids():
+        if pid in signaled:
+            continue
+        try:
+            subprocess.run(["/bin/kill", "-TERM", str(pid)], timeout=3)
+            signaled.add(pid)
+        except Exception:
+            pass
+
+    for _ in range(15):
+        if not _standalone_watchdog_pids():
+            break
+        time.sleep(0.2)
+
     for sig in ("-TERM", "-KILL"):
         try:
             subprocess.run(
@@ -623,6 +654,8 @@ def stop_watchdog(*, preserve_launchd: bool = True) -> None:
             )
         except Exception:
             pass
+        time.sleep(0.1)
+
     try:
         _WATCHDOG_PID_FILE.unlink(missing_ok=True)
     except Exception:

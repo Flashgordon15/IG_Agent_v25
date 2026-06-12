@@ -538,7 +538,7 @@ export default function App() {
         }
       }
       return {
-        ok: true,
+        ok: false,
         status: "done",
         checks: [
           {
@@ -549,10 +549,11 @@ export default function App() {
           {
             label: "Post-exit verifier",
             ok: false,
-            detail: "timed out — agent is down; optional: confirm_stopped.py",
+            detail:
+              "timed out — run: PYTHONPATH=src python3 scripts/confirm_stopped.py --repair",
           },
         ],
-        issues: [],
+        issues: ["post_exit_verifier_timeout"],
         inferred_stopped: true,
       };
     }

@@ -291,7 +291,7 @@
     ]
   },
   "max_positions_per_epic": 3,
-  "max_daily_loss_gbp": 500.0,
+  "max_daily_loss_gbp": 2000.0,
   "adaptive_block_bad_setups": true,
   "breakeven_lock_points": 0,
   "default_stop_distance_points": 60,
@@ -301,7 +301,7 @@
   "risk_per_trade": 40,
   "max_spread_points": 35,
   "max_slippage_points": 5,
-  "max_daily_loss": 500,
+  "max_daily_loss": 2000,
   "max_daily_trades": 60,
   "min_account_balance": 0,
   "min_account_available": 100,

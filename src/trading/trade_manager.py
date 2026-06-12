@@ -50,6 +50,7 @@ class TradeManager:
         self._limit_ext_count: dict[int, int] = {}
         self._gone_deals: set[str] = set()
         self._capital_recycle_applied: set[int] = set()
+        self._scalping_be_armed: set[int] = set()
 
     @staticmethod
     def confidence_band(confidence: float) -> str:
@@ -312,30 +313,21 @@ class TradeManager:
             if row_after_partial:
                 size = float(row_after_partial["size"])
 
-            if cfg.breakeven_enabled:
-                be_trigger = self._effective_breakeven_trigger(entry_atr)
-                messages.extend(
-                    self._apply_breakeven(
-                        market,
-                        side,
-                        trade_id,
-                        entry,
-                        stop,
-                        target,
-                        px,
-                        be_trigger,
-                        cfg.breakeven_lock_points,
-                    )
-                )
-                stop = self._current_stop(trade_id, stop)
+            protect_active = False
+            scalping_trail = False
+            try:
+                from execution.execution_protect import is_protect_enabled
+                from execution.scalping.config import is_scalping_enabled
 
-            if cfg.adaptive_trailing_stop_enabled:
-                trail_dist = trail_distance
-                if trail_dist <= 0:
-                    trail_dist = float(cfg.trailing_stop_step_points)
-                trail_trigger = self._effective_trail_trigger(entry_atr, epic=epic)
+                protect_active = is_protect_enabled(cfg)
+                scalping_trail = is_scalping_enabled(cfg)
+            except Exception:
+                protect_active = False
+                scalping_trail = False
+
+            if protect_active and cfg.breakeven_enabled:
                 messages.extend(
-                    self._apply_trailing(
+                    self._apply_scalping_breakeven_trail(
                         market,
                         side,
                         trade_id,
@@ -343,11 +335,49 @@ class TradeManager:
                         stop,
                         target,
                         px,
-                        trail_trigger,
-                        trail_dist,
+                        quote,
+                        entry_atr,
+                        enable_atr_trail=scalping_trail,
                     )
                 )
                 stop = self._current_stop(trade_id, stop)
+            else:
+                if cfg.breakeven_enabled:
+                    be_trigger = self._effective_breakeven_trigger(entry_atr)
+                    messages.extend(
+                        self._apply_breakeven(
+                            market,
+                            side,
+                            trade_id,
+                            entry,
+                            stop,
+                            target,
+                            px,
+                            be_trigger,
+                            cfg.breakeven_lock_points,
+                        )
+                    )
+                    stop = self._current_stop(trade_id, stop)
+
+                if cfg.adaptive_trailing_stop_enabled:
+                    trail_dist = trail_distance
+                    if trail_dist <= 0:
+                        trail_dist = float(cfg.trailing_stop_step_points)
+                    trail_trigger = self._effective_trail_trigger(entry_atr, epic=epic)
+                    messages.extend(
+                        self._apply_trailing(
+                            market,
+                            side,
+                            trade_id,
+                            entry,
+                            stop,
+                            target,
+                            px,
+                            trail_trigger,
+                            trail_dist,
+                        )
+                    )
+                    stop = self._current_stop(trade_id, stop)
 
             if getattr(cfg, "limit_extension_enabled", False) and entry_atr > 0:
                 ext_msgs, target = self._apply_limit_extension(
@@ -446,6 +476,9 @@ class TradeManager:
             pts_state = "CAUTION"
             if self._points_engine is not None:
                 pts_state = self._points_engine.get_state()
+            protect_on = bool(execution.get("execution_protect", False))
+            order_type = str(execution.get("order_type") or "MARKET")
+            protected = bool(execution.get("protection_verified", True))
             notifier.notify_trade_opened(
                 market=market,
                 direction=side,
@@ -456,6 +489,9 @@ class TradeManager:
                 signal_pct=float(adjusted_confidence),
                 fitness_pct=fitness,
                 points_state=pts_state,
+                order_type=order_type,
+                protected=protected,
+                scalping=protect_on,
             )
         except Exception as e:
             log_engine(f"telegram trade open notify failed: {type(e).__name__}: {e}")
@@ -823,6 +859,17 @@ class TradeManager:
         except Exception:
             pass
 
+    def _telegram_scalping_event(self, msg: str, *, dedupe_key: str) -> None:
+        """Scalping lifecycle (BE/trail) — deduped; suppressed in executive mode."""
+        try:
+            from system.telegram_notifier import get_telegram_notifier
+
+            n = get_telegram_notifier()
+            if n:
+                n.send_alert(msg, dedupe_key=dedupe_key)
+        except Exception:
+            pass
+
     def _check_hard_cap(
         self,
         market: str,
@@ -1028,6 +1075,93 @@ class TradeManager:
         if self.on_alert:
             self.on_alert(msg)
         return [msg], new_target
+
+    def _apply_scalping_breakeven_trail(
+        self,
+        market: str,
+        side: str,
+        trade_id: int,
+        entry: float,
+        stop: float,
+        target: float,
+        px: float,
+        quote: Quote,
+        entry_atr: float,
+        *,
+        enable_atr_trail: bool = False,
+    ) -> list[str]:
+        """Micro-milestone BE (spread+commission+2pts) then optional ATR trail."""
+        from execution.scalping.breakeven_trail import (
+            breakeven_stop_offset,
+            breakeven_trigger_points,
+            trail_distance_from_atr,
+        )
+
+        msgs: list[str] = []
+        be_trigger = breakeven_trigger_points(quote, self._cfg)
+        be_offset = breakeven_stop_offset(quote, self._cfg)
+        profit = self._profit_points(side, entry, px)
+
+        if trade_id not in self._scalping_be_armed:
+            if side == "BUY":
+                be_stop = entry + be_offset
+                if profit >= be_trigger and stop < be_stop:
+                    self.store.update_stop(
+                        trade_id,
+                        be_stop,
+                        f" | Scalping BE+tx {be_stop:.2f}",
+                    )
+                    self._scalping_be_armed.add(trade_id)
+                    msgs.append(
+                        f"EXEC_PROTECT BREAKEVEN | {market} BUY | stop {be_stop:.2f}"
+                    )
+                    log_engine(
+                        f"EXEC_PROTECT breakeven armed trade={trade_id} "
+                        f"trigger={be_trigger:.2f} stop={be_stop:.2f}"
+                    )
+                    self._telegram_scalping_event(
+                        f"BE locked | {market} BUY → {be_stop:.2f}",
+                        dedupe_key=f"protect_be:{market}:{trade_id}",
+                    )
+            else:
+                be_stop = entry - be_offset
+                if profit >= be_trigger and stop > be_stop:
+                    self.store.update_stop(
+                        trade_id,
+                        be_stop,
+                        f" | Scalping BE+tx {be_stop:.2f}",
+                    )
+                    self._scalping_be_armed.add(trade_id)
+                    msgs.append(
+                        f"EXEC_PROTECT BREAKEVEN | {market} SELL | stop {be_stop:.2f}"
+                    )
+                    log_engine(
+                        f"EXEC_PROTECT breakeven armed trade={trade_id} "
+                        f"trigger={be_trigger:.2f} stop={be_stop:.2f}"
+                    )
+                    self._telegram_scalping_event(
+                        f"BE locked | {market} SELL → {be_stop:.2f}",
+                        dedupe_key=f"protect_be:{market}:{trade_id}",
+                    )
+
+        if enable_atr_trail and trade_id in self._scalping_be_armed:
+            atr = entry_atr if entry_atr > 0 else be_trigger
+            trail_dist = trail_distance_from_atr(atr, self._cfg)
+            if trail_dist > 0:
+                msgs.extend(
+                    self._apply_trailing(
+                        market,
+                        side,
+                        trade_id,
+                        entry,
+                        self._current_stop(trade_id, stop),
+                        target,
+                        px,
+                        be_trigger,
+                        trail_dist,
+                    )
+                )
+        return msgs
 
     def _apply_breakeven(
         self, market, side, trade_id, entry, stop, target, px, trigger, offset

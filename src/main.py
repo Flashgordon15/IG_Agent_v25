@@ -303,6 +303,18 @@ def _pre_startup_cleanup() -> None:
         log_label="pre-startup",
     )
 
+    # 2b. Orphan watchdog from a prior session can race this startup — stop it first.
+    try:
+        from system.overnight_supervision import launchd_watchdog_active
+
+        if not launchd_watchdog_active():
+            from api.agent_health import stop_watchdog
+
+            stop_watchdog(preserve_launchd=False)
+            log_engine("pre-startup: cleared standalone watchdog from prior session")
+    except Exception as e:
+        log_engine(f"pre-startup: watchdog cleanup error (ignored): {e}")
+
     # 3. Remove stale lock
     try:
         if lock_path.exists():

@@ -157,6 +157,26 @@ class TradingLoop:
             },
         )
         self.signal_engine.add_quote(market, quote)
+        try:
+            from execution.execution_protect import is_protect_enabled
+            from execution.scalping.dynamic_spread_filter import get_spread_filter
+            from execution.scalping.equity_circuit_breaker import check_equity_circuit
+
+            if is_protect_enabled(cfg):
+                get_spread_filter().record(epic, float(quote.offer) - float(quote.bid))
+            try:
+                from execution.scalping.config import is_scalping_enabled
+
+                if is_scalping_enabled(cfg):
+                    client = getattr(self.execution_engine, "_rest_client", None)
+                    if client is not None:
+                        eq_ok, eq_msg = check_equity_circuit(client)
+                        if not eq_ok:
+                            log_engine(f"EXEC_PROTECT equity circuit active: {eq_msg}")
+            except Exception:
+                pass
+        except Exception:
+            pass
         position_messages = self.execution_engine.update_positions(market, epic, quote)
         if prefetched_signal is not None:
             sig = prefetched_signal

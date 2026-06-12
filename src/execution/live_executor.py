@@ -138,17 +138,22 @@ class LiveExecutor:
             return self._execute_dry_run(signal, execution_params, trade_manager)
 
         if has_pending(signal.epic):
-            log_unresolved_if_due(signal.epic)
-            reason = (
-                f"Order confirmation unresolved for {signal.epic} — "
-                f"trading paused until reconciliation"
+            from execution.pending_order_reconcile import (
+                is_unresolved_overdue,
+                log_unresolved_if_due,
             )
-            try:
-                from system.telegram_notifier import send_critical_alert
 
-                send_critical_alert(f"{signal.epic} order confirmation unresolved")
-            except Exception:
-                pass
+            log_unresolved_if_due(signal.epic)
+            if is_unresolved_overdue(signal.epic):
+                reason = (
+                    f"Order confirmation overdue for {signal.epic} — "
+                    f"paused until broker reconciliation"
+                )
+            else:
+                reason = (
+                    f"Order confirmation in progress for {signal.epic} — "
+                    f"entry briefly paused"
+                )
             update_demo_diagnostics(last_rejection=reason)
             trace_execution(
                 "ORDER", "LiveExecutor.execute", decision=f"REJECTED: {reason}"
@@ -191,6 +196,33 @@ class LiveExecutor:
                 rejection_reason=reason,
                 execution_params=execution_params,
             )
+
+        try:
+            from execution.scalping.config import is_scalping_enabled
+            from execution.scalping.entry_halt import entry_halt_detail, is_entry_halted
+            from execution.scalping.equity_circuit_breaker import check_equity_circuit
+
+            if is_scalping_enabled(cfg):
+                if is_entry_halted():
+                    reason = entry_halt_detail() or "Scalping entry halt active"
+                    update_demo_diagnostics(last_rejection=reason)
+                    return ExecutionResult(
+                        success=False,
+                        action="REJECTED",
+                        rejection_reason=reason,
+                        execution_params=execution_params,
+                    )
+                eq_ok, eq_msg = check_equity_circuit(self._client)
+                if not eq_ok:
+                    update_demo_diagnostics(last_rejection=eq_msg)
+                    return ExecutionResult(
+                        success=False,
+                        action="REJECTED",
+                        rejection_reason=eq_msg,
+                        execution_params=execution_params,
+                    )
+        except Exception:
+            pass
 
         size = float(execution_params.get("size", cfg.trade_size))
         stop_pts = float(
@@ -436,6 +468,39 @@ class LiveExecutor:
             if hasattr(cfg, "retry_delay_seconds")
             else 2.5
         )
+        try:
+            from execution.execution_protect import is_protect_enabled
+
+            protect_on = is_protect_enabled(cfg)
+        except Exception:
+            protect_on = False
+
+        if protect_on:
+            try:
+                from execution.execution_protect import check_signal_spread
+
+                spread_ok, spread_msg = check_signal_spread(signal, cfg)
+                if not spread_ok:
+                    update_demo_diagnostics(last_rejection=spread_msg)
+                    return ExecutionResult(
+                        success=False,
+                        action="REJECTED",
+                        rejection_reason=spread_msg,
+                        execution_params=execution_params,
+                    )
+            except Exception as e:
+                log_engine(
+                    f"EXEC_PROTECT spread check error: {type(e).__name__}: {e}"
+                )
+
+        use_limit = False
+        if protect_on:
+            try:
+                from execution.execution_protect import protect_settings
+
+                use_limit = bool(protect_settings(cfg).get("use_limit_at_touch", False))
+            except Exception:
+                use_limit = False
 
         result: dict | None = None
         ref = ""
@@ -493,28 +558,46 @@ class LiveExecutor:
                     continue
                 break
 
+            order_fn = (
+                "execution_protect.submit_atomic_entry"
+                if protect_on
+                else "IGRestClient.place_market_order"
+            )
             bus.emit(
                 STAGE_EXECUTION_REQUEST,
                 STATUS_OK,
-                f"POST /positions/otc (attempt {attempt})",
+                f"POST /positions/otc ({'LIMIT' if use_limit else 'MARKET'}) attempt {attempt}",
                 payload=payload,
             )
             trace_execution(
                 "REST",
-                "IGRestClient.place_market_order",
+                order_fn,
                 decision=f"calling IG (attempt {attempt}/{max_retries + 1})",
-                next_fn="IGRestClient.place_market_order",
+                next_fn=order_fn,
                 params=payload,
             )
             try:
-                result = self._client.place_market_order(
-                    epic=signal.epic,
-                    direction=signal.direction,
-                    size=size,
-                    stop_distance=stop_distance,
-                    limit_distance=limit_distance,
-                    currency_code=cfg.currency_code,
-                )
+                if protect_on:
+                    from execution.execution_protect import submit_atomic_entry
+
+                    result = submit_atomic_entry(
+                        self._client,
+                        signal,
+                        size=size,
+                        stop_distance=stop_distance,
+                        limit_distance=limit_distance,
+                        currency_code=cfg.currency_code,
+                        cfg=cfg,
+                    )
+                else:
+                    result = self._client.place_market_order(
+                        epic=signal.epic,
+                        direction=signal.direction,
+                        size=size,
+                        stop_distance=stop_distance,
+                        limit_distance=limit_distance,
+                        currency_code=cfg.currency_code,
+                    )
                 update_demo_diagnostics(
                     last_ig_response=result,
                     rest_status=f"order submitted (attempt {attempt})",
@@ -524,7 +607,7 @@ class LiveExecutor:
                     set_entry_deal_reference(signal.epic, ref)
                 trace_execution(
                     "REST",
-                    "IGRestClient.place_market_order",
+                    order_fn,
                     decision=f"IG response received (attempt {attempt})",
                     next_fn="IGRestClient.confirm_deal",
                     params={"dealReference": ref},
@@ -685,6 +768,44 @@ class LiveExecutor:
                 execution_params=execution_params,
             )
 
+        deal_id = str(confirm.get("deal_id") or "")
+        if protect_on and deal_id:
+            try:
+                from execution.execution_protect import verify_stop_fail_safe
+
+                stop_ok = verify_stop_fail_safe(
+                    self._client,
+                    deal_id=deal_id,
+                    epic=signal.epic,
+                    direction=signal.direction,
+                    size=size,
+                    stop_distance=float(stop_distance),
+                    cfg=cfg,
+                )
+                if not stop_ok:
+                    bus.emit(
+                        STAGE_IG_RESPONSE,
+                        STATUS_FAIL,
+                        "Stop fail-safe: emergency close on position",
+                        deal_id=deal_id,
+                    )
+                    bus.finalize_failure(
+                        reason="Stop fail-safe: emergency close on position"
+                    )
+                    return ExecutionResult(
+                        success=False,
+                        action="REJECTED",
+                        rejection_reason="Stop fail-safe: emergency close on position",
+                        deal_reference=ref,
+                        deal_id=deal_id,
+                        execution_params=execution_params,
+                    )
+            except Exception as e:
+                log_engine(
+                    f"EXEC_PROTECT stop verify error deal={deal_id}: "
+                    f"{type(e).__name__}: {e}"
+                )
+
         bus.emit(
             STAGE_IG_RESPONSE,
             STATUS_OK,
@@ -700,6 +821,13 @@ class LiveExecutor:
             deal_id=confirm.get("deal_id"),
         )
         cooldown.record(signal.epic, direction=signal.direction)
+        order_type = "LIMIT" if (protect_on and use_limit) else "MARKET"
+        execution_params = {
+            **execution_params,
+            "order_type": order_type,
+            "protection_verified": bool(protect_on),
+            "execution_protect": protect_on,
+        }
         trade_manager.open_trade_from_execution(
             market=signal.market,
             epic=signal.epic,
@@ -712,9 +840,8 @@ class LiveExecutor:
             notes=signal.notes,
             execution=execution_params,
             dry_run=False,
-            ig_deal_id=str(confirm.get("deal_id") or ""),
+            ig_deal_id=deal_id,
         )
-        deal_id = str(confirm.get("deal_id") or "")
         if deal_id:
             try:
                 from execution.ml_training_hooks import record_ml_entry_from_signal
@@ -752,13 +879,19 @@ class LiveExecutor:
                     confirm_direction_risk(signal.direction, entry_risk)
             except Exception:
                 pass
-        if deal_id and hasattr(self._client, "ensure_protective_stops"):
-            self._client.ensure_protective_stops(
-                deal_id,
-                epic=signal.epic,
-                stop_distance=float(stop_distance),
-                limit_distance=float(limit_distance),
-            )
+        if not protect_on and deal_id and hasattr(self._client, "ensure_protective_stops"):
+            try:
+                self._client.ensure_protective_stops(
+                    deal_id,
+                    epic=signal.epic,
+                    stop_distance=float(stop_distance),
+                    limit_distance=float(limit_distance),
+                )
+            except Exception as e:
+                log_engine(
+                    f"post-fill ensure_protective_stops failed deal={deal_id}: "
+                    f"{type(e).__name__}: {e}"
+                )
 
         label = "DEMO" if is_demo else "LIVE"
         return ExecutionResult(
@@ -768,6 +901,6 @@ class LiveExecutor:
             deal_id=confirm.get("deal_id"),
             execution_params=execution_params,
             messages=[
-                f"{label} IG order size={size} stop={stop_distance} limit={limit_distance}"
+                f"{label} IG {order_type} size={size} stop={stop_distance} limit={limit_distance}"
             ],
         )

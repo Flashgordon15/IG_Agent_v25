@@ -8,7 +8,7 @@
     "max_margin_pct": 0.2,
     "max_concurrent_risk_gbp": 1200,
     "max_daily_risk_deployed_gbp": 8000,
-    "max_daily_loss_gbp": 500,
+    "max_daily_loss_gbp": 2000,
     "max_daily_profit_target_gbp": 1000,
     "min_available_gbp": 100,
     "reserve_pct": 0.1

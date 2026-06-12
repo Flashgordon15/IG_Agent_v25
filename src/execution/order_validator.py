@@ -36,6 +36,7 @@ class OrderValidator:
         self._store = store
         self._points = points_engine
         self._trade_tracker: Any | None = None
+        self._rest_client: Any | None = None
 
     def attach_trade_tracker(self, tracker: Any) -> None:
         self._trade_tracker = tracker
@@ -90,6 +91,21 @@ class OrderValidator:
         checks["spread"] = spread_ok
         if not spread_ok:
             reasons.append(spread_msg)
+
+        prot_spread_ok, prot_spread_msg = self.check_execution_protect_spread(signal)
+        checks["execution_protect_spread"] = prot_spread_ok
+        if not prot_spread_ok:
+            reasons.append(prot_spread_msg)
+
+        scalp_halt_ok, scalp_halt_msg = self.check_scalping_entry_halt()
+        checks["scalping_entry_halt"] = scalp_halt_ok
+        if not scalp_halt_ok:
+            reasons.append(scalp_halt_msg)
+
+        scalp_eq_ok, scalp_eq_msg = self.check_scalping_equity_circuit()
+        checks["scalping_equity_circuit"] = scalp_eq_ok
+        if not scalp_eq_ok:
+            reasons.append(scalp_eq_msg)
 
         atr_ok, atr_msg = self.check_atr(signal)
         checks["atr"] = atr_ok
@@ -257,6 +273,57 @@ class OrderValidator:
                 f"Spread {spread:.1f} > max {self._cfg.adaptive_max_entry_spread:.1f}",
             )
         return True, ""
+
+    def check_execution_protect_spread(self, signal: TradeSignal) -> tuple[bool, str]:
+        try:
+            from execution.execution_protect import check_signal_spread, is_protect_enabled
+
+            if not is_protect_enabled(self._cfg):
+                return True, ""
+            return check_signal_spread(signal, self._cfg)
+        except Exception:
+            return True, ""
+
+    def check_scalping_spread(self, signal: TradeSignal) -> tuple[bool, str]:
+        return self.check_execution_protect_spread(signal)
+
+    @staticmethod
+    def check_scalping_entry_halt() -> tuple[bool, str]:
+        try:
+            from execution.scalping.config import is_scalping_enabled
+            from execution.scalping.entry_halt import entry_halt_detail, is_entry_halted
+            from system.config_loader import get_config
+
+            if not is_scalping_enabled(get_config()):
+                return True, ""
+            if is_entry_halted():
+                return False, entry_halt_detail() or "Scalping entry halt active"
+        except Exception:
+            pass
+        return True, ""
+
+    def check_scalping_equity_circuit(self) -> tuple[bool, str]:
+        try:
+            from execution.scalping.config import is_scalping_enabled
+            from execution.scalping.equity_circuit_breaker import (
+                check_equity_circuit,
+                get_equity_circuit_breaker,
+            )
+
+            if not is_scalping_enabled(self._cfg):
+                return True, ""
+            client = getattr(self, "_rest_client", None)
+            if client is None:
+                breaker = get_equity_circuit_breaker()
+                if breaker.is_locked():
+                    return False, breaker.lock_reason()
+                return True, ""
+            return check_equity_circuit(client)
+        except Exception:
+            return True, ""
+
+    def attach_rest_client(self, client: Any) -> None:
+        self._rest_client = client
 
     def check_atr(self, signal: TradeSignal) -> tuple[bool, str]:
         min_atr = self._cfg.min_atr_points

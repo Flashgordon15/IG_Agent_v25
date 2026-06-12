@@ -460,7 +460,7 @@ def test_safe_to_leave_script_exists() -> None:
 
 
 def test_shutdown_cleanup_module_covers_full_teardown() -> None:
-    """Stop Agent must tear down streams, IG session, watchdog (preserve launchd), orphans, lock."""
+    """Stop Agent must tear down streams, IG session, watchdog (launchd-aware), orphans, lock."""
     path = _SRC / "system" / "shutdown_cleanup.py"
     assert path.is_file(), "shutdown_cleanup.py missing"
     source = path.read_text(encoding="utf-8")
@@ -470,12 +470,14 @@ def test_shutdown_cleanup_module_covers_full_teardown() -> None:
         "stop_ig_position_sync",
         "shutdown_shared_ig_session",
         "stop_watchdog",
-        "preserve_launchd=True",
+        "launchd_watchdog_active",
+        "preserve_launchd=launchd_wd",
         "kill_other_agent_processes",
-        "release_instance_lock",
+        "force_release_instance_lock",
         "_force_cleanup_port",
         "agent_fully_started",
         "agent_fully_stopped",
+        "repair_stale_watchdog_after_stop",
         "preserve_launchd_supervision",
     ):
         assert needle in source, f"shutdown_cleanup missing {needle}"
@@ -494,6 +496,9 @@ def test_confirm_stopped_script_exists() -> None:
     """scripts/confirm_stopped.py verifies Stop Agent left no rogue processes."""
     script = _ROOT / "scripts" / "confirm_stopped.py"
     assert script.is_file(), "confirm_stopped.py missing"
+    source = script.read_text(encoding="utf-8")
+    assert "--repair" in source
+    assert "repair_stale_watchdog_after_stop" in source
 
 
 def test_shutdown_verify_server_and_dashboard_integration() -> None:
@@ -589,6 +594,7 @@ def test_pre_startup_cleanup_kills_duplicate_processes() -> None:
             body.append(line)
     func_body = "\n".join(body)
     assert "kill_other_agent_processes" in func_body
+    assert "stop_watchdog" in func_body
     assert "_force_cleanup_port" in func_body
 
 

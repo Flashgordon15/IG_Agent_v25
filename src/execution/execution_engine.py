@@ -75,6 +75,8 @@ class ExecutionEngine:
             points_engine=points_engine,
         )
         self._validator.attach_trade_tracker(self._tracker)
+        if rest_client is not None:
+            self._validator.attach_rest_client(rest_client)
         self._risk = RiskManager(config, store)
         skip_ig_exits = mode.uses_broker()
         self._trade_manager = TradeManager(

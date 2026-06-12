@@ -42,6 +42,32 @@
     },
     "_note": "Profile B Learning Demo — labelled throughput relaxations via demo_soak_mode; integrity fixes require gate-sourced submit."
   },
+  "execution_protect": {
+    "enabled": true,
+    "spread_ma_periods": 20,
+    "spread_ma_multiplier": 1.5,
+    "spread_min_samples": 5,
+    "protection_verify_ms": 200,
+    "commission_points_per_side": 0.5,
+    "breakeven_buffer_points": 2.0,
+    "halt_all_entries_on_stop_fail": false,
+    "use_limit_at_touch": false,
+    "_note": "Execution boundary only — spread MA gate, atomic SL/TP payload, stop fail-safe close, micro breakeven. Does not alter entry signals or indicators."
+  },
+  "scalping_framework": {
+    "enabled": true,
+    "spread_ma_periods": 20,
+    "spread_ma_multiplier": 1.5,
+    "spread_min_samples": 5,
+    "protection_verify_ms": 200,
+    "commission_points_per_side": 0.5,
+    "breakeven_buffer_points": 2.0,
+    "atr_trail_period": 14,
+    "atr_trail_multiplier": 0.5,
+    "daily_equity_drawdown_pct": 1.5,
+    "halt_entries_on_protection_failure": true,
+    "_note": "HFT scalping: limit-at-touch entries, atomic SL/TP verify, spread MA filter, micro BE + ATR trail, 1.5% daily equity circuit breaker."
+  },
   "demo_soak_mode": {
     "enabled": true,
     "_note": "Profile B entry permissiveness — fitness/rotation/ML bypass for learning throughput. Not sizing authority.",

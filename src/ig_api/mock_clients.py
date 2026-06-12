@@ -103,15 +103,83 @@ class MockIGRest:
             raise IGOrderError("Mock order rejected", status_code=400)
         ref = "MOCK-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=10))
         deal_id = "D" + ref[5:]
-        self._positions.append({"epic": epic, "direction": direction, "size": size, "dealId": deal_id})
+        self._positions.append(
+            {
+                "epic": epic,
+                "direction": direction,
+                "size": size,
+                "dealId": deal_id,
+                "stop_distance": float(stop_distance),
+                "limit_distance": float(limit_distance),
+            }
+        )
+        self._last_deal_id = deal_id
+        self._last_deal_reference = ref
         return {"dealReference": ref}
 
+    def place_limit_entry_atomic(
+        self,
+        *,
+        epic: str,
+        direction: str,
+        size: float,
+        level: float,
+        stop_distance: float,
+        limit_distance: float | None = None,
+        currency_code: str = "GBP",
+    ) -> dict[str, Any]:
+        return self.place_market_order(
+            epic=epic,
+            direction=direction,
+            size=size,
+            stop_distance=stop_distance,
+            limit_distance=float(limit_distance or 0),
+            currency_code=currency_code,
+        )
+
+    def find_open_position(self, deal_id: str) -> dict[str, Any] | None:
+        for p in self._positions:
+            if str(p.get("dealId")) == str(deal_id):
+                return {
+                    "market": {"epic": p.get("epic")},
+                    "position": {
+                        "dealId": deal_id,
+                        "direction": p.get("direction"),
+                        "size": p.get("size"),
+                        "stopDistance": p.get("stop_distance", 10),
+                        "limitDistance": p.get("limit_distance", 30),
+                    },
+                }
+        return None
+
+    def position_protection_status(self, deal_id: str) -> bool:
+        row = self.find_open_position(deal_id)
+        if not row:
+            return False
+        pos = row.get("position") or {}
+        return float(pos.get("stopDistance") or 0) > 0 and float(
+            pos.get("limitDistance") or 0
+        ) > 0
+
+    def cancel_all_working_orders(self, epic: str | None = None) -> int:
+        return 0
+
+    def flatten_all_positions(self) -> int:
+        n = len(self._positions)
+        self._positions.clear()
+        return n
+
     def confirm_deal(self, deal_reference: str, **kwargs: Any) -> dict[str, Any]:
+        deal_id = getattr(self, "_last_deal_id", None)
+        if str(deal_reference) != str(getattr(self, "_last_deal_reference", "")):
+            deal_id = None
+        if not deal_id:
+            deal_id = "D" + str(deal_reference)[5:]
         return {
             "terminal": True,
             "accepted": True,
             "rejected": False,
-            "deal_id": "D" + deal_reference[-6:],
+            "deal_id": deal_id,
             "reason": "",
         }
 

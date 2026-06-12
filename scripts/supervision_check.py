@@ -32,14 +32,29 @@ def main() -> int:
         evaluate_supervision_drift,
     )
 
+    from system.shutdown_cleanup import agent_fully_stopped, repair_stale_watchdog_after_stop
+
     drift = evaluate_supervision_drift()
     summary = overnight_supervision_summary()
-    repair_detail = ""
-    if args.repair and not drift.get("ok"):
-        ok, repair_detail = attempt_supervision_repair()
-        drift = evaluate_supervision_drift()
-        summary = overnight_supervision_summary()
-        drift.setdefault("repairs_attempted", []).append(repair_detail)
+    repairs_attempted: list[str] = []
+    if args.repair:
+        if not drift.get("ok"):
+            _ok, repair_detail = attempt_supervision_repair()
+            repairs_attempted.append(repair_detail)
+            drift = evaluate_supervision_drift()
+            summary = overnight_supervision_summary()
+        stopped_ok, _ = agent_fully_stopped()
+        if stopped_ok:
+            wd_ok, wd_detail = repair_stale_watchdog_after_stop()
+            if wd_detail and "no repair needed" not in wd_detail:
+                repairs_attempted.append(
+                    f"watchdog cleanup: {'ok' if wd_ok else 'fail'} — {wd_detail}"
+                )
+                drift = evaluate_supervision_drift()
+                summary = overnight_supervision_summary()
+    repair_detail = "; ".join(repairs_attempted)
+    if repairs_attempted:
+        drift.setdefault("repairs_attempted", []).extend(repairs_attempted)
 
     payload = {
         "supervision_drift": drift,

@@ -11,7 +11,25 @@ sys.path.insert(0, str(ROOT / "src"))
 
 
 def main() -> int:
-    from system.shutdown_cleanup import agent_fully_stopped, stopped_verification_checks
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Verify IG Agent is fully stopped")
+    parser.add_argument(
+        "--repair",
+        action="store_true",
+        help="Kill orphaned watchdog when launchd is not loaded",
+    )
+    args = parser.parse_args()
+
+    from system.shutdown_cleanup import (
+        agent_fully_stopped,
+        repair_stale_watchdog_after_stop,
+        stopped_verification_checks,
+    )
+
+    if args.repair:
+        repaired, detail = repair_stale_watchdog_after_stop()
+        print(f"Repair: {'OK' if repaired else 'FAIL'} — {detail}")
 
     ok, issues = agent_fully_stopped()
     checks = stopped_verification_checks(issues)

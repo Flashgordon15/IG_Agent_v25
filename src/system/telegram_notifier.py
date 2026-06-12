@@ -30,8 +30,10 @@ from system.engine_log import log_engine
 _LONDON = ZoneInfo("Europe/London")
 _HEARTBEAT_INTERVAL_SEC = 60 * 60
 _ALERT_DEDUPE_SEC = 300.0
+_UNRESOLVED_ALERT_DEDUPE_SEC = 900.0
 
 _lock = threading.RLock()
+_unresolved_alert_last: dict[str, float] = {}
 _instance: TelegramNotifier | None = None
 _heartbeat_provider: Callable[[], dict[str, Any]] | None = None
 _heartbeat_thread: threading.Thread | None = None
@@ -122,7 +124,10 @@ def _preserve_alert_in_executive_mode(message: str) -> bool:
         "agent stopped",
         "trading loops stopped",
         "emergency",
-        "order confirmation unresolved",
+        "broker confirm overdue",
+        "entry halt",
+        "protection fail",
+        "equity circuit",
         "startup blocked",
         "watchdog fatal",
         "manual intervention",
@@ -130,7 +135,39 @@ def _preserve_alert_in_executive_mode(message: str) -> bool:
     return any(token in lower for token in preserve)
 
 
-def send_critical_alert(message: str) -> bool:
+def send_unresolved_order_alert(
+    epic: str,
+    *,
+    age_seconds: float = 0.0,
+    order_type: str = "",
+    deal_reference: str = "",
+) -> bool:
+    """
+    Throttled alert when broker confirm is genuinely overdue (>30s).
+
+    Normal in-flight confirms (<30s) must not notify — scalping async worker
+    routinely takes 2–15s on IG DEMO.
+    """
+    key = str(epic or "").strip()
+    if not key:
+        return False
+    now = time.time()
+    with _lock:
+        last = _unresolved_alert_last.get(key, 0.0)
+        if now - last < _UNRESOLVED_ALERT_DEDUPE_SEC:
+            return False
+        _unresolved_alert_last[key] = now
+    kind = str(order_type or "order").lower()
+    ref = str(deal_reference or "").strip() or "—"
+    body = (
+        f"Broker confirm overdue — {key}\n"
+        f"Type: {kind} | Age: {int(age_seconds)}s | Ref: {ref}\n"
+        f"Entries paused until IG reconcile (not a failed trade yet)"
+    )
+    return send_critical_alert(body, dedupe_key=f"unresolved:{key}")
+
+
+def send_critical_alert(message: str, *, dedupe_key: str | None = None) -> bool:
     """Send an immediate critical alert (blocking). Logs all failures; never raises."""
     body = str(message or "").strip()
     if not body:
@@ -154,6 +191,13 @@ def send_critical_alert(message: str) -> bool:
                 "or credentials.json)"
             )
             return False
+        if dedupe_key:
+            now = time.time()
+            with _lock:
+                last = notifier._alert_last_sent.get(dedupe_key, 0.0)
+                if now - last < _UNRESOLVED_ALERT_DEDUPE_SEC:
+                    return False
+                notifier._alert_last_sent[dedupe_key] = now
         ok = notifier.send_now(text)
         if not ok:
             log_engine(f"TELEGRAM ALERTS NOT WORKING: send failed for: {body[:120]}")
@@ -360,11 +404,18 @@ class TelegramNotifier:
         signal_pct: float,
         fitness_pct: float,
         points_state: str = "CAUTION",
+        order_type: str = "MARKET",
+        protected: bool = True,
+        scalping: bool = False,
     ) -> None:
+        mode = "SCALP" if scalping else "STD"
+        entry_label = str(order_type or "MARKET").upper()
+        prot = "SL+TP ✓" if protected else "UNPROTECTED"
         text = (
-            f"📈 {market} {direction} at {self._fmt_price(entry)}\n"
-            f"Size:{size:g} Stop:{self._fmt_price(stop)} Signal:{signal_pct:.0f}%\n"
-            f"Fitness:{fitness_pct:.0f}% Points:{points_state}"
+            f"📈 {market} {direction} [{mode}] {entry_label} @ {self._fmt_price(entry)}\n"
+            f"Size:{size:g} Stop:{self._fmt_price(stop)} TP:{self._fmt_price(target)}\n"
+            f"Protection: {prot} | Signal:{signal_pct:.0f}% Fitness:{fitness_pct:.0f}%\n"
+            f"Points:{points_state}"
         )
         self._send_async(text)
 

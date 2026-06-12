@@ -81,11 +81,26 @@ def release_instance_lock() -> None:
     global _acquired
     if not _acquired:
         return
+    _unlink_lock_if_owned(_LOCK_PATH)
+    _acquired = False
+
+
+def _unlink_lock_if_owned(path: Path) -> None:
+    pid = os.getpid()
     try:
-        if _LOCK_PATH.exists():
-            raw = _LOCK_PATH.read_text(encoding="utf-8").strip()
-            if raw.startswith(str(os.getpid())):
-                _LOCK_PATH.unlink(missing_ok=True)
+        if not path.exists():
+            return
+        raw = path.read_text(encoding="utf-8").strip()
+        holder = int(raw.split()[0]) if raw else 0
+        if holder == pid or not _pid_alive(holder):
+            path.unlink(missing_ok=True)
     except OSError:
         pass
+
+
+def force_release_instance_lock() -> None:
+    """Shutdown path — drop lock even if acquire tracking was lost."""
+    global _acquired
+    _unlink_lock_if_owned(_LOCK_PATH)
+    _unlink_lock_if_owned(_LEGACY_LOCK_PATH)
     _acquired = False

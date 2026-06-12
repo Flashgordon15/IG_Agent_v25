@@ -389,6 +389,7 @@ class IgPositionSync:
                 from execution.exit_inflight import clear_exit_on_reconciled_close
                 from execution.pending_order_reconcile import (
                     log_unresolved_if_due,
+                    reconcile_all_pending_from_broker,
                     reconcile_pending_via_position_state,
                 )
 
@@ -398,10 +399,10 @@ class IgPositionSync:
                         reconcile_pending_via_position_state(
                             epic_name, position_present=True
                         )
-                # Reconcile ALL managed epics that have no open position.
-                # Previously only self._epic (which is "" when monitoring all
-                # markets) was checked, so pending entries for epics like Gold
-                # with no open position were never cleared automatically.
+                reconcile_all_pending_from_broker(
+                    dict(self._snapshot.by_epic),
+                    stale_entry_grace_sec=OPEN_GRACE_SEC,
+                )
                 reconcile_targets = self._managed_epics or (
                     frozenset([self._epic]) if self._epic else frozenset()
                 )
@@ -409,9 +410,6 @@ class IgPositionSync:
                     epic_open = int(self._snapshot.by_epic.get(epic_name, 0))
                     if epic_open <= 0:
                         clear_exit_on_reconciled_close(epic_name)
-                        reconcile_pending_via_position_state(
-                            epic_name, position_present=False
-                        )
                     log_unresolved_if_due(epic_name)
                 prev_ids = {p.deal_id for p in prev.positions}
                 new_ids = {p.deal_id for p in ig_positions}

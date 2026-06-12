@@ -215,11 +215,17 @@ def perform_shutdown_cleanup(
 
     try:
         from api.agent_health import stop_watchdog
+        from system.overnight_supervision import launchd_watchdog_active
 
-        # Preserve launchd supervision on agent exit — watchdog stays loaded and
-        # respects manual_stop.json after dashboard Stop.
-        stop_watchdog(preserve_launchd=True)
-        log_engine("shutdown cleanup: agent stopped (launchd supervision preserved)")
+        launchd_wd = launchd_watchdog_active()
+        # Preserve launchd only when actually loaded; otherwise stop standalone watchdog.
+        stop_watchdog(preserve_launchd=launchd_wd)
+        if launchd_wd:
+            log_engine(
+                "shutdown cleanup: launchd supervision preserved (manual_stop respected)"
+            )
+        else:
+            log_engine("shutdown cleanup: standalone watchdog stopped (no launchd)")
     except Exception as e:
         log_engine(f"shutdown cleanup: watchdog stop error (continuing): {e}")
 
@@ -232,9 +238,9 @@ def perform_shutdown_cleanup(
         )
 
     try:
-        from system.instance_lock import release_instance_lock
+        from system.instance_lock import force_release_instance_lock
 
-        release_instance_lock()
+        force_release_instance_lock()
     except Exception as e:
         log_engine(f"shutdown cleanup: lock release error (continuing): {e}")
 
@@ -536,6 +542,27 @@ def spawn_post_shutdown_verifier(parent_pid: int) -> None:
         log_engine(f"shutdown verify: spawned post-exit checker (parent={parent_pid})")
     except Exception as e:
         log_engine(f"shutdown verify: spawn failed: {type(e).__name__}: {e}")
+
+
+def repair_stale_watchdog_after_stop() -> tuple[bool, str]:
+    """Kill orphaned watchdog.sh when launchd is not supervising."""
+    try:
+        from system.overnight_supervision import launchd_watchdog_active
+
+        if launchd_watchdog_active():
+            return True, "launchd supervision active — no repair needed"
+    except Exception:
+        pass
+    try:
+        from api.agent_health import stop_watchdog
+
+        stop_watchdog(preserve_launchd=False)
+    except Exception as e:
+        return False, f"watchdog repair failed: {type(e).__name__}: {e}"
+    ok, issues = agent_fully_stopped()
+    if ok:
+        return True, "watchdog stopped and pid cleared"
+    return False, ", ".join(issues) if issues else "watchdog still present"
 
 
 def agent_fully_stopped(
