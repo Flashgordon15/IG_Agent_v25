@@ -8,12 +8,14 @@ import time
 from typing import Any, Callable
 
 from execution.trailing_stop_engine import QuoteTick
+from system.engine_log import log_engine
 
 _engines: dict[str, Any] = {}
 _managers: dict[str, Any] = {}
 _last_hub_eval_ts: dict[str, float] = {}
 _min_interval_s: float = 0.05
 _stop_dispatch_ready = False
+_last_hub_error_log: dict[str, float] = {}
 
 
 def register_execution_engine(epic: str, engine: Any) -> None:
@@ -61,6 +63,7 @@ def reset_position_protect_hub_for_tests() -> None:
     _engines.clear()
     _managers.clear()
     _last_hub_eval_ts.clear()
+    _last_hub_error_log.clear()
     _stop_dispatch_ready = False
 
 
@@ -97,7 +100,14 @@ def wire_hub_quotes_to_position_protect(
         )
         try:
             engine.update_positions_fast(tick)
-        except Exception:
-            pass
+        except Exception as exc:
+            now_err = time.time()
+            last = _last_hub_error_log.get(epic, 0.0)
+            if now_err - last >= 5.0:
+                _last_hub_error_log[epic] = now_err
+                log_engine(
+                    f"position_protect_hub fast eval failed epic={epic}: "
+                    f"{type(exc).__name__}: {exc}"
+                )
 
     return on_hub_quote(_on_hub)

@@ -56,6 +56,7 @@ class LearningStore:
         assert self._conn is not None
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._conn.execute("PRAGMA busy_timeout=30000")
         self._conn.execute(
             "PRAGMA wal_autocheckpoint=500"
         )  # checkpoint every 500 pages (~2MB)
