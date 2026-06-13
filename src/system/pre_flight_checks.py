@@ -22,11 +22,21 @@ _GATE_LINE = re.compile(
     r"WAIT —|gate .* error — WAIT:|stream_ready:|trading_loop started|orchestrator trading loop started"
 )
 _MAGICMOCK = re.compile(r"MagicMock|<MagicMock")
+_SUMMARY_HEADER = re.compile(
+    r"^IG Agent v(?:25|29(?:\.\d+)?)\s+—\s+Session Summary",
+    re.MULTILINE,
+)
 _SUMMARY_REQUIRED = (
-    "IG Agent v25 — Session Summary",
     "Trades:",
     "Final state:",
     "Stream uptime:",
+)
+_STREAM_READY_PATTERNS = (
+    "stream_ready: market stream live",
+    "stream_ready: hub quotes already live",
+    "stream_ready_timeout",
+    "timeout_proceed",
+    "test_mode_no_stream",
 )
 
 
@@ -138,6 +148,8 @@ def check_session_summary_integrity(logs: Path | None = None) -> PreFlightResult
             reason=str(e),
         )
     missing = [needle for needle in _SUMMARY_REQUIRED if needle not in text]
+    if not _SUMMARY_HEADER.search(text):
+        missing.append("IG Agent session summary header")
     if _MAGICMOCK.search(text):
         missing.append("MagicMock contamination")
     if missing:
@@ -238,29 +250,63 @@ def check_live_data_recent(*, max_tick_age_sec: float = 60.0) -> PreFlightResult
     )
 
 
-def check_startup_stream_gate_log(*, within_minutes: float = 10.0) -> PreFlightResult:
-    """After startup, stream_ready or timeout proceed should appear in logs."""
-    cutoff = datetime.now() - timedelta(minutes=within_minutes)
-    patterns = (
-        "stream_ready: market stream live",
-        "stream_ready: hub quotes already live",
-        "stream_ready_timeout",
-        "timeout_proceed",
-        "test_mode_no_stream",
+def _find_stream_ready_log_line(
+    *,
+    within_minutes: float | None = 10.0,
+) -> tuple[str, str] | None:
+    """Return (log_name, line) when a stream_ready marker is found."""
+    cutoff = (
+        datetime.now() - timedelta(minutes=within_minutes)
+        if within_minutes is not None
+        else None
     )
     for name in ("engine.log", "launcher.log"):
         path = logs_dir() / name
         for line in reversed(_read_log_tail(path)):
             ts = _parse_log_ts(line)
-            if ts is not None and ts < cutoff:
+            if cutoff is not None and ts is not None and ts < cutoff:
                 break
-            if any(p in line for p in patterns):
-                return PreFlightResult(
-                    "7.5",
-                    "Startup stream_ready gate logged",
-                    True,
-                    reason=f"{name}: {line.split('|', 1)[-1].strip()[:80]}",
-                )
+            if any(p in line for p in _STREAM_READY_PATTERNS):
+                return name, line
+    return None
+
+
+def check_startup_stream_gate_log(*, within_minutes: float = 10.0) -> PreFlightResult:
+    """After startup, stream_ready or timeout proceed should appear in logs."""
+    try:
+        from system.stream_ready import is_stream_ready
+
+        if is_stream_ready():
+            return PreFlightResult(
+                "7.5",
+                "Startup stream_ready gate logged",
+                True,
+                reason="in-process stream_ready=True",
+            )
+    except Exception:
+        pass
+
+    hit = _find_stream_ready_log_line(within_minutes=within_minutes)
+    if hit is not None:
+        name, line = hit
+        return PreFlightResult(
+            "7.5",
+            "Startup stream_ready gate logged",
+            True,
+            reason=f"{name}: {line.split('|', 1)[-1].strip()[:80]}",
+        )
+
+    # Warm 24/7 host: agent may have booted hours ago — accept any recent log marker.
+    hit = _find_stream_ready_log_line(within_minutes=None)
+    if hit is not None:
+        name, line = hit
+        return PreFlightResult(
+            "7.5",
+            "Startup stream_ready gate logged",
+            True,
+            reason=f"{name} (historical): {line.split('|', 1)[-1].strip()[:80]}",
+        )
+
     return PreFlightResult(
         "7.5",
         "Startup stream_ready gate logged",

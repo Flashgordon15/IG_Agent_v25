@@ -48,6 +48,10 @@ from trading.environment_scorer import (
     score_trend_factor,
 )
 from trading.ohlc_cache_paths import ohlc_cache_path
+from system.protective_learning import (
+    reset_protective_learning_cache_for_tests,
+    signal_threshold_floor,
+)
 from trading.points_engine import (
     CONF_HIGH,
     CONF_MARGINAL_MIN,
@@ -474,23 +478,27 @@ def run_layer2(ctx: ValidationContext) -> LayerSummary:
         )
     )
 
-    # 2.3 — points engine state transitions (aligned with config signal_threshold)
+    # 2.3 — points engine state transitions (aligned with config + protective floor)
     set_points_state_path_for_tests(ctx.points_path)
+    reset_protective_learning_cache_for_tests()
     pe = PointsEngine(state_path=ctx.points_path)
     cfg_floor = float(getattr(ctx.cfg, "confidence_floor", entry_floor))
+    prot_floor = float(signal_threshold_floor() or 0.0)
     m0_trade_thr = max(
-        min(cfg_floor, CONF_MARGINAL_MIN),
-        entry_floor,
+        max(min(cfg_floor, CONF_MARGINAL_MIN), entry_floor),
+        prot_floor,
     )
 
     pe._cumulative = 3.0
     pe._stop_latched = False
     pe._persist()
     caution_state = pe.get_state()
+    caution_trade_thr = pe.trade_confidence_threshold(ctx.cfg)
+    caution_min_size = pe.min_size_confidence_threshold()
     caution_ok = (
         caution_state == "CAUTION"
-        and pe.trade_confidence_threshold(ctx.cfg) == m0_trade_thr
-        and pe.min_size_confidence_threshold() == CONF_MARGINAL_MIN
+        and caution_trade_thr == m0_trade_thr
+        and caution_min_size == CONF_MARGINAL_MIN
     )
 
     pe._cumulative = 12.0
@@ -498,15 +506,14 @@ def run_layer2(ctx: ValidationContext) -> LayerSummary:
     pe._stop_latched = False
     pe._persist()
     healthy_state = pe.get_state()
-    healthy_ok = (
-        healthy_state == "HEALTHY"
-        and pe.trade_confidence_threshold(ctx.cfg) == m0_trade_thr
-    )
+    healthy_trade_thr = pe.trade_confidence_threshold(ctx.cfg)
+    healthy_ok = healthy_state == "HEALTHY" and healthy_trade_thr == m0_trade_thr
 
     pe._cumulative = -15.0
     pe._persist()
     warning_state = pe.get_state()
-    warning_ok = warning_state == "WARNING" and pe.get_threshold() == CONF_HIGH
+    warning_thr = pe.get_threshold()
+    warning_ok = warning_state == "WARNING" and warning_thr == CONF_HIGH
     layer.checks.append(
         _check(
             "2",
@@ -518,9 +525,10 @@ def run_layer2(ctx: ValidationContext) -> LayerSummary:
                 f"HEALTHY→{m0_trade_thr:.0f}; WARNING→{CONF_HIGH:.0f}"
             ),
             got=(
-                f"caution={caution_state} trade_thr={pe.trade_confidence_threshold(ctx.cfg):.0f} "
-                f"min_size={pe.min_size_confidence_threshold():.0f}; "
-                f"healthy={healthy_state}; warning={warning_state}@{pe.get_threshold():.0f}"
+                f"caution={caution_state} trade_thr={caution_trade_thr:.0f} "
+                f"min_size={caution_min_size:.0f}; "
+                f"healthy={healthy_state}@{healthy_trade_thr:.0f}; "
+                f"warning={warning_state}@{warning_thr:.0f}"
             ),
         )
     )
@@ -586,6 +594,23 @@ def run_layer3(ctx: ValidationContext) -> LayerSummary:
     size = float(settings["size"])
     risk = float(settings["risk"])
     limit = float(settings["limit"])
+    signal = TradeSignal(
+        market=signal.market,
+        epic=signal.epic,
+        direction=signal.direction,
+        raw_confidence=signal.raw_confidence,
+        adjusted_confidence=signal.adjusted_confidence,
+        setup_key=signal.setup_key,
+        quote=signal.quote,
+        snapshot=signal.snapshot,
+        notes=signal.notes,
+        gate_execution_params={
+            "actual_size": size,
+            "stop_points": risk,
+            "limit_points": limit,
+            "risk_band": "standard",
+        },
+    )
     risk_lo = float(cfg.adaptive_min_risk_points)
     risk_hi = float(cfg.adaptive_max_risk_points)
     size_ok = (
@@ -1249,7 +1274,7 @@ def run_layer7(ctx: ValidationContext) -> LayerSummary:
 
     good_summary = logs_root / "session_summary_20990101.txt"
     good_summary.write_text(
-        "IG Agent v25 — Session Summary\n"
+        "IG Agent v29 — Session Summary\n"
         "Date: 2099-01-01\n"
         "Session: 18:00 — 21:00 BST\n"
         "Trades:      0 (0W / 0L)\n"
