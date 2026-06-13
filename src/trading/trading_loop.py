@@ -18,6 +18,11 @@ from typing import Any, Callable
 from api.snapshot import GATE_NAMES
 from api.snapshot_store import publish_tick
 from data.models import Quote
+from execution.spread_atr_circuit import (
+    BLOCKED_SPREAD_TO_ATR_CIRCUIT_BREAKER,
+    atr_from_signal_snapshot as _atr_from_signal_snapshot,
+    spread_to_atr_circuit_max,
+)
 from execution.trading_loop import TickOutcome
 from execution.trading_loop import TradingLoop as ExecutionTickLoop
 from signals.signal_engine import SignalResult
@@ -143,26 +148,9 @@ def _feeder_bar_from_snapshot(
     }
 
 
-def _atr_from_signal_snapshot(snapshot: dict[str, Any] | None) -> float:
-    if not snapshot:
-        return 0.0
-    last = snapshot.get("last")
-    try:
-        if last is not None and hasattr(last, "get"):
-            return float(last.get("atr", 0) or 0)
-    except (TypeError, ValueError):
-        pass
-    try:
-        return float(snapshot.get("atr", 0) or 0)
-    except (TypeError, ValueError):
-        return 0.0
-
-
 NOT_IN_TOP_3_VOLATILITY_ROTATION = "NOT_IN_TOP_3_VOLATILITY_ROTATION"
 SOFT_BLOCK_NOT_IN_TOP_3 = f"soft block — {NOT_IN_TOP_3_VOLATILITY_ROTATION}"
 OFFLINE_BROKER_FEED_REJECTED = "OFFLINE_BROKER_FEED_REJECTED"
-BLOCKED_SPREAD_TO_ATR_CIRCUIT_BREAKER = "BLOCKED_SPREAD_TO_ATR_CIRCUIT_BREAKER"
-SPREAD_TO_ATR_CIRCUIT_BREAKER_MAX = 0.30
 
 
 @dataclass
@@ -1268,25 +1256,7 @@ class TradingLoop:
         return results
 
     def _spread_to_atr_circuit_max(self) -> float:
-        """Per-instrument override, then config global, then module default."""
-        default = float(
-            self._config.get("spread_to_atr_circuit_breaker_max")
-            or SPREAD_TO_ATR_CIRCUIT_BREAKER_MAX
-        )
-        try:
-            from trading.instrument_registry import InstrumentRegistry
-
-            inst = InstrumentRegistry(self._config.as_dict()).get_by_epic(self._epic)
-            if inst and inst.get("spread_to_atr_max") is not None:
-                default = float(inst["spread_to_atr_max"])
-        except (TypeError, ValueError, ImportError):
-            pass
-        try:
-            from system.gate_relaxation import soak_spread_to_atr_max
-
-            return soak_spread_to_atr_max(default)
-        except Exception:
-            return default
+        return spread_to_atr_circuit_max(self._config, self._epic)
 
     def _rotation_grace_cycles(self) -> int:
         from runtime.market_orchestrator import ROTATION_GRACE_CYCLES

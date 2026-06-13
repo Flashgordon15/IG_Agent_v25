@@ -22,6 +22,7 @@ from system.demo_execution_trace import (
     update_demo_diagnostics,
 )
 from system.rate_limit_manager import get_rate_limit_manager
+from system.engine_log import log_engine
 from system.trade_lifecycle_bus import (
     STAGE_EXECUTION_REQUEST,
     STAGE_RISK,
@@ -669,6 +670,46 @@ class ExecutionEngine:
             size=risk.size,
             stop=risk.stop_distance,
         )
+
+        if signal.direction in ("BUY", "SELL"):
+            from execution.spread_atr_circuit import (
+                BLOCKED_SPREAD_TO_ATR_CIRCUIT_BREAKER,
+                entry_spread_atr_blocked,
+                execution_dispatch_mode_label,
+                execution_spread_atr_block_message,
+            )
+
+            spread_blocked, spread_ratio, spread_max = entry_spread_atr_blocked(
+                signal.quote,
+                signal.snapshot,
+                self.config,
+                signal.epic,
+            )
+            if spread_blocked:
+                mode_name = execution_dispatch_mode_label(
+                    self.mode.uses_simulator()
+                )
+                reason = execution_spread_atr_block_message(
+                    mode_name,
+                    spread_ratio,
+                    max_ratio=spread_max,
+                )
+                log_engine(reason)
+                bus = get_lifecycle_bus()
+                bus.emit(STAGE_RISK, STATUS_FAIL, BLOCKED_SPREAD_TO_ATR_CIRCUIT_BREAKER)
+                update_demo_diagnostics(last_rejection=BLOCKED_SPREAD_TO_ATR_CIRCUIT_BREAKER)
+                bus.finalize_rejected(
+                    BLOCKED_SPREAD_TO_ATR_CIRCUIT_BREAKER,
+                    stage=STAGE_RISK,
+                )
+                return ExecutionResult(
+                    success=False,
+                    action="REJECTED",
+                    rejection_reason=BLOCKED_SPREAD_TO_ATR_CIRCUIT_BREAKER,
+                    execution_params=execution_params,
+                    messages=[reason],
+                )
+
         get_lifecycle_bus().emit(
             STAGE_EXECUTION_REQUEST,
             STATUS_OK,
