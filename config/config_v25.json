@@ -363,6 +363,8 @@
     "limit_extension_trigger_atr_multiple": 1.5,
     "limit_extension_step_atr_multiple": 0.75,
     "limit_extension_max_extensions": 3,
+    "stale_decay_activation_minutes": 15,
+    "stale_decay_factor_per_minute": 0.02,
     "partial_close_enabled": true,
     "partial_close_at_r": 1.5,
     "partial_close_fraction": 0.5

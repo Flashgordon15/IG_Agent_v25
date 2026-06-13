@@ -383,6 +383,16 @@ class Config:
         return int(self.trailing_stop.get("limit_extension_max_extensions", 2))
 
     @property
+    def stale_decay_activation_minutes(self) -> float:
+        """Minutes open before stale trailing distance compression begins."""
+        return float(self.trailing_stop.get("stale_decay_activation_minutes", 15.0))
+
+    @property
+    def stale_decay_factor_per_minute(self) -> float:
+        """Trailing distance compression per minute past activation (0.02 = 2%/min)."""
+        return float(self.trailing_stop.get("stale_decay_factor_per_minute", 0.02))
+
+    @property
     def partial_close_enabled(self) -> bool:
         return bool(self.trailing_stop.get("partial_close_enabled", False))
 

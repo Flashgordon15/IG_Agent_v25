@@ -17,6 +17,17 @@ BreakevenEval = namedtuple(
     "side entry stop target px profit trigger offset",
 )
 QuoteTick = namedtuple("QuoteTick", "bid offer epic market ts")
+StaleDecayConfig = namedtuple(
+    "StaleDecayConfig",
+    (
+        "activation_minutes",
+        "factor_per_minute",
+        "trade_age_minutes",
+        "at_mfe",
+        "limit_extension_winning",
+    ),
+    defaults=(15.0, 0.02, 0.0, False, False),
+)
 
 
 def exit_price_for_side(side: str, bid: float, offer: float) -> float:
@@ -24,7 +35,39 @@ def exit_price_for_side(side: str, bid: float, offer: float) -> float:
     return float(bid if str(side or "").upper() == "BUY" else offer)
 
 
-def eval_trailing_stop(ev: TrailEval) -> float | None:
+def _stale_decay_pct(cfg: StaleDecayConfig) -> float:
+    age = float(cfg.trade_age_minutes)
+    activation = float(cfg.activation_minutes)
+    if age <= activation:
+        return 0.0
+    decay_minutes = age - activation
+    return decay_minutes * float(cfg.factor_per_minute)
+
+
+def _bypass_stale_decay(cfg: StaleDecayConfig) -> bool:
+    return bool(cfg.at_mfe or cfg.limit_extension_winning)
+
+
+def _effective_trail_distance(
+    distance: float,
+    *,
+    stale_decay: StaleDecayConfig | None,
+) -> float:
+    base = float(distance)
+    if stale_decay is None or _bypass_stale_decay(stale_decay):
+        return base
+    decay_pct = _stale_decay_pct(stale_decay)
+    if decay_pct <= 0.0:
+        return base
+    capped = min(max(decay_pct, 0.0), 1.0)
+    return base * (1.0 - capped)
+
+
+def eval_trailing_stop(
+    ev: TrailEval,
+    *,
+    stale_decay: StaleDecayConfig | None = None,
+) -> float | None:
     """Return proposed stop when trail should advance; None if unchanged."""
     side = str(ev.side or "").upper()
     stop = float(ev.stop)
@@ -32,7 +75,7 @@ def eval_trailing_stop(ev: TrailEval) -> float | None:
     px = float(ev.px)
     profit = float(ev.profit)
     trigger = float(ev.trigger)
-    distance = float(ev.distance)
+    distance = _effective_trail_distance(float(ev.distance), stale_decay=stale_decay)
     if distance <= 0:
         return None
 

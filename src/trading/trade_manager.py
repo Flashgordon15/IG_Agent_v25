@@ -8,7 +8,13 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from data.learning_store import LearningStore
 from data.models import Quote, TradeRecord
-from execution.trailing_stop_engine import BreakevenEval, TrailEval, eval_breakeven_stop, eval_trailing_stop
+from execution.trailing_stop_engine import (
+    BreakevenEval,
+    StaleDecayConfig,
+    TrailEval,
+    eval_breakeven_stop,
+    eval_trailing_stop,
+)
 from system.config import Config
 from system.engine_log import log_engine
 from system.trade_lifecycle_bus import (
@@ -27,6 +33,7 @@ _MAX_AGE_WARNED: set[int] = (
     set()
 )  # trade IDs already warned to avoid repeat Telegram spam
 PARTIAL_CLOSE_FRACTION = 0.5
+_MFE_PROFIT_EPSILON_IG_POINTS = 0.5
 
 
 class TradeManager:
@@ -51,6 +58,7 @@ class TradeManager:
         self._last_ig_stop: dict[str, float] = {}
         self._last_ig_limit: dict[str, float] = {}
         self._limit_ext_count: dict[int, int] = {}
+        self._peak_profit_pts: dict[int, float] = {}
         self._gone_deals: set[str] = set()
         self._capital_recycle_applied: set[int] = set()
         self._scalping_be_armed: set[int] = set()
@@ -414,6 +422,8 @@ class TradeManager:
                             trail_trigger,
                             trail_dist,
                             epic=epic,
+                            tr=tr,
+                            entry_atr=entry_atr,
                         )
                     )
                     stop = self._current_stop(trade_id, stop)
@@ -474,6 +484,7 @@ class TradeManager:
                     if self._points_engine is not None
                     else None
                 )
+                self._release_trade_protect_state(trade_id)
                 self.store.close_trade(
                     trade_id,
                     exit_price,
@@ -743,6 +754,79 @@ class TradeManager:
         except Exception:
             return None
 
+    def _touch_peak_profit(self, trade_id: int, profit_pts: float) -> float:
+        peak = self._peak_profit_pts.get(trade_id, profit_pts)
+        if profit_pts > peak:
+            peak = profit_pts
+            self._peak_profit_pts[trade_id] = peak
+        return peak
+
+    def _at_mfe(self, trade_id: int, profit_pts: float) -> bool:
+        peak = self._touch_peak_profit(trade_id, profit_pts)
+        return profit_pts >= peak - _MFE_PROFIT_EPSILON_IG_POINTS
+
+    def _limit_extension_winning(
+        self,
+        trade_id: int,
+        side: str,
+        entry: float,
+        px: float,
+        epic: str,
+        entry_atr: float,
+        profit_pts: float,
+    ) -> bool:
+        cfg = self._cfg
+        if not cfg.limit_extension_enabled or entry_atr <= 0:
+            return False
+        if self._limit_ext_count.get(trade_id, 0) > 0:
+            return True
+        trigger_mult = float(cfg.limit_extension_trigger_atr_multiple)
+        from system.pnl_math import price_delta_to_ig_points
+
+        required_price = trigger_mult * entry_atr
+        required = price_delta_to_ig_points(epic, required_price)
+        return profit_pts >= required
+
+    def _build_stale_decay_config(
+        self,
+        trade_id: int,
+        tr: Any | None,
+        side: str,
+        entry: float,
+        px: float,
+        epic: str,
+        entry_atr: float,
+        profit_pts: float,
+    ) -> StaleDecayConfig:
+        cfg = self._cfg
+        if tr is None:
+            row = self.store.conn.execute(
+                "SELECT opened_at FROM trades WHERE id=?", (trade_id,)
+            ).fetchone()
+            tr = row
+        age_mins = self._trade_age_minutes(tr) if tr is not None else None
+        return StaleDecayConfig(
+            activation_minutes=float(cfg.stale_decay_activation_minutes),
+            factor_per_minute=float(cfg.stale_decay_factor_per_minute),
+            trade_age_minutes=float(age_mins or 0.0),
+            at_mfe=self._at_mfe(trade_id, profit_pts),
+            limit_extension_winning=self._limit_extension_winning(
+                trade_id,
+                side,
+                entry,
+                px,
+                epic,
+                entry_atr,
+                profit_pts,
+            ),
+        )
+
+    def _release_trade_protect_state(self, trade_id: int) -> None:
+        self._peak_profit_pts.pop(trade_id, None)
+        self._limit_ext_count.pop(trade_id, None)
+        self._capital_recycle_applied.discard(trade_id)
+        self._scalping_be_armed.discard(trade_id)
+
     def _apply_capital_recycle_breakeven(
         self,
         market: str,
@@ -889,6 +973,7 @@ class TradeManager:
             if self._points_engine is not None
             else None
         )
+        self._release_trade_protect_state(trade_id)
         self.store.close_trade(
             trade_id,
             exit_price,
@@ -948,6 +1033,7 @@ class TradeManager:
             if self._points_engine is not None
             else None
         )
+        self._release_trade_protect_state(trade_id)
         self.store.close_trade(
             trade_id,
             exit_price,
@@ -1028,6 +1114,7 @@ class TradeManager:
             if self._points_engine is not None
             else None
         )
+        self._release_trade_protect_state(trade_id)
         self.store.close_trade(
             trade_id,
             exit_price,
@@ -1324,6 +1411,7 @@ class TradeManager:
                         be_trigger,
                         trail_dist,
                         epic=epic,
+                        entry_atr=entry_atr,
                     )
                 )
         return msgs
@@ -1373,11 +1461,24 @@ class TradeManager:
         distance,
         *,
         epic: str = "",
+        tr: Any | None = None,
+        entry_atr: float = 0.0,
     ):
         msgs: list[str] = []
         profit = self._profit_ig_points(side, entry, px, epic)
+        stale_decay = self._build_stale_decay_config(
+            trade_id,
+            tr,
+            side,
+            entry,
+            px,
+            epic,
+            entry_atr,
+            profit,
+        )
         trail_stop = eval_trailing_stop(
-            TrailEval(side, entry, stop, target, px, profit, trigger, distance)
+            TrailEval(side, entry, stop, target, px, profit, trigger, distance),
+            stale_decay=stale_decay,
         )
         if trail_stop is not None:
             from execution.dealing_constraints import (
@@ -1487,6 +1588,7 @@ class TradeManager:
             return
 
         entry = float(row["entry"] or 0)
+        self._release_trade_protect_state(trade_id)
         self.store.close_trade(
             trade_id,
             entry,
