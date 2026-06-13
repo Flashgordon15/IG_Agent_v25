@@ -58,7 +58,7 @@ def _base_cfg_data() -> dict:
         "reward_multiple": 3.0,
         "risk_points": 30,
         "max_open_positions": 5,
-        "max_positions_per_epic": 3,
+        "max_positions_per_epic": 2,
         "max_consecutive_losses": 0,
         "breakeven_enabled": True,
         "breakeven_trigger_points": 30,

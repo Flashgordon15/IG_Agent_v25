@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from data.models import Quote
+from system.fx_conversion import apply_ig_fx_markup, spot_gbp_per_usd
 from trading.open_position_view import (
     apply_display_daily_pnl,
     enrich_positions_with_quote,
@@ -18,6 +19,11 @@ from trading.open_position_view import (
     sum_open_unrealized_gbp,
     unrealized_from_quote,
 )
+
+
+def _usd_to_gbp_net(amount_usd: float) -> float:
+    """USD notional → account GBP including IG 0.5% commercial FX markup."""
+    return apply_ig_fx_markup(float(amount_usd) * spot_gbp_per_usd())
 
 
 class TestOpenPositionView(unittest.TestCase):
@@ -99,7 +105,7 @@ class TestOpenPositionView(unittest.TestCase):
         )
         self.assertAlmostEqual(mark, 1.08510)
         self.assertAlmostEqual(pts, 1.0)
-        self.assertAlmostEqual(gbp, 100.0 * 0.78, places=1)
+        self.assertAlmostEqual(gbp, _usd_to_gbp_net(100.0), places=1)
 
     def test_fx_sub_pip_move_updates_pnl(self) -> None:
         quote = Quote(datetime(2026, 6, 11, 12, 0), 1.08501, 1.08503)
@@ -113,7 +119,7 @@ class TestOpenPositionView(unittest.TestCase):
             currency="USD",
         )
         self.assertAlmostEqual(pts, 0.1)
-        self.assertAlmostEqual(gbp, 10.0 * 0.78, places=1)
+        self.assertAlmostEqual(gbp, _usd_to_gbp_net(10.0), places=1)
 
     def test_fx_size5_matches_ig_contract_value(self) -> None:
         quote = Quote(datetime(2026, 6, 12, 14, 0), 1.15712, 1.15716)
@@ -126,7 +132,7 @@ class TestOpenPositionView(unittest.TestCase):
             currency="USD",
         )
         self.assertAlmostEqual(pts, 3.9, places=1)
-        self.assertAlmostEqual(gbp, 3.9 * 5.0 * 10.0 * 0.78, places=0)
+        self.assertAlmostEqual(gbp, _usd_to_gbp_net(3.9 * 5.0 * 10.0), places=0)
 
     def test_enrich_keeps_ig_upl_when_quote_scale_mismatch(self) -> None:
         quote = Quote(datetime(2026, 5, 27, 12, 0), 100.0, 100.5)
@@ -186,7 +192,7 @@ class TestOpenPositionView(unittest.TestCase):
                 }
             )
         ]
-        self.assertAlmostEqual(base[0]["pnl_gbp"], 335.0 * 0.78, places=2)
+        self.assertAlmostEqual(base[0]["pnl_gbp"], _usd_to_gbp_net(335.0), places=2)
         out = enrich_positions_with_quote(
             base,
             quote,
@@ -195,7 +201,9 @@ class TestOpenPositionView(unittest.TestCase):
         )
         self.assertAlmostEqual(out[0]["current"], 1.15738)
         self.assertAlmostEqual(out[0]["pnl_pts"], 6.5, places=1)
-        self.assertAlmostEqual(out[0]["pnl_gbp"], 335.0 * 0.78 * (6.5 / 8.0), places=0)
+        self.assertAlmostEqual(
+            out[0]["pnl_gbp"], _usd_to_gbp_net(335.0 * (6.5 / 8.0)), places=0
+        )
         self.assertAlmostEqual(out[0]["pnl_currency"], 335.0 * (6.5 / 8.0), places=0)
 
     def test_fx_instrument_spec_uses_usd_currency(self) -> None:

@@ -105,7 +105,7 @@ class ValidationContext:
         self.shadow_path = self.base / "shadow_log.jsonl"
         self.ml_path = self.base / "ml_training_store.jsonl"
         self.snapshot_path = self.base / "dashboard_snapshot.json"
-        self.cfg = ConfigLoader(ROOT / "config" / "config_v25.json").load_config()
+        self.cfg = ConfigLoader().load_config()
         self.store: LearningStore | None = None
         self.sim_deal_ref: str = ""
         self.sim_setup_key: str = ""
@@ -532,6 +532,20 @@ def run_layer2(ctx: ValidationContext) -> LayerSummary:
             ),
         )
     )
+
+    max_global = int(getattr(ctx.cfg, "max_open_positions", 0) or 0)
+    max_epic = int(getattr(ctx.cfg, "max_positions_per_epic", 0) or 0)
+    caps_ok = max_global == 5 and max_epic == 2
+    layer.checks.append(
+        _check(
+            "2",
+            "2.4",
+            "Portfolio exposure caps (v29.1: global 5, per-epic 2)",
+            caps_ok,
+            expected="max_open_positions=5, max_positions_per_epic=2",
+            got=f"max_open_positions={max_global}, max_positions_per_epic={max_epic}",
+        )
+    )
     return layer
 
 
@@ -711,6 +725,7 @@ def run_layer3(ctx: ValidationContext) -> LayerSummary:
             "breakeven_enabled": False,
             "adaptive_trailing_trigger_points": 10,
             "adaptive_trailing_distance_points": 25,
+            "scalping_framework": {"enabled": False},
         }
     )
     trail_mgr = TradeManager(cfg_trail, ctx.store, skip_ig_synced_exits=True)
@@ -1344,15 +1359,15 @@ def run_layer7(ctx: ValidationContext) -> LayerSummary:
         )
     )
 
+    stream = check_startup_stream_gate_log(within_minutes=60.0)
     layer.checks.append(
         _check(
             "7",
             "5",
-            "Startup stream gate log parser callable",
-            isinstance(
-                check_startup_stream_gate_log(within_minutes=60.0).check_id, str
-            ),
-            got="parser ok",
+            "Startup stream gate (rest_poll aware)",
+            stream.passed,
+            expected="stream_ready or rest_poll healthy",
+            got=stream.reason or "ok",
         )
     )
     return layer
@@ -1377,7 +1392,7 @@ def _print_report(layers: list[LayerSummary]) -> int:
     total = 0
     print()
     print("╔══════════════════════════════════════════╗")
-    print("║     IG AGENT v25 — PLATFORM VALIDATION   ║")
+    print("║     IG AGENT v29.1 — PLATFORM VALIDATION ║")
     print("╠══════════════════════════════════════════╣")
     labels = {
         "Data Integrity": "Layer 1: Data Integrity        ",
