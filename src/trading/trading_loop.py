@@ -1855,6 +1855,26 @@ class TradingLoop:
         base_size = float(self._config.trade_size)
         point_value = float(self._config.get("ig_point_value_gbp", 1.0))
         size_mult = float(self._points.get_size_multiplier(planning_conf))
+        corr_mult = 1.0
+        corr_density = 0
+        corr_detail = ""
+        try:
+            from execution.correlation_matrix import correlation_density_risk_multiplier
+
+            snap = tracker.snapshot() if tracker is not None else {}
+            positions = (
+                snap.get("positions") if isinstance(snap, dict) else []
+            ) or []
+            corr_mult, corr_density, corr_detail = correlation_density_risk_multiplier(
+                self._epic,
+                positions if isinstance(positions, list) else [],
+            )
+            size_mult *= float(corr_mult)
+        except Exception as e:
+            log_engine(
+                f"correlation_matrix sizing skipped epic={self._epic}: "
+                f"{type(e).__name__}: {e}"
+            )
         risk_band_label = ""
         risk_band_note = ""
         effective_size = max(
@@ -1965,6 +1985,8 @@ class TradingLoop:
                 f"OK — spread {spread:.1f} pts (normal {normal:.1f}, max {spread_cap:.1f}), "
                 f"flat, risk £{risk_gbp:.0f} (cap £{risk_cap:.0f}){clip_note}{band_note}"
             )
+            if corr_detail and corr_mult < 1.0:
+                detail = f"{detail}; {corr_detail}"
         return GateResult(
             name="risk_validation",
             passed=passed,
@@ -1985,6 +2007,9 @@ class TradingLoop:
                 "size_clipped_to_risk_cap": size_was_clipped,
                 "ig_min_deal_size": round(ig_min_size, 3),
                 "size_multiplier": round(size_mult, 3),
+                "correlation_density": int(corr_density),
+                "correlation_size_multiplier": round(float(corr_mult), 3),
+                "correlation_detail": corr_detail,
                 "stop_points": round(stop, 1),
                 "stop_source": stop_source,
                 "limit_points": round(stop * float(self._config.reward_multiple), 1),

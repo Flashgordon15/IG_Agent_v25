@@ -131,6 +131,8 @@ def _preserve_alert_in_executive_mode(message: str) -> bool:
         "startup blocked",
         "watchdog fatal",
         "manual intervention",
+        "[risk shield]",
+        "risk shield",
     )
     return any(token in lower for token in preserve)
 

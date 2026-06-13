@@ -695,6 +695,21 @@ class ExecutionEngine:
                     max_ratio=spread_max,
                 )
                 log_engine(reason)
+                try:
+                    from execution.risk_telemetry import notify_spread_atr_entry_blocked
+
+                    notify_spread_atr_entry_blocked(
+                        signal.epic,
+                        signal.quote,
+                        signal.snapshot,
+                        max_ratio=spread_max,
+                        ratio=spread_ratio,
+                    )
+                except Exception as e:
+                    log_engine(
+                        f"risk_telemetry spread block notify failed: "
+                        f"{type(e).__name__}: {e}"
+                    )
                 bus = get_lifecycle_bus()
                 bus.emit(STAGE_RISK, STATUS_FAIL, BLOCKED_SPREAD_TO_ATR_CIRCUIT_BREAKER)
                 update_demo_diagnostics(last_rejection=BLOCKED_SPREAD_TO_ATR_CIRCUIT_BREAKER)

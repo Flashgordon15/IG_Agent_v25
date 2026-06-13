@@ -14,6 +14,7 @@ from execution.trailing_stop_engine import (
     TrailEval,
     eval_breakeven_stop,
     eval_trailing_stop,
+    stale_decay_compression_pct,
 )
 from system.config import Config
 from system.engine_log import log_engine
@@ -1509,6 +1510,25 @@ class TradeManager:
             trail_stop,
             f" | Trailing stop {'raised' if side == 'BUY' else 'lowered'} to {trail_stop:.5f}",
         )
+        compression = stale_decay_compression_pct(stale_decay)
+        if compression >= 0.25:
+            try:
+                from execution.risk_telemetry import notify_stale_decay_trail_tighten
+
+                notify_stale_decay_trail_tighten(
+                    epic=epic,
+                    market=market,
+                    side=side,
+                    trade_id=trade_id,
+                    stop=float(trail_stop),
+                    compression_pct=compression,
+                    age_minutes=float(stale_decay.trade_age_minutes),
+                )
+            except Exception as e:
+                log_engine(
+                    f"risk_telemetry stale decay notify failed trade={trade_id}: "
+                    f"{type(e).__name__}: {e}"
+                )
         if side == "BUY":
             msgs.append(
                 f"TRAILING STOP RAISED | {market} BUY | stop {trail_stop:.5f}"

@@ -48,6 +48,13 @@ def _bypass_stale_decay(cfg: StaleDecayConfig) -> bool:
     return bool(cfg.at_mfe or cfg.limit_extension_winning)
 
 
+def stale_decay_compression_pct(cfg: StaleDecayConfig | None) -> float:
+    """Fraction of trail distance removed by stale decay (0.0–1.0)."""
+    if cfg is None or _bypass_stale_decay(cfg):
+        return 0.0
+    return min(1.0, max(0.0, _stale_decay_pct(cfg)))
+
+
 def _effective_trail_distance(
     distance: float,
     *,
