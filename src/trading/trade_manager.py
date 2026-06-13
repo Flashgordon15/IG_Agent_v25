@@ -18,6 +18,7 @@ from system.trade_lifecycle_bus import (
 )
 
 if TYPE_CHECKING:
+    from execution.stop_dispatch_worker import StopDispatchJob
     from trading.points_engine import PointsEngine
 
 HARD_CAP_ATR_MULTIPLE = 3.0

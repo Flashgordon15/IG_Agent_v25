@@ -76,5 +76,5 @@ data_lake/backups/config_snapshot*.json
 /trade_size
 /trailingStop:
 /username=*
-/}
+/[}]
 /.pytest_last.txt

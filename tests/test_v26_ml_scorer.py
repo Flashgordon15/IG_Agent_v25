@@ -25,6 +25,10 @@ class V26MLScorerTests(unittest.TestCase):
             from xgboost import XGBClassifier
         except ImportError:
             self.skipTest("xgboost not installed")
+        except Exception as exc:
+            if "XGBoost" in type(exc).__name__ or "libomp" in str(exc).lower():
+                self.skipTest(f"xgboost runtime unavailable: {exc}")
+            raise
         import pandas as pd
 
         with tempfile.TemporaryDirectory() as tmp:

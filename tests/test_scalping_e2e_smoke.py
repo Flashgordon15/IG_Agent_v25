@@ -103,6 +103,11 @@ class ScalpingE2ESmokeTests(unittest.TestCase):
         clear_entry_halt_for_tests()
         reset_spread_filter_for_tests()
         reset_equity_circuit_for_tests()
+        self._friday_patch = patch(
+            "trading.trade_manager.TradeManager._is_friday_close_window",
+            return_value=False,
+        )
+        self._friday_patch.start()
         self._tmp = tempfile.TemporaryDirectory()
         self.store = LearningStore(str(Path(self._tmp.name) / "test.db"))
         self.cfg = Config(_data=_base_cfg_data())
@@ -111,6 +116,7 @@ class ScalpingE2ESmokeTests(unittest.TestCase):
         self.client.mock.balance = 50_000.0
 
     def tearDown(self) -> None:
+        self._friday_patch.stop()
         self._tmp.cleanup()
         clear_entry_halt_for_tests()
         reset_spread_filter_for_tests()

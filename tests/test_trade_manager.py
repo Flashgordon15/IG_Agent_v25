@@ -627,6 +627,11 @@ class LimitExtensionTests(unittest.TestCase):
 
 class CapitalRecycleTests(unittest.TestCase):
     def setUp(self) -> None:
+        self._friday_patch = patch(
+            "trading.trade_manager.TradeManager._is_friday_close_window",
+            return_value=False,
+        )
+        self._friday_patch.start()
         self.tmp = tempfile.TemporaryDirectory()
         self.store = LearningStore(str(Path(self.tmp.name) / "learning.db"))
         self.store.connect()
@@ -639,6 +644,7 @@ class CapitalRecycleTests(unittest.TestCase):
         )
 
     def tearDown(self) -> None:
+        self._friday_patch.stop()
         self.store.close()
         self.tmp.cleanup()
 

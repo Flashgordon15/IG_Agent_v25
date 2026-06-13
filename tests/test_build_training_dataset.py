@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = ROOT / "scripts" / "build_training_dataset.py"
@@ -36,8 +37,11 @@ class BuildTrainingDatasetTests(unittest.TestCase):
         builder.REPLAY_PATH = self.replay_path
         builder.ML_PATH = self.ml_path
         builder.OUT_PATH = self.out_path
+        self._shadow_patch = patch.object(builder, "_load_shadow_rows", return_value=[])
+        self._shadow_patch.start()
 
     def tearDown(self) -> None:
+        self._shadow_patch.stop()
         self.tmp.cleanup()
 
     def test_merge_row_counts_and_weights(self) -> None:

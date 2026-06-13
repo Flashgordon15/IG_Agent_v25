@@ -187,8 +187,17 @@ class TestV29ChaosE2E(unittest.TestCase):
         self.assertAlmostEqual(asian["atr"], BASE_ATR * 1.30)
         self.assertAlmostEqual(asian["spread"], BASE_SPREAD * 1.10)
 
-        with patch("runtime.market_orchestrator.publish_tick"):
+        with (
+            patch("runtime.market_orchestrator.publish_tick"),
+            patch.object(
+                MarketOrchestrator, "_strategy_session_eligible", return_value=True
+            ),
+        ):
             orch = _build_five_market_orchestrator()
+            data = orch._config.as_dict()
+            data["rotation_expand_threshold_pct"] = 0
+            data["rotation_max_slots"] = 3
+            orch._config = Config(_data=data)
             attach_snapshot_handlers(orch)
             for loop in orch.loops:
                 orch.on_market_snapshot(
