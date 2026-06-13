@@ -18,11 +18,10 @@ from system.pnl_math import (
 # Non-GBP CFD specs — point_value is in position currency per index point (per contract).
 INSTRUMENT_PNL_SPEC: dict[str, dict[str, float | str]] = {
     "IX.D.DOW.IFM.IP": {"point_value": 2.0, "currency": "USD"},
+    "IX.D.SPTRD.IFE.IP": {"point_value": 1.0, "currency": "USD"},
     "CS.D.CFPGOLD.CFP.IP": {"point_value": 1.0, "currency": "USD"},
+    "IX.D.DAX.IFM.IP": {"point_value": 1.0, "currency": "EUR"},
 }
-
-_GBPUSD_EPIC = "CS.D.GBPUSD.CFD.IP"
-_USD_GBP_PEG = 0.78
 
 
 def normalize_epic(epic: str) -> str:
@@ -152,24 +151,17 @@ def _scale_pnl_from_broker_baseline(
 
 
 def usd_to_gbp_rate() -> float:
-    """USD→GBP from live GBP/USD hub quote, else conservative M0 peg."""
-    try:
-        from system.market_data_hub import get_market_data_hub
+    """USD→GBP spot for display back-conversions (fee applied in convert_to_account_gbp)."""
+    from system.fx_conversion import spot_gbp_per_usd
 
-        snap = get_market_data_hub().get_snapshot(_GBPUSD_EPIC)
-        if snap is not None and float(snap.bid) > 0:
-            return 1.0 / float(snap.bid)
-    except Exception:
-        pass
-    return _USD_GBP_PEG
+    return spot_gbp_per_usd()
 
 
 def pnl_currency_amount_to_gbp(amount: float, currency: str) -> float:
-    """Broker UPL is already in position currency (e.g. USD for Wall St Cash)."""
-    ccy = str(currency or "GBP").upper()
-    if ccy == "USD":
-        return float(amount) * usd_to_gbp_rate()
-    return float(amount)
+    """Broker UPL in position currency → account GBP including IG FX markup."""
+    from system.fx_conversion import convert_to_account_gbp
+
+    return convert_to_account_gbp(float(amount), str(currency or "GBP"))
 
 
 def raw_points_pnl_to_gbp(
@@ -518,6 +510,16 @@ def enrich_positions_with_quote(
         row["point_value"] = pv
         row["currency"] = ccy
         row["pnl_gbp"] = round(gbp, 2)
+        funding = 0.0
+        try:
+            from system.overnight_funding import accrued_funding_gbp_for_position
+
+            funding = accrued_funding_gbp_for_position(row)
+            if funding > 0:
+                row["overnight_funding_gbp"] = round(funding, 2)
+                row["pnl_gbp"] = round(float(row["pnl_gbp"]) - funding, 2)
+        except Exception:
+            pass
         if scaled_upl is not None:
             row["pnl_currency"] = scaled_upl
         elif gbp != 0.0:

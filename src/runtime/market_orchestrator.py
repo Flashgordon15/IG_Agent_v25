@@ -125,7 +125,14 @@ def select_active_rotation_epics(
             slot_count = i + 1
         else:
             break
-    return [epic for epic, _ in ranked_assets[:slot_count]]
+    selected = [epic for epic, _ in ranked_assets[:slot_count]]
+    try:
+        from system.instrument_class import filter_rotation_epics
+
+        selected = filter_rotation_epics(selected)
+    except Exception:
+        pass
+    return selected
 
 
 class MarketOrchestrator:

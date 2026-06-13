@@ -1359,6 +1359,20 @@ class TradeManager:
         trail_stop = eval_trailing_stop(
             TrailEval(side, entry, stop, target, px, profit, trigger, distance)
         )
+        if trail_stop is not None:
+            from execution.dealing_constraints import (
+                clamp_stop_to_broker_minimum,
+                fetch_min_stop_points,
+            )
+
+            min_pts = fetch_min_stop_points(self._rest, epic)
+            trail_stop = clamp_stop_to_broker_minimum(
+                side,
+                px=px,
+                stop=trail_stop,
+                min_distance_points=min_pts,
+                epic=epic,
+            )
         if trail_stop is None:
             if profit >= trigger:
                 if side == "BUY" and (px - distance) < stop:

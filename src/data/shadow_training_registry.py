@@ -83,6 +83,9 @@ def upsert_ig_import(conn: sqlite3.Connection, row: dict[str, Any]) -> bool:
     ref = _deal_key(row)
     if not ref:
         return False
+    from system.pnl_accounting import normalize_shadow_net_pnl
+
+    row = normalize_shadow_net_pnl(row)
     setup_key = str(row.get("setup_key") or "IG|imported")
     source = str(row.get("source") or "ig_import")
     if not is_shadow_registry_row({"setup_key": setup_key, "source": source}):
