@@ -1543,6 +1543,22 @@ class TradingLoop:
         return float(fitness_min)
 
     def _gate_environment_fitness(self, quote: Quote) -> GateResult:
+        try:
+            from execution.scalping.config import is_scalping_enabled
+
+            if is_scalping_enabled(self._config):
+                return GateResult(
+                    name="environment_fitness",
+                    passed=True,
+                    value={
+                        "bypass": True,
+                        "display": "scalping",
+                        "reason": "scalping entry path",
+                    },
+                    detail="environment fitness bypassed (scalping framework)",
+                )
+        except Exception:
+            pass
         if not self._config.get("enforce_environment_fitness_filter", True):
             return GateResult(
                 name="environment_fitness",

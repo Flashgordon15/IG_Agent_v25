@@ -35,6 +35,7 @@ class RiskManager:
         account_balance: float | None = None,
         account_available: float | None = None,
     ) -> RiskAssessment:
+        """Final pre-broker entry gate — does not apply to exits or stop dispatch."""
         cfg = self._cfg
         size = float(execution_params.get("size", cfg.trade_size))
         stop = float(execution_params.get("risk", cfg.stop_distance_points))

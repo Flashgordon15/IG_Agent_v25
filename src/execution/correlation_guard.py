@@ -98,6 +98,15 @@ def _max_open_positions_global() -> int:
         return 2
 
 
+def _max_positions_per_epic() -> int:
+    try:
+        from system.config_loader import get_config
+
+        return max(1, int(get_config().max_positions_per_epic))
+    except Exception:
+        return 2
+
+
 def _max_concurrent_us_index_shorts() -> int:
     cfg = _correlation_guard_config()
     try:
@@ -141,7 +150,15 @@ def check_open_book_limits(
 
     positions = [p for p in (open_positions or []) if isinstance(p, dict)]
     epic_s = str(epic or "").strip()
-    open_on_epic = any(_position_epic(p) == epic_s for p in positions)
+    epic_count = sum(1 for p in positions if _position_epic(p) == epic_s)
+    max_per_epic = _max_positions_per_epic()
+    if epic_count >= max_per_epic:
+        return (
+            False,
+            f"correlation guard: per-epic {epic_count} >= max {max_per_epic}",
+        )
+
+    open_on_epic = epic_count > 0
     open_total = len(positions)
     max_global = _max_open_positions_global()
 

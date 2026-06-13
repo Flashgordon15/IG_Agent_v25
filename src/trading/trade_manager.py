@@ -353,59 +353,79 @@ class TradeManager:
                 protect_active = self._protect_active
                 scalping_trail = self._scalping_trail
 
-            if protect_active and cfg.breakeven_enabled:
-                messages.extend(
-                    self._apply_scalping_breakeven_trail(
-                        market,
-                        side,
-                        trade_id,
-                        entry,
-                        stop,
-                        target,
-                        px,
-                        quote,
-                        entry_atr,
-                        epic=epic,
-                        enable_atr_trail=scalping_trail,
+            from execution.scalping.config import is_scalping_exit_management_isolated
+
+            scalping_exit = is_scalping_exit_management_isolated(self._cfg)
+
+            skip_slow_trailing = False
+            if not fast_path:
+                from execution.protect_priority import slow_loop_should_skip_trailing
+
+                skip_slow_trailing = slow_loop_should_skip_trailing(trade_id)
+
+            if not skip_slow_trailing:
+                if (scalping_exit or protect_active) and cfg.breakeven_enabled:
+                    messages.extend(
+                        self._apply_scalping_breakeven_trail(
+                            market,
+                            side,
+                            trade_id,
+                            entry,
+                            stop,
+                            target,
+                            px,
+                            quote,
+                            entry_atr,
+                            epic=epic,
+                            enable_atr_trail=scalping_trail,
+                        )
                     )
-                )
-                stop = self._current_stop(trade_id, stop)
-            elif cfg.breakeven_enabled:
-                be_trigger = self._effective_breakeven_trigger(entry_atr, epic=epic)
-                messages.extend(
-                    self._apply_breakeven(
-                        market,
-                        side,
-                        trade_id,
-                        entry,
-                        stop,
-                        target,
-                        px,
-                        be_trigger,
-                        cfg.breakeven_lock_points,
-                        epic=epic,
+                    stop = self._current_stop(trade_id, stop)
+                elif cfg.breakeven_enabled:
+                    be_trigger = self._effective_breakeven_trigger(entry_atr, epic=epic)
+                    messages.extend(
+                        self._apply_breakeven(
+                            market,
+                            side,
+                            trade_id,
+                            entry,
+                            stop,
+                            target,
+                            px,
+                            be_trigger,
+                            cfg.breakeven_lock_points,
+                            epic=epic,
+                        )
                     )
-                )
+                    stop = self._current_stop(trade_id, stop)
+
+                if cfg.adaptive_trailing_stop_enabled and not scalping_exit:
+                    trail_dist = self._trail_distance_price(epic, trail_distance, cfg)
+                    trail_trigger = self._effective_trail_trigger(entry_atr, epic=epic)
+                    messages.extend(
+                        self._apply_trailing(
+                            market,
+                            side,
+                            trade_id,
+                            entry,
+                            stop,
+                            target,
+                            px,
+                            trail_trigger,
+                            trail_dist,
+                            epic=epic,
+                        )
+                    )
+                    stop = self._current_stop(trade_id, stop)
+            else:
                 stop = self._current_stop(trade_id, stop)
 
-            if cfg.adaptive_trailing_stop_enabled:
-                trail_dist = self._trail_distance_price(epic, trail_distance, cfg)
-                trail_trigger = self._effective_trail_trigger(entry_atr, epic=epic)
-                messages.extend(
-                    self._apply_trailing(
-                        market,
-                        side,
-                        trade_id,
-                        entry,
-                        stop,
-                        target,
-                        px,
-                        trail_trigger,
-                        trail_dist,
-                        epic=epic,
-                    )
-                )
-                stop = self._current_stop(trade_id, stop)
+            if fast_path:
+                tol = self._stop_tolerance(epic)
+                if abs(stop - prev_stop) >= tol:
+                    from execution.protect_priority import mark_fast_protect_touch
+
+                    mark_fast_protect_touch(trade_id)
 
             if getattr(cfg, "limit_extension_enabled", False) and entry_atr > 0:
                 ext_msgs, target = self._apply_limit_extension(
@@ -1557,7 +1577,10 @@ class TradeManager:
         epic: str,
         new_limit: float | None = None,
     ) -> bool:
-        """Blocking IG REST stop/limit update — runs on stop_dispatch_worker thread."""
+        """Blocking IG REST stop/limit update — runs on stop_dispatch_worker thread.
+
+        Entry shields never apply (see manual_intervention.exits_exempt_from_entry_shields).
+        """
         if not self._rest or not deal_id:
             return False
         cache_key = f"{deal_id}:{trade_id}"

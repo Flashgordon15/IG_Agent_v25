@@ -28,7 +28,7 @@
   "enforce_1h_ema_filter": true,
   "enforce_top3_rotation_filter": true,
   "max_open_positions": 5,
-  "max_positions_per_epic": 3,
+  "max_positions_per_epic": 2,
   "correlation_guard": {
     "max_concurrent_us_index_shorts": 2,
     "max_open_positions_global": 5

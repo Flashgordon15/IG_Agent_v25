@@ -18,6 +18,11 @@ SHIELD_BREACH_AT_KEY = "daily_max_loss_breached_at"
 SHIELD_LOSS_KEY = "daily_max_loss_breached_loss_gbp"
 
 
+def exits_exempt_from_entry_shields() -> bool:
+    """Policy: entry shields and daily-loss gates never block exit/stop paths."""
+    return True
+
+
 def _today() -> str:
     return date.today().isoformat()
 
@@ -273,6 +278,7 @@ def force_terminate_position(
     Immediately close all IG positions for ``epic``.
 
     Clears exit-inflight guards and sends MARKET close orders without trailing delays.
+    Entry shields never apply (see exits_exempt_from_entry_shields).
     """
     from execution.exit_inflight import clear_exit
 
@@ -339,6 +345,7 @@ def force_breakeven_now(
     Move local stop to entry for all active trades on ``epic`` and sync to IG immediately.
 
     Bypasses standard breakeven threshold checks in the trailing loop.
+    Entry shields never apply (see exits_exempt_from_entry_shields).
     """
     from execution.position_protect_hub import get_trade_manager
 

@@ -34,3 +34,10 @@ def scalping_settings(cfg: Config | dict[str, Any] | None = None) -> dict[str, A
 
 def is_scalping_enabled(cfg: Config | dict[str, Any] | None = None) -> bool:
     return bool(scalping_settings(cfg).get("enabled", False))
+
+
+def is_scalping_exit_management_isolated(
+    cfg: Config | dict[str, Any] | None = None,
+) -> bool:
+    """Scalping BE/trail runs on isolated conditionals — never gated by sentiment/fitness."""
+    return is_scalping_enabled(cfg)

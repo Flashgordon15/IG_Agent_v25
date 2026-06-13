@@ -61,7 +61,12 @@ def configure_stop_dispatch(handler: Callable[[StopDispatchJob], bool]) -> None:
 
 
 def enqueue_stop_dispatch(job: StopDispatchJob) -> bool:
-    """Queue broker stop update. Coalesces duplicate keys to the latest stop."""
+    """Queue broker stop update. Coalesces duplicate keys to the latest stop.
+
+    Entry shields (daily drawdown shield, daily loss gate, points STOP) never
+    apply here — exits and stop sync must always proceed (see
+    manual_intervention.exits_exempt_from_entry_shields).
+    """
     if _sync_mode:
         handler = _handler
         if handler is None:
