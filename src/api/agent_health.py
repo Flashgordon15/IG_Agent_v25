@@ -423,10 +423,24 @@ def build_health_status() -> dict[str, Any]:
     except Exception:
         system_status = {}
 
+    try:
+        from system.boot_metrics import get_boot_metrics
+
+        boot_metrics = get_boot_metrics()
+    except Exception:
+        boot_metrics = {
+            "percent": 0,
+            "label": "Broker Handshake",
+            "ready": False,
+            "stage": "ig_auth",
+            "error": None,
+        }
+
     return {
         "ok": trading_healthy and watchdog and supervision_drift.get("ok", True),
         "agent_alive": True,
         "trading_healthy": trading_healthy,
+        "boot_metrics": boot_metrics,
         "system_status": system_status,
         "gate_relaxations": gate_relaxations,
         "trading_loops_running": loops_running,
@@ -477,10 +491,23 @@ def _build_fast_health_status() -> dict[str, Any]:
     issues = list(health["issues"])
     if "health_cache_warming" not in issues:
         issues.append("health_cache_warming")
+    try:
+        from system.boot_metrics import get_boot_metrics
+
+        boot_metrics = get_boot_metrics()
+    except Exception:
+        boot_metrics = {
+            "percent": 0,
+            "label": "Broker Handshake",
+            "ready": False,
+            "stage": "ig_auth",
+            "error": None,
+        }
     return {
         "ok": bool(loops_running and not paused),
         "agent_alive": True,
         "trading_healthy": bool(health["trading_healthy"]),
+        "boot_metrics": boot_metrics,
         "trading_loops_running": loops_running,
         "trading_paused": paused,
         "port_bound": _port_bound(),

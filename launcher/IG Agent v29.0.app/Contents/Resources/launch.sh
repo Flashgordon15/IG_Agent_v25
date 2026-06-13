@@ -36,8 +36,9 @@ API_HEALTH_URL="http://localhost:8080/api/health"
 
 open_dashboard() {
   if command -v open >/dev/null 2>&1; then
-    # Use localhost (not 127.0.0.1) so dashboard API_BASE matches CORS allow_origins.
-    open -g "${DASHBOARD_URL}" 2>/dev/null || open "${DASHBOARD_URL}" 2>/dev/null || true
+    # Fresh URL forces full SPA reload so the 3-stage launch sequence always runs.
+    local launch_url="${DASHBOARD_URL}?launch=$(date +%s)"
+    open "${launch_url}" 2>/dev/null || true
   fi
 }
 
@@ -85,7 +86,7 @@ lock_holder_alive() {
 
 trading_healthy() {
   if command -v curl >/dev/null 2>&1; then
-    curl -sf --max-time 2 "${API_HEALTH_URL}" 2>/dev/null \
+    curl -sf --max-time 2 -H "User-Agent: IG-Agent-Watchdog/1" "${API_HEALTH_URL}" 2>/dev/null \
       | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get('trading_healthy') else 1)" 2>/dev/null
     return $?
   fi

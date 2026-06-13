@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { WS_URL } from "./config.js";
-import { fetchState, fetchSplash, dismissSplash } from "./api.js";
+import { fetchState, fetchSplash } from "./api.js";
+import { authHeaders, clearAuthSession } from "./api/client.js";
 
 const HEARTBEAT_INTERVAL_MS = 25000; // ping every 25 s (server times out at 10 min)
 import Header from "./components/Header.jsx";
@@ -19,6 +20,7 @@ import ProfitPanel from "./components/ProfitPanel.jsx";
 import CertPanel from "./components/CertPanel.jsx";
 import SplashScreen from "./components/SplashScreen.jsx";
 import StartupSplash from "./components/StartupSplash.jsx";
+import AuthLogin from "./components/AuthLogin.jsx";
 import StrategyHelpModal from "./components/StrategyHelpModal.jsx";
 import RoadmapProgressModal from "./components/RoadmapProgressModal.jsx";
 import DailyDigestModal, {
@@ -86,7 +88,11 @@ async function fetchVerifyPayload(url) {
 
 async function probeAgentDown() {
   try {
-    const res = await fetch("/api/health", { signal: AbortSignal.timeout(2000) });
+    const res = await fetch("/api/health", {
+      signal: AbortSignal.timeout(2000),
+      credentials: "include",
+      headers: authHeaders(),
+    });
     return !res.ok;
   } catch {
     return true;
@@ -274,9 +280,8 @@ export default function App() {
   const [reconnecting, setReconnecting] = useState(true);
   const [selectedEpic, setSelectedEpic] = useState(null);
   const [splashData, setSplashData] = useState(null);
-  const [splashVisible, setSplashVisible] = useState(false);
-  // startupDone: null = checking, false = show splash, true = skip splash
-  const [startupDone, setStartupDone] = useState(null);
+  // auth → boot progress → release notes → dashboard
+  const [launchStage, setLaunchStage] = useState("auth");
   // "idle" | "confirming" | "stopping" | "verifying" | "stopped"
   const [shutdownState, setShutdownState] = useState("idle");
   const [shutdownVerification, setShutdownVerification] = useState(null);
@@ -302,41 +307,31 @@ export default function App() {
     }
   }, []);
 
-  // Always show the startup splash on every fresh page load.
-  // If the agent is already running (ready:true on first poll), the splash
-  // ticks all phases instantly and auto-dismisses after a brief hold.
-  // This ensures the user always sees the splash when clicking the desktop icon.
+  // Stage 1 auth first on every fresh navigation (desktop launcher adds ?launch=timestamp).
   useEffect(() => {
-    setStartupDone(false);
+    clearAuthSession();
+    setLaunchStage("auth");
+    const params = new URLSearchParams(window.location.search);
+    if (params.has("launch")) {
+      window.history.replaceState({}, "", window.location.pathname || "/");
+    }
   }, []);
 
-  // Version changelog splash: once per version (localStorage), AFTER startup
+  // Prefetch release-notes metadata when entering stage 3.
   useEffect(() => {
-    if (!startupDone) return;
+    if (launchStage !== "release") return;
     fetchSplash().then((data) => {
-      if (!data) return;
-      const version = String(data.version ?? "unknown");
-      const seenKey = `ig_agent_splash_seen_${version}`;
-      if (typeof window !== "undefined" && window.localStorage.getItem(seenKey)) {
-        return;
-      }
-      setSplashData(data);
-      setSplashVisible(true);
+      if (data) setSplashData(data);
     });
-  }, [startupDone]);
+  }, [launchStage]);
 
   const handleSplashDismiss = useCallback(() => {
-    setSplashVisible(false);
-    const version = splashData?.version;
-    if (version && typeof window !== "undefined") {
-      window.localStorage.setItem(`ig_agent_splash_seen_${version}`, "1");
-    }
-    dismissSplash();
-  }, [splashData]);
+    setLaunchStage("dashboard");
+  }, []);
 
-  // Daily operator report: auto-popup once per calendar day after startup.
+  // Daily operator report: auto-popup once per calendar day after launch completes.
   useEffect(() => {
-    if (!startupDone || splashVisible) return;
+    if (launchStage !== "dashboard") return;
     let cancelled = false;
     fetchDigestDay().then((day) => {
       if (cancelled || !day) return;
@@ -349,7 +344,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [startupDone, splashVisible]);
+  }, [launchStage]);
 
   useEffect(() => {
     const epics = listMarketEpics(state);
@@ -476,19 +471,23 @@ export default function App() {
 
   // Heartbeat — dashboard liveness ping (auto-shutdown on disconnect is disabled)
   useEffect(() => {
-    if (startupDone !== true) return;
+    if (launchStage === "auth" || launchStage === "boot" || launchStage === "release") return;
     const ping = () => fetch("/api/heartbeat", { method: "POST" }).catch(() => {});
     ping(); // immediate first ping
     const id = window.setInterval(ping, HEARTBEAT_INTERVAL_MS);
     return () => window.clearInterval(id);
-  }, [startupDone]);
+  }, [launchStage]);
 
   // Agent liveness — distinguish dead backend from closed markets / CAUTION
   useEffect(() => {
-    if (startupDone !== true) return;
+    if (launchStage === "auth" || launchStage === "boot" || launchStage === "release") return;
     const checkHealth = async () => {
       try {
-        const res = await fetch("/api/health", { method: "GET" });
+        const res = await fetch("/api/health", {
+          method: "GET",
+          credentials: "include",
+          headers: authHeaders(),
+        });
         if (res.ok) {
           healthFailRef.current = 0;
           setAgentAlive(true);
@@ -506,7 +505,7 @@ export default function App() {
     checkHealth();
     const id = window.setInterval(checkHealth, 10000);
     return () => window.clearInterval(id);
-  }, [startupDone]);
+  }, [launchStage]);
 
   const handleStopAgent = useCallback(() => {
     setShutdownState("confirming");
@@ -647,7 +646,11 @@ export default function App() {
     let cancelled = false;
     const probe = async () => {
       try {
-        const res = await fetch("/api/health", { signal: AbortSignal.timeout(2000) });
+        const res = await fetch("/api/health", {
+      signal: AbortSignal.timeout(2000),
+      credentials: "include",
+      headers: authHeaders(),
+    });
         if (!cancelled && res.ok) {
           setAgentStillRunning(true);
         } else if (!cancelled) {
@@ -713,7 +716,7 @@ export default function App() {
 
   // Stale tabs: recover deliberate-stop screen after refresh when agent is down
   useEffect(() => {
-    if (startupDone !== true) return undefined;
+    if (launchStage === "auth" || launchStage === "boot" || launchStage === "release") return undefined;
     if (shutdownState !== "idle") {
       setAgentOfflineChecked(false);
       return undefined;
@@ -787,7 +790,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [startupDone, shutdownState, agentAlive]);
+  }, [launchStage, shutdownState, agentAlive]);
 
   const headerProps = {
     state: viewState,
@@ -939,20 +942,21 @@ export default function App() {
     );
   }
 
-  // Show startup splash while agent is initialising (null = still checking initial status)
-  if (startupDone === false) {
-    return <StartupSplash onComplete={() => setStartupDone(true)} />;
+  if (launchStage === "auth") {
+    return <AuthLogin onSuccess={() => setLaunchStage("boot")} />;
   }
 
-  // Thin loading state while the initial /api/startup/status fetch completes
-  if (startupDone === null) {
+  if (launchStage === "boot") {
+    return <StartupSplash onComplete={() => setLaunchStage("release")} />;
+  }
+
+  if (launchStage === "release") {
     return (
-      <div style={{
-        position: "fixed", inset: 0, background: "#0b0f19",
-        display: "flex", alignItems: "center", justifyContent: "center",
-      }}>
-        <p style={{ fontSize: "12px", color: "#334155" }}>Connecting…</p>
-      </div>
+      <SplashScreen
+        variant="launch"
+        versionData={splashData}
+        onDismiss={handleSplashDismiss}
+      />
     );
   }
 
@@ -1059,9 +1063,6 @@ export default function App() {
             )}
           </div>
         </div>
-      )}
-      {splashVisible && (
-        <SplashScreen versionData={splashData} onDismiss={handleSplashDismiss} />
       )}
 
       <StrategyHelpModal

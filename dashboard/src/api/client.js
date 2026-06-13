@@ -1,8 +1,41 @@
 const API = "";
+const AUTH_TOKEN_KEY = "ig_agent_auth_token";
+const AUTH_FLAG_KEY = "ig_agent_authenticated";
+
+export function authHeaders(extra = {}) {
+  const headers = { "Content-Type": "application/json", ...extra };
+  if (typeof window !== "undefined") {
+    const token = window.sessionStorage.getItem(AUTH_TOKEN_KEY);
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+  }
+  return headers;
+}
+
+export function isAuthenticated() {
+  if (typeof window === "undefined") return false;
+  return window.sessionStorage.getItem(AUTH_FLAG_KEY) === "1";
+}
+
+export function clearAuthSession() {
+  if (typeof window === "undefined") return;
+  window.sessionStorage.removeItem(AUTH_TOKEN_KEY);
+  window.sessionStorage.removeItem(AUTH_FLAG_KEY);
+}
+
+export function storeAuthSession(token) {
+  if (typeof window === "undefined") return;
+  if (token) {
+    window.sessionStorage.setItem(AUTH_TOKEN_KEY, token);
+  }
+  window.sessionStorage.setItem(AUTH_FLAG_KEY, "1");
+}
 
 export async function fetchJson(path, options = {}) {
   const res = await fetch(`${API}${path}`, {
-    headers: { "Content-Type": "application/json", ...options.headers },
+    credentials: "include",
+    headers: authHeaders(options.headers),
     ...options,
   });
   if (!res.ok) {
@@ -29,6 +62,22 @@ export const api = {
   state: () => fetchJson("/state"),
   splash: () => fetchJson("/api/splash"),
   dismissSplash: () => fetchJson("/api/splash/dismiss", { method: "POST" }),
+  login: async (password) => {
+    const res = await fetch(`${API}/api/auth/login`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data?.detail || "Access Denied");
+    }
+    const token = res.headers.get("X-Auth-Token");
+    storeAuthSession(token);
+    return data;
+  },
+  getStartupStatus: () => fetchJson("/api/startup/status"),
   trades: () => fetchJson("/api/trades?limit=10"),
   signals: () => fetchJson("/api/signals"),
   system: () => fetchJson("/api/system"),
@@ -64,4 +113,5 @@ export const api = {
       body: JSON.stringify({ epic }),
     }),
   adminRiskStatus: () => fetchJson("/api/admin/risk-status"),
+  getHealth: () => fetchJson("/api/health"),
 };

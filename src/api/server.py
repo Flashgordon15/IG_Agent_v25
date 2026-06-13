@@ -429,6 +429,10 @@ def create_app(*, watch_snapshot: bool = True) -> FastAPI:
         allow_headers=["*"],
     )
 
+    from api.auth_middleware import AdminAuthMiddleware
+
+    app.add_middleware(AdminAuthMiddleware)
+
     app.include_router(router)
     app.include_router(ws_router)
 

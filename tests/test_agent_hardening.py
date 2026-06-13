@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from api.auth import admin_password, reset_auth_for_tests
 from api.agent_control import (
     enrich_tick_runtime,
     register_trading_loop,
@@ -27,6 +28,14 @@ from api.snapshot_store import (
     reset_snapshot_store_for_tests,
     set_snapshot_path_for_tests,
 )
+
+
+def _login_token(client: TestClient) -> str:
+    res = client.post("/api/auth/login", json={"password": admin_password()})
+    assert res.status_code == 200
+    token = res.headers.get("X-Auth-Token") or res.cookies.get("ig_agent_auth")
+    assert token
+    return token
 
 
 def _reset_control() -> None:
@@ -60,6 +69,7 @@ class AutoStartTradingTests(unittest.TestCase):
 
 class ApiHealthTests(unittest.TestCase):
     def setUp(self) -> None:
+        reset_auth_for_tests()
         self.tmp = tempfile.TemporaryDirectory()
         snap = Path(self.tmp.name) / "dashboard_snapshot.json"
         reset_snapshot_store_for_tests()
@@ -70,6 +80,7 @@ class ApiHealthTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.client.close()
+        reset_auth_for_tests()
         reset_snapshot_store_for_tests()
         reset_close_handler_for_tests()
         _reset_control()
@@ -80,7 +91,12 @@ class ApiHealthTests(unittest.TestCase):
         loop.is_running.return_value = True
         register_trading_loop(loop)
 
-        r = self.client.get("/api/health")
+        r = self.client.get(
+            "/api/health",
+            headers={
+                "Authorization": f"Bearer {_login_token(self.client)}",
+            },
+        )
         self.assertEqual(r.status_code, 200)
         body = r.json()
         for key in (

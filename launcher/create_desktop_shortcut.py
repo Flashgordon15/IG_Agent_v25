@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-Create ~/Desktop/Desktop IG Agent v29.0.app shortcut to the launcher bundle.
+Create Desktop shortcuts to the IG Agent v29.0 launcher bundle.
 
-Uses a symlink (not a Finder alias) so macOS shows the real app icon on Desktop.
+Creates:
+  ~/Desktop/Desktop IG Agent v29.0.app  (symlink)
+  ~/Desktop/IG Agent Cursor.app         (symlink — replaces legacy Cursor IDE stub)
 """
 
 from __future__ import annotations
@@ -12,7 +14,10 @@ import sys
 from pathlib import Path
 
 BUNDLE_NAME = "IG Agent v29.0.app"
-SHORTCUT_NAME = "Desktop IG Agent v29.0.app"
+SHORTCUT_NAMES = (
+    "Desktop IG Agent v29.0.app",
+    "IG Agent Cursor.app",
+)
 LEGACY_SHORTCUT_NAMES = (
     "IG Agent v25.app",
     "Desktop IG Agent v25.app",
@@ -34,7 +39,6 @@ def remove_existing_shortcut(link: Path) -> None:
 
         shutil.rmtree(link)
         return
-    # Finder alias or stale file
     subprocess.run(
         ["osascript", "-e", f'tell application "Finder" to delete POSIX file "{link}"'],
         check=False,
@@ -51,7 +55,7 @@ def create_symlink_shortcut(bundle: Path, link: Path) -> None:
     link.symlink_to(bundle, target_is_directory=True)
 
 
-def create_shortcut() -> Path:
+def create_shortcuts() -> list[Path]:
     root = project_root()
     bundle = (root / "launcher" / BUNDLE_NAME).resolve()
     if not bundle.is_dir():
@@ -59,8 +63,11 @@ def create_shortcut() -> Path:
             f"App bundle not found: {bundle}\nRun: python3 launcher/build_mac_app.py"
         )
 
-    link = Path.home() / "Desktop" / SHORTCUT_NAME
-    create_symlink_shortcut(bundle, link)
+    links: list[Path] = []
+    for name in SHORTCUT_NAMES:
+        link = Path.home() / "Desktop" / name
+        create_symlink_shortcut(bundle, link)
+        links.append(link)
 
     for legacy_name in LEGACY_SHORTCUT_NAMES:
         legacy = Path.home() / "Desktop" / legacy_name
@@ -69,13 +76,13 @@ def create_shortcut() -> Path:
             print(f"Removed legacy Desktop shortcut: {legacy}")
 
     subprocess.run(["/usr/bin/touch", str(bundle)], check=False)
-    for path in (bundle, link):
+    for path in (bundle, *links):
         subprocess.run(
             ["xattr", "-dr", "com.apple.quarantine", str(path)],
             check=False,
             capture_output=True,
         )
-    return link
+    return links
 
 
 def main() -> int:
@@ -83,10 +90,11 @@ def main() -> int:
         print("create_desktop_shortcut.py requires macOS.", file=sys.stderr)
         return 1
     try:
-        link = create_shortcut()
         bundle = (project_root() / "launcher" / BUNDLE_NAME).resolve()
-        print(f"Desktop shortcut: {link}")
-        print(f"  -> {bundle}")
+        links = create_shortcuts()
+        for link in links:
+            print(f"Desktop shortcut: {link}")
+            print(f"  -> {bundle}")
         return 0
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)

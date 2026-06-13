@@ -90,7 +90,7 @@ except Exception:
 
 trading_healthy() {
     local health_json
-    health_json=$(curl -sf --max-time 3 "http://127.0.0.1:${PORT}/api/health" 2>/dev/null || true)
+    health_json=$(curl -sf --max-time 3 -H "User-Agent: IG-Agent-Watchdog/1" "http://127.0.0.1:${PORT}/api/health" 2>/dev/null || true)
     if [ -z "$health_json" ]; then
         return 1
     fi

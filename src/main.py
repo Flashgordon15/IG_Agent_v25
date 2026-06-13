@@ -668,11 +668,13 @@ class AgentRuntime:
                         f"banned={summary.get('banned_count')} "
                         f"gate={'on' if summary.get('enabled') else 'off'}"
                     )
+                    _startup_mark("learning")
                 except Exception as e:
                     log_engine(
                         f"setup_registry startup refresh skipped: "
                         f"{type(e).__name__}: {e}"
                     )
+                    _startup_mark("learning", note="skipped")
                 from system.gate_coherence_scheduler import (
                     start_gate_coherence_scheduler,
                 )
