@@ -227,6 +227,7 @@ def test_stale_port_killed_not_own_pid() -> None:
     mock_result.stdout = "12345\n99999\n"
 
     with (
+        patch.dict(os.environ, {"IG_AGENT_PYTEST": ""}),
         patch("subprocess.run", return_value=mock_result),
         patch("os.getpid", return_value=12345),
         patch("os.kill") as mock_kill,

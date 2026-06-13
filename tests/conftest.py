@@ -30,3 +30,15 @@ def isolate_engine_log(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     rsp.set_state_path_for_tests(tmp_path / "runtime_state.json")
     yield
     rsp.reset_persist_state_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def isolate_live_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never probe or tear down a live agent on :8080 during pytest."""
+    from system.shutdown_cleanup import reset_shutdown_cleanup_for_tests
+
+    reset_shutdown_cleanup_for_tests()
+    monkeypatch.setattr(
+        "system.shutdown_cleanup._fetch_api_health",
+        lambda *args, **kwargs: None,
+    )

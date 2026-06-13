@@ -405,13 +405,17 @@ def audit_trading_readiness(
             from execution.trade_risk import risk_gbp_from_row
             from system.portfolio_envelope import rehydrate, snapshot
 
+            from system.learning_trade_policy import portfolio_deploy_sql_clause
+
             today = date.today().isoformat()
+            deploy_clause = portfolio_deploy_sql_clause()
             daily = 0.0
             for row in store.conn.execute(
-                """
+                f"""
                 SELECT entry, stop, size, epic, dry_run
                 FROM trades
-                WHERE substr(opened_at, 1, 10) = ? AND dry_run = 0
+                WHERE substr(opened_at, 1, 10) = ?
+                  AND {deploy_clause}
                 """,
                 (today,),
             ):

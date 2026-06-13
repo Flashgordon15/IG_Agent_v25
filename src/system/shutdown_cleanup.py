@@ -92,6 +92,8 @@ def kill_other_agent_processes(
     log_label: str = "agent cleanup",
 ) -> list[int]:
     """SIGTERM (then optional SIGKILL) any other src/main.py processes."""
+    if os.environ.get("IG_AGENT_PYTEST") == "1":
+        return []
     own = exclude_pid if exclude_pid is not None else os.getpid()
     killed: list[int] = []
     try:
@@ -158,6 +160,12 @@ def perform_shutdown_cleanup(
     if _cleanup_done:
         return
     _cleanup_done = True
+
+    if os.environ.get("IG_AGENT_PYTEST") == "1":
+        log_engine(
+            f"shutdown cleanup: skipped live teardown (IG_AGENT_PYTEST=1, source={source})"
+        )
+        return
 
     log_engine(f"shutdown cleanup: begin (source={source})")
 
@@ -311,6 +319,8 @@ def _instance_lock_holder_pid() -> int | None:
 
 
 def _fetch_api_health(timeout: float = 3.0) -> dict | None:
+    if os.environ.get("IG_AGENT_PYTEST") == "1":
+        return None
     try:
         with urllib.request.urlopen(
             "http://127.0.0.1:8080/api/health", timeout=timeout

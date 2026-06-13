@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -116,6 +117,7 @@ class LaunchdKeepAliveRegressionTests(unittest.TestCase):
 
         reset_shutdown_cleanup_for_tests()
         with (
+            patch.dict(os.environ, {"IG_AGENT_PYTEST": ""}),
             patch("api.agent_control.stop_trading"),
             patch("runtime.agent_bootstrap.stop_market_stream"),
             patch("runtime.agent_bootstrap.stop_ig_position_sync"),

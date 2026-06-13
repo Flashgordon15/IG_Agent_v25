@@ -116,11 +116,15 @@ def rehydrate_portfolio_from_store(
             r[1] for r in store.conn.execute("PRAGMA table_info(trades)").fetchall()
         }
         if "opened_at" in cols:
+            from system.learning_trade_policy import portfolio_deploy_sql_clause
+
+            deploy_clause = portfolio_deploy_sql_clause()
             day_rows = store.conn.execute(
-                """
+                f"""
                 SELECT entry, stop, size, epic, dry_run
                 FROM trades
-                WHERE substr(opened_at, 1, 10) = ? AND dry_run = 0
+                WHERE substr(opened_at, 1, 10) = ?
+                  AND {deploy_clause}
                 """,
                 (today,),
             ).fetchall()

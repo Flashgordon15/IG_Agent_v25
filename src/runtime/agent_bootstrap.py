@@ -331,6 +331,7 @@ def build_market_orchestrator(
                 env={
                     **__import__("os").environ,
                     "PYTHONPATH": str(project_root() / "src"),
+                    "IG_AGENT_PYTEST": "1",
                 },
                 capture_output=True,
                 text=True,

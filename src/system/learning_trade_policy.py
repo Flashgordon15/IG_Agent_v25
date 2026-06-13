@@ -50,3 +50,8 @@ def agent_trades_sql_clause(*, table_alias: str = "") -> str:
         AND ({prefix}source IS NULL OR {prefix}source IN ('strategy', 'shadow', 'agent'))
         AND COALESCE({prefix}dry_run, 0) = 0
     """
+
+
+def portfolio_deploy_sql_clause(*, table_alias: str = "") -> str:
+    """Agent-sourced rows only — IG sync imports must not inflate deploy caps."""
+    return agent_trades_sql_clause(table_alias=table_alias)

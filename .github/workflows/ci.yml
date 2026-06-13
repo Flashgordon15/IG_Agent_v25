@@ -31,6 +31,7 @@ jobs:
       - name: Run tests
         env:
           PYTHONPATH: src
+          IG_AGENT_PYTEST: "1"
         run: python -m pytest tests/ -x -q --tb=short
 
   lint:

@@ -122,7 +122,35 @@ class GateCoherenceTests(unittest.TestCase):
         self.assertFalse(mc.session_allowed)
         self.assertTrue(any(i.code == "session_closed" for i in mc.issues))
 
-    def test_report_has_market_rows(self) -> None:
+    def test_ig_import_rows_excluded_from_daily_deploy_audit(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        store = LearningStore(str(Path(tmp.name) / "t.db"))
+        store.connect()
+        today = __import__("datetime").date.today().isoformat()
+        store.conn.execute(
+            """
+            INSERT INTO trades (
+                market, epic, side, entry, exit, size, stop, target,
+                confidence, adjusted_confidence, setup_key, dry_run,
+                deal_reference, opened_at, closed_at, source
+            ) VALUES (
+                'Spot Gold', 'CS.D.CFPGOLD.CFP.IP', 'BUY', 4213.62, NULL,
+                10.0, 4183.22, NULL, 0, 0, 'ig|imported', 0,
+                'DUP1', ?, ?, 'ig_import'
+            )
+            """,
+            (f"{today} 00:01:22", f"{today} 00:01:23"),
+        )
+        store.conn.commit()
+        report = audit_trading_readiness(
+            _cfg(), store, points_state="HEALTHY", repair_db=False, per_market=False
+        )
+        self.assertFalse(
+            any(i.code == "portfolio_daily_deploy_exceeded" for i in report.critical)
+        )
+        store.close()
+        tmp.cleanup()
+
         c = MagicMock()
         c.get = lambda k, d=None: (
             {

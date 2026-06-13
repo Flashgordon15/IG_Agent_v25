@@ -14,6 +14,7 @@ from __future__ import annotations
 import importlib
 import inspect
 import json
+import os
 import textwrap
 from pathlib import Path
 
@@ -1136,6 +1137,7 @@ class TestPortCleanupOnExit:
         fake_result.stdout = "77777\n"
 
         with (
+            patch.dict(os.environ, {"IG_AGENT_PYTEST": ""}),
             patch("subprocess.run", return_value=fake_result),
             patch("os.getpid", return_value=1),
             patch("os.kill") as mock_kill,
@@ -1160,6 +1162,7 @@ class TestPortCleanupOnExit:
         fake_result.stdout = f"{own}\n"
 
         with (
+            patch.dict(os.environ, {"IG_AGENT_PYTEST": ""}),
             patch("subprocess.run", return_value=fake_result),
             patch("os.kill") as mock_kill,
             patch("pathlib.Path.unlink"),
@@ -1181,6 +1184,7 @@ class TestPortCleanupOnExit:
         fake_result.stdout = ""
 
         with (
+            patch.dict(os.environ, {"IG_AGENT_PYTEST": ""}),
             patch("subprocess.run", return_value=fake_result),
             patch("os.kill"),
             patch("pathlib.Path.unlink") as mock_unlink,

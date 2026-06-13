@@ -258,7 +258,11 @@ def _run_deployment_verification() -> None:
         capture_output=True,
         text=True,
         cwd=Path(__file__).resolve().parents[1],
-        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parent)},
+        env={
+            **os.environ,
+            "PYTHONPATH": str(Path(__file__).resolve().parent),
+            "IG_AGENT_PYTEST": "1",
+        },
     )
     if result.returncode != 0:
         log_engine(
@@ -431,6 +435,8 @@ def _force_cleanup_port(port: int = 8080) -> None:
     Uses ``lsof -ti :<port>`` which catches zombie uvicorn workers that
     ``pgrep -f src/main.py`` misses.  Safe to call at startup and on exit.
     """
+    if os.environ.get("IG_AGENT_PYTEST") == "1":
+        return
     own_pid = os.getpid()
     try:
         result = subprocess.run(
