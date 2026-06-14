@@ -18,6 +18,7 @@ src/data/autopsy/
 src/data/ml_model/
 src/data/ohlc_cache/
 src/data/state/
+src/data/runtime_state.json
 src/data/replay_analysis.txt
 src/data/training_dataset.csv
 src/data/.ig_agent*.lock
@@ -33,6 +34,13 @@ data_lake/state/*.json
 data_lake/state/*.jsonl
 data_lake/state/rca_diagnostics/
 data_lake/backups/config_snapshot*.json
+
+# Generated morning reports and digests
+docs/morning/DAILY_DIGEST_LATEST.md
+docs/morning/DAILY_DIGEST_*.md
+docs/morning/ROADMAP_*.md
+*.pdf
+
 # macOS "Keep Both" duplicate copies
 **/* 2
 **/* 2.*
