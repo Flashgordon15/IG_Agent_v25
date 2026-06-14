@@ -25,6 +25,7 @@ from data.models import Quote
 from execution.adaptive_engine import AdaptiveEngine
 from runtime.market_orchestrator import MarketOrchestrator, attach_snapshot_handlers
 from system.config import Config
+from config_test_helpers import v25_config_path
 from system.config_loader import ConfigLoader
 from system.market_data_hub import get_market_data_hub
 from trading.environment_scorer import (
@@ -60,7 +61,7 @@ def _weighted_total(factors: dict[str, float]) -> float:
 
 
 def _build_five_market_orchestrator() -> MarketOrchestrator:
-    cfg = ConfigLoader(ROOT / "config" / "config_v25.json").load_config()
+    cfg = ConfigLoader(v25_config_path()).load_config()
     specs = {
         HERO_EPIC: ("US Tech 100", 95.0, STRONG_TREND),
         GOLD_EPIC: ("Spot Gold", 40.0, WEAK_TREND),

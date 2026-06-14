@@ -221,11 +221,9 @@ class TestMaxPositionAge:
 
 class TestWeek1Config:
     def _load(self):
-        import json
+        from config_test_helpers import load_v25_config_dict
 
-        p = Path(__file__).parent.parent / "config" / "config_v25.json"
-        with open(p) as f:
-            return json.load(f)
+        return load_v25_config_dict()
 
     def test_nikkei_threshold_55(self):
         cfg = self._load()

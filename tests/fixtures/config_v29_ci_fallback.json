@@ -1,0 +1,183 @@
+{
+  "$schema": "./config_schema.json",
+  "$extends": "config_v25.json",
+  "version": "29.1.0",
+  "app_version": "v29.1",
+  "operating_mode": "DEMO",
+  "demo_only_deployment": true,
+  "allow_live_trading": false,
+  "_note": "v29.1 — DEMO-only deployment; Profile B integrity + daily loss baseline reset + £400 soft pause / £500 hard stop",
+  "protective_learning": {
+    "enabled": true,
+    "signal_threshold_floor": 62,
+    "fitness_min_floor": 55,
+    "_note": "Phase 2 — raise entry bar while collecting agent-labelled trades; works with demo_soak relaxations reduced below."
+  },
+  "sentiment_guard": {
+    "enabled": true,
+    "crowded_long_pct": 70,
+    "crowded_short_pct": 30,
+    "log_raw": true,
+    "_note": "IG client positioning — logs raw API value; -10 fitness when crowded."
+  },
+  "reward_multiple": 3.0,
+  "adaptive_high_confidence_reward_multiple": 3.0,
+  "adaptive_max_limit_atr_multiple": 4.0,
+  "spread_to_atr_circuit_breaker_max": 0.3,
+  "enforce_rr_floor_filter": true,
+  "enforce_1h_ema_filter": true,
+  "enforce_top3_rotation_filter": true,
+  "max_open_positions": 5,
+  "max_positions_per_epic": 2,
+  "correlation_guard": {
+    "max_concurrent_us_index_shorts": 2,
+    "max_open_positions_global": 5
+  },
+  "capital_recycle_enabled": true,
+  "capital_recycle_age_minutes": 45,
+  "capital_recycle_breakeven_lock_points": 1.0,
+  "enforce_environment_fitness_filter": true,
+  "_deprecated_config_removals": {
+    "environment_fitness_min_pct": "Unused — fitness floor comes from velocity strictness_resolver",
+    "trading_strictness_profile": "Unused — strictness morphs from live ATR velocity per instrument"
+  },
+  "learning_demo_mode": {
+    "enabled": true,
+    "profile": "B",
+    "policy_id": "learning_demo_v1",
+    "require_gate_sourced_submit": true,
+    "suppress_v26_gate_relaxations": true,
+    "disable_dynamic_sizing": false,
+    "daily_loss_soft_pause_gbp": 400,
+    "daily_loss_reset": {
+      "enabled": true,
+      "upgrade_version": "v29.1",
+      "reset_on_upgrade": true,
+      "refresh_on_startup": true,
+      "_note": "On each agent start, archive today's raw P&L as baseline so effective daily loss is £0 and entries can fire. SQLite audit rows preserved."
+    },
+    "_note": "Profile B Learning Demo — labelled throughput relaxations via demo_soak_mode; integrity fixes require gate-sourced submit."
+  },
+  "execution_protect": {
+    "enabled": true,
+    "spread_ma_periods": 20,
+    "spread_ma_multiplier": 1.5,
+    "spread_min_samples": 5,
+    "protection_verify_ms": 200,
+    "commission_points_per_side": 0.5,
+    "breakeven_buffer_points": 2.0,
+    "halt_all_entries_on_stop_fail": false,
+    "use_limit_at_touch": false,
+    "_note": "Execution boundary only — spread MA gate, atomic SL/TP payload, stop fail-safe close, micro breakeven. Does not alter entry signals or indicators."
+  },
+  "scalping_framework": {
+    "enabled": true,
+    "spread_ma_periods": 20,
+    "spread_ma_multiplier": 1.5,
+    "spread_min_samples": 5,
+    "protection_verify_ms": 200,
+    "commission_points_per_side": 0.5,
+    "breakeven_buffer_points": 2.0,
+    "atr_trail_period": 14,
+    "atr_trail_multiplier": 0.5,
+    "daily_equity_drawdown_pct": 1.5,
+    "halt_entries_on_protection_failure": true,
+    "_note": "HFT scalping: limit-at-touch entries, atomic SL/TP verify, spread MA filter, micro BE + ATR trail, 1.5% daily equity circuit breaker."
+  },
+  "ml_filter_overrides_enabled": false,
+  "_ml_filter_overrides_note": "TEMP 2026-06-12: disabled while ML store has ~14 rows — synthetic replay max_rsi≈16 was blocking 83–100% wins at signal_confidence. Re-enable after ≥500 training records.",
+  "milestone_webhooks": {
+    "enabled": false,
+    "webhook_url": "",
+    "slack_webhook_url": "",
+    "discord_webhook_url": "",
+    "_note": "Slack/Discord incoming webhook URLs — fires at 100/250/500 ML training records."
+  },
+  "demo_soak_mode": {
+    "enabled": true,
+    "_note": "Profile B entry permissiveness — reduced for protective learning phase.",
+    "fitness_min": 55,
+    "warning_confidence_cap": 85,
+    "warning_use_instrument_threshold": true,
+    "relax_all_epics": true,
+    "disable_rotation_filter": false,
+    "bypass_ml_veto": false,
+    "spread_to_atr_circuit_max": 0.35,
+    "require_points_healthy": true
+  },
+  "manual_intervention": {
+    "daily_drawdown_shield_enabled": true,
+    "daily_drawdown_shield_gbp": 500,
+    "_note": "Admin safety shield — blocks new entries when closed-day loss exceeds threshold until midnight. Distinct from max_daily_loss_gbp hard stop."
+  },
+  "instruments": {
+    "gold": {
+      "enabled": true,
+      "reward_multiple": 3.0,
+      "trading_session_whitelist": [
+        "london_morning",
+        "london_us_overlap",
+        "us_afternoon"
+      ]
+    },
+    "wall_street": {
+      "enabled": true,
+      "reward_multiple": 3.0,
+      "spread_to_atr_max": 0.45,
+      "trading_session_whitelist": [
+        "london_us_overlap",
+        "us_afternoon",
+        "late"
+      ]
+    },
+    "nasdaq_100": {
+      "enabled": true,
+      "reward_multiple": 3.0,
+      "risk_cap_gbp": 200,
+      "spread_to_atr_max": 0.45,
+      "trading_session_whitelist": [
+        "london_us_overlap",
+        "us_afternoon",
+        "late"
+      ]
+    },
+    "gbp_usd": {
+      "enabled": true,
+      "reward_multiple": 3.0,
+      "trading_session_whitelist": [
+        "london_morning",
+        "london_us_overlap",
+        "us_afternoon"
+      ]
+    },
+    "eur_usd": {
+      "enabled": true,
+      "reward_multiple": 3.0,
+      "trading_session_whitelist": [
+        "london_morning",
+        "london_us_overlap",
+        "us_afternoon"
+      ]
+    },
+    "japan_225": {
+      "enabled": true,
+      "reward_multiple": 3.0,
+      "trading_session_whitelist": [
+        "asia_early"
+      ]
+    },
+    "us_oil": {
+      "enabled": false,
+      "_note": "Disabled 2026-06-11: no OHLC cache + no Lightstreamer ticks — blocked trading_healthy and watchdog restarts. Re-enable after seed_ohlc.",
+      "reward_multiple": 3.0,
+      "trading_session_whitelist": [
+        "london_us_overlap",
+        "us_afternoon"
+      ]
+    },
+    "germany_40": {
+      "enabled": false,
+      "_note": "Keep off until IG account streams IX.D.DAX.IFM.IP — DEMO often rejects this epic"
+    }
+  }
+}

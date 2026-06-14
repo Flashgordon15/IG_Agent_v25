@@ -10,9 +10,18 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "tests"))
 # Append v26 so `import main` resolves to src/main.py, not v26/main.py
 if str(ROOT / "v26") not in sys.path:
     sys.path.append(str(ROOT / "v26"))
+
+from config_test_helpers import (  # noqa: E402
+    ensure_test_data_directories,
+    materialize_config_from_fixtures_if_missing,
+)
+
+ensure_test_data_directories()
+materialize_config_from_fixtures_if_missing()
 
 
 @pytest.fixture(autouse=True)

@@ -21,6 +21,7 @@ from data.models import Quote
 from execution.trading_loop import TickOutcome
 from execution.trading_loop import TradingLoop as ExecutionTickLoop
 from signals.signal_engine import SignalEngine
+from config_test_helpers import v25_config_path
 from system.config_loader import ConfigLoader
 from trading.environment_scorer import GATE_PASS_MIN, EnvironmentScorer
 from trading.ohlc_bootstrap import bootstrap_ohlc_for_session
@@ -78,7 +79,7 @@ class OrchestratorPostBootstrapGatesTests(unittest.TestCase):
         hub.verify_liquidity_shield_delta.return_value = (True, 1.0)
         hub_mock.return_value = hub
 
-        cfg = ConfigLoader(ROOT / "config" / "config_v25.json").load_config()
+        cfg = ConfigLoader(v25_config_path()).load_config()
         market = "Japan 225"
         epic = "IX.D.NIKKEI.IFM.IP"
 

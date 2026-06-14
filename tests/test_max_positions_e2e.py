@@ -30,6 +30,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from data.models import Quote
 from execution.order_validator import OrderValidator, ValidationResult
 from execution.types import TradeSignal
+from config_test_helpers import load_v25_config_dict
 from system.config import Config
 
 # ---------------------------------------------------------------------------
@@ -47,9 +48,8 @@ EPICS = [
 
 
 def _cfg_10_pos() -> Config:
-    """Load the real config then override position-related keys."""
-    import json as _json
-    raw = _json.loads((ROOT / "config" / "config_v25.json").read_text())
+    """Load config (disk or CI fixture) then override position-related keys."""
+    raw = load_v25_config_dict()
     raw.update({
         "one_position_per_epic": False,
         "max_open_positions": 10,

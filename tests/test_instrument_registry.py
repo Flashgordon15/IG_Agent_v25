@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import sys
 import unittest
 from pathlib import Path
@@ -12,14 +11,15 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from trading.instrument_registry import InstrumentRegistry
 
-CONFIG_PATH = ROOT / "config" / "config_v25.json"
+from config_test_helpers import load_v25_config_dict, v25_config_path
+
 JAPAN_EPIC = "IX.D.NIKKEI.IFM.IP"
 
 
 class InstrumentRegistryTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        cls.config = load_v25_config_dict()
 
     def test_get_enabled_includes_japan_225(self) -> None:
         reg = InstrumentRegistry(self.config)

@@ -37,14 +37,13 @@ from execution.stop_dispatch_worker import (
     reset_stop_dispatch_worker_for_tests,
 )
 from execution.types import TradeSignal
+from config_test_helpers import load_v25_config_dict, load_v29_config_dict
 from system.config import Config
 from trading.trade_manager import TradeManager
 
 
 def _cfg(**overrides) -> Config:
-    import json
-
-    raw = json.loads((ROOT / "config" / "config_v25.json").read_text())
+    raw = load_v25_config_dict()
     raw.update(
         {
             "one_position_per_epic": False,
@@ -124,9 +123,7 @@ def _open_trade(
 
 class PerEpicCapTests(unittest.TestCase):
     def test_config_v29_overlay_cap_is_two(self) -> None:
-        import json
-
-        raw = json.loads((ROOT / "config" / "config_v29.json").read_text())
+        raw = load_v29_config_dict()
         self.assertEqual(raw["max_positions_per_epic"], 2)
         self.assertEqual(raw["max_open_positions"], 5)
 

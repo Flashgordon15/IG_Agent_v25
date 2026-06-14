@@ -11,13 +11,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from runtime.market_orchestrator import MarketOrchestrator
+from config_test_helpers import v25_config_path
 from system.config_loader import ConfigLoader
 
 
 class MarketOrchestratorTabTests(unittest.TestCase):
     @patch("runtime.market_orchestrator.publish_tick")
     def test_publish_includes_all_enabled_epics(self, publish_mock: MagicMock) -> None:
-        cfg = ConfigLoader(ROOT / "config" / "config_v25.json").load_config()
+        cfg = ConfigLoader(v25_config_path()).load_config()
         loop_j = MagicMock()
         loop_j._epic = "IX.D.NIKKEI.IFM.IP"
         loop_e = MagicMock()

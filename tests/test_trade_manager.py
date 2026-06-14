@@ -14,47 +14,12 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from data.learning_store import LearningStore
 from data.models import Quote, TradeRecord
-from system.config import Config
+from config_test_helpers import trade_manager_test_config as _cfg
 from trading.points_engine import PointsEngine
 from trading.trade_manager import (
     HARD_CAP_ATR_MULTIPLE,
     TradeManager,
 )
-
-
-def _cfg(**overrides) -> Config:
-    data = {
-        "operating_mode": "DEMO",
-        "account_type": "DEMO",
-        "epic": "IX.D.NIKKEI.IFM.IP",
-        "auto_trade_enabled": True,
-        "dry_run": True,
-        "signal_threshold": 85,
-        "trade_size": 1.0,
-        "risk_points": 40,
-        "reward_multiple": 2.0,
-        "limit_distance_points": 80,
-        "stop_distance_points": 40,
-        "max_spread": 35,
-        "max_spread_points": 35,
-        "fast_ema": 9,
-        "slow_ema": 21,
-        "rsi_period": 14,
-        "rsi_buy_min": 58,
-        "rsi_buy_max": 68,
-        "rsi_sell_max": 45,
-        "breakeven_enabled": True,
-        "breakeven_trigger_points": 30,
-        "breakeven_lock_points": 0,
-        "breakeven_offset_points": 0,
-        "adaptive_trailing_stop_enabled": True,
-        "adaptive_trailing_trigger_points": 30,
-        "adaptive_trailing_distance_points": 25,
-        "learning_enabled": False,
-        "max_live_quotes": 1000,
-    }
-    data.update(overrides)
-    return Config(_data=data)
 
 
 def _open_trade(

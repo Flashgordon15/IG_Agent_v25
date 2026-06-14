@@ -475,8 +475,9 @@ def test_app_identity_v29_centralized() -> None:
 
 def test_demo_only_guard_in_config_and_preflight() -> None:
     """v29 config and main preflight must enforce demo-only deployment."""
-    cfg_path = _ROOT / "config" / "config_v29.json"
-    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    from config_test_helpers import load_v29_config_dict
+
+    cfg = load_v29_config_dict()
     assert cfg.get("demo_only_deployment") is True
     assert cfg.get("allow_live_trading") is False
     assert str(cfg.get("operating_mode", "")).upper() == "DEMO"

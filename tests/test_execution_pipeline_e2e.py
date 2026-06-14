@@ -32,6 +32,7 @@ from execution.trading_loop import TradingLoop as ExecutionTickLoop
 from execution.types import ExecutionMode, ExecutionResult, TradeSignal
 from runtime.market_orchestrator import MarketOrchestrator, attach_snapshot_handlers
 from signals.signal_engine import SignalResult
+from config_test_helpers import v25_config_path
 from system.config_loader import ConfigLoader
 from trading.environment_scorer import (
     FACTOR_TREND_MAX,
@@ -463,7 +464,7 @@ def _roadmap_loop(epic: str, fitness_total: float, *, market: str) -> MagicMock:
 
 def _build_four_market_orchestrator() -> MarketOrchestrator:
     """Four dummy instruments with descending fitness (DAX is choppy / lowest)."""
-    cfg = ConfigLoader(ROOT / "config" / "config_v25.json").load_config()
+    cfg = ConfigLoader(v25_config_path()).load_config()
     epics = {
         "IX.D.NASDAQ.CASH.IP": ("IXIC", 88.0),
         "CS.D.CFPGOLD.CFP.IP": ("Spot Gold", 72.0),

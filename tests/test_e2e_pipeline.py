@@ -15,6 +15,7 @@ import pytest
 
 from data.models import Quote
 from signals.signal_engine import SignalEngine
+from config_test_helpers import v25_config_path
 from system.config_loader import ConfigLoader
 from trading.environment_scorer import (
     GATE_PASS_MIN,
@@ -69,7 +70,7 @@ def shadow_log_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def test_full_signal_to_shadow_log_pipeline(shadow_log_path: Path) -> None:
-    cfg = ConfigLoader(ROOT / "config" / "config_v25.json").load_config()
+    cfg = ConfigLoader(v25_config_path()).load_config()
     quotes = _synthetic_quotes()
 
     engine = SignalEngine(cfg)

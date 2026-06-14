@@ -22,7 +22,10 @@ import pytest
 
 PROJECT = Path(__file__).parent.parent
 SRC = PROJECT / "src"
-CONFIG = PROJECT / "config" / "config_v25.json"
+
+from config_test_helpers import load_v25_config_dict, v25_config_path  # noqa: E402
+
+CONFIG = v25_config_path()
 
 
 # ---------------------------------------------------------------------------
@@ -48,7 +51,7 @@ class TestSession1Config:
     """US indices trade overlap/afternoon only — london_morning removed (profitability)."""
 
     def test_wall_street_excludes_london_morning(self):
-        cfg = json.loads(CONFIG.read_text())
+        cfg = load_v25_config_dict()
         ws = cfg["instruments"]["wall_street"]
         assert "london_morning" not in ws["trading_session_whitelist"], (
             "wall_street must not trade london_morning — weak session for US indices"
@@ -56,7 +59,7 @@ class TestSession1Config:
         assert "london_us_overlap" in ws["trading_session_whitelist"]
 
     def test_nasdaq_excludes_london_morning(self):
-        cfg = json.loads(CONFIG.read_text())
+        cfg = load_v25_config_dict()
         nas = cfg["instruments"]["nasdaq_100"]
         assert "london_morning" not in nas["trading_session_whitelist"], (
             "nasdaq_100 must not trade london_morning — weak session for US indices"
@@ -135,7 +138,7 @@ class TestSession2RsiBuyMax:
     """RSI filters must be relaxed to allow ML-led trading decisions."""
 
     def test_rsi_buy_max_relaxed(self):
-        cfg = json.loads(CONFIG.read_text())
+        cfg = load_v25_config_dict()
         val = cfg.get("rsi_buy_max")
         assert val >= 85, (
             f"rsi_buy_max={val}, expected >=85. "
@@ -143,7 +146,7 @@ class TestSession2RsiBuyMax:
         )
 
     def test_rsi_sell_min_relaxed(self):
-        cfg = json.loads(CONFIG.read_text())
+        cfg = load_v25_config_dict()
         val = cfg.get("rsi_sell_min")
         assert val <= 15, (
             f"rsi_sell_min={val}, expected <=15. "
@@ -498,7 +501,7 @@ class TestSession4PreLaunchValidation:
     # ------------------------------------------------------------------
 
     def test_trailing_stop_config_keys_present(self):
-        cfg = json.loads(CONFIG.read_text())
+        cfg = load_v25_config_dict()
         ts = cfg.get("trailing_stop")
         assert isinstance(ts, dict), "trailing_stop block missing from config_v25.json"
         for key in (
@@ -521,7 +524,7 @@ class TestSession4PreLaunchValidation:
 
         sys.path.insert(0, str(SRC))
 
-        cfg_data = json.loads(CONFIG.read_text())
+        cfg_data = load_v25_config_dict()
         mult = cfg_data["trailing_stop"]["trail_trigger_atr_multiple"]
         assert 0 < mult < 1.0, (
             f"trail_trigger_atr_multiple={mult} — expected a fractional ATR multiple < 1.0"
@@ -758,7 +761,7 @@ class TestSession6DynamicSizing:
 
     def test_dynamic_sizing_config_present(self):
         """config_v25.json must have dynamic_sizing.enabled=True with 4 tiers."""
-        cfg = json.loads(CONFIG.read_text())
+        cfg = load_v25_config_dict()
         dyn = cfg.get("dynamic_sizing", {})
         assert dyn.get("enabled") is True, "dynamic_sizing.enabled must be True"
         tiers = dyn.get("tiers", [])
@@ -773,7 +776,7 @@ class TestSession6DynamicSizing:
         from execution.execution_engine import ExecutionEngine
         from system.config import Config
 
-        cfg_data = json.loads(CONFIG.read_text())
+        cfg_data = load_v25_config_dict()
         config = Config(_data=cfg_data)
 
         engine = object.__new__(ExecutionEngine)
@@ -798,7 +801,7 @@ class TestSession6DynamicSizing:
 
     def test_nasdaq_base_size_updated(self):
         """Nasdaq base trade_size must be 0.25 (up from 0.05) for dynamic sizing."""
-        cfg = json.loads(CONFIG.read_text())
+        cfg = load_v25_config_dict()
         nasdaq = cfg["instruments"]["nasdaq_100"]
         assert nasdaq["trade_size"] == 0.25, (
             f"Nasdaq trade_size should be 0.25, got {nasdaq['trade_size']}"
@@ -806,7 +809,7 @@ class TestSession6DynamicSizing:
 
     def test_partial_close_keys_present(self):
         """trailing_stop block must have partial_close_* keys (enabled for profitability)."""
-        cfg = json.loads(CONFIG.read_text())
+        cfg = load_v25_config_dict()
         ts = cfg.get("trailing_stop", {})
         assert "partial_close_enabled" in ts, (
             "trailing_stop missing partial_close_enabled"
