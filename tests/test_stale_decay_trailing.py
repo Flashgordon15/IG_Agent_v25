@@ -196,6 +196,17 @@ class StaleDecayTradeManagerWiringTests(unittest.TestCase):
         )
         self.assertAlmostEqual(new_stop, 125.0)
 
+    @patch("trading.trade_manager.log_engine")
+    def test_at_mfe_false_after_pullback_without_manual_peak_seed(self, _log) -> None:
+        opened = datetime.utcnow() - timedelta(minutes=40)
+        tid = _open_trade(self.store, stop=90.0, opened_at=opened)
+        self.assertEqual(self.mgr._touch_peak_profit(tid, 20.0), 20.0)
+        self.assertTrue(self.mgr._at_mfe(tid, 20.0))
+        self.assertFalse(self.mgr._at_mfe(tid, 19.0))
+        self.assertTrue(self.mgr._at_mfe(tid, 19.6))
+        self.mgr._touch_peak_profit(tid, 25.0)
+        self.assertFalse(self.mgr._at_mfe(tid, 24.0))
+
 
 if __name__ == "__main__":
     unittest.main()

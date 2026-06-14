@@ -49,11 +49,10 @@ class TestPartialCloseConfigGuard(unittest.TestCase):
         from trading.trade_manager import TradeManager
 
         store = MagicMock()
-        store.is_partial_close_done.return_value = False
         cfg = MagicMock()
         cfg.partial_close_enabled = False
 
-        tm = TradeManager(store, cfg, rest_client=None, points_engine=None)
+        tm = TradeManager(cfg, store, rest_client=None, points_engine=None)
         out = tm._apply_partial_close(
             "m", "BUY", 1, 100.0, 1.0, 110.0, 10.0, 90.0, "", "EPIC"
         )

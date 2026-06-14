@@ -12,6 +12,50 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class PartialCloseRung:
+    at_r_multiple: float
+    fraction: float
+
+
+def normalize_partial_close_rungs(trailing_stop: dict[str, Any] | None) -> list[PartialCloseRung]:
+    """Conservative fallback: legacy single rung when rungs missing/empty."""
+    ts = trailing_stop if isinstance(trailing_stop, dict) else {}
+    raw = ts.get("partial_close_rungs")
+    rungs: list[PartialCloseRung] = []
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            try:
+                at_r = float(item.get("at_r_multiple") or item.get("at_r") or 0)
+                frac = float(item.get("fraction") or 0)
+            except (TypeError, ValueError):
+                continue
+            if at_r > 0 and 0 < frac <= 1.0:
+                rungs.append(PartialCloseRung(at_r, frac))
+    rungs.sort(key=lambda r: r.at_r_multiple)
+    if rungs:
+        total = sum(r.fraction for r in rungs)
+        if total > 1.0:
+            trimmed: list[PartialCloseRung] = []
+            used = 0.0
+            for rung in rungs:
+                if used >= 1.0:
+                    break
+                room = 1.0 - used
+                frac = min(rung.fraction, room)
+                if frac <= 0:
+                    continue
+                trimmed.append(PartialCloseRung(rung.at_r_multiple, frac))
+                used += frac
+            return trimmed
+        return rungs
+    at_r = float(ts.get("partial_close_at_r") or 1.5)
+    frac = float(ts.get("partial_close_fraction") or 0.5)
+    return [PartialCloseRung(at_r, frac)]
+
+
+@dataclass(frozen=True)
 class Config:
     """Typed view over merged v29 / v25 / v22 adaptive autotrader settings."""
 
@@ -403,6 +447,10 @@ class Config:
     @property
     def partial_close_fraction(self) -> float:
         return float(self.trailing_stop.get("partial_close_fraction", 0.5))
+
+    @property
+    def partial_close_rungs(self) -> list[PartialCloseRung]:
+        return normalize_partial_close_rungs(self.trailing_stop)
 
     @property
     def stop_distance_points(self) -> float:

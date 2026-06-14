@@ -1,4 +1,32 @@
-# .cursorrules - Production Guardrails for IG_Agent_v29.1
+---
+# MANDATORY ENVIRONMENT & SESSION SAFEGUARDS (NEVER VIOLATE)
+
+Before writing code, suggesting diffs, or executing deployment steps, you must explicitly confirm that the trading environment is safe for modification. You must follow these strict operational laws:
+
+1. THE TRADING SESSION LAW:
+   - You are STRICTLY FORBIDDEN from performing hot-reloads, clearing caches, or killing processes if any global financial market sessions are open or if active positions exist in `src/data/runtime_state.json`. 
+   - You must query the system status first to ensure all trading activity is flat and sessions are fully closed.
+
+2. ANTI-ZOMBIE DEPLOYMENT PROTOCOL:
+   Whenever a system cycle, cache purge, or code upgrade is required, you must NEVER execute a raw `kill -9` or kill `main.py` in isolation. This creates unmanaged zombie states because the launchd watchdog is active. You must always use the following exact tear-down sequence:
+   
+   A. Engage Hold: Mark a manual stop via Python to freeze the launchd supervisor watchdog:
+      `PYTHONPATH=src .venv/bin/python3 -c "from system.shutdown_cleanup import mark_manual_stop; mark_manual_stop(source='operator_restart')"`
+   
+   B. Graceful Shutdown: Issue a `kill -TERM` to the main agent PID. Wait up to 30 seconds and verify port 8080 is completely unbound using `lsof -iTCP:8080`.
+   
+   C. Evict Cache: Purge bytecode trailing data ONLY after the port is free:
+      `find src -type d -name __pycache__ -prune -exec rm -rf {} +`
+      `find src -name '*.pyc' -delete`
+      `rm -f src/data/.ig_agent_v29.lock`
+
+3. PRE-DEVELOPMENT AUDIT:
+   At the start of every session or complex request, print a small read-only audit block confirming: 
+   [Market Sessions Closed?] | [Watchdog Hold Active?] | [Active PIDs Cleaned?]
+   Do not modify code or configs until this audit is printed and safe.
+---
+
+# v29.1 Architecture & Code Guardrails
 
 [Architecture Priorities]
 CorePipeline=src/trading/trading_loop.py -> src/trading/environment_scorer.py -> src/signals/signal_engine.py -> src/trading/points_engine.py -> src/execution/risk_manager.py

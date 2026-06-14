@@ -166,6 +166,18 @@ class LearningStore:
             c.execute(
                 "ALTER TABLE trades ADD COLUMN partial_close_done INTEGER DEFAULT 0"
             )
+        if "partial_close_rung_index" not in cols:
+            c.execute(
+                "ALTER TABLE trades ADD COLUMN partial_close_rung_index INTEGER DEFAULT 0"
+            )
+        if "original_size" not in cols:
+            c.execute("ALTER TABLE trades ADD COLUMN original_size REAL")
+        c.execute(
+            """
+            UPDATE trades SET original_size = size
+            WHERE original_size IS NULL AND closed_at IS NULL
+            """
+        )
         # Cooldowns table — survives restarts
         c.execute(
             """
@@ -225,7 +237,13 @@ class LearningStore:
             ),
         )
         self.conn.commit()
-        return int(cur.lastrowid)
+        trade_id = int(cur.lastrowid)
+        self.conn.execute(
+            "UPDATE trades SET original_size=? WHERE id=?",
+            (float(record.size), trade_id),
+        )
+        self.conn.commit()
+        return trade_id
 
     @_locked
     def get_stop(self, trade_id: int) -> float | None:
@@ -894,6 +912,85 @@ class LearningStore:
             (str(confidence_band), float(entry_atr), float(trail_distance), trade_id),
         )
         self.conn.commit()
+
+    @_locked
+    def get_partial_close_rung_index(self, trade_id: int) -> int:
+        cols = {
+            row[1] for row in self.conn.execute("PRAGMA table_info(trades)").fetchall()
+        }
+        if "partial_close_rung_index" not in cols:
+            if "partial_close_done" in cols:
+                row = self.conn.execute(
+                    "SELECT partial_close_done FROM trades WHERE id=?",
+                    (trade_id,),
+                ).fetchone()
+                return 1 if row and int(row["partial_close_done"] or 0) else 0
+            return 0
+        row = self.conn.execute(
+            "SELECT partial_close_rung_index FROM trades WHERE id=?",
+            (trade_id,),
+        ).fetchone()
+        return int(row["partial_close_rung_index"] or 0) if row else 0
+
+    @_locked
+    def advance_partial_close_rung(
+        self, trade_id: int, *, total_rungs: int | None = None
+    ) -> None:
+        cols = {
+            row[1] for row in self.conn.execute("PRAGMA table_info(trades)").fetchall()
+        }
+        if "partial_close_rung_index" not in cols:
+            self.mark_partial_close_done(trade_id)
+            return
+        idx = self.get_partial_close_rung_index(trade_id) + 1
+        done = int(
+            total_rungs is not None and total_rungs > 0 and idx >= int(total_rungs)
+        )
+        if "partial_close_done" in cols:
+            self.conn.execute(
+                """
+                UPDATE trades
+                SET partial_close_rung_index=?, partial_close_done=?
+                WHERE id=?
+                """,
+                (idx, done, trade_id),
+            )
+        else:
+            self.conn.execute(
+                "UPDATE trades SET partial_close_rung_index=? WHERE id=?",
+                (idx, trade_id),
+            )
+        self.conn.commit()
+
+    @_locked
+    def get_original_size(self, trade_id: int, fallback: float) -> float:
+        cols = {
+            row[1] for row in self.conn.execute("PRAGMA table_info(trades)").fetchall()
+        }
+        if "original_size" not in cols:
+            return float(fallback)
+        row = self.conn.execute(
+            "SELECT original_size, size FROM trades WHERE id=?",
+            (trade_id,),
+        ).fetchone()
+        if not row:
+            return float(fallback)
+        try:
+            orig = row["original_size"]
+            if orig is not None and float(orig) > 0:
+                return float(orig)
+        except (TypeError, ValueError):
+            pass
+        try:
+            return float(row["size"] or fallback)
+        except (TypeError, ValueError):
+            return float(fallback)
+
+    @_locked
+    def all_partial_rungs_done(self, trade_id: int, total_rungs: int) -> bool:
+        if total_rungs <= 0:
+            return True
+        return self.get_partial_close_rung_index(trade_id) >= int(total_rungs)
 
     @_locked
     def mark_partial_close_done(self, trade_id: int) -> None:

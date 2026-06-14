@@ -1065,7 +1065,12 @@ class IgPositionSync:
                 log_engine(
                     f"points_engine partial close score failed: {type(e).__name__}: {e}"
                 )
-        if hasattr(self._store, "mark_partial_close_done"):
+        if hasattr(self._store, "advance_partial_close_rung"):
+            try:
+                self._store.advance_partial_close_rung(trade_id)
+            except Exception:
+                pass
+        elif hasattr(self._store, "mark_partial_close_done"):
             try:
                 self._store.mark_partial_close_done(trade_id)
             except Exception:

@@ -818,6 +818,9 @@ class TestSession6DynamicSizing:
         assert "partial_close_fraction" in ts, (
             "trailing_stop missing partial_close_fraction"
         )
+        assert "partial_close_rungs" in ts, (
+            "trailing_stop missing partial_close_rungs"
+        )
 
 
 # ---------------------------------------------------------------------------

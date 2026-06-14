@@ -369,7 +369,12 @@
     "stale_decay_factor_per_minute": 0.02,
     "partial_close_enabled": true,
     "partial_close_at_r": 1.5,
-    "partial_close_fraction": 0.5
+    "partial_close_fraction": 0.5,
+    "partial_close_rungs": [
+      { "at_r_multiple": 1.5, "fraction": 0.25 },
+      { "at_r_multiple": 2.5, "fraction": 0.25 },
+      { "at_r_multiple": 3.5, "fraction": 0.25 }
+    ]
   },
   "risk_bands": {
     "enabled": true,

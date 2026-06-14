@@ -18,7 +18,6 @@ from system.config import Config
 from trading.points_engine import PointsEngine
 from trading.trade_manager import (
     HARD_CAP_ATR_MULTIPLE,
-    PARTIAL_CLOSE_ATR_MULTIPLE,
     TradeManager,
 )
 
@@ -249,7 +248,7 @@ class TradeManagerExtensionTests(unittest.TestCase):
             skip_ig_synced_exits=True,
             points_engine=self.points,
         )
-        px = entry + PARTIAL_CLOSE_ATR_MULTIPLE * 20.0 + 1.0
+        px = entry + 1.5 * 20.0 + 1.0
         quote = Quote(datetime.now(), px, px + 1)
         msgs1 = mgr.update_from_quote("Japan 225", "IX.D.NIKKEI.IFM.IP", quote)
         self.assertTrue(any("PARTIAL CLOSE" in m for m in msgs1))
@@ -264,6 +263,160 @@ class TradeManagerExtensionTests(unittest.TestCase):
 
         msgs2 = mgr.update_from_quote("Japan 225", "IX.D.NIKKEI.IFM.IP", quote)
         self.assertFalse(any("PARTIAL CLOSE" in m for m in msgs2))
+
+    def test_partial_close_rungs_fallback_legacy_single(self) -> None:
+        entry = 100.0
+        tid = _open_trade(self.store, entry=entry)
+        self.store.set_v25_entry_meta(
+            tid, confidence_band="high", entry_atr=20.0, trail_distance=35.0
+        )
+        mgr = TradeManager(
+            _cfg(
+                breakeven_enabled=False,
+                adaptive_trailing_stop_enabled=False,
+                trailing_stop={
+                    "partial_close_enabled": True,
+                    "partial_close_at_r": 1.5,
+                    "partial_close_fraction": 0.5,
+                    "partial_close_rungs": [],
+                },
+            ),
+            self.store,
+            skip_ig_synced_exits=True,
+        )
+        px = entry + 1.5 * 20.0 + 1.0
+        msgs = mgr.update_from_quote(
+            "Japan 225", "IX.D.NIKKEI.IFM.IP", Quote(datetime.now(), px, px + 1)
+        )
+        self.assertTrue(any("PARTIAL CLOSE" in m for m in msgs))
+        self.assertAlmostEqual(
+            float(
+                self.store.conn.execute(
+                    "SELECT size FROM trades WHERE id=?", (tid,)
+                ).fetchone()["size"]
+            ),
+            1.0,
+        )
+        self.assertEqual(self.store.get_partial_close_rung_index(tid), 1)
+
+    def test_partial_close_two_rungs_sequential(self) -> None:
+        entry = 100.0
+        tid = _open_trade(self.store, entry=entry)
+        self.store.set_v25_entry_meta(
+            tid, confidence_band="high", entry_atr=20.0, trail_distance=35.0
+        )
+        mgr = TradeManager(
+            _cfg(
+                breakeven_enabled=False,
+                adaptive_trailing_stop_enabled=False,
+                trailing_stop={
+                    "partial_close_enabled": True,
+                    "partial_close_rungs": [
+                        {"at_r_multiple": 1.5, "fraction": 0.25},
+                        {"at_r_multiple": 2.5, "fraction": 0.25},
+                    ],
+                },
+            ),
+            self.store,
+            skip_ig_synced_exits=True,
+        )
+        px_r1 = entry + 1.5 * 20.0 + 1.0
+        msgs1 = mgr.update_from_quote(
+            "Japan 225",
+            "IX.D.NIKKEI.IFM.IP",
+            Quote(datetime.now(), px_r1, px_r1 + 1),
+        )
+        self.assertTrue(any("PARTIAL CLOSE" in m for m in msgs1))
+        self.assertAlmostEqual(
+            float(
+                self.store.conn.execute(
+                    "SELECT size FROM trades WHERE id=?", (tid,)
+                ).fetchone()["size"]
+            ),
+            1.5,
+        )
+        self.assertEqual(self.store.get_partial_close_rung_index(tid), 1)
+
+        px_r2 = entry + 2.5 * 20.0 + 1.0
+        msgs2 = mgr.update_from_quote(
+            "Japan 225",
+            "IX.D.NIKKEI.IFM.IP",
+            Quote(datetime.now(), px_r2, px_r2 + 1),
+        )
+        self.assertTrue(any("PARTIAL CLOSE" in m for m in msgs2))
+        self.assertAlmostEqual(
+            float(
+                self.store.conn.execute(
+                    "SELECT size FROM trades WHERE id=?", (tid,)
+                ).fetchone()["size"]
+            ),
+            1.0,
+        )
+        self.assertEqual(self.store.get_partial_close_rung_index(tid), 2)
+
+        msgs3 = mgr.update_from_quote(
+            "Japan 225",
+            "IX.D.NIKKEI.IFM.IP",
+            Quote(datetime.now(), px_r2, px_r2 + 1),
+        )
+        self.assertFalse(any("PARTIAL CLOSE" in m for m in msgs3))
+
+    def test_partial_close_second_rung_not_early(self) -> None:
+        entry = 100.0
+        tid = _open_trade(self.store, entry=entry)
+        self.store.set_v25_entry_meta(
+            tid, confidence_band="high", entry_atr=20.0, trail_distance=35.0
+        )
+        mgr = TradeManager(
+            _cfg(
+                breakeven_enabled=False,
+                adaptive_trailing_stop_enabled=False,
+                trailing_stop={
+                    "partial_close_enabled": True,
+                    "partial_close_rungs": [
+                        {"at_r_multiple": 1.5, "fraction": 0.25},
+                        {"at_r_multiple": 2.5, "fraction": 0.25},
+                    ],
+                },
+            ),
+            self.store,
+            skip_ig_synced_exits=True,
+        )
+        px_r1 = entry + 1.5 * 20.0 + 1.0
+        mgr.update_from_quote(
+            "Japan 225",
+            "IX.D.NIKKEI.IFM.IP",
+            Quote(datetime.now(), px_r1, px_r1 + 1),
+        )
+        self.assertEqual(self.store.get_partial_close_rung_index(tid), 1)
+
+        px_between = entry + 2.0 * 20.0 + 1.0
+        msgs = mgr.update_from_quote(
+            "Japan 225",
+            "IX.D.NIKKEI.IFM.IP",
+            Quote(datetime.now(), px_between, px_between + 1),
+        )
+        self.assertFalse(any("PARTIAL CLOSE" in m for m in msgs))
+        self.assertEqual(self.store.get_partial_close_rung_index(tid), 1)
+
+    def test_normalize_partial_close_rungs_sorts_and_fallback(self) -> None:
+        from system.config import normalize_partial_close_rungs
+
+        fallback = normalize_partial_close_rungs({})
+        self.assertEqual(len(fallback), 1)
+        self.assertAlmostEqual(fallback[0].at_r_multiple, 1.5)
+        self.assertAlmostEqual(fallback[0].fraction, 0.5)
+
+        sorted_rungs = normalize_partial_close_rungs(
+            {
+                "partial_close_rungs": [
+                    {"at_r_multiple": 2.5, "fraction": 0.25},
+                    {"at_r_multiple": 1.5, "fraction": 0.25},
+                ]
+            }
+        )
+        self.assertEqual(sorted_rungs[0].at_r_multiple, 1.5)
+        self.assertEqual(sorted_rungs[1].at_r_multiple, 2.5)
 
     def test_hard_cap_closes_position(self) -> None:
         entry = 100.0

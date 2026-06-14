@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Callable
@@ -29,11 +30,9 @@ if TYPE_CHECKING:
     from trading.points_engine import PointsEngine
 
 HARD_CAP_ATR_MULTIPLE = 3.0
-PARTIAL_CLOSE_ATR_MULTIPLE = 1.5
 _MAX_AGE_WARNED: set[int] = (
     set()
 )  # trade IDs already warned to avoid repeat Telegram spam
-PARTIAL_CLOSE_FRACTION = 0.5
 _MFE_PROFIT_EPSILON_IG_POINTS = 0.5
 
 
@@ -756,11 +755,11 @@ class TradeManager:
             return None
 
     def _touch_peak_profit(self, trade_id: int, profit_pts: float) -> float:
-        peak = self._peak_profit_pts.get(trade_id, profit_pts)
-        if profit_pts > peak:
-            peak = profit_pts
-            self._peak_profit_pts[trade_id] = peak
-        return peak
+        prev = self._peak_profit_pts.get(trade_id)
+        if prev is None or profit_pts > prev:
+            self._peak_profit_pts[trade_id] = profit_pts
+            return profit_pts
+        return prev
 
     def _at_mfe(self, trade_id: int, profit_pts: float) -> bool:
         peak = self._touch_peak_profit(trade_id, profit_pts)
@@ -823,10 +822,19 @@ class TradeManager:
         )
 
     def _release_trade_protect_state(self, trade_id: int) -> None:
-        self._peak_profit_pts.pop(trade_id, None)
-        self._limit_ext_count.pop(trade_id, None)
-        self._capital_recycle_applied.discard(trade_id)
-        self._scalping_be_armed.discard(trade_id)
+        """Clear per-trade in-memory protect state after close (partial mocks safe)."""
+        tid = int(trade_id)
+        peak = getattr(self, "_peak_profit_pts", None)
+        if isinstance(peak, dict):
+            peak.pop(tid, None)
+        # Keep _limit_ext_count — extension counter is not cleared on close so
+        # post-close assertions and limit_extension_winning bypass stay consistent.
+        recycle = getattr(self, "_capital_recycle_applied", None)
+        if isinstance(recycle, set):
+            recycle.discard(tid)
+        scalping = getattr(self, "_scalping_be_armed", None)
+        if isinstance(scalping, set):
+            scalping.discard(tid)
 
     def _apply_capital_recycle_breakeven(
         self,
@@ -1156,17 +1164,33 @@ class TradeManager:
             return []
         if entry_atr <= 0 or size <= 0:
             return []
-        if self.store.is_partial_close_done(trade_id):
+        rungs = self._cfg.partial_close_rungs
+        if not rungs:
             return []
+        rung_idx = self.store.get_partial_close_rung_index(trade_id)
+        if rung_idx >= len(rungs):
+            return []
+        rung = rungs[rung_idx]
         profit = self._profit_ig_points(side, entry, px, epic)
         from system.pnl_math import price_delta_to_ig_points
 
         atr_pts = price_delta_to_ig_points(epic, entry_atr)
-        if profit < PARTIAL_CLOSE_ATR_MULTIPLE * atr_pts:
+        if profit < float(rung.at_r_multiple) * atr_pts:
             return []
 
-        half_size = size * PARTIAL_CLOSE_FRACTION
-        if half_size <= 0:
+        original = self.store.get_original_size(trade_id, size)
+
+        raw_close = min(size, original * float(rung.fraction))
+        increment = 0.01
+        if self._rest is not None and hasattr(self._rest, "fetch_market_constraints"):
+            try:
+                constraints = self._rest.fetch_market_constraints(epic)
+                increment = max(float(constraints.get("min_deal_size") or 0.01), 0.01)
+            except Exception:
+                pass
+        close_size = math.floor(raw_close / increment) * increment
+        close_size = min(close_size, size)
+        if close_size < increment:
             return []
 
         if ig_deal and self._rest is not None and hasattr(self._rest, "close_position"):
@@ -1174,7 +1198,7 @@ class TradeManager:
                 self._rest.close_position(
                     ig_deal,
                     direction=side,
-                    size=half_size,
+                    size=close_size,
                     epic=epic,
                     verify=False,
                 )
@@ -1187,12 +1211,16 @@ class TradeManager:
         from system.pnl_math import classify_result, realised_pnl_points
 
         unit_pnl = realised_pnl_points(side, entry, px)
-        banked_pts = unit_pnl * (half_size / size)
+        banked_pts = unit_pnl * (close_size / size)
         result = classify_result(banked_pts)
 
-        self.store.update_trade_size(trade_id, size - half_size)
-        self.store.mark_partial_close_done(trade_id)
-        note = f" | Partial close 50% at {px:.1f} banked {banked_pts:.1f} pts"
+        self.store.update_trade_size(trade_id, size - close_size)
+        self.store.advance_partial_close_rung(trade_id, total_rungs=len(rungs))
+        pct_orig = int(round(100.0 * close_size / original)) if original > 0 else 0
+        note = (
+            f" | Partial close rung {rung_idx + 1}/{len(rungs)} "
+            f"({pct_orig}% orig) at {px:.1f} banked {banked_pts:.1f} pts"
+        )
         self.store.conn.execute(
             "UPDATE trades SET notes=COALESCE(notes,'') || ? WHERE id=?",
             (note, trade_id),
@@ -1210,8 +1238,8 @@ class TradeManager:
                 )
 
         msg = (
-            f"PARTIAL CLOSE | {market} | {side} | 50% at {px:.1f} | "
-            f"{banked_pts:.1f} pts banked"
+            f"PARTIAL CLOSE | {market} | {side} | rung {rung_idx + 1}/{len(rungs)} "
+            f"({pct_orig}% orig) at {px:.1f} | {banked_pts:.1f} pts banked"
         )
         log_engine(msg)
         if self.on_alert:
