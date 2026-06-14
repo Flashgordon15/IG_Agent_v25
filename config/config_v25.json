@@ -374,6 +374,11 @@
       { "at_r_multiple": 1.5, "fraction": 0.25 },
       { "at_r_multiple": 2.5, "fraction": 0.25 },
       { "at_r_multiple": 3.5, "fraction": 0.25 }
+    ],
+    "tranche_stop_coordination_enabled": true,
+    "tranche_stop_tiers": [
+      { "after_rung_index": 0, "mode": "breakeven_plus", "offset_ig_points": 1.0 },
+      { "after_rung_index": 1, "mode": "lock_at_r", "at_r_multiple": 1.5 }
     ]
   },
   "risk_bands": {

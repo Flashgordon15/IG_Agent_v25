@@ -56,6 +56,53 @@ def normalize_partial_close_rungs(trailing_stop: dict[str, Any] | None) -> list[
 
 
 @dataclass(frozen=True)
+class TrancheStopTier:
+    after_rung_index: int
+    mode: str
+    offset_ig_points: float = 1.0
+    at_r_multiple: float = 0.0
+
+
+def normalize_tranche_stop_tiers(trailing_stop: dict[str, Any] | None) -> list[TrancheStopTier]:
+    """Parse tranche stop tiers; conservative defaults when coordination enabled."""
+    ts = trailing_stop if isinstance(trailing_stop, dict) else {}
+    if not bool(ts.get("tranche_stop_coordination_enabled", True)):
+        return []
+    raw = ts.get("tranche_stop_tiers")
+    tiers: list[TrancheStopTier] = []
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            try:
+                after_idx = int(item.get("after_rung_index", -1))
+                mode = str(item.get("mode") or "").strip().lower()
+            except (TypeError, ValueError):
+                continue
+            if after_idx < 0 or mode not in ("breakeven_plus", "lock_at_r"):
+                continue
+            try:
+                offset = float(item.get("offset_ig_points") or 1.0)
+                at_r = float(item.get("at_r_multiple") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            tiers.append(
+                TrancheStopTier(
+                    after_rung_index=after_idx,
+                    mode=mode,
+                    offset_ig_points=offset,
+                    at_r_multiple=at_r,
+                )
+            )
+    if tiers:
+        return sorted(tiers, key=lambda t: t.after_rung_index)
+    return [
+        TrancheStopTier(0, "breakeven_plus", offset_ig_points=1.0),
+        TrancheStopTier(1, "lock_at_r", at_r_multiple=1.5),
+    ]
+
+
+@dataclass(frozen=True)
 class Config:
     """Typed view over merged v29 / v25 / v22 adaptive autotrader settings."""
 
@@ -451,6 +498,14 @@ class Config:
     @property
     def partial_close_rungs(self) -> list[PartialCloseRung]:
         return normalize_partial_close_rungs(self.trailing_stop)
+
+    @property
+    def tranche_stop_coordination_enabled(self) -> bool:
+        return bool(self.trailing_stop.get("tranche_stop_coordination_enabled", True))
+
+    @property
+    def tranche_stop_tiers(self) -> list[TrancheStopTier]:
+        return normalize_tranche_stop_tiers(self.trailing_stop)
 
     @property
     def stop_distance_points(self) -> float:

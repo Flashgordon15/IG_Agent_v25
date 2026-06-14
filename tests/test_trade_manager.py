@@ -428,6 +428,185 @@ class TradeManagerExtensionTests(unittest.TestCase):
         self.assertAlmostEqual(stop_after, stop_high, places=1)
 
 
+class TrancheStopCoordinationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = LearningStore(str(Path(self.tmp.name) / "t.db"))
+        self.store.connect()
+        self._friday_patch = patch.object(
+            TradeManager, "_is_friday_close_window", return_value=False
+        )
+        self._friday_patch.start()
+
+    def tearDown(self) -> None:
+        self._friday_patch.stop()
+        self.store.close()
+        self.tmp.cleanup()
+
+    def _tranche_mgr(self, **overrides) -> TradeManager:
+        trailing_stop = {
+            "partial_close_enabled": True,
+            "tranche_stop_coordination_enabled": True,
+            "partial_close_rungs": [
+                {"at_r_multiple": 1.5, "fraction": 0.25},
+                {"at_r_multiple": 2.5, "fraction": 0.25},
+            ],
+            "tranche_stop_tiers": [
+                {
+                    "after_rung_index": 0,
+                    "mode": "breakeven_plus",
+                    "offset_ig_points": 1.0,
+                },
+                {"after_rung_index": 1, "mode": "lock_at_r", "at_r_multiple": 1.5},
+            ],
+        }
+        if "trailing_stop" in overrides:
+            trailing_stop = overrides.pop("trailing_stop")
+        return TradeManager(
+            _cfg(
+                breakeven_enabled=False,
+                adaptive_trailing_stop_enabled=False,
+                trailing_stop=trailing_stop,
+                **overrides,
+            ),
+            self.store,
+            skip_ig_synced_exits=True,
+        )
+
+    def test_rung1_partial_close_locks_be_plus_one(self) -> None:
+        entry, atr = 100.0, 20.0
+        tid = _open_trade(self.store, entry=entry, stop=80.0)
+        self.store.set_v25_entry_meta(
+            tid, confidence_band="high", entry_atr=atr, trail_distance=35.0
+        )
+        mgr = self._tranche_mgr()
+        px = entry + 1.5 * atr + 0.5
+        msgs = mgr.update_from_quote(
+            "Japan 225",
+            "IX.D.NIKKEI.IFM.IP",
+            Quote(datetime.now(), px, px + 1),
+        )
+        self.assertTrue(any("PARTIAL CLOSE" in m for m in msgs))
+        self.assertTrue(any("TRANCHE STOP" in m for m in msgs))
+        stop = float(self.store.get_stop(tid))
+        expected = entry + mgr._offset_price("IX.D.NIKKEI.IFM.IP", 1.0)
+        self.assertAlmostEqual(stop, expected, places=3)
+        self.assertEqual(self.store.get_partial_close_rung_index(tid), 1)
+
+    def test_rung2_partial_close_locks_one_point_five_r(self) -> None:
+        entry, atr = 100.0, 20.0
+        tid = _open_trade(self.store, entry=entry, stop=80.0)
+        self.store.set_v25_entry_meta(
+            tid, confidence_band="high", entry_atr=atr, trail_distance=35.0
+        )
+        mgr = self._tranche_mgr()
+        px_r1 = entry + 1.5 * atr + 0.5
+        mgr.update_from_quote(
+            "Japan 225",
+            "IX.D.NIKKEI.IFM.IP",
+            Quote(datetime.now(), px_r1, px_r1 + 1),
+        )
+        px_r2 = entry + 2.5 * atr + 0.5
+        mgr.update_from_quote(
+            "Japan 225",
+            "IX.D.NIKKEI.IFM.IP",
+            Quote(datetime.now(), px_r2, px_r2 + 1),
+        )
+        stop = float(self.store.get_stop(tid))
+        self.assertAlmostEqual(stop, entry + 1.5 * atr, places=3)
+        self.assertEqual(self.store.get_partial_close_rung_index(tid), 2)
+
+    def test_tranche_stop_never_loosens(self) -> None:
+        entry, atr = 100.0, 20.0
+        tid = _open_trade(self.store, entry=entry, stop=entry + 5.0)
+        self.store.set_v25_entry_meta(
+            tid, confidence_band="high", entry_atr=atr, trail_distance=35.0
+        )
+        mgr = self._tranche_mgr()
+        stop_before = float(self.store.get_stop(tid))
+        px = entry + 1.5 * atr + 0.5
+        mgr.update_from_quote(
+            "Japan 225",
+            "IX.D.NIKKEI.IFM.IP",
+            Quote(datetime.now(), px, px + 1),
+        )
+        self.assertAlmostEqual(float(self.store.get_stop(tid)), stop_before, places=5)
+
+    def test_sell_side_tightens_downward(self) -> None:
+        entry, atr = 100.0, 20.0
+        tid = _open_sell_trade(self.store, entry=entry, stop=110.0)
+        self.store.set_v25_entry_meta(
+            tid, confidence_band="high", entry_atr=atr, trail_distance=35.0
+        )
+        mgr = self._tranche_mgr()
+        px = entry - 1.5 * atr - 0.5
+        mgr.update_from_quote(
+            "Japan 225",
+            "IX.D.NIKKEI.IFM.IP",
+            Quote(datetime.now(), px, px - 1),
+        )
+        stop = float(self.store.get_stop(tid))
+        expected = entry - mgr._offset_price("IX.D.NIKKEI.IFM.IP", 1.0)
+        self.assertAlmostEqual(stop, expected, places=3)
+        self.assertLess(stop, 110.0)
+
+    def test_coordination_disabled_is_noop(self) -> None:
+        entry, atr = 100.0, 20.0
+        tid = _open_trade(self.store, entry=entry, stop=80.0)
+        self.store.set_v25_entry_meta(
+            tid, confidence_band="high", entry_atr=atr, trail_distance=35.0
+        )
+        mgr = self._tranche_mgr(
+            trailing_stop={
+                "partial_close_enabled": True,
+                "tranche_stop_coordination_enabled": False,
+                "partial_close_rungs": [
+                    {"at_r_multiple": 1.5, "fraction": 0.25},
+                ],
+            }
+        )
+        stop_before = float(self.store.get_stop(tid))
+        px = entry + 1.5 * atr + 0.5
+        msgs = mgr.update_from_quote(
+            "Japan 225",
+            "IX.D.NIKKEI.IFM.IP",
+            Quote(datetime.now(), px, px + 1),
+        )
+        self.assertTrue(any("PARTIAL CLOSE" in m for m in msgs))
+        self.assertFalse(any("TRANCHE STOP" in m for m in msgs))
+        self.assertAlmostEqual(float(self.store.get_stop(tid)), stop_before, places=5)
+
+    def test_rehydrate_applies_missing_floor_after_restart(self) -> None:
+        entry, atr = 100.0, 20.0
+        tid = _open_trade(self.store, entry=entry, stop=80.0)
+        self.store.set_v25_entry_meta(
+            tid, confidence_band="high", entry_atr=atr, trail_distance=35.0
+        )
+        self.store.conn.execute(
+            "UPDATE trades SET partial_close_rung_index=? WHERE id=?",
+            (1, tid),
+        )
+        self.store.conn.commit()
+        mgr = self._tranche_mgr()
+        px = entry + 1.6 * atr
+        msgs = mgr.update_from_quote(
+            "Japan 225",
+            "IX.D.NIKKEI.IFM.IP",
+            Quote(datetime.now(), px, px + 1),
+        )
+        self.assertTrue(any("TRANCHE STOP" in m for m in msgs))
+        stop = float(self.store.get_stop(tid))
+        expected = entry + mgr._offset_price("IX.D.NIKKEI.IFM.IP", 1.0)
+        self.assertAlmostEqual(stop, expected, places=3)
+        self.assertGreater(stop, 80.0)
+
+    def test_stop_tightens_helper_buy_and_sell(self) -> None:
+        self.assertTrue(TradeManager._stop_tightens("BUY", 90.0, 95.0))
+        self.assertFalse(TradeManager._stop_tightens("BUY", 95.0, 90.0))
+        self.assertTrue(TradeManager._stop_tightens("SELL", 110.0, 105.0))
+        self.assertFalse(TradeManager._stop_tightens("SELL", 105.0, 110.0))
+
+
 class TrailDirectionAssertionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()

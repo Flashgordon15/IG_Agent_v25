@@ -61,6 +61,8 @@ class TradeManager:
         self._peak_profit_pts: dict[int, float] = {}
         self._gone_deals: set[str] = set()
         self._capital_recycle_applied: set[int] = set()
+        self._tranche_stop_applied: set[tuple[int, int]] = set()
+        self._tranche_stop_rehydrated: set[int] = set()
         self._scalping_be_armed: set[int] = set()
         self._protect_active = False
         self._scalping_trail = False
@@ -333,6 +335,25 @@ class TradeManager:
 
             prev_stop = stop
             prev_target = target
+            try:
+                messages.extend(
+                    self._rehydrate_tranche_stop_floors(
+                        market,
+                        side,
+                        trade_id,
+                        entry,
+                        px,
+                        entry_atr,
+                        epic,
+                        ig_deal,
+                    )
+                )
+                stop = self._current_stop(trade_id, stop)
+            except Exception as e:
+                log_engine(
+                    f"tranche_stop rehydrate skipped trade={trade_id} {market}: "
+                    f"{type(e).__name__}: {e}"
+                )
             if cfg.partial_close_enabled:
                 messages.extend(
                     self._apply_partial_close(
@@ -348,6 +369,7 @@ class TradeManager:
                         epic,
                     )
                 )
+                stop = self._current_stop(trade_id, stop)
             row_after_partial = self.store.conn.execute(
                 "SELECT size FROM trades WHERE id=?", (trade_id,)
             ).fetchone()
@@ -835,6 +857,173 @@ class TradeManager:
         scalping = getattr(self, "_scalping_be_armed", None)
         if isinstance(scalping, set):
             scalping.discard(tid)
+        tranche_applied = getattr(self, "_tranche_stop_applied", None)
+        if isinstance(tranche_applied, set):
+            self._tranche_stop_applied = {
+                pair for pair in tranche_applied if pair[0] != tid
+            }
+        tranche_rehydrated = getattr(self, "_tranche_stop_rehydrated", None)
+        if isinstance(tranche_rehydrated, set):
+            tranche_rehydrated.discard(tid)
+
+    @staticmethod
+    def _stop_tightens(
+        side: str, current: float, proposed: float, *, tolerance: float = 0.0
+    ) -> bool:
+        """True when proposed stop is strictly tighter than current (never widens)."""
+        tol = max(0.0, float(tolerance))
+        side_u = str(side or "").upper()
+        if side_u == "BUY":
+            return proposed > current + tol
+        if side_u == "SELL":
+            return proposed < current - tol
+        return False
+
+    def _tranche_lock_stop_price(
+        self,
+        side: str,
+        entry: float,
+        entry_atr: float,
+        epic: str,
+        tier: Any,
+    ) -> float:
+        from system.config import TrancheStopTier
+
+        if not isinstance(tier, TrancheStopTier):
+            raise TypeError("tier must be TrancheStopTier")
+        side_u = str(side or "").upper()
+        mode = str(tier.mode or "").strip().lower()
+        if mode == "breakeven_plus":
+            offset_price = self._offset_price(epic, float(tier.offset_ig_points))
+            return (entry + offset_price) if side_u == "BUY" else (entry - offset_price)
+        if mode == "lock_at_r":
+            r = float(tier.at_r_multiple)
+            if r <= 0 or entry_atr <= 0:
+                raise ValueError("lock_at_r requires positive at_r_multiple and entry_atr")
+            delta = float(entry_atr) * r
+            return (entry + delta) if side_u == "BUY" else (entry - delta)
+        raise ValueError(f"unknown tranche stop mode: {tier.mode}")
+
+    def _apply_tranche_stop_coordination(
+        self,
+        market: str,
+        side: str,
+        trade_id: int,
+        entry: float,
+        px: float,
+        entry_atr: float,
+        epic: str,
+        executed_rung_idx: int,
+        ig_deal: str,
+    ) -> list[str]:
+        tiers = self._cfg.tranche_stop_tiers
+        if not tiers:
+            return []
+        tier = next(
+            (t for t in tiers if int(t.after_rung_index) == int(executed_rung_idx)),
+            None,
+        )
+        if tier is None:
+            return []
+        key = (int(trade_id), int(executed_rung_idx))
+        if key in self._tranche_stop_applied:
+            return []
+
+        current_stop = self.store.get_stop(trade_id)
+        if current_stop is None:
+            return []
+        current = float(current_stop)
+        tol = self._stop_tolerance(epic)
+
+        try:
+            proposed = self._tranche_lock_stop_price(side, entry, entry_atr, epic, tier)
+        except (TypeError, ValueError) as e:
+            log_engine(
+                f"TRANCHE STOP skipped trade={trade_id} tier={executed_rung_idx + 1}: "
+                f"{type(e).__name__}: {e}"
+            )
+            return []
+
+        if not self._stop_tightens(side, current, proposed, tolerance=tol):
+            return []
+
+        from execution.dealing_constraints import (
+            clamp_stop_to_broker_minimum,
+            fetch_min_stop_points,
+        )
+
+        min_pts = fetch_min_stop_points(self._rest, epic)
+        clamped = clamp_stop_to_broker_minimum(
+            side,
+            px=px,
+            stop=proposed,
+            min_distance_points=min_pts,
+            epic=epic,
+        )
+        if clamped is None:
+            log_engine(
+                f"TRANCHE STOP skipped trade={trade_id} tier={executed_rung_idx + 1}: "
+                "broker min distance"
+            )
+            return []
+        proposed = self._round_stop_level(float(clamped), epic)
+
+        if not self._stop_tightens(side, current, proposed, tolerance=tol):
+            return []
+
+        note = (
+            f" | Tranche stop tier {executed_rung_idx + 1} "
+            f"({tier.mode}) locked {proposed:.5f}"
+        )
+        self.store.update_stop(trade_id, proposed, note)
+        self._tranche_stop_applied.add(key)
+
+        msg = (
+            f"TRANCHE STOP | {market} | {side} | tier {executed_rung_idx + 1} "
+            f"| stop {proposed:.5f}"
+        )
+        log_engine(msg)
+        if self.on_alert:
+            self.on_alert(msg)
+        return [msg]
+
+    def _rehydrate_tranche_stop_floors(
+        self,
+        market: str,
+        side: str,
+        trade_id: int,
+        entry: float,
+        px: float,
+        entry_atr: float,
+        epic: str,
+        ig_deal: str,
+    ) -> list[str]:
+        if int(trade_id) in self._tranche_stop_rehydrated:
+            return []
+        tiers = self._cfg.tranche_stop_tiers
+        if not tiers:
+            return []
+        rung_idx = self.store.get_partial_close_rung_index(trade_id)
+        if rung_idx <= 0:
+            return []
+        self._tranche_stop_rehydrated.add(int(trade_id))
+        msgs: list[str] = []
+        for tier in tiers:
+            if int(tier.after_rung_index) < rung_idx:
+                msgs.extend(
+                    self._apply_tranche_stop_coordination(
+                        market,
+                        side,
+                        trade_id,
+                        entry,
+                        px,
+                        entry_atr,
+                        epic,
+                        executed_rung_idx=int(tier.after_rung_index),
+                        ig_deal=ig_deal,
+                    )
+                )
+        return msgs
 
     def _apply_capital_recycle_breakeven(
         self,
@@ -1244,7 +1433,21 @@ class TradeManager:
         log_engine(msg)
         if self.on_alert:
             self.on_alert(msg)
-        return [msg]
+        msgs = [msg]
+        msgs.extend(
+            self._apply_tranche_stop_coordination(
+                market=market,
+                side=side,
+                trade_id=trade_id,
+                entry=entry,
+                px=px,
+                entry_atr=entry_atr,
+                epic=epic,
+                executed_rung_idx=rung_idx,
+                ig_deal=ig_deal,
+            )
+        )
+        return msgs
 
     def _effective_trail_trigger(
         self, entry_atr: float, *, epic: str | None = None
