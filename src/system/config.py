@@ -739,3 +739,11 @@ class Config:
     @property
     def telegram_chat_id(self) -> str:
         return str(self.telegram.get("chat_id", "") or "").strip()
+
+    @property
+    def telegram_heartbeat_interval_seconds(self) -> float:
+        return float(self.telegram.get("telegram_heartbeat_interval_seconds", 3600))
+
+    @property
+    def telegram_substantial_loss_points(self) -> float:
+        return float(self.telegram.get("telegram_substantial_loss_points", 50.0))

@@ -121,6 +121,6 @@ def reset_risk_telemetry_for_tests() -> None:
 
         n = get_telegram_notifier()
         if n is not None:
-            n._alert_last_sent.clear()
+            n.reset_telemetry_for_tests()
     except Exception:
         pass

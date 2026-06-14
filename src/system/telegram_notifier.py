@@ -12,25 +12,55 @@ Setup (disabled until configured):
   5. Restart the agent.
 
 All sends are fire-and-forget; API failures are logged only and never block trading.
+
+v29.1 telemetry: routine operational noise is buffered in-memory and flushed on an
+hourly heartbeat; [RISK SHIELD], critical faults, and substantial losses bypass
+the buffer and dispatch immediately.
 """
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from datetime import datetime
+from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 import requests
 from requests.exceptions import RequestException, Timeout
-from typing import Any, Callable
-from zoneinfo import ZoneInfo
 
 from system.engine_log import log_engine
 
 _LONDON = ZoneInfo("Europe/London")
-_HEARTBEAT_INTERVAL_SEC = 60 * 60
+
+_DEFAULT_HEARTBEAT_INTERVAL_SEC = 3600.0
+_DEFAULT_SUBSTANTIAL_LOSS_POINTS = 50.0
 _ALERT_DEDUPE_SEC = 300.0
 _UNRESOLVED_ALERT_DEDUPE_SEC = 900.0
+
+_LOSS_PTS_RE = re.compile(
+    r"P&L:.*?(-\d+(?:\.\d+)?)\s*pts",
+    re.IGNORECASE,
+)
+
+_URGENT_CRITICAL_TOKENS = (
+    "critical",
+    "crash",
+    "fatal",
+    "exception",
+    "emergency",
+    "agent stopped",
+    "trading loops stopped",
+    "watchdog fatal",
+    "manual intervention",
+    "startup blocked",
+    "protection fail",
+    "equity circuit",
+    "entry halt",
+    "broker confirm overdue",
+    "drawdown limit",
+)
 
 _lock = threading.RLock()
 _unresolved_alert_last: dict[str, float] = {}
@@ -38,6 +68,30 @@ _instance: TelegramNotifier | None = None
 _heartbeat_provider: Callable[[], dict[str, Any]] | None = None
 _heartbeat_thread: threading.Thread | None = None
 _heartbeat_stop = threading.Event()
+
+
+def _empty_heartbeat_buffer() -> dict[str, Any]:
+    return {
+        "session_pnl_points": 0.0,
+        "position_epics": set(),
+        "correlation_multiplier": 1.0,
+        "suppressed_count": 0,
+        "buffer_dedupe_keys": set(),
+    }
+
+
+def _default_heartbeat_snapshot() -> dict[str, Any]:
+    """Best-effort live snapshot when no custom provider is registered."""
+    snap: dict[str, Any] = {}
+    try:
+        from api.agent_health import get_cached_health_status
+
+        health = get_cached_health_status()
+        snap["positions"] = int(health.get("open_deals") or 0)
+        snap["trading_healthy"] = bool(health.get("trading_healthy"))
+    except Exception:
+        pass
+    return snap
 
 
 def configure_telegram(cfg: Any) -> TelegramNotifier:
@@ -51,7 +105,13 @@ def configure_telegram(cfg: Any) -> TelegramNotifier:
         data = dict(raw) if isinstance(raw, dict) else {}
     with _lock:
         _instance = TelegramNotifier.from_config(data)
-    return _instance
+        inst = _instance
+    stop_telegram_heartbeat()
+    if inst.enabled:
+        if _heartbeat_provider is None:
+            set_heartbeat_provider(_default_heartbeat_snapshot)
+        start_telegram_heartbeat(inst.heartbeat_interval_seconds)
+    return inst
 
 
 def get_telegram_notifier() -> TelegramNotifier | None:
@@ -65,23 +125,26 @@ def set_heartbeat_provider(fn: Callable[[], dict[str, Any]] | None) -> None:
         _heartbeat_provider = fn
 
 
-def start_telegram_heartbeat(interval_sec: float = _HEARTBEAT_INTERVAL_SEC) -> None:
-    """Start daemon thread that sends periodic heartbeat messages."""
+def start_telegram_heartbeat(interval_sec: float | None = None) -> None:
+    """Start daemon thread that flushes the aggregated heartbeat buffer."""
     global _heartbeat_thread
+    wait_sec = float(interval_sec or _DEFAULT_HEARTBEAT_INTERVAL_SEC)
+    if wait_sec <= 0:
+        wait_sec = _DEFAULT_HEARTBEAT_INTERVAL_SEC
     with _lock:
         if _heartbeat_thread is not None and _heartbeat_thread.is_alive():
             return
         _heartbeat_stop.clear()
 
         def _loop() -> None:
-            while not _heartbeat_stop.wait(interval_sec):
+            while not _heartbeat_stop.wait(wait_sec):
                 try:
                     notifier = get_telegram_notifier()
                     if notifier is None or not notifier.enabled:
                         continue
                     provider = _heartbeat_provider
                     payload = provider() if provider else {}
-                    notifier.send_heartbeat(payload)
+                    notifier.flush_aggregated_heartbeat(payload)
                 except Exception as e:
                     log_engine(f"telegram heartbeat failed: {type(e).__name__}: {e}")
 
@@ -92,7 +155,10 @@ def start_telegram_heartbeat(interval_sec: float = _HEARTBEAT_INTERVAL_SEC) -> N
 
 
 def stop_telegram_heartbeat() -> None:
+    global _heartbeat_thread
     _heartbeat_stop.set()
+    with _lock:
+        _heartbeat_thread = None
 
 
 def executive_status_only_enabled(cfg: Any | None = None) -> bool:
@@ -232,7 +298,7 @@ def send_startup_test() -> bool:
 
 
 class TelegramNotifier:
-    """Async Telegram Bot API client (sendMessage only)."""
+    """Async Telegram Bot API client with buffered operational telemetry."""
 
     def __init__(
         self,
@@ -240,20 +306,34 @@ class TelegramNotifier:
         enabled: bool,
         bot_token: str,
         chat_id: str,
+        heartbeat_interval_seconds: float = _DEFAULT_HEARTBEAT_INTERVAL_SEC,
+        substantial_loss_points: float = _DEFAULT_SUBSTANTIAL_LOSS_POINTS,
     ) -> None:
         self.enabled = bool(enabled) and bool(bot_token) and bool(chat_id)
         self.bot_token = str(bot_token or "").strip()
         self.chat_id = str(chat_id or "").strip()
+        self.heartbeat_interval_seconds = float(heartbeat_interval_seconds)
+        self.substantial_loss_points = float(substantial_loss_points)
         self._alert_last_sent: dict[str, float] = {}
         self._stream_stale_sent: set[str] = set()
+        self._buffer_lock = threading.RLock()
+        self._heartbeat_buffer: dict[str, Any] = _empty_heartbeat_buffer()
 
     @classmethod
     def from_config(cls, data: dict[str, Any] | None) -> TelegramNotifier:
         raw = data or {}
+        interval = float(
+            raw.get("telegram_heartbeat_interval_seconds", _DEFAULT_HEARTBEAT_INTERVAL_SEC)
+        )
+        loss_pts = float(
+            raw.get("telegram_substantial_loss_points", _DEFAULT_SUBSTANTIAL_LOSS_POINTS)
+        )
         return cls(
             enabled=bool(raw.get("enabled", False)),
             bot_token=str(raw.get("bot_token", "") or ""),
             chat_id=str(raw.get("chat_id", "") or ""),
+            heartbeat_interval_seconds=interval,
+            substantial_loss_points=loss_pts,
         )
 
     def _send_async(self, text: str) -> None:
@@ -312,11 +392,82 @@ class TelegramNotifier:
     def _now_bst() -> str:
         return datetime.now(_LONDON).strftime("%H:%M BST")
 
+    def _extract_loss_points(self, body: str) -> float | None:
+        text = str(body or "")
+        lower = text.lower()
+        if "loss" not in lower and "❌" not in text:
+            return None
+        match = _LOSS_PTS_RE.search(text)
+        if match:
+            return abs(float(match.group(1)))
+        for token in re.findall(r"(-\d+(?:\.\d+)?)\s*pts", text, flags=re.IGNORECASE):
+            val = abs(float(token))
+            if val > 0:
+                return val
+        return None
+
+    def _is_urgent(self, message: str) -> bool:
+        body = str(message or "").strip()
+        if not body:
+            return False
+        lower = body.lower()
+        if "[risk shield]" in lower or "risk shield" in lower:
+            return True
+        if any(token in lower for token in _URGENT_CRITICAL_TOKENS):
+            return True
+        loss_pts = self._extract_loss_points(body)
+        if loss_pts is not None and loss_pts >= self.substantial_loss_points:
+            return True
+        return False
+
+    def _buffer_alert(self, message: str, *, dedupe_key: str | None = None) -> None:
+        body = str(message or "").strip()
+        if not body:
+            return
+        with self._buffer_lock:
+            buf = self._heartbeat_buffer
+            if dedupe_key:
+                keys = buf["buffer_dedupe_keys"]
+                if dedupe_key in keys:
+                    buf["suppressed_count"] = int(buf.get("suppressed_count") or 0) + 1
+                    return
+                keys.add(dedupe_key)
+            buf["suppressed_count"] = int(buf.get("suppressed_count") or 0) + 1
+            loss_pts = self._extract_loss_points(body)
+            if loss_pts is not None:
+                buf["session_pnl_points"] = float(buf.get("session_pnl_points") or 0.0) - loss_pts
+            win_match = re.search(
+                r"P&L:.*?\+(\d+(?:\.\d+)?)\s*pts",
+                body,
+                flags=re.IGNORECASE,
+            )
+            if win_match:
+                buf["session_pnl_points"] = float(buf.get("session_pnl_points") or 0.0) + float(
+                    win_match.group(1)
+                )
+            epic_match = re.search(r"(?:Epic:|^[^\n]*?\s)([A-Z0-9.]+(?:\.[A-Z0-9.]+)+)", body)
+            if epic_match:
+                buf["position_epics"].add(epic_match.group(1))
+            mult_match = re.search(
+                r"correlation.*?multiplier.*?(\d+(?:\.\d+)?)",
+                body,
+                flags=re.IGNORECASE,
+            )
+            if mult_match:
+                buf["correlation_multiplier"] = float(mult_match.group(1))
+
+    def record_correlation_multiplier(self, multiplier: float) -> None:
+        with self._buffer_lock:
+            self._heartbeat_buffer["correlation_multiplier"] = float(multiplier)
+
+    def reset_telemetry_for_tests(self) -> None:
+        self._alert_last_sent.clear()
+        with self._buffer_lock:
+            self._heartbeat_buffer = _empty_heartbeat_buffer()
+
     def _alert_deduped(
         self, key: str, text: str, *, dedupe_sec: float = _ALERT_DEDUPE_SEC
     ) -> None:
-        if executive_status_only_enabled():
-            return
         now = time.time()
         with _lock:
             last = self._alert_last_sent.get(key, 0.0)
@@ -325,20 +476,73 @@ class TelegramNotifier:
             self._alert_last_sent[key] = now
         self._send_async(text)
 
+    def _route_notification(
+        self,
+        message: str,
+        *,
+        dedupe_key: str | None = None,
+        force_urgent: bool = False,
+    ) -> None:
+        raw = str(message or "").strip()
+        if not raw:
+            return
+        urgent = force_urgent or self._is_urgent(raw)
+        if executive_status_only_enabled() and not urgent and not _preserve_alert_in_executive_mode(raw):
+            self._buffer_alert(raw, dedupe_key=dedupe_key)
+            return
+        if urgent:
+            if dedupe_key:
+                self._alert_deduped(dedupe_key, raw)
+            else:
+                self._send_async(raw)
+            return
+        self._buffer_alert(raw, dedupe_key=dedupe_key)
+
     def send(self, text: str) -> None:
-        """Async send — convenience alias for fire-and-forget messages."""
-        self._send_async(text)
+        """Async send with urgent escalation gate."""
+        self._route_notification(text)
 
     def send_alert(self, message: str, *, dedupe_key: str | None = None) -> None:
+        raw = str(message or "").strip()
+        if not raw:
+            return
         line = (
-            message
-            if message.startswith(("⚠️", "❌", "💓", "🟢", "🔴", "🚨"))
-            else f"⚠️ {message}"
+            raw
+            if raw.startswith(("⚠️", "❌", "💓", "🟢", "🔴", "🚨", "📈", "✅"))
+            else f"⚠️ {raw}"
         )
-        if dedupe_key:
-            self._alert_deduped(dedupe_key, line)
-        else:
-            self._send_async(line)
+        self._route_notification(line, dedupe_key=dedupe_key)
+
+    def flush_aggregated_heartbeat(self, snapshot: dict[str, Any] | None = None) -> None:
+        snap = dict(snapshot or {})
+        with self._buffer_lock:
+            buf = self._heartbeat_buffer
+            session_pts = float(buf.get("session_pnl_points") or 0.0)
+            suppressed = int(buf.get("suppressed_count") or 0)
+            epics = set(buf.get("position_epics") or set())
+            corr_mult = float(buf.get("correlation_multiplier") or 1.0)
+            self._heartbeat_buffer = _empty_heartbeat_buffer()
+
+        positions = int(snap.get("positions") or snap.get("open_deals") or len(epics) or 0)
+        if snap.get("correlation_multiplier") is not None:
+            corr_mult = float(snap.get("correlation_multiplier") or corr_mult)
+        epic_count = len(epics) if epics else positions
+        pts_sign = "+" if session_pts >= 0 else ""
+        text = (
+            "================================\n"
+            "📊 [AGENT HEARTBEAT REPORT]\n"
+            "================================\n"
+            f"• Session P&L: {pts_sign}{session_pts:.1f} pts\n"
+            f"• Active Positions: {positions} open across {max(epic_count, 1)} epics\n"
+            f"• Current Risk State: Correlation Multiplier at {corr_mult:.2f}\n"
+            f"• Filters Suppressed: {suppressed} standard alerts silenced this hour.\n"
+            "================================"
+        )
+        self._send_async(text)
+
+    def send_heartbeat(self, snapshot: dict[str, Any]) -> None:
+        """Legacy alias — routes to aggregated flush."""
+        self.flush_aggregated_heartbeat(snapshot)
 
     def notify_startup(
         self,
@@ -356,10 +560,13 @@ class TelegramNotifier:
         self.send_now("🔴 IG Agent v25 stopped")
 
     def notify_critical(self, message: str) -> None:
-        self._send_async(f"🚨 CRITICAL: {message}")
+        self._route_notification(f"🚨 CRITICAL: {message}", force_urgent=True)
 
     def notify_crash(self, error: str) -> None:
-        self._send_async(f"❌ Agent crash — check logs immediately\n{error[:500]}")
+        self._route_notification(
+            f"❌ Agent crash — check logs immediately\n{error[:500]}",
+            force_urgent=True,
+        )
 
     def notify_stream_stale(self, epic: str, tick_age_s: float) -> None:
         if epic in self._stream_stale_sent:
@@ -415,7 +622,7 @@ class TelegramNotifier:
             f"Protection: {prot} | Signal:{signal_pct:.0f}% Fitness:{fitness_pct:.0f}%\n"
             f"Points:{points_state}"
         )
-        self._send_async(text)
+        self._route_notification(text)
 
     def notify_trade_closed(
         self,
@@ -445,33 +652,6 @@ class TelegramNotifier:
             lines.append(f"P&L: {pts_str}")
         lines.append(f"Entry: {entry:.5f} → Exit: {exit_price:.5f}")
         lines.append(f"Cumulative: {cumulative:.1f}pts {points_state}")
-        self._send_async("\n".join(lines))
-
-    def send_heartbeat(self, snapshot: dict[str, Any]) -> None:
-        if executive_status_only_enabled():
-            return
-        fitness = float(snapshot.get("fitness") or 0)
-        signal = float(snapshot.get("signal") or 0)
-        stream = str(snapshot.get("stream") or "DISCONNECTED")
-        positions = int(snapshot.get("positions") or 0)
-        cumulative = float(snapshot.get("cumulative") or 0)
-        state = str(snapshot.get("state") or "CAUTION")
-        balance = snapshot.get("balance")
-        daily_pnl = snapshot.get("daily_pnl")
-        balance_line = ""
-        if balance is not None:
-            pnl_sign = "+" if float(daily_pnl or 0) >= 0 else ""
-            pnl_str = (
-                f" | Daily P&L: {pnl_sign}£{float(daily_pnl or 0):,.2f}"
-                if daily_pnl is not None
-                else ""
-            )
-            balance_line = f"\nBalance: £{float(balance):,.2f}{pnl_str}"
-        text = (
-            f"💓 Hourly update {self._now_bst()}\n"
-            f"Fitness: {fitness:.0f}% | Signal: {signal:.0f}%\n"
-            f"Stream: {stream} | Positions: {positions}\n"
-            f"Points: {cumulative:.1f} {state}"
-            f"{balance_line}"
-        )
-        self._send_async(text)
+        text = "\n".join(lines)
+        substantial_loss = (not win) and abs(float(pnl_pts)) >= self.substantial_loss_points
+        self._route_notification(text, force_urgent=substantial_loss)

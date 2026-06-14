@@ -120,11 +120,17 @@ def apply_config_defaults(config: dict[str, Any]) -> dict[str, Any]:
             "bot_token": "",
             "chat_id": "",
             "executive_status_only": True,
+            "telegram_heartbeat_interval_seconds": 3600,
+            "telegram_substantial_loss_points": 50.0,
         }
     else:
         tg = out["telegram"]
         if "executive_status_only" not in tg:
             tg["executive_status_only"] = True
+        if "telegram_heartbeat_interval_seconds" not in tg:
+            tg["telegram_heartbeat_interval_seconds"] = 3600
+        if "telegram_substantial_loss_points" not in tg:
+            tg["telegram_substantial_loss_points"] = 50.0
     return out
 
 

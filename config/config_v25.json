@@ -353,7 +353,9 @@
     "enabled": true,
     "bot_token": "",
     "chat_id": "",
-    "executive_status_only": true
+    "executive_status_only": true,
+    "telegram_heartbeat_interval_seconds": 3600,
+    "telegram_substantial_loss_points": 50.0
   },
   "rest_hard_cap_per_minute": 3,
   "trailing_stop": {
