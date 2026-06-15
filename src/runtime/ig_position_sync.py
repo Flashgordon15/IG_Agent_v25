@@ -45,6 +45,7 @@ class SyncedPosition:
     bid: float = 0.0
     offer: float = 0.0
     currency: str = ""
+    created_at: str = ""
 
 
 @dataclass
@@ -193,8 +194,18 @@ class IgPositionSync:
                 last_closed_summary=self._snapshot.last_closed_summary,
             )
 
-    def _open_mins_for_deal(self, deal_id: str) -> float | None:
-        """Look up opened_at from local store and return minutes since entry."""
+    def _open_mins_for_deal(
+        self, deal_id: str, created_at: str = ""
+    ) -> float | None:
+        """Minutes since entry — IG createdDate, then local store opened_at."""
+        if created_at:
+            try:
+                opened = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+                if opened.tzinfo is None:
+                    opened = opened.replace(tzinfo=None)
+                return max(0.0, (datetime.now() - opened).total_seconds() / 60.0)
+            except Exception:
+                pass
         if not self._store or not deal_id:
             return None
         try:
@@ -247,7 +258,8 @@ class IgPositionSync:
             "current": p.bid if p.direction == "BUY" else p.offer,
             "currency": currency,
             "point_value": point_value,
-            "open_mins": self._open_mins_for_deal(p.deal_id),
+            "open_mins": self._open_mins_for_deal(p.deal_id, p.created_at),
+            "opened_at": p.created_at or None,
         }
 
     def snapshot_dict(self) -> dict[str, Any]:
@@ -539,6 +551,12 @@ class IgPositionSync:
                     bid=float(mkt.get("bid") or 0),
                     offer=float(mkt.get("offer") or 0),
                     currency=currency,
+                    created_at=str(
+                        pos.get("createdDateUTC")
+                        or pos.get("createdDate")
+                        or pos.get("created")
+                        or ""
+                    ),
                 )
             )
         return out

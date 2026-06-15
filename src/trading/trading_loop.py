@@ -2413,6 +2413,28 @@ class TradingLoop:
     def _flatten_if_needed(self) -> None:
         at = quote_time(self._clock())
         try:
+            from trading.flatten_retry import (
+                check_slow_monitor_alerts,
+                mark_flatten_retry_attempt,
+                on_flatten_confirmed,
+                should_run_flatten_retry,
+            )
+
+            if should_run_flatten_retry():
+                mark_flatten_retry_attempt()
+                log_engine("flatten retry — scheduled re-attempt")
+                try:
+                    n = self._execute_flatten_close()
+                    log_engine(f"flatten retry close sent — {n} position(s)")
+                except Exception as e:
+                    log_engine(f"flatten retry close failed: {type(e).__name__}: {e}")
+                self._verify_flatten_after_close(at)
+                return
+
+            open_count = self._ig_open_position_count()
+            if open_count > 0:
+                check_slow_monitor_alerts(self._epic, open_count)
+
             if not self._session.should_run_flatten_attempt(at=at):
                 return
         except Exception as e:
@@ -2427,9 +2449,14 @@ class TradingLoop:
             log_engine(f"flatten close sent — {n} position(s)")
         except Exception as e:
             log_engine(f"flatten close failed: {type(e).__name__}: {e}")
-            self._session.record_flatten_failure()
-            if self._session.flatten_failures() >= 3:
-                self._flatten_failed_critical()
+            try:
+                from trading.flatten_retry import on_flatten_verify_failed
+
+                on_flatten_verify_failed(
+                    self._epic, self._ig_open_position_count(), cfg=self._config
+                )
+            except Exception:
+                pass
             return
         self._verify_flatten_after_close(at)
 
@@ -2446,16 +2473,46 @@ class TradingLoop:
         open_count = self._ig_open_position_count()
         if open_count <= 0:
             log_engine("FLATTEN CONFIRMED — all positions closed")
+            try:
+                from trading.flatten_retry import on_flatten_confirmed
+
+                on_flatten_confirmed()
+            except Exception:
+                pass
             self._session.flatten_confirmed()
             self._write_session_summary_if_needed(at)
             return
-        failures = self._session.record_flatten_failure()
-        log_engine(
-            f"flatten verify failed — {open_count} position(s) still open "
-            f"(failure {failures}/3)"
-        )
-        if failures >= 3:
-            self._flatten_failed_critical()
+        try:
+            from trading.flatten_retry import (
+                check_slow_monitor_alerts,
+                flatten_max_retries,
+                flatten_backoff_seconds,
+                get_flatten_retry_state,
+                on_flatten_verify_failed,
+            )
+
+            st = on_flatten_verify_failed(
+                self._epic,
+                open_count,
+                cfg=self._config,
+            )
+            cap = flatten_max_retries(self._config)
+            log_engine(
+                f"flatten verify failed — {open_count} position(s) still open "
+                f"(failure {st.retry_count}/{cap})"
+            )
+            if st.abandoned:
+                check_slow_monitor_alerts(
+                    self._epic,
+                    open_count,
+                )
+            return
+        except Exception as e:
+            log_engine(
+                f"flatten verify failed — {open_count} position(s) still open "
+                f"flatten_retry error: {e}"
+            )
+            return
 
     def _write_session_summary_if_needed(self, at: datetime) -> None:
         try:
@@ -3057,28 +3114,21 @@ class TradingLoop:
             return None
 
     def _win_rate_20_pct(self) -> int | None:
-        if self._store is None or not hasattr(self._store, "recent_closed_trades"):
+        if self._store is None or not hasattr(
+            self._store, "recent_confirmed_closed_trades"
+        ):
             return None
         try:
-            from system.closed_trades_display import is_excluded_display_row
-
-            rows = self._store.recent_closed_trades(40)
-            closed: list[dict[str, Any]] = []
-            for row in rows:
-                if is_excluded_display_row(row):
-                    continue
-                closed.append(row)
-                if len(closed) >= 20:
-                    break
-            if not closed:
+            rows = self._store.recent_confirmed_closed_trades(20)
+            if not rows:
                 return None
             wins = 0
-            for row in closed:
+            for row in rows:
                 result = str(row.get("result") or "").upper()
                 if not result:
                     pnl = row.get("ig_pnl_currency")
                     if pnl is None:
-                        pnl = row.get("pnl_points")
+                        pnl = row.get("pnl")
                     try:
                         pnl_f = float(pnl)
                         result = (
@@ -3088,7 +3138,7 @@ class TradingLoop:
                         result = ""
                 if result == "WIN":
                     wins += 1
-            return int(round((wins / len(closed)) * 100))
+            return int(round((wins / len(rows)) * 100))
         except Exception:
             return None
 
@@ -3169,24 +3219,20 @@ class TradingLoop:
 
     def _recent_trades_results(self) -> list[dict[str, Any]]:
         try:
-            if self._store is None or not hasattr(self._store, "recent_closed_trades"):
+            if self._store is None or not hasattr(
+                self._store, "recent_confirmed_closed_trades"
+            ):
                 return []
-            from system.closed_trades_display import is_excluded_display_row
-
-            rows = self._store.recent_closed_trades(50)
+            rows = self._store.recent_confirmed_closed_trades(20)
             out: list[dict[str, Any]] = []
             for row in rows:
-                if is_excluded_display_row(row):
-                    continue
                 pnl_gbp = row.get("ig_pnl_currency")
                 if pnl_gbp is not None:
                     result = "WIN" if float(pnl_gbp) > 0 else "LOSS"
                 else:
-                    pnl_pts = float(row.get("pnl_points") or 0)
+                    pnl_pts = float(row.get("pnl_points") or row.get("pnl") or 0)
                     result = "WIN" if pnl_pts > 0 else "LOSS"
                 out.append({"result": result})
-                if len(out) >= 20:
-                    break
             return out
         except Exception:
             return []

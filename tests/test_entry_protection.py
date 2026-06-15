@@ -16,15 +16,16 @@ from data.models import Quote
 from signals.signal_engine import SignalEngine
 from system.config import Config
 from trading.entry_protection import (
+    apply_ranging_penalty,
     check_daily_trade_cap,
-    check_ranging_regime,
     check_reentry_cooldown,
     check_session_blackout,
-    daily_trade_count,
-    increment_daily_trade_count,
+    increment_session_trade_count,
     ml_insufficient_data_threshold,
     record_epic_close,
     reset_entry_protection_state,
+    session_trade_count,
+    session_window_key,
 )
 
 GOLD = "CS.D.CFPGOLD.CFP.IP"
@@ -54,7 +55,9 @@ def _cfg(**overrides) -> Config:
         "rsi_sell_max": 45,
         "atr_period": 14,
         "min_atr_points": 0,
+        "momentum_gap_points": 5,
         "max_live_quotes": 5000,
+        "learning_enabled": False,
         "vol_regime_filter_enabled": False,
         "entry_protection": {
             "enabled": True,
@@ -63,13 +66,14 @@ def _cfg(**overrides) -> Config:
             "gold_weekday_blackout_start": "20:00",
             "gold_weekday_blackout_end": "06:00",
             "gold_weekend_blackout_start": "Fri 20:00",
-            "gold_weekend_blackout_end": "Sun 22:00",
-            "reentry_cooldown_minutes": 15,
-            "reentry_cooldown_after_loss_minutes": 30,
+            "gold_weekend_blackout_end": "Mon 06:00",
+            "cooldown_minutes_after_close": 10,
             "ranging_filter_enabled": True,
             "ranging_atr_ratio_threshold": 1.5,
             "ranging_h1_bars": 20,
-            "max_trades_per_epic_per_day": 8,
+            "h1_ranging_penalty": 25,
+            "h1_ranging_hard_block": False,
+            "max_trades_per_epic_per_session": 12,
             "ml_min_rows_for_trust": 50,
             "ml_insufficient_rows_threshold": 99,
         },
@@ -131,23 +135,21 @@ class TestReentryCooldown(unittest.TestCase):
             mock_dt.now.return_value = closed_at
             record_epic_close(epic, -5.0)
 
-        inside = closed_at + timedelta(minutes=10)
+        inside = closed_at + timedelta(minutes=2)
         blocked, reason = check_reentry_cooldown(epic, cfg, now=inside)
         self.assertTrue(blocked)
         self.assertIn("remaining", reason)
 
-        outside = closed_at + timedelta(minutes=31)
+        outside = closed_at + timedelta(minutes=11)
         blocked, reason = check_reentry_cooldown(epic, cfg, now=outside)
         self.assertFalse(blocked, reason)
 
 
-class TestRangingRegime(unittest.TestCase):
+class TestRangingPenalty(unittest.TestCase):
     def setUp(self) -> None:
         reset_entry_protection_state()
 
-    def _engine_with_h1(
-        self, *, spread: float, atr: float, bars: int = 20
-    ) -> SignalEngine:
+    def _engine_with_h1(self, *, spread: float, atr: float, bars: int = 20, trending: bool = False) -> SignalEngine:
         cfg = _cfg()
         engine = SignalEngine(cfg)
         base = datetime(2026, 6, 10, 0, 0)
@@ -155,6 +157,8 @@ class TestRangingRegime(unittest.TestCase):
         mid = 100.0
         for i in range(bars * 60):
             t = base + timedelta(minutes=i)
+            if trending:
+                mid = 100.0 + i * 0.3
             rows.append(
                 {
                     "time": t,
@@ -167,13 +171,14 @@ class TestRangingRegime(unittest.TestCase):
         df = pd.DataFrame(rows)
         c60 = engine.candles(df, 60)
         c60 = c60.copy()
-        low = 100.0
-        high = low + spread
-        c60["low"] = low
-        c60["high"] = high
-        c60["close"] = (low + high) / 2
-        c60["price"] = c60["close"]
-        c60["open"] = c60["close"]
+        if not trending:
+            low = 100.0
+            high = low + spread
+            c60["low"] = low
+            c60["high"] = high
+            c60["close"] = (low + high) / 2
+            c60["price"] = c60["close"]
+            c60["open"] = c60["close"]
         c60["atr"] = atr
 
         mock_engine = MagicMock(spec=SignalEngine)
@@ -182,21 +187,24 @@ class TestRangingRegime(unittest.TestCase):
         mock_engine.add_indicators.side_effect = lambda d: d
         return mock_engine
 
-    def test_ranging_blocks_choppy_market(self) -> None:
+    def test_ranging_applies_penalty(self) -> None:
         cfg = _cfg()
         engine = self._engine_with_h1(spread=5.0, atr=10.0)
-        blocked, reason = check_ranging_regime(engine, "Gold", cfg)
-        self.assertTrue(blocked)
-        self.assertIn("ratio", reason)
+        adjusted, penalty, note = apply_ranging_penalty(engine, "Gold", cfg, 70.0)
+        self.assertEqual(penalty, 25.0)
+        self.assertEqual(adjusted, 45.0)
+        self.assertIn("ratio", note)
 
-    def test_trending_passes(self) -> None:
+    def test_trending_no_penalty(self) -> None:
         cfg = _cfg()
-        engine = self._engine_with_h1(spread=40.0, atr=10.0)
-        blocked, reason = check_ranging_regime(engine, "Gold", cfg)
-        self.assertFalse(blocked, reason)
+        engine = self._engine_with_h1(spread=40.0, atr=10.0, trending=True)
+        adjusted, penalty, note = apply_ranging_penalty(engine, "Gold", cfg, 70.0)
+        self.assertEqual(penalty, 0.0)
+        self.assertEqual(adjusted, 70.0)
+        self.assertEqual(note, "")
 
 
-class TestDailyTradeCap(unittest.TestCase):
+class TestSessionTradeCap(unittest.TestCase):
     def setUp(self) -> None:
         reset_entry_protection_state()
 
@@ -204,12 +212,24 @@ class TestDailyTradeCap(unittest.TestCase):
         cfg = _cfg()
         epic = GOLD
         at = _london_dt(2026, 6, 15, 12, 0)
-        for _ in range(8):
-            increment_daily_trade_count(epic, now=at)
-        self.assertEqual(daily_trade_count(epic, now=at), 8)
+        for _ in range(12):
+            increment_session_trade_count(epic, now=at)
+        self.assertEqual(session_trade_count(epic, now=at), 12)
         blocked, reason = check_daily_trade_cap(epic, cfg, now=at)
         self.assertTrue(blocked)
-        self.assertIn("8/8", reason)
+        self.assertIn("12/12", reason)
+
+    def test_cap_resets_at_london_open(self) -> None:
+        cfg = _cfg()
+        epic = GOLD
+        late = _london_dt(2026, 6, 15, 6, 30)
+        for _ in range(12):
+            increment_session_trade_count(epic, now=late)
+        open_am = _london_dt(2026, 6, 15, 7, 5)
+        self.assertNotEqual(session_window_key(late), session_window_key(open_am))
+        self.assertEqual(session_trade_count(epic, now=open_am), 0)
+        blocked, _ = check_daily_trade_cap(epic, cfg, now=open_am)
+        self.assertFalse(blocked)
 
 
 class TestMlInsufficientDataGuard(unittest.TestCase):
@@ -242,7 +262,6 @@ class TestSignalEngineEntryProtection(unittest.TestCase):
         engine = SignalEngine(cfg)
         market = GOLD
         _seed_signal_engine(engine, market)
-        at = _london_dt(2026, 6, 15, 20, 5)
         with patch(
             "trading.entry_protection.check_session_blackout",
             return_value=(True, "test blackout"),

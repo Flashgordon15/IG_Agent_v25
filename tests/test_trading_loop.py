@@ -296,10 +296,10 @@ class TradingLoopTests(unittest.TestCase):
             rest.get_cached_account_summary.return_value
         )
         loop._execution_loop.execution_engine._rest_client = rest
-        loop._store.recent_closed_trades.return_value = [
-            {"result": "WIN"},
-            {"result": "LOSS"},
-            {"result": "WIN"},
+        loop._store.recent_confirmed_closed_trades.return_value = [
+            {"result": "WIN", "ig_pnl_currency": 10.0},
+            {"result": "LOSS", "ig_pnl_currency": -5.0},
+            {"result": "WIN", "ig_pnl_currency": 8.0},
         ]
         loop._store.sum_daily_pnl.return_value = -12.5
         loop.run_once()

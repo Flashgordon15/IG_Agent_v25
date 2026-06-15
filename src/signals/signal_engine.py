@@ -437,7 +437,6 @@ class SignalEngine:
         try:
             from trading.entry_protection import (
                 check_daily_trade_cap,
-                check_ranging_regime,
                 check_reentry_cooldown,
                 check_session_blackout,
                 resolve_epic_for_market,
@@ -455,11 +454,7 @@ class SignalEngine:
                 ),
                 (
                     *check_daily_trade_cap(epic, cfg, market=market),
-                    "daily_trade_cap",
-                ),
-                (
-                    *check_ranging_regime(self, market, cfg),
-                    "ranging_regime",
+                    "session_trade_cap",
                 ),
             ]
             for is_blocked, reason, block_key in protection_blocks:
@@ -591,6 +586,7 @@ class SignalEngine:
         candidate = raw_sig
         h1_penalty = 0.0
         h1_note = ""
+        regime_note = ""
         if buy_ok and sell_ok:
             candidate = "BUY" if buy >= sell else "SELL"
         elif buy_ok:
@@ -649,6 +645,16 @@ class SignalEngine:
             side_score = buy if candidate == "BUY" else sell
             delta, learn_note = self.learning_adjustment(setup)
             adjusted = max(0, min(99, side_score + delta))
+            regime_penalty = 0.0
+            regime_note = ""
+            try:
+                from trading.entry_protection import apply_ranging_penalty
+
+                adjusted, regime_penalty, regime_note = apply_ranging_penalty(
+                    self, market, cfg, float(adjusted)
+                )
+            except Exception:
+                regime_note = ""
             stop_pts = max(1.0, float(cfg.stop_distance_points))
             atr_ratio = float(last.get("atr", 0) or 0) / stop_pts
             try:
@@ -740,6 +746,7 @@ class SignalEngine:
             "h1_bearish": h1_bearish,
             "h1_bullish": h1_bullish,
             "h1_penalty": h1_penalty,
+            "regime_penalty": regime_penalty if candidate in ("BUY", "SELL") else 0.0,
         }
         self.last_snapshot[market] = snapshot
 

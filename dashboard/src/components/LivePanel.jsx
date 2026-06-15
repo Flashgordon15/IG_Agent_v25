@@ -1041,16 +1041,22 @@ export default function LivePanel({ state, rawState, selectedEpic, onSelectEpic,
   const closablePosition = positions.find((p) => !selectedEpic || p.epic === selectedEpic) ?? positions[0];
   const [closeStep, setCloseStep] = useState(0);
   const [closing, setClosing] = useState(false);
-  useEffect(() => { setCloseStep(0); }, [closablePosition?.deal_id]);
+  const [closeStatus, setCloseStatus] = useState(null);
+  useEffect(() => { setCloseStep(0); setCloseStatus(null); }, [closablePosition?.deal_id]);
 
   const handleClose = async () => {
     if (!closablePosition?.deal_id) return;
     if (closeStep < 1) { setCloseStep(1); return; }
     setClosing(true);
+    setCloseStatus("CLOSING");
     try {
-      await api.closeDeal(closablePosition.deal_id);
+      const res = await api.closeDeal(closablePosition.deal_id);
+      setCloseStatus(res?.status ?? "CLOSED");
       setCloseStep(0);
-    } catch (e) { alert(e.message); }
+    } catch (e) {
+      setCloseStatus("FAILED");
+      alert(e.message);
+    }
     finally { setClosing(false); }
   };
 
@@ -1154,7 +1160,15 @@ export default function LivePanel({ state, rawState, selectedEpic, onSelectEpic,
           <div className="mt-3 border-t border-border pt-3">
             <button type="button" disabled={closing} onClick={handleClose}
               className={["w-full rounded-md py-2 text-[12px] font-medium transition-colors", closeStep === 1 ? "bg-danger text-white" : "border border-danger text-danger hover:bg-danger/10"].join(" ")}>
-              {closeStep === 0 ? `Close ${closablePosition.side ?? "position"} — ${closablePosition.deal_id}` : closing ? "Closing…" : "Confirm close — click again"}
+              {closeStatus === "FAILED"
+                ? "Close FAILED — retry from dashboard"
+                : closeStatus === "CLOSED"
+                  ? "Closed"
+                  : closeStep === 0
+                    ? `Close ${closablePosition.side ?? "position"} — ${closablePosition.deal_id}`
+                    : closing || closeStatus === "CLOSING"
+                      ? "Closing…"
+                      : "Confirm close — click again"}
             </button>
             {closeStep === 1 && (
               <button type="button" className="mt-2 w-full text-[11px] text-muted" onClick={() => setCloseStep(0)}>Cancel</button>

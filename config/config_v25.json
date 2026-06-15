@@ -421,14 +421,20 @@
     "gold_weekday_blackout_start": "20:00",
     "gold_weekday_blackout_end": "06:00",
     "gold_weekend_blackout_start": "Fri 20:00",
-    "gold_weekend_blackout_end": "Sun 22:00",
-    "reentry_cooldown_minutes": 15,
-    "reentry_cooldown_after_loss_minutes": 30,
+    "gold_weekend_blackout_end": "Mon 06:00",
+    "cooldown_minutes_after_close": 10,
     "ranging_filter_enabled": true,
     "ranging_atr_ratio_threshold": 1.5,
     "ranging_h1_bars": 20,
-    "max_trades_per_epic_per_day": 8,
+    "h1_ranging_penalty": 25,
+    "h1_ranging_hard_block": false,
+    "max_trades_per_epic_per_session": 12,
     "ml_min_rows_for_trust": 50,
     "ml_insufficient_rows_threshold": 99
+  },
+  "flatten_retry": {
+    "flatten_max_retries": 5,
+    "flatten_retry_backoff_seconds": [30, 60, 120, 240, 480],
+    "flatten_slow_monitor_interval_seconds": 600
   }
 }

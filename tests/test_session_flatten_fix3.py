@@ -201,14 +201,15 @@ class TradingLoopFlattenVerificationTests(unittest.TestCase):
     def test_flatten_retries_when_still_open(
         self, sleep_mock: MagicMock, _snap: MagicMock
     ) -> None:
+        from trading.flatten_retry import reset_flatten_retry_state
+
+        reset_flatten_retry_state()
         flatten = MagicMock(return_value=1)
         sync = MagicMock()
         sync.count_for_epic.return_value = 1
         session = MagicMock()
         session.should_run_flatten_attempt.return_value = True
         session.mark_flatten_attempt.return_value = 5.0
-        session.record_flatten_failure.return_value = 1
-        session.flatten_failures.return_value = 1
         session.is_entry_blocked_near_session_end.return_value = (False, None)
         session.is_session_open.return_value = True
         session.is_cold_start.return_value = False
@@ -225,29 +226,28 @@ class TradingLoopFlattenVerificationTests(unittest.TestCase):
         with patch("trading.trading_loop.log_engine") as log_mock:
             loop.run_once()
             flatten.assert_called_once()
-            session.record_flatten_failure.assert_called_once()
             messages = [c.args[0] for c in log_mock.call_args_list]
             self.assertTrue(
                 any("flatten verify failed" in m and "still open" in m for m in messages)
             )
+            self.assertTrue(any("1/5" in m for m in messages))
 
     @patch("trading.trading_loop.publish_tick")
     @patch("trading.trading_loop.time.sleep")
-    @patch("trading.trading_loop.subprocess.Popen")
-    def test_emergency_stop_after_three_failures(
+    def test_abandoned_after_max_retries(
         self,
-        popen_mock: MagicMock,
         sleep_mock: MagicMock,
         _snap: MagicMock,
     ) -> None:
+        from trading.flatten_retry import on_flatten_verify_failed, reset_flatten_retry_state
+
+        reset_flatten_retry_state()
         flatten = MagicMock(return_value=1)
         sync = MagicMock()
         sync.count_for_epic.return_value = 2
         session = MagicMock()
         session.should_run_flatten_attempt.return_value = True
         session.mark_flatten_attempt.return_value = 1.0
-        session.record_flatten_failure.return_value = 3
-        session.flatten_failures.return_value = 3
         session.is_entry_blocked_near_session_end.return_value = (False, None)
         session.is_session_open.return_value = True
         session.is_cold_start.return_value = False
@@ -261,16 +261,14 @@ class TradingLoopFlattenVerificationTests(unittest.TestCase):
             position_sync=sync,
             session_manager=session,
         )
-        with patch("trading.trading_loop.log_engine") as log_mock:
+        for _ in range(4):
+            on_flatten_verify_failed(loop._epic, 2, cfg=loop._config)
+        with patch("trading.trading_loop.log_engine"):
             loop.run_once()
-            messages = [c.args[0] for c in log_mock.call_args_list]
-            self.assertTrue(
-                any(
-                    "CRITICAL: FLATTEN FAILED — manual intervention required" in m
-                    for m in messages
-                )
-            )
-            popen_mock.assert_called_once()
+        from trading.flatten_retry import get_flatten_retry_state
+
+        self.assertTrue(get_flatten_retry_state().abandoned)
+        self.assertTrue(get_flatten_retry_state().slow_monitor_active)
 
     @patch("trading.trading_loop.publish_tick")
     def test_entry_blocked_at_t10min(self, _snap: MagicMock) -> None:

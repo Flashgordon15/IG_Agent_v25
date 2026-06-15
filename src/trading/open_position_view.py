@@ -7,7 +7,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+FRESHNESS_SEC = 10.0
+_PRICE_STALE_LOGGED: set[str] = set()
+
 from data.models import Quote
+from system.engine_log import log_engine
 from system.pnl_math import (
     fx_upl_per_ig_point,
     pip_size_for_epic,
@@ -22,6 +26,33 @@ INSTRUMENT_PNL_SPEC: dict[str, dict[str, float | str]] = {
     "CS.D.CFPGOLD.CFP.IP": {"point_value": 1.0, "currency": "USD"},
     "IX.D.DAX.IFM.IP": {"point_value": 1.0, "currency": "EUR"},
 }
+
+
+def _quote_stale(quote: Quote | None, quote_age_s: float | None) -> bool:
+    if quote_age_s is not None:
+        return float(quote_age_s) > FRESHNESS_SEC
+    if quote is None or quote.time is None:
+        return True
+    try:
+        age = (datetime.now(timezone.utc) - quote.time.astimezone(timezone.utc)).total_seconds()
+        return age > FRESHNESS_SEC
+    except Exception:
+        return False
+
+
+def _log_price_stale(epic: str, age_s: float | None) -> None:
+    key = normalize_epic(epic)
+    if not key or key in _PRICE_STALE_LOGGED:
+        return
+    _PRICE_STALE_LOGGED.add(key)
+    from system.engine_log import log_engine
+
+    age_label = f"{float(age_s):.0f}s" if age_s is not None else "unknown"
+    log_engine(f"[PRICE STALE] Open P&L unreliable — last update {age_label} ago")
+
+
+def reset_price_stale_log_for_tests() -> None:
+    _PRICE_STALE_LOGGED.clear()
 
 
 def normalize_epic(epic: str) -> str:
@@ -385,6 +416,7 @@ def apply_position_view_refresh(
     offer: float,
     *,
     point_value_gbp: float = 1.0,
+    tick_age_s: float | None = None,
 ) -> bool:
     """Recompute open-position marks/P&L in-memory from a streaming quote."""
     epic_key = normalize_epic(epic)
@@ -406,6 +438,7 @@ def apply_position_view_refresh(
                     quote,
                     point_value_gbp=point_value_gbp,
                     epic=epic_key,
+                    quote_age_s=tick_age_s,
                 )
                 updated = True
 
@@ -416,6 +449,7 @@ def apply_position_view_refresh(
             quote,
             point_value_gbp=point_value_gbp,
             epic=epic_key,
+            quote_age_s=tick_age_s,
         )
         updated = True
     return updated
@@ -447,9 +481,24 @@ def enrich_positions_with_quote(
     *,
     point_value_gbp: float,
     epic: str | None = None,
+    quote_age_s: float | None = None,
 ) -> list[dict[str, Any]]:
     """Refresh mark and unrealized P&L from streaming quote (no REST)."""
+    if not positions:
+        return positions
+    stale = _quote_stale(quote, quote_age_s)
+    if stale and epic:
+        _log_price_stale(epic, quote_age_s)
     if not positions or quote is None:
+        if stale and positions:
+            out_stale: list[dict[str, Any]] = []
+            for raw in positions:
+                row = dict(raw)
+                row["price_stale"] = True
+                if quote_age_s is not None:
+                    row["quote_age_s"] = round(float(quote_age_s), 1)
+                out_stale.append(row)
+            return out_stale
         return positions
     out: list[dict[str, Any]] = []
     for raw in positions:
@@ -506,6 +555,32 @@ def enrich_positions_with_quote(
             )
         if mark:
             row["current"] = mark
+        open_mins = _compute_open_mins(row)
+        if open_mins is not None:
+            row["open_mins"] = round(open_mins, 1)
+            row["time_open_mins"] = round(open_mins, 1)
+        row["price_stale"] = stale
+        if quote_age_s is not None:
+            row["quote_age_s"] = round(float(quote_age_s), 1)
+        elif quote is not None and getattr(quote, "time", None) is not None:
+            try:
+                qtime = quote.time
+                if isinstance(qtime, datetime):
+                    if qtime.tzinfo is None:
+                        qtime = qtime.replace(tzinfo=timezone.utc)
+                    age_s = max(
+                        0.0,
+                        (
+                            datetime.now(timezone.utc)
+                            - qtime.astimezone(timezone.utc)
+                        ).total_seconds(),
+                    )
+                    row["quote_age_s"] = round(age_s, 1)
+                    row["price_stale"] = age_s > FRESHNESS_SEC
+            except Exception:
+                pass
+        if row.get("price_stale"):
+            row["pnl_stale"] = True
         row["pnl_pts"] = round_pnl_pts(pts, epic_str)
         row["point_value"] = pv
         row["currency"] = ccy

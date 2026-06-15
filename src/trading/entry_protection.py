@@ -1,5 +1,5 @@
 """
-Entry protection — session blackout, re-entry cooldown, ranging filter, daily cap.
+Entry protection — session blackout, re-entry cooldown, ranging filter, session cap.
 """
 
 from __future__ import annotations
@@ -14,6 +14,8 @@ from system.engine_log import log_engine
 
 _LONDON = ZoneInfo("Europe/London")
 _DOW = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+_LONDON_OPEN_MIN = 7 * 60
+_US_OPEN_MIN = 13 * 60 + 30
 
 
 def _ep_cfg(cfg: Config) -> dict[str, Any]:
@@ -75,9 +77,18 @@ def _in_weekend_blackout(dt: datetime, *, start: str, end: str) -> bool:
     end_m = eh * 60 + em
     wd = dt.weekday()
     t = _minutes_since_midnight(dt)
+    if start_dow <= end_dow:
+        if wd == start_dow and t >= start_m:
+            return True
+        if start_dow < wd < end_dow:
+            return True
+        if wd == end_dow and t < end_m:
+            return True
+        return False
+    # Wraps across week boundary (e.g. Fri 20:00 → Mon 06:00).
     if wd == start_dow and t >= start_m:
         return True
-    if start_dow < wd < end_dow:
+    if wd > start_dow or wd < end_dow:
         return True
     if wd == end_dow and t < end_m:
         return True
@@ -111,7 +122,7 @@ def _session_rules_for_epic(epic: str, cfg: Config) -> dict[str, str] | None:
                 "weekend_end": str(
                     row.get("weekend_blackout_end")
                     or row.get("gold_weekend_blackout_end")
-                    or ep.get("gold_weekend_blackout_end", "Sun 22:00")
+                    or ep.get("gold_weekend_blackout_end", "Mon 06:00")
                 ),
             }
     gold = str(ep.get("gold_epic", "CS.D.CFPGOLD.CFP.IP"))
@@ -120,7 +131,7 @@ def _session_rules_for_epic(epic: str, cfg: Config) -> dict[str, str] | None:
             "weekday_start": str(ep.get("gold_weekday_blackout_start", "20:00")),
             "weekday_end": str(ep.get("gold_weekday_blackout_end", "06:00")),
             "weekend_start": str(ep.get("gold_weekend_blackout_start", "Fri 20:00")),
-            "weekend_end": str(ep.get("gold_weekend_blackout_end", "Sun 22:00")),
+            "weekend_end": str(ep.get("gold_weekend_blackout_end", "Mon 06:00")),
         }
     default_rules = ep.get("default_session_rules")
     if isinstance(default_rules, dict):
@@ -130,7 +141,7 @@ def _session_rules_for_epic(epic: str, cfg: Config) -> dict[str, str] | None:
             "weekend_start": str(
                 default_rules.get("weekend_blackout_start", "Fri 20:00")
             ),
-            "weekend_end": str(default_rules.get("weekend_blackout_end", "Sun 22:00")),
+            "weekend_end": str(default_rules.get("weekend_blackout_end", "Mon 06:00")),
         }
     return None
 
@@ -156,6 +167,13 @@ def resolve_epic_for_market(market: str, cfg: Config) -> str:
     return str(cfg.epic or key)
 
 
+def _london_now(now: datetime | None = None) -> datetime:
+    at = now or datetime.now(_LONDON)
+    if at.tzinfo is None:
+        return at.replace(tzinfo=_LONDON)
+    return at.astimezone(_LONDON)
+
+
 def check_session_blackout(
     epic: str,
     cfg: Config,
@@ -169,11 +187,13 @@ def check_session_blackout(
     rules = _session_rules_for_epic(str(epic or "").strip(), cfg)
     if rules is None:
         return False, ""
-    at = now or datetime.now(_LONDON)
-    if at.tzinfo is None:
-        at = at.replace(tzinfo=_LONDON)
-    else:
-        at = at.astimezone(_LONDON)
+    at = _london_now(now)
+    label = str(market or epic)
+    log_engine(
+        f"[SESSION CHECK] {label} local={at.strftime('%Y-%m-%d %H:%M %Z')} "
+        f"(weekday {rules['weekday_start']}-{rules['weekday_end']}, "
+        f"weekend {rules['weekend_start']}–{rules['weekend_end']})"
+    )
     weekday_block = _in_weekday_overnight_blackout(
         at,
         start=rules["weekday_start"],
@@ -185,7 +205,6 @@ def check_session_blackout(
         end=rules["weekend_end"],
     )
     if weekday_block or weekend_block:
-        label = str(market or epic)
         parts: list[str] = []
         if weekday_block:
             parts.append(
@@ -206,13 +225,11 @@ def check_session_blackout(
 @dataclass
 class EntryProtectionState:
     last_close_time: dict[str, datetime] = field(default_factory=dict)
-    last_close_was_loss: dict[str, bool] = field(default_factory=dict)
-    daily_opens: dict[str, tuple[date, int]] = field(default_factory=dict)
+    session_opens: dict[str, tuple[str, int]] = field(default_factory=dict)
 
     def reset(self) -> None:
         self.last_close_time.clear()
-        self.last_close_was_loss.clear()
-        self.daily_opens.clear()
+        self.session_opens.clear()
 
 
 _STATE = EntryProtectionState()
@@ -230,9 +247,14 @@ def record_epic_close(epic: str, pnl_gbp: float | None) -> None:
     key = str(epic or "").strip()
     if not key:
         return
-    at = datetime.now(_LONDON)
-    _STATE.last_close_time[key] = at
-    _STATE.last_close_was_loss[key] = float(pnl_gbp or 0.0) < 0.0
+    _STATE.last_close_time[key] = datetime.now(_LONDON)
+
+
+def _cooldown_minutes(cfg: Config) -> int:
+    ep = _ep_cfg(cfg)
+    if "cooldown_minutes_after_close" in ep:
+        return int(ep.get("cooldown_minutes_after_close", 10))
+    return int(ep.get("reentry_cooldown_minutes", 10))
 
 
 def check_reentry_cooldown(
@@ -245,26 +267,16 @@ def check_reentry_cooldown(
     """Return (blocked, reason)."""
     if not _enabled(cfg):
         return False, ""
-    ep = _ep_cfg(cfg)
     key = str(epic or "").strip()
     closed_at = _STATE.last_close_time.get(key)
     if closed_at is None:
         return False, ""
-    at = now or datetime.now(_LONDON)
-    if at.tzinfo is None:
-        at = at.replace(tzinfo=_LONDON)
-    else:
-        at = at.astimezone(_LONDON)
+    at = _london_now(now)
     if closed_at.tzinfo is None:
         closed_at = closed_at.replace(tzinfo=_LONDON)
     else:
         closed_at = closed_at.astimezone(_LONDON)
-    loss = bool(_STATE.last_close_was_loss.get(key))
-    minutes = int(
-        ep.get("reentry_cooldown_after_loss_minutes", 30)
-        if loss
-        else ep.get("reentry_cooldown_minutes", 15)
-    )
+    minutes = _cooldown_minutes(cfg)
     elapsed = at - closed_at
     remaining = timedelta(minutes=minutes) - elapsed
     if remaining.total_seconds() <= 0:
@@ -277,36 +289,81 @@ def check_reentry_cooldown(
     return True, f"{mins_left}m remaining after last close"
 
 
-def _london_today(at: datetime) -> date:
-    if at.tzinfo is None:
-        at = at.replace(tzinfo=_LONDON)
-    return at.astimezone(_LONDON).date()
+def session_window_key(at: datetime | None = None) -> str:
+    """Trading session window id — resets 07:00 and 13:30 Europe/London."""
+    dt = _london_now(at)
+    d = dt.date()
+    t = _minutes_since_midnight(dt)
+    if t < _LONDON_OPEN_MIN:
+        prev = d - timedelta(days=1)
+        return f"{prev.isoformat()}_pm"
+    if t < _US_OPEN_MIN:
+        return f"{d.isoformat()}_am"
+    return f"{d.isoformat()}_pm"
 
 
-def increment_daily_trade_count(epic: str, now: datetime | None = None) -> int:
+def increment_session_trade_count(
+    epic: str, now: datetime | None = None
+) -> int:
     key = str(epic or "").strip()
     if not key:
         return 0
-    at = now or datetime.now(_LONDON)
-    today = _london_today(at)
-    stored_day, count = _STATE.daily_opens.get(key, (today, 0))
-    if stored_day != today:
+    window = session_window_key(now)
+    stored_window, count = _STATE.session_opens.get(key, (window, 0))
+    if stored_window != window:
         count = 0
     count += 1
-    _STATE.daily_opens[key] = (today, count)
+    _STATE.session_opens[key] = (window, count)
+    return count
+
+
+def increment_daily_trade_count(epic: str, now: datetime | None = None) -> int:
+    """Alias — session-window trade counter."""
+    return increment_session_trade_count(epic, now=now)
+
+
+def session_trade_count(epic: str, now: datetime | None = None) -> int:
+    key = str(epic or "").strip()
+    if not key:
+        return 0
+    window = session_window_key(now)
+    stored_window, count = _STATE.session_opens.get(key, (window, 0))
+    if stored_window != window:
+        return 0
     return count
 
 
 def daily_trade_count(epic: str, now: datetime | None = None) -> int:
-    key = str(epic or "").strip()
-    if not key:
-        return 0
-    at = now or datetime.now(_LONDON)
-    today = _london_today(at)
-    stored_day, count = _STATE.daily_opens.get(key, (today, 0))
-    if stored_day != today:
-        return 0
-    return count
+    return session_trade_count(epic, now=now)
+
+
+def _session_cap(cfg: Config) -> int:
+    ep = _ep_cfg(cfg)
+    if "max_trades_per_epic_per_session" in ep:
+        return int(ep.get("max_trades_per_epic_per_session", 12))
+    return int(ep.get("max_trades_per_epic_per_day", 12))
+
+
+def check_session_trade_cap(
+    epic: str,
+    cfg: Config,
+    now: datetime | None = None,
+    *,
+    market: str | None = None,
+) -> tuple[bool, str]:
+    if not _enabled(cfg):
+        return False, ""
+    cap = _session_cap(cfg)
+    if cap <= 0:
+        return False, ""
+    used = session_trade_count(epic, now=now)
+    if used < cap:
+        return False, ""
+    label = str(market or epic)
+    log_engine(
+        f"[SESSION CAP] {label} entry suppressed — {used}/{cap} trades this session window"
+    )
+    return True, f"{used}/{cap} trades this session window"
 
 
 def check_daily_trade_cap(
@@ -316,20 +373,67 @@ def check_daily_trade_cap(
     *,
     market: str | None = None,
 ) -> tuple[bool, str]:
-    if not _enabled(cfg):
-        return False, ""
+    return check_session_trade_cap(epic, cfg, now=now, market=market)
+
+
+def _ranging_ratio(
+    signal_engine: Any,
+    market: str,
+    cfg: Config,
+) -> tuple[float | None, int]:
     ep = _ep_cfg(cfg)
-    cap = int(ep.get("max_trades_per_epic_per_day", 8))
-    if cap <= 0:
-        return False, ""
-    used = daily_trade_count(epic, now=now)
-    if used < cap:
-        return False, ""
-    label = str(market or epic)
+    if not bool(ep.get("ranging_filter_enabled", True)):
+        return None, 0
+    threshold = float(ep.get("ranging_atr_ratio_threshold", 1.5))
+    bars_needed = int(ep.get("ranging_h1_bars", 20))
+    df = signal_engine.quote_df(market)
+    c60 = signal_engine.candles(df, 60)
+    if len(c60) < bars_needed:
+        return None, bars_needed
+    c60i = signal_engine.add_indicators(c60)
+    window = c60i.tail(bars_needed)
+    if window["atr"].isna().all():
+        return None, bars_needed
+    high_max = float(window["high"].max())
+    low_min = float(window["low"].min())
+    atr_mean = float(window["atr"].mean())
+    if atr_mean <= 0:
+        return None, bars_needed
+    ratio = (high_max - low_min) / atr_mean
+    if ratio >= threshold:
+        return ratio, bars_needed
+    return ratio, bars_needed
+
+
+def ranging_regime_penalty(
+    signal_engine: Any,
+    market: str,
+    cfg: Config,
+) -> tuple[int, str]:
+    """Return confidence penalty (0 = none) for H1 ranging conditions."""
+    if not _enabled(cfg):
+        return 0, ""
+    ep = _ep_cfg(cfg)
+    if bool(ep.get("h1_ranging_hard_block", False)):
+        blocked, reason = check_ranging_regime(signal_engine, market, cfg)
+        if blocked:
+            penalty = int(ep.get("h1_ranging_penalty", 25))
+            return penalty, reason
+        return 0, ""
+    ratio, _ = _ranging_ratio(signal_engine, market, cfg)
+    if ratio is None:
+        return 0, ""
+    threshold = float(ep.get("ranging_atr_ratio_threshold", 1.5))
+    if ratio >= threshold:
+        return 0, ""
+    penalty = int(ep.get("h1_ranging_penalty", 25))
+    if penalty <= 0:
+        return 0, ""
     log_engine(
-        f"[DAILY CAP] {label} entry suppressed — {used}/{cap} trades used today"
+        f"[REGIME PENALTY] {market} confidence reduced by {penalty} — ranging conditions "
+        f"(ratio: {ratio:.1f})"
     )
-    return True, f"{used}/{cap} trades used today"
+    return penalty, f"ranging market detected (ratio: {ratio:.1f})"
 
 
 def check_ranging_regime(
@@ -342,23 +446,10 @@ def check_ranging_regime(
     ep = _ep_cfg(cfg)
     if not bool(ep.get("ranging_filter_enabled", True)):
         return False, ""
-    threshold = float(ep.get("ranging_atr_ratio_threshold", 1.5))
-    bars_needed = int(ep.get("ranging_h1_bars", 20))
-    df = signal_engine.quote_df(market)
-    c60 = signal_engine.candles(df, 60)
-    if len(c60) < bars_needed:
+    if not bool(ep.get("h1_ranging_hard_block", False)):
         return False, ""
-    c60i = signal_engine.add_indicators(c60)
-    window = c60i.tail(bars_needed)
-    if window["atr"].isna().all():
-        return False, ""
-    high_max = float(window["high"].max())
-    low_min = float(window["low"].min())
-    atr_mean = float(window["atr"].mean())
-    if atr_mean <= 0:
-        return False, ""
-    ratio = (high_max - low_min) / atr_mean
-    if ratio >= threshold:
+    ratio, bars_needed = _ranging_ratio(signal_engine, market, cfg)
+    if ratio is None:
         return False, ""
     log_engine(
         f"[REGIME BLOCK] {market} entry suppressed — ranging market detected "
@@ -386,6 +477,20 @@ def ml_insufficient_data_threshold(cfg: Config) -> float | None:
     if count < min_rows:
         return forced
     return None
+
+
+def apply_ranging_penalty(
+    signal_engine: Any,
+    market: str,
+    cfg: Config,
+    confidence: float,
+) -> tuple[float, float, str]:
+    """Subtract H1 ranging penalty from confidence; return (new_score, penalty, note)."""
+    penalty, reason = ranging_regime_penalty(signal_engine, market, cfg)
+    if penalty <= 0:
+        return float(confidence), 0.0, ""
+    new_score = max(0.0, min(99.0, float(confidence) - float(penalty)))
+    return new_score, float(penalty), reason
 
 
 def log_ml_insufficient_data_warning(cfg: Config | None = None) -> None:

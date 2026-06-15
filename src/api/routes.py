@@ -503,7 +503,10 @@ def api_close_deal(deal_id: str) -> JSONResponse:
     """Manual position close — routes to IG close_position()."""
     try:
         result = close_deal(deal_id)
-        return JSONResponse({"ok": True, "deal_id": deal_id, "result": result})
+        status = str(result.get("status") or "CLOSED")
+        return JSONResponse(
+            {"ok": True, "deal_id": deal_id, "result": result, "status": status}
+        )
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
     except ValueError as e:
