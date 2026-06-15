@@ -7,9 +7,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-FRESHNESS_SEC = 10.0
-_PRICE_STALE_LOGGED: set[str] = set()
-
 from data.models import Quote
 from system.engine_log import log_engine
 from system.pnl_math import (
@@ -18,6 +15,9 @@ from system.pnl_math import (
     realised_pnl_points,
     round_pnl_pts,
 )
+
+FRESHNESS_SEC = 10.0
+_PRICE_STALE_LOGGED: set[str] = set()
 
 # Non-GBP CFD specs — point_value is in position currency per index point (per contract).
 INSTRUMENT_PNL_SPEC: dict[str, dict[str, float | str]] = {
