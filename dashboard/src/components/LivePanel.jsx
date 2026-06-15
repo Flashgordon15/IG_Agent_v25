@@ -12,6 +12,7 @@ import {
   medalForRank,
   resolveActiveEpics,
   resolveGateRelaxations,
+  TOP_ROTATION_DISPLAY_SLOTS,
 } from "../utils/roadmapTelemetry.js";
 
 // ---------------------------------------------------------------------------
@@ -848,10 +849,10 @@ function MarketGrid({ rawState, selectedEpic, onSelectEpic }) {
 
   const featured =
     activeEpics.length > 0
-      ? activeEpics.slice(0, 3)
+      ? activeEpics.slice(0, TOP_ROTATION_DISPLAY_SLOTS)
       : epics
           .filter((epic) => String(markets?.[epic]?.market_state ?? "").toUpperCase() === "OPEN")
-          .slice(0, 3);
+          .slice(0, TOP_ROTATION_DISPLAY_SLOTS);
   const featuredSet = new Set(featured);
   const secondary = epics.filter((epic) => !featuredSet.has(epic));
 
@@ -867,7 +868,9 @@ function MarketGrid({ rawState, selectedEpic, onSelectEpic }) {
                 ? "grid-cols-1 max-w-xs mx-auto"
                 : featured.length === 2
                   ? "grid-cols-2 max-w-lg mx-auto"
-                  : "grid-cols-1 sm:grid-cols-3",
+                  : featured.length <= 3
+                    ? "grid-cols-1 sm:grid-cols-3"
+                    : "grid-cols-2 sm:grid-cols-3 lg:grid-cols-5",
             ].join(" ")}
           >
             {featured.map((epic) => (

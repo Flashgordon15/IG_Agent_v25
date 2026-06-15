@@ -177,6 +177,49 @@ class OrchestratorDynamicExpansionIntegration(unittest.TestCase):
         self.assertEqual(len(active), 5)
         self.assertEqual(active, list(scores.keys()))
 
+    def test_rotation_rank_log_deduped_on_unchanged_rank(self) -> None:
+        from runtime.market_orchestrator import MarketOrchestrator
+        from system.config import Config
+
+        cfg = Config(_data={"rotation_base_slots": 3})
+        loops = []
+        scores = {
+            "EPIC_A": 100.0,
+            "EPIC_B": 80.0,
+            "EPIC_C": 60.0,
+        }
+        for epic, fitness in scores.items():
+            loop = MagicMock()
+            loop._epic = epic
+            loop._env = MagicMock()
+            loop._env._last.total = fitness
+            loop._publish_snapshots = False
+            loop._on_snapshot = None
+            loops.append(loop)
+
+        orch = MarketOrchestrator(
+            cfg,
+            loops,
+            primary_epic="EPIC_A",
+            enabled_epics=list(scores.keys()),
+        )
+        rank_side_effect = lambda epic, loop: float(scores.get(epic, 0.0))
+        with patch("system.engine_log.log_engine") as log_mock:
+            with patch.object(orch, "_apply_feed_circuit_breakers", return_value=set()):
+                with patch.object(orch, "_loop_providing_live_data", return_value=True):
+                    with patch.object(
+                        orch, "_strategy_session_eligible", return_value=True
+                    ):
+                        with patch.object(
+                            orch, "_rotation_rank_score", side_effect=rank_side_effect
+                        ):
+                            orch.refresh_active_epics()
+                            first_calls = log_mock.call_count
+                            orch.refresh_active_epics()
+                            second_calls = log_mock.call_count
+        self.assertGreater(first_calls, 0)
+        self.assertEqual(second_calls, first_calls)
+
 
 if __name__ == "__main__":
     unittest.main()

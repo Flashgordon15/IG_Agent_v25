@@ -83,6 +83,8 @@ _e2e_diagnostics_depth = 0
 _e2e_diagnostics_lock = threading.RLock()
 _ohlc_bootstrap_depth = 0
 _ohlc_bootstrap_lock = threading.RLock()
+_stream_quote_poll_depth = 0
+_stream_quote_poll_lock = threading.RLock()
 
 
 def e2e_diagnostics_rest_active() -> bool:
@@ -108,6 +110,27 @@ def ohlc_bootstrap_rest_window() -> Iterator[None]:
     finally:
         with _ohlc_bootstrap_lock:
             _ohlc_bootstrap_depth = max(0, _ohlc_bootstrap_depth - 1)
+
+
+@contextmanager
+def stream_quote_poll_rest_window() -> Iterator[None]:
+    """
+    REST poll transport: quote fetches for subscribed epics must not consume the
+  3/min hard cap — otherwise 5+ epics starve and trading loops see no quote.
+    """
+    global _stream_quote_poll_depth
+    with _stream_quote_poll_lock:
+        _stream_quote_poll_depth += 1
+    try:
+        yield
+    finally:
+        with _stream_quote_poll_lock:
+            _stream_quote_poll_depth = max(0, _stream_quote_poll_depth - 1)
+
+
+def stream_quote_poll_rest_active() -> bool:
+    with _stream_quote_poll_lock:
+        return _stream_quote_poll_depth > 0
 
 
 @contextmanager
@@ -364,7 +387,9 @@ class RestApiBudget:
             now = time.time()
             self._total_calls += 1
             cat = categorize_rest_label(label)
-            exempt_preemptive = ohlc_bootstrap_rest_active()
+            exempt_preemptive = (
+                ohlc_bootstrap_rest_active() or stream_quote_poll_rest_active()
+            )
             self._recent.append(
                 RestCallRecord(now, label, cat, exempt_preemptive=exempt_preemptive)
             )
@@ -412,6 +437,8 @@ class RestApiBudget:
         if category in ESSENTIAL_REST_CATEGORIES:
             return
         if e2e_diagnostics_rest_active():
+            return
+        if stream_quote_poll_rest_active():
             return
         if self._rate_limit_rest_active():
             if not self._rate_limit_skip_logged:

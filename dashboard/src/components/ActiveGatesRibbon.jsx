@@ -4,6 +4,7 @@ import {
   isRotationFilterBypassed,
   resolveActiveEpics,
   resolveGateRelaxations,
+  TOP_ROTATION_DISPLAY_SLOTS,
 } from "../utils/roadmapTelemetry.js";
 
 const RANK_BADGE_STYLES = [
@@ -57,7 +58,7 @@ export default function ActiveGatesRibbon({ state }) {
           {activeEpics.length > 0 && (
             <span className="text-[9px] text-amber-100/60">
               Ranked (info):{" "}
-              {activeEpics.slice(0, 3).map((epic, idx) => (
+              {activeEpics.slice(0, TOP_ROTATION_DISPLAY_SLOTS).map((epic, idx) => (
                 <span key={epic}>
                   {idx > 0 ? ", " : ""}
                   {RANK_MEDALS[idx] ?? ""}
@@ -80,7 +81,7 @@ export default function ActiveGatesRibbon({ state }) {
         <span className="shrink-0 font-semibold uppercase tracking-wide text-muted/80">
           Top rotation:
         </span>
-        {activeEpics.slice(0, 3).map((epic, idx) => (
+        {activeEpics.slice(0, TOP_ROTATION_DISPLAY_SLOTS).map((epic, idx) => (
           <span
             key={epic}
             role="status"

@@ -23,6 +23,8 @@ export function isRotationFilterBypassed(state) {
   return false;
 }
 
+const TOP_ROTATION_DISPLAY_SLOTS = 5;
+
 export function resolveActiveEpics(state) {
   const fromOrch = state?.orchestrator?.active_epics;
   if (Array.isArray(fromOrch) && fromOrch.length) return fromOrch.filter(Boolean);
@@ -36,16 +38,18 @@ export function resolveActiveEpics(state) {
   if (initCleared) {
     const enabled = state?.enabled_epics;
     if (Array.isArray(enabled) && enabled.length) {
-      return enabled.filter(Boolean).slice(0, 3);
+      return enabled.filter(Boolean).slice(0, TOP_ROTATION_DISPLAY_SLOTS);
     }
     const markets = state?.markets;
     if (markets && typeof markets === "object") {
       const keys = Object.keys(markets).filter(Boolean);
-      if (keys.length) return keys.slice(0, 3);
+      if (keys.length) return keys.slice(0, TOP_ROTATION_DISPLAY_SLOTS);
     }
   }
   return [];
 }
+
+export { TOP_ROTATION_DISPLAY_SLOTS };
 
 export function epicShortLabel(epic, labels = {}) {
   if (!epic) return "—";

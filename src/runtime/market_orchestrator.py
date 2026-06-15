@@ -57,6 +57,7 @@ _ROTATION_ONLINE_MAX_AGE_SEC = 30.0
 _ROTATION_RANK_FLOOR = 0.01
 _FEED_STARVATION_MAX_AGE_SEC = 120.0
 _FEED_RECOVERY_MAX_AGE_SEC = 30.0
+_ROTATION_LOG_MIN_INTERVAL_SEC = 60.0
 OFFLINE_BROKER_FEED_REJECTED = "OFFLINE_BROKER_FEED_REJECTED"
 
 
@@ -166,6 +167,8 @@ class MarketOrchestrator:
         self._active_epics: list[str] = list(passed_enabled)
         self._active_epics_updated_at: float = 0.0
         self._feed_offline_epics: set[str] = set()
+        self._last_rotation_log_key: tuple[Any, ...] | None = None
+        self._last_rotation_log_ts: float = 0.0
 
     @property
     def config(self) -> Config:
@@ -454,6 +457,7 @@ class MarketOrchestrator:
         from system.engine_log import log_engine
 
         active_set = set(active)
+        rank_rows: list[tuple[str, int, float, str]] = []
         for rank, (epic, score) in enumerate(ranked_assets, start=1):
             if epic in feed_offline:
                 status = "MUTED"
@@ -461,9 +465,21 @@ class MarketOrchestrator:
                 status = "IN_TOP_3"
             else:
                 status = "RANKED_OUT"
-            log_engine(
-                f"[ROTATION RANK] {epic} score={score:.2f} rank={rank} status={status}"
-            )
+            rank_rows.append((epic, rank, score, status))
+
+        log_key = (tuple(active), tuple(rank_rows))
+        now = time.time()
+        should_log = (
+            log_key != self._last_rotation_log_key
+            or (now - self._last_rotation_log_ts) >= _ROTATION_LOG_MIN_INTERVAL_SEC
+        )
+        if should_log and rank_rows:
+            for epic, rank, score, status in rank_rows:
+                log_engine(
+                    f"[ROTATION RANK] {epic} score={score:.2f} rank={rank} status={status}"
+                )
+            self._last_rotation_log_key = log_key
+            self._last_rotation_log_ts = now
 
         with self._lock:
             self._active_epics = active

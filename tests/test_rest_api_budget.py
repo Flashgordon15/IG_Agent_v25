@@ -17,6 +17,7 @@ from system.rest_api_budget import (
     e2e_diagnostics_rest_window,
     hub_quote_stream_fresh,
     ohlc_bootstrap_rest_window,
+    stream_quote_poll_rest_window,
 )
 
 
@@ -244,6 +245,27 @@ class HardCapTests(unittest.TestCase):
                 for _ in range(5):
                     budget.acquire(label="GET /prices/EPIC/MINUTE_5/100")
             # Non-essential call still allowed (cap not consumed by ohlc)
+            budget.acquire(label="GET /accounts")
+
+    def test_stream_quote_poll_exempt_from_hard_cap(self) -> None:
+        """REST poll quote fetches must not starve when 5+ epics share the 3/min cap."""
+        budget = RestApiBudget(
+            min_interval_seconds=0.001, warn_per_minute=6, hard_cap_per_minute=2
+        )
+        with (
+            patch.object(budget, "_maybe_warn_locked"),
+            patch.object(budget, "_maybe_periodic_log_locked"),
+            patch(
+                "system.rest_api_budget.hub_quote_stream_genuinely_stale",
+                return_value=False,
+            ),
+            patch("system.rest_api_budget._hub_in_maintenance", return_value=False),
+            patch("system.rate_limit_manager.get_rate_limit_manager") as mgr_mock,
+        ):
+            mgr_mock.return_value = self._mgr_patch()
+            with stream_quote_poll_rest_window():
+                for i in range(6):
+                    budget.acquire(label=f"GET /markets/EPIC_{i}")
             budget.acquire(label="GET /accounts")
 
     def test_e2e_diagnostics_bypasses_hard_cap(self) -> None:

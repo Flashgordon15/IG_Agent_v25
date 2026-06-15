@@ -238,31 +238,35 @@ class IGStreamingClient:
         backoff.set_normal_interval(self._poll_interval)
 
         got_tick = False
-        for epic in list(self._epics):
-            snap = hub.fetch_if_stale(
-                epic,
-                min_interval=self._poll_interval,
-                propagate_transient_errors=True,
-            )
-            if not snap or snap.bid <= 0:
-                continue
-            got_tick = True
-            bid, offer = snap.bid, snap.offer
-            pu = PriceUpdate(
-                epic=epic,
-                bid=bid,
-                offer=offer,
-                timestamp=time.time(),
-            )
-            if tick == 0 or tick % 30 == 0:
-                trace_execution(
-                    "STREAM",
-                    "IGStreamingClient._poll_loop",
-                    decision="tick received",
-                    params={"epic": epic, "bid": pu.bid, "offer": pu.offer},
+        from system.rest_api_budget import stream_quote_poll_rest_window
+
+        with stream_quote_poll_rest_window():
+            epics_this_tick = list(self._epics)
+            for epic in epics_this_tick:
+                snap = hub.fetch_if_stale(
+                    epic,
+                    min_interval=self._poll_interval,
+                    propagate_transient_errors=True,
                 )
-            self._price_subs.emit(pu)
-            self._mark_connected_on_first_tick()
+                if not snap or snap.bid <= 0:
+                    continue
+                got_tick = True
+                bid, offer = snap.bid, snap.offer
+                pu = PriceUpdate(
+                    epic=epic,
+                    bid=bid,
+                    offer=offer,
+                    timestamp=time.time(),
+                )
+                if tick == 0 or tick % 30 == 0:
+                    trace_execution(
+                        "STREAM",
+                        "IGStreamingClient._poll_loop",
+                        decision="tick received",
+                        params={"epic": epic, "bid": pu.bid, "offer": pu.offer},
+                    )
+                self._price_subs.emit(pu)
+                self._mark_connected_on_first_tick()
 
         if got_tick:
             self._failures = 0
