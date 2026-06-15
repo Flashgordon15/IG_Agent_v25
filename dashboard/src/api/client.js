@@ -90,6 +90,7 @@ export const api = {
   replaySummary: () => fetchJson("/api/replay/summary"),
   shadowToday: () => fetchJson("/api/shadow/today"),
   learningStatus: () => fetchJson("/api/learning/status"),
+  edgeAnalysis: () => fetchJson("/api/stats/edge-analysis"),
   replayRun: () => fetchJson("/api/replay/run", { method: "POST" }),
   runE2eCheck: () => fetchJson("/api/system/e2e", { method: "POST" }),
   sentinelDiagnostics: (limit = 60) =>

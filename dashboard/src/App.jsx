@@ -28,10 +28,13 @@ import DailyDigestModal, {
   isDigestUnread,
 } from "./components/DailyDigestModal.jsx";
 
+import StatsTab from "./tabs/StatsTab.jsx";
+
 const TABS = [
   { id: "live", label: "LIVE" },
   { id: "trades", label: "TRADES" },
   { id: "points", label: "POINTS" },
+  { id: "stats", label: "STATS" },
   { id: "intelligence", label: "INTELLIGENCE" },
   { id: "profit", label: "PROFIT" },
   { id: "cert", label: "CERT" },
@@ -1126,6 +1129,7 @@ export default function App() {
         )}
         {tab === "trades" && <TradesPanel state={state} />}
         {tab === "points" && <PointsPanel state={state} />}
+        {tab === "stats" && <StatsTab />}
         {tab === "intelligence" && <IntelligencePanel state={state} />}
         {tab === "profit" && <ProfitPanel />}
         {tab === "cert" && <CertPanel />}

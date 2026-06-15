@@ -1092,6 +1092,16 @@ export default function LivePanel({ state, rawState, selectedEpic, onSelectEpic,
       />
 
       {/* 3. Agent state banner */}
+      {(rawState ?? state)?.friday_flatten?.banner && (
+        <div className="w-full rounded-lg border border-warning bg-warning/15 px-3 py-2 text-[12px] font-semibold uppercase tracking-wide text-warning">
+          Friday flatten active — closing positions before weekend
+        </div>
+      )}
+      {(rawState ?? state)?.calendar_blackout_active && (
+        <div className="w-full rounded-lg border border-orange-500/40 bg-orange-500/10 px-3 py-2 text-[12px] font-medium text-orange-200">
+          [CALENDAR BLACKOUT] High-impact event window — entries suppressed
+        </div>
+      )}
       <div className={["w-full rounded-lg border px-3 py-2.5 sm:px-4", agent.banner].join(" ")}>
         <p className="text-sm font-bold uppercase tracking-wide">{agent.label}</p>
         <p className="mt-0.5 text-[12px] leading-snug opacity-90">{agent.description}</p>
