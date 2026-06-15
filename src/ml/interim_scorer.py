@@ -143,15 +143,28 @@ def _volatility_score(atr_series: pd.Series | None, *, max_pts: float) -> float:
     return max_pts * 0.4
 
 
-def _recent_performance_score(store: Any | None, *, max_pts: float) -> float:
+def _min_recent_score(cfg: Config) -> float:
+    block = cfg.get("interim_scorer")
+    if isinstance(block, dict) and block.get("interim_scorer_min_recent_score") is not None:
+        return float(block["interim_scorer_min_recent_score"])
+    raw = cfg.get("interim_scorer_min_recent_score")
+    if raw is not None:
+        return float(raw)
+    return 20.0
+
+
+def _recent_performance_score(
+    store: Any | None, *, max_pts: float, cfg: Config | None = None
+) -> float:
+    floor = _min_recent_score(cfg) if cfg is not None else 20.0
     if store is None or not hasattr(store, "recent_confirmed_closed_trades"):
-        return max_pts * 0.48
+        return floor
     try:
         rows = store.recent_confirmed_closed_trades(10)
     except Exception:
-        return max_pts * 0.48
+        return floor
     if len(rows) < 5:
-        return max_pts * 0.48
+        return floor
     wins = 0
     for row in rows:
         result = str(row.get("result") or "").upper()
@@ -197,7 +210,9 @@ class InterimConfidenceScorer:
         )
         session = _session_score(now, max_pts=weights["session"])
         vol = _volatility_score(atr_series, max_pts=weights["volatility"])
-        recent = _recent_performance_score(store, max_pts=weights["recent_performance"])
+        recent = _recent_performance_score(
+            store, max_pts=weights["recent_performance"], cfg=cfg
+        )
         total = max(0.0, min(100.0, trend + session + vol + recent))
         notes = (
             f"trend={trend:.0f} session={session:.0f} vol={vol:.0f} "

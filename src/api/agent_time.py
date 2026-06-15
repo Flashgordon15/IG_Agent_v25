@@ -119,12 +119,69 @@ def _resolve_clock_status(at: datetime) -> str:
     return "green"
 
 
+def _next_market_boundary(at: datetime) -> dict[str, Any]:
+    """Nearest IG calendar open/close across enabled epics (display only)."""
+    from system.market_watch.calendar import get_market_status, is_market_open
+
+    epics = _enabled_epics()
+    best: dict[str, Any] | None = None
+    local = at.astimezone(_LONDON)
+
+    for epic in epics:
+        try:
+            if is_market_open(epic, at=at):
+                from system.market_watch.calendar import minutes_until_market_close
+
+                mins = minutes_until_market_close(epic, at=at)
+                if mins is None or mins <= 0:
+                    continue
+                candidate = {
+                    "minutes_to_boundary": int(round(float(mins))),
+                    "boundary_type": "CLOSE",
+                    "epic": epic,
+                }
+            else:
+                status = get_market_status(epic, at=at)
+                if not status or not status.next_open_at:
+                    continue
+                tz = ZoneInfo(status.timezone or "Europe/London")
+                delta = status.next_open_at - at.astimezone(tz)
+                mins = delta.total_seconds() / 60.0
+                if mins <= 0:
+                    continue
+                candidate = {
+                    "minutes_to_boundary": int(round(mins)),
+                    "boundary_type": "OPEN",
+                    "epic": epic,
+                }
+        except Exception:
+            continue
+
+        if best is None or candidate["minutes_to_boundary"] < best["minutes_to_boundary"]:
+            best = candidate
+
+    if best is None:
+        return {
+            "next_boundary": None,
+            "minutes_to_boundary": None,
+            "boundary_type": None,
+        }
+
+    target = local + timedelta(minutes=best["minutes_to_boundary"])
+    return {
+        "next_boundary": target.strftime("%H:%M"),
+        "minutes_to_boundary": best["minutes_to_boundary"],
+        "boundary_type": best["boundary_type"],
+    }
+
+
 def get_agent_time_payload(*, at: datetime | None = None) -> dict[str, Any]:
     """BST/UTC clock fields for GET /api/time."""
     from signals.indicators import session_name
 
     now_utc = (at or datetime.now(_UTC)).astimezone(_UTC)
     now_bst = now_utc.astimezone(_LONDON)
+    boundary = _next_market_boundary(now_bst)
 
     return {
         "bst": now_bst.strftime("%H:%M:%S"),
@@ -134,4 +191,5 @@ def get_agent_time_payload(*, at: datetime | None = None) -> dict[str, Any]:
         "session": session_name(now_bst),
         "clock_status": _resolve_clock_status(now_bst),
         "utc_epoch": now_utc.timestamp(),
+        **boundary,
     }

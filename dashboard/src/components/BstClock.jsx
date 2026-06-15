@@ -3,6 +3,7 @@ import { api } from "../api/client.js";
 
 const POLL_MS = 1000;
 const MISMATCH_MINUTES = 5;
+const BOUNDARY_WARN_MINUTES = 30;
 
 const STATUS_CLASS = {
   green: "text-success border-success/40 bg-success/10",
@@ -21,6 +22,13 @@ function clockMismatchMinutes(utcEpoch) {
   const apiMs = Number(utcEpoch) * 1000;
   const browserMs = Date.now();
   return Math.abs(browserMs - apiMs) / 60000;
+}
+
+function boundaryVerb(boundaryType) {
+  const t = String(boundaryType ?? "").toUpperCase();
+  if (t === "OPEN") return "opens";
+  if (t === "CLOSE") return "closes";
+  return null;
 }
 
 /**
@@ -61,6 +69,12 @@ export default function BstClock() {
     [payload?.utc_epoch],
   );
 
+  const boundaryMinutes = Number(payload?.minutes_to_boundary);
+  const nearBoundary =
+    Number.isFinite(boundaryMinutes) &&
+    boundaryMinutes > 0 &&
+    boundaryMinutes < BOUNDARY_WARN_MINUTES;
+
   if (!payload && !error) {
     return (
       <div className="inline-flex shrink-0 items-center rounded-md border border-border bg-card/60 px-2 py-1 text-[10px] text-muted">
@@ -77,9 +91,18 @@ export default function BstClock() {
     );
   }
 
-  const status = String(payload.clock_status ?? "green").toLowerCase();
+  let status = String(payload.clock_status ?? "green").toLowerCase();
+  if (nearBoundary && status === "green") {
+    status = "amber";
+  }
   const statusClass = STATUS_CLASS[status] ?? STATUS_CLASS.green;
   const sess = sessionLabel(payload.session);
+  const bstShort = String(payload.bst ?? "").slice(0, 5);
+  const verb = boundaryVerb(payload.boundary_type);
+  const boundaryLine =
+    verb && Number.isFinite(boundaryMinutes)
+      ? `${verb} in ${boundaryMinutes}m`
+      : null;
 
   return (
     <div className="inline-flex shrink-0 flex-col gap-0.5">
@@ -91,15 +114,13 @@ export default function BstClock() {
         title={`Agent time (Europe/London) · session: ${sess || "—"}`}
       >
         <span className="text-[11px] font-semibold leading-none">
-          {payload.bst} BST
-        </span>
-        <span className="hidden text-[10px] opacity-80 md:inline">
-          {payload.weekday?.slice(0, 3)} {payload.date}
+          {bstShort} BST
         </span>
         {sess ? (
-          <span className="hidden text-[9px] uppercase tracking-wide opacity-80 lg:inline">
-            · {sess}
-          </span>
+          <span className="text-[10px] opacity-90">| {sess}</span>
+        ) : null}
+        {boundaryLine ? (
+          <span className="text-[10px] opacity-90">| {boundaryLine}</span>
         ) : null}
       </div>
       {mismatch > MISMATCH_MINUTES ? (

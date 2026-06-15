@@ -211,6 +211,7 @@ class PointsEngine:
         self._rapid_cooldown_until: float = 0.0
         self._roadmap_compound_boost = False
         self._equity_lock_announced = False
+        self._operator_reset_healthy = False
         self._load()
 
     def equity_lock_active(self) -> bool:
@@ -262,6 +263,7 @@ class PointsEngine:
             "equity_lock_active": self.equity_lock_active(),
             "equity_lock_milestone": EQUITY_LOCK_SESSION_MILESTONE,
             "equity_lock_signal_threshold": EQUITY_LOCK_SIGNAL_THRESHOLD,
+            "operator_reset_healthy": self._operator_reset_healthy,
         }
 
     def _apply_payload(self, data: dict[str, Any]) -> None:
@@ -281,6 +283,7 @@ class PointsEngine:
         )
         restored_cooldown = float(data.get("rapid_cooldown_until", 0.0))
         self._rapid_cooldown_until = max(0.0, restored_cooldown)
+        self._operator_reset_healthy = bool(data.get("operator_reset_healthy", False))
 
     def _persist(self) -> None:
         try:
@@ -429,6 +432,8 @@ class PointsEngine:
     def _effective_state_unlocked(self) -> PointsStateName:
         if self._stop_latched:
             return "STOP"
+        if self._operator_reset_healthy:
+            return "HEALTHY"
 
         if time.time() < self._rapid_cooldown_until:
             nominal = _nominal_state(self._cumulative)
@@ -461,6 +466,7 @@ class PointsEngine:
         """Score trade, update cumulative/session state, persist. Returns points scored."""
         try:
             with _lock:
+                self._operator_reset_healthy = False
                 if pnl_gbp is not None and float(pnl_gbp) < 0:
                     self.note_realised_gbp_loss(float(pnl_gbp))
                 score = self._score_trade(result, confidence, pnl_pts)
@@ -866,6 +872,26 @@ class PointsEngine:
         with _lock:
             self._stop_latched = False
             self._persist()
+
+    def admin_reset_cumulative(self) -> tuple[float, PointsStateName]:
+        """Operator reset — zero cumulative, clear WARNING/STOP latch, return HEALTHY."""
+        with _lock:
+            previous = float(self._cumulative)
+            self._cumulative = 0.0
+            self._session_score = 0.0
+            self._last_trade_score = 0.0
+            self._consecutive_losses = 0
+            self._signals_to_skip = 0
+            self._recovery_wins = 0
+            self._bootstrap_wins = 0
+            self._day_stopped = False
+            self._stop_latched = False
+            self._rapid_cooldown_until = 0.0
+            self._last_nominal = "HEALTHY"
+            self._equity_lock_announced = False
+            self._operator_reset_healthy = True
+            self._persist()
+            return previous, "HEALTHY"
 
     def snapshot(self) -> PointsSnapshot:
         with _lock:

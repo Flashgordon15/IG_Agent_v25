@@ -107,8 +107,9 @@
   },
   "manual_intervention": {
     "daily_drawdown_shield_enabled": true,
-    "daily_drawdown_shield_gbp": 500,
-    "_note": "Admin safety shield — blocks new entries when closed-day loss exceeds threshold until midnight. Distinct from max_daily_loss_gbp hard stop."
+    "daily_drawdown_shield_gbp": 1000,
+    "daily_loss_limit_gbp": 1000,
+    "_note": "Admin safety shield — blocks new entries when closed-day loss exceeds threshold until midnight Europe/London. Distinct from max_daily_loss_gbp hard stop."
   },
   "instruments": {
     "gold": {

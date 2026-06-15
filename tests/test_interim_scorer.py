@@ -131,15 +131,26 @@ class InterimScorerTests(unittest.TestCase):
         store = MagicMock()
         store.recent_confirmed_closed_trades.return_value = [{"result": "WIN"}]
         snap = {"last": {"fast_ema": 101, "slow_ema": 100, "atr": 5, "rsi": 60}}
+        cfg = Config(
+            _data={
+                "interim_scorer": {"interim_scorer_min_recent_score": 20},
+                "interim_scorer_weights": {
+                    "trend": 25,
+                    "session": 25,
+                    "volatility": 25,
+                    "recent_performance": 25,
+                },
+            }
+        )
         with patch("ml.interim_scorer.log_engine"):
             result = scorer.score(
-                cfg=_cfg(),
+                cfg=cfg,
                 market="Gold",
                 direction="BUY",
                 snapshot=snap,
                 store=store,
             )
-        self.assertEqual(result.recent_performance, 12.0)
+        self.assertEqual(result.recent_performance, 20.0)
 
     def test_total_score_components_sum_correctly(self) -> None:
         scorer = InterimConfidenceScorer()

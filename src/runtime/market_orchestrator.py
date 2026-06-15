@@ -451,6 +451,20 @@ class MarketOrchestrator:
                 expand_threshold_pct=expand_pct,
             )
 
+        from system.engine_log import log_engine
+
+        active_set = set(active)
+        for rank, (epic, score) in enumerate(ranked_assets, start=1):
+            if epic in feed_offline:
+                status = "MUTED"
+            elif epic in active_set:
+                status = "IN_TOP_3"
+            else:
+                status = "RANKED_OUT"
+            log_engine(
+                f"[ROTATION RANK] {epic} score={score:.2f} rank={rank} status={status}"
+            )
+
         with self._lock:
             self._active_epics = active
             self._active_epics_updated_at = time.time()

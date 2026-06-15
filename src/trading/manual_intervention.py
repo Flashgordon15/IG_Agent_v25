@@ -7,10 +7,13 @@ hard-blocks new entries until midnight reset without altering trailing logic.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from system.engine_log import log_engine
+
+_LONDON = ZoneInfo("Europe/London")
 
 SHIELD_BREACH_KEY = "daily_max_loss_breached"
 SHIELD_BREACH_DAY_KEY = "daily_max_loss_breached_day"
@@ -24,7 +27,8 @@ def exits_exempt_from_entry_shields() -> bool:
 
 
 def _today() -> str:
-    return date.today().isoformat()
+    """Calendar day for shield reset — Europe/London, not UTC."""
+    return datetime.now(_LONDON).date().isoformat()
 
 
 def shield_threshold_gbp(cfg: Any | None = None) -> float:
@@ -38,8 +42,10 @@ def shield_threshold_gbp(cfg: Any | None = None) -> float:
             return 500.0
     try:
         block = cfg.get("manual_intervention") or {}
-        if isinstance(block, dict) and block.get("daily_drawdown_shield_gbp") is not None:
-            return float(block["daily_drawdown_shield_gbp"])
+        if isinstance(block, dict):
+            for key in ("daily_drawdown_shield_gbp", "daily_loss_limit_gbp"):
+                if block.get(key) is not None:
+                    return float(block[key])
     except (TypeError, ValueError, AttributeError):
         pass
     return 500.0

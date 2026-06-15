@@ -247,6 +247,50 @@ async def api_admin_force_breakeven(request: Request) -> JSONResponse:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@router.post("/api/admin/reset-points")
+async def api_admin_reset_points(request: Request) -> JSONResponse:
+    """Admin override — reset points engine cumulative to HEALTHY."""
+    from system.engine_log import log_engine
+    from trading.points_engine import PointsEngine
+
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="invalid JSON body") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+    if body.get("confirm") is not True:
+        raise HTTPException(
+            status_code=400, detail="confirm: true required in JSON body"
+        )
+
+    try:
+        engine = PointsEngine()
+        previous, new_state = engine.admin_reset_cumulative()
+        log_engine(
+            f"[POINTS RESET] Cumulative reset to 0 — operator action "
+            f"(previous={previous:.2f})"
+        )
+        try:
+            from system.telegram_notifier import send_critical_alert
+
+            send_critical_alert("[ADMIN] Points engine reset by operator")
+        except Exception as exc:
+            log_engine(
+                f"telegram points-reset alert failed: {type(exc).__name__}: {exc}"
+            )
+        return JSONResponse(
+            {
+                "success": True,
+                "previous_cumulative": previous,
+                "new_state": new_state,
+            }
+        )
+    except Exception as exc:
+        log_engine(f"admin/reset-points failed: {type(exc).__name__}: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @router.get("/api/admin/risk-status")
 def api_admin_risk_status() -> dict[str, Any]:
     """Admin view — drawdown shield latch, closed-day loss, and daily loss gate."""
