@@ -12,6 +12,7 @@ import { APP_VERSION_LABEL, resolveAppAiHealth } from "../utils/roadmapTelemetry
 import { RoadmapProgressButton } from "./RoadmapProgressModal.jsx";
 import { DailyDigestButton } from "./DailyDigestModal.jsx";
 import MarketStatusTimer, { buildMarketStatusTimerProps } from "./MarketStatusTimer.jsx";
+import BstClock from "./BstClock.jsx";
 
 function isNil(v) {
   return v == null || v === "";
@@ -378,6 +379,8 @@ export default function Header({
 
         {/* Divider */}
         <span className="hidden sm:block h-5 w-px bg-border shrink-0" aria-hidden />
+
+        <BstClock />
 
         <div className="mx-6 flex shrink-0 items-center gap-4">
           <RoadmapAiStatusPills

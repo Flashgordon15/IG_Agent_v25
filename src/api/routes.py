@@ -102,6 +102,14 @@ async def api_health() -> dict[str, Any]:
     }
 
 
+@router.get("/api/time")
+def get_agent_time() -> dict[str, Any]:
+    """Agent-resolved Europe/London clock for dashboard header (display only)."""
+    from api.agent_time import get_agent_time_payload
+
+    return get_agent_time_payload()
+
+
 @router.get("/api/startup/status")
 def get_startup_status() -> dict[str, Any]:
     """Real-time startup phase progress — polled by the StartupSplash component."""

@@ -115,4 +115,5 @@ export const api = {
     }),
   adminRiskStatus: () => fetchJson("/api/admin/risk-status"),
   getHealth: () => fetchJson("/api/health"),
+  time: () => fetchJson("/api/time"),
 };
