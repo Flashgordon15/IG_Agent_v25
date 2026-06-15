@@ -19,6 +19,37 @@ _CACHE_PAYLOAD: dict[str, Any] | None = None
 _CACHE_TTL_SEC = 60.0
 
 
+def resolve_learning_db_path() -> str:
+    """Production learning DB path — matches dashboard_data / agent_bootstrap."""
+    from system.config_loader import get_config
+
+    return str(get_config().learning_db)
+
+
+def get_edge_analysis_payload(*, force: bool = False) -> dict[str, Any]:
+    """API entry point — read-only stats without instantiating LearningStore."""
+    return get_edge_analysis(db_path=resolve_learning_db_path(), force=force)
+
+
+def _patch_learning_store_default_db_path() -> None:
+    """routes.py calls LearningStore() without db_path; default from config."""
+    import data.learning_store as mod
+
+    if getattr(mod, "_EDGE_ANALYSIS_DB_PATCHED", False):
+        return
+
+    _original = mod.LearningStore.__init__
+
+    def __init__(self, db_path: str | None = None) -> None:
+        _original(self, db_path if db_path is not None else resolve_learning_db_path())
+
+    mod.LearningStore.__init__ = __init__  # type: ignore[method-assign]
+    mod._EDGE_ANALYSIS_DB_PATCHED = True
+
+
+_patch_learning_store_default_db_path()
+
+
 def _parse_dt(text: str | None) -> Any:
     if not text:
         return None
