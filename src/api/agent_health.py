@@ -34,6 +34,8 @@ _RUNTIME_TICK_LOCK = threading.Lock()
 
 _INIT_QUOTES_LIVE_SINCE: float | None = None
 _INIT_HARD_CLEAR_LOGGED = False
+_INIT_PERMANENTLY_CLEARED = False
+_AGENT_BOOT_MONO = time.monotonic()
 _INIT_EARLY_CLEAR_SEC = 90.0
 _INIT_HARD_CLEAR_SEC = 120.0
 
@@ -328,30 +330,57 @@ def _quotes_live_for_init(status: dict[str, Any]) -> bool:
 
 
 def _apply_supervision_init_timeout(status: dict[str, Any]) -> dict[str, Any]:
-    """Clear stuck INITIALIZING telemetry once live prices have been up long enough."""
-    global _INIT_QUOTES_LIVE_SINCE, _INIT_HARD_CLEAR_LOGGED
+    """Clear stuck INITIALIZING once prices are live and trading loops are running."""
+    global _INIT_QUOTES_LIVE_SINCE, _INIT_HARD_CLEAR_LOGGED, _INIT_PERMANENTLY_CLEARED
 
     out = dict(status)
     quotes_live = _quotes_live_for_init(out)
     now = time.time()
+    uptime_sec = max(0.0, time.monotonic() - _AGENT_BOOT_MONO)
+    loops_running = bool(out.get("trading_loops_running"))
+    has_price_tick = quotes_live or int(out.get("quotes_fresh_count") or 0) > 0
 
     if quotes_live:
         if _INIT_QUOTES_LIVE_SINCE is None:
             _INIT_QUOTES_LIVE_SINCE = now
     else:
         _INIT_QUOTES_LIVE_SINCE = None
-        _INIT_HARD_CLEAR_LOGGED = False
+        if not _INIT_PERMANENTLY_CLEARED:
+            _INIT_HARD_CLEAR_LOGGED = False
 
     live_sec = (
         max(0.0, now - _INIT_QUOTES_LIVE_SINCE) if _INIT_QUOTES_LIVE_SINCE else 0.0
     )
-    out["init_live_sec"] = round(live_sec, 1)
+    out["init_live_sec"] = round(max(live_sec, uptime_sec), 1)
+
+    if _INIT_PERMANENTLY_CLEARED:
+        out["init_force_cleared"] = True
+    elif (
+        loops_running
+        and has_price_tick
+        and (live_sec >= _INIT_EARLY_CLEAR_SEC or uptime_sec >= _INIT_EARLY_CLEAR_SEC)
+    ):
+        _INIT_PERMANENTLY_CLEARED = True
+        out["init_force_cleared"] = True
+        if not _INIT_HARD_CLEAR_LOGGED:
+            _INIT_HARD_CLEAR_LOGGED = True
+            elapsed = round(max(live_sec, uptime_sec))
+            log_engine(
+                f"[INIT] Cleared after {elapsed}s — prices live, loops running"
+            )
+    elif out.get("init_force_cleared"):
+        out["init_force_cleared"] = True
+        _INIT_PERMANENTLY_CLEARED = True
 
     drift = out.get("supervision_drift_ok")
     watchdog = out.get("watchdog_active")
     stuck = drift is None and watchdog is None
-
-    if quotes_live and stuck and live_sec >= _INIT_EARLY_CLEAR_SEC:
+    if (
+        quotes_live
+        and stuck
+        and live_sec >= _INIT_EARLY_CLEAR_SEC
+        and not out.get("init_force_cleared")
+    ):
         if out.get("supervision_drift_ok") is None:
             out["supervision_drift_ok"] = True
         if out.get("watchdog_active") is None:
@@ -360,21 +389,22 @@ def _apply_supervision_init_timeout(status: dict[str, Any]) -> dict[str, Any]:
             except Exception:
                 out["watchdog_active"] = True
         out["init_force_cleared"] = True
+        _INIT_PERMANENTLY_CLEARED = True
         if live_sec >= _INIT_HARD_CLEAR_SEC and not _INIT_HARD_CLEAR_LOGGED:
             _INIT_HARD_CLEAR_LOGGED = True
             log_engine(
                 "[INIT] Forced clear after timeout — prices confirmed live"
             )
-    elif out.get("init_force_cleared"):
-        out["init_force_cleared"] = True
 
     return out
 
 
 def reset_init_timeout_state_for_tests() -> None:
-    global _INIT_QUOTES_LIVE_SINCE, _INIT_HARD_CLEAR_LOGGED
+    global _INIT_QUOTES_LIVE_SINCE, _INIT_HARD_CLEAR_LOGGED, _INIT_PERMANENTLY_CLEARED, _AGENT_BOOT_MONO
     _INIT_QUOTES_LIVE_SINCE = None
     _INIT_HARD_CLEAR_LOGGED = False
+    _INIT_PERMANENTLY_CLEARED = False
+    _AGENT_BOOT_MONO = time.monotonic()
 
 
 def evaluate_trading_health(
@@ -613,8 +643,10 @@ def get_runtime_tick_fields() -> dict[str, Any]:
         {
             "last_gate_check_age_sec": fast.get("last_gate_check_age_sec"),
             "quotes_fresh": fast.get("quotes_fresh"),
+            "quotes_fresh_count": fast.get("quotes_fresh_count"),
             "markets_open_count": fast.get("markets_open_count"),
             "trading_healthy": fast.get("trading_healthy"),
+            "trading_loops_running": fast.get("trading_loops_running"),
             "watchdog_active": fast.get("watchdog_active"),
             "supervision_drift_ok": fast.get("supervision_drift_ok"),
             "supervision_drift": fast.get("supervision_drift"),
@@ -635,8 +667,10 @@ def _update_runtime_tick_fields(status: dict[str, Any]) -> None:
         {
             "last_gate_check_age_sec": status.get("last_gate_check_age_sec"),
             "quotes_fresh": status.get("quotes_fresh"),
+            "quotes_fresh_count": status.get("quotes_fresh_count"),
             "markets_open_count": status.get("markets_open_count"),
             "trading_healthy": status.get("trading_healthy"),
+            "trading_loops_running": status.get("trading_loops_running"),
             "watchdog_active": status.get("watchdog_active"),
             "supervision_drift_ok": status.get("supervision_drift_ok"),
             "supervision_drift": status.get("supervision_drift"),

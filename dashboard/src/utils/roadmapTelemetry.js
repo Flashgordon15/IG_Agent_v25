@@ -25,17 +25,21 @@ export function isRotationFilterBypassed(state) {
 
 const TOP_ROTATION_DISPLAY_SLOTS = 5;
 
+export function resolveInitCleared(state) {
+  if (state?.init_force_cleared === true) return true;
+  const loopsRunning = state?.trading_loops_running !== false;
+  const quotesLive =
+    state?.quotes_fresh === true || Number(state?.quotes_fresh_count ?? 0) > 0;
+  const liveSec = Number(state?.init_live_sec ?? 0);
+  return loopsRunning && quotesLive && liveSec >= 90;
+}
+
 export function resolveActiveEpics(state) {
   const fromOrch = state?.orchestrator?.active_epics;
   if (Array.isArray(fromOrch) && fromOrch.length) return fromOrch.filter(Boolean);
   const flat = state?.active_epics;
   if (Array.isArray(flat) && flat.length) return flat.filter(Boolean);
-  const initCleared =
-    state?.init_force_cleared === true ||
-    (state?.quotes_fresh === true &&
-      Number(state?.init_live_sec ?? 0) >= 90 &&
-      (state?.markets_open_count ?? 0) > 0);
-  if (initCleared) {
+  if (resolveInitCleared(state)) {
     const enabled = state?.enabled_epics;
     if (Array.isArray(enabled) && enabled.length) {
       return enabled.filter(Boolean).slice(0, TOP_ROTATION_DISPLAY_SLOTS);
@@ -98,16 +102,8 @@ export function resolveAppAiHealth(state) {
   }
   const driftOk = state.supervision_drift_ok;
   const watchdogActive = state.watchdog_active;
-  const quotesLive =
-    state.quotes_fresh === true && Number(state.markets_open_count ?? 0) > 0;
-  const initCleared =
-    state.init_force_cleared === true ||
-    (quotesLive && Number(state.init_live_sec ?? 0) >= 90);
-  const initializing =
-    !initCleared &&
-    driftOk == null &&
-    watchdogActive == null &&
-    !state?.overnight_supervision?.launchd_watchdog;
+  const initCleared = resolveInitCleared(state);
+  const initializing = !initCleared;
   const ok =
     !initializing &&
     driftOk !== false &&

@@ -56,16 +56,84 @@ class TestBootSequence(unittest.TestCase):
 
         reset_init_timeout_state_for_tests()
         ah._INIT_QUOTES_LIVE_SINCE = time.time() - 91.0
+        ah._AGENT_BOOT_MONO = time.monotonic() - 91.0
         out = _apply_supervision_init_timeout(
             {
                 "quotes_fresh": True,
+                "quotes_fresh_count": 3,
                 "markets_open_count": 3,
-                "supervision_drift_ok": None,
-                "watchdog_active": None,
+                "trading_loops_running": True,
+                "supervision_drift_ok": False,
+                "watchdog_active": False,
             }
         )
         self.assertTrue(out.get("init_force_cleared"))
         self.assertGreaterEqual(float(out.get("init_live_sec") or 0), 90.0)
+
+    def test_initializing_clears_after_90s_with_prices(self) -> None:
+        import api.agent_health as ah
+        from api.agent_health import _apply_supervision_init_timeout, reset_init_timeout_state_for_tests
+
+        reset_init_timeout_state_for_tests()
+        ah._AGENT_BOOT_MONO = time.monotonic() - 95.0
+        out = _apply_supervision_init_timeout(
+            {
+                "quotes_fresh": True,
+                "quotes_fresh_count": 1,
+                "trading_loops_running": True,
+            }
+        )
+        self.assertTrue(out.get("init_force_cleared"))
+
+    def test_initializing_does_not_depend_on_watchdog(self) -> None:
+        import api.agent_health as ah
+        from api.agent_health import _apply_supervision_init_timeout, reset_init_timeout_state_for_tests
+
+        reset_init_timeout_state_for_tests()
+        ah._AGENT_BOOT_MONO = time.monotonic() - 100.0
+        out = _apply_supervision_init_timeout(
+            {
+                "quotes_fresh": True,
+                "quotes_fresh_count": 2,
+                "trading_loops_running": True,
+                "watchdog_active": False,
+            }
+        )
+        self.assertTrue(out.get("init_force_cleared"))
+
+    def test_initializing_does_not_depend_on_supervision_drift(self) -> None:
+        import api.agent_health as ah
+        from api.agent_health import _apply_supervision_init_timeout, reset_init_timeout_state_for_tests
+
+        reset_init_timeout_state_for_tests()
+        ah._AGENT_BOOT_MONO = time.monotonic() - 100.0
+        out = _apply_supervision_init_timeout(
+            {
+                "quotes_fresh": True,
+                "quotes_fresh_count": 2,
+                "trading_loops_running": True,
+                "supervision_drift_ok": False,
+            }
+        )
+        self.assertTrue(out.get("init_force_cleared"))
+
+    def test_initializing_clears_with_desktop_launcher(self) -> None:
+        import api.agent_health as ah
+        from api.agent_health import _apply_supervision_init_timeout, reset_init_timeout_state_for_tests
+
+        reset_init_timeout_state_for_tests()
+        ah._AGENT_BOOT_MONO = time.monotonic() - 120.0
+        out = _apply_supervision_init_timeout(
+            {
+                "quotes_fresh": True,
+                "quotes_fresh_count": 4,
+                "trading_loops_running": True,
+                "watchdog_active": None,
+                "supervision_drift_ok": None,
+                "overnight_supervision": {},
+            }
+        )
+        self.assertTrue(out.get("init_force_cleared"))
 
     def test_trading_healthy_true_when_all_epics_live(self) -> None:
         from api.agent_health import evaluate_trading_health
@@ -517,6 +585,118 @@ class TestRESTStallRecovery(unittest.TestCase):
         tick = enrich_tick_runtime({"markets": {}})
         self.assertIn("rest_poll_stalled", tick)
         self.assertIn("rest_poll_stalled", snapshot_fields())
+
+
+class TestStopAttachment(unittest.TestCase):
+    def _client(self, *, stops: list[bool]) -> MagicMock:
+        calls = {"i": 0}
+
+        def find_open_position(_deal_id: str) -> dict:
+            idx = min(calls["i"], len(stops) - 1)
+            calls["i"] += 1
+            if stops[idx]:
+                return {"position": {"stopLevel": 1.2345, "stopDistance": 0}}
+            return {"position": {"stopLevel": 0, "stopDistance": 0}}
+
+        client = MagicMock()
+        client.find_open_position.side_effect = find_open_position
+        client.ensure_protective_stops.return_value = True
+        return client
+
+    def test_stop_always_attached_after_entry_buy(self) -> None:
+        from execution.scalping.atomic_protect import verify_stop_or_emergency
+
+        client = self._client(stops=[False, True])
+        ok = verify_stop_or_emergency(
+            client,
+            deal_id="D1",
+            epic="CS.D.EURUSD.CFD.IP",
+            direction="BUY",
+            size=10.0,
+            stop_distance=8.0,
+            verify_ms=500,
+            max_retries=1,
+            backoff_sec=0.0,
+        )
+        self.assertTrue(ok)
+        client.ensure_protective_stops.assert_called()
+
+    def test_stop_always_attached_after_entry_sell(self) -> None:
+        from execution.scalping.atomic_protect import verify_stop_or_emergency
+
+        client = self._client(stops=[True])
+        ok = verify_stop_or_emergency(
+            client,
+            deal_id="D2",
+            epic="CS.D.GBPUSD.CFD.IP",
+            direction="SELL",
+            size=7.5,
+            stop_distance=8.0,
+            verify_ms=500,
+            max_retries=1,
+            backoff_sec=0.0,
+        )
+        self.assertTrue(ok)
+
+    def test_stop_attachment_retry_on_failure(self) -> None:
+        from execution.scalping.atomic_protect import verify_stop_or_emergency
+
+        client = self._client(stops=[False, False, True])
+        ok = verify_stop_or_emergency(
+            client,
+            deal_id="D3",
+            epic="CS.D.EURUSD.CFD.IP",
+            direction="BUY",
+            size=10.0,
+            stop_distance=8.0,
+            verify_ms=100,
+            max_retries=3,
+            backoff_sec=0.0,
+        )
+        self.assertTrue(ok)
+        self.assertGreaterEqual(client.ensure_protective_stops.call_count, 2)
+
+    def test_position_closed_if_stop_fails_after_retries(self) -> None:
+        from execution.scalping.atomic_protect import verify_stop_or_emergency
+
+        client = self._client(stops=[False] * 20)
+        with patch(
+            "system.telegram_notifier.send_critical_alert", return_value=True
+        ) as tg:
+            ok = verify_stop_or_emergency(
+                client,
+                deal_id="D4",
+                epic="CS.D.GBPUSD.CFD.IP",
+                direction="SELL",
+                size=7.5,
+                stop_distance=8.0,
+                verify_ms=50,
+                max_retries=3,
+                backoff_sec=0.0,
+            )
+        self.assertFalse(ok)
+        client.close_position.assert_called_once()
+        tg.assert_called_once()
+        self.assertIn("STOP FAIL", tg.call_args[0][0])
+
+    def test_partial_size_stop_attachment_correct(self) -> None:
+        from execution.scalping.atomic_protect import verify_stop_or_emergency
+
+        client = self._client(stops=[True])
+        ok = verify_stop_or_emergency(
+            client,
+            deal_id="D5",
+            epic="CS.D.GBPUSD.CFD.IP",
+            direction="BUY",
+            size=7.5,
+            stop_distance=8.0,
+            verify_ms=500,
+            max_retries=1,
+            backoff_sec=0.0,
+        )
+        self.assertTrue(ok)
+        args, kwargs = client.ensure_protective_stops.call_args
+        self.assertEqual(kwargs.get("stop_distance"), 8.0)
 
 
 if __name__ == "__main__":

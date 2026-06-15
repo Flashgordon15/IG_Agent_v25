@@ -798,9 +798,20 @@ class LiveExecutor:
                         execution_params=execution_params,
                     )
             except Exception as e:
-                log_engine(
+                err = (
                     f"EXEC_PROTECT stop verify error deal={deal_id}: "
                     f"{type(e).__name__}: {e}"
+                )
+                log_engine(err)
+                bus.emit(STAGE_IG_RESPONSE, STATUS_FAIL, err, deal_id=deal_id)
+                bus.finalize_failure(reason=err)
+                return ExecutionResult(
+                    success=False,
+                    action="REJECTED",
+                    rejection_reason=err,
+                    deal_reference=ref,
+                    deal_id=deal_id,
+                    execution_params=execution_params,
                 )
 
         bus.emit(

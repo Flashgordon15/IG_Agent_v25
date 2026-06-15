@@ -18,7 +18,9 @@ _DEFAULTS: dict[str, Any] = {
     "spread_ma_periods": 20,
     "spread_ma_multiplier": 1.5,
     "spread_min_samples": 5,
-    "protection_verify_ms": 200,
+    "protection_verify_ms": 5000,
+    "stop_attach_retries": 3,
+    "stop_attach_backoff_sec": 2.0,
     "commission_points_per_side": 0.5,
     "breakeven_buffer_points": 2.0,
     "halt_all_entries_on_stop_fail": False,
@@ -162,7 +164,9 @@ def verify_stop_fail_safe(
         direction=direction,
         size=size,
         stop_distance=stop_distance,
-        verify_ms=int(settings.get("protection_verify_ms", 200)),
+        verify_ms=int(settings.get("protection_verify_ms", 5000)),
+        max_retries=int(settings.get("stop_attach_retries", 3)),
+        backoff_sec=float(settings.get("stop_attach_backoff_sec", 2.0)),
         halt_all_entries=bool(settings.get("halt_all_entries_on_stop_fail", False)),
     )
 

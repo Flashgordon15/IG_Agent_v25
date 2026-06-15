@@ -177,6 +177,38 @@ def emergency_close_and_halt(
         halt_entries(reason)
 
 
+def _attach_stop_once(
+    client: Any,
+    *,
+    deal_id: str,
+    epic: str,
+    stop_distance: float,
+    limit_distance: float = 0.0,
+) -> None:
+    if not hasattr(client, "ensure_protective_stops"):
+        return
+    try:
+        client.ensure_protective_stops(
+            deal_id,
+            epic=epic,
+            stop_distance=float(stop_distance),
+            limit_distance=float(limit_distance),
+        )
+    except Exception as e:
+        log_engine(f"EXEC_PROTECT stop attach retry failed: {e}")
+
+
+def _notify_stop_fail(epic: str, deal_id: str) -> None:
+    msg = f"[STOP FAIL] Position closed — no stop attached ({epic} deal={deal_id})"
+    log_engine(f"[STOP FAIL] {epic} — stop attachment failed after 3 retries")
+    try:
+        from system.telegram_notifier import send_critical_alert
+
+        send_critical_alert(msg, dedupe_key=f"stop_fail:{deal_id}")
+    except Exception as e:
+        log_engine(f"EXEC_PROTECT telegram stop-fail alert failed: {type(e).__name__}: {e}")
+
+
 def verify_stop_or_emergency(
     client: Any,
     *,
@@ -185,37 +217,58 @@ def verify_stop_or_emergency(
     direction: str,
     size: float,
     stop_distance: float,
-    verify_ms: int = 200,
+    verify_ms: int = 5000,
+    max_retries: int = 3,
+    backoff_sec: float = 2.0,
     halt_all_entries: bool = False,
 ) -> bool:
-    """Poll for stop attachment; close position if missing after verify_ms."""
-    import time
+    """Attach stop within verify_ms; retry with backoff; emergency-close if all fail."""
+    retries = max(1, int(max_retries))
+    window_sec = max(0.5, float(verify_ms) / 1000.0)
+    pause_sec = max(0.0, float(backoff_sec))
 
-    start = time.monotonic()
     log_engine(
-        f"EXEC_PROTECT stop verify deal={deal_id} epic={epic} deadline={verify_ms}ms"
+        f"EXEC_PROTECT stop verify deal={deal_id} epic={epic} "
+        f"window={verify_ms}ms retries={retries} backoff={pause_sec}s"
     )
-    while (time.monotonic() - start) * 1000.0 < verify_ms:
-        if position_has_stop_protection(client, deal_id):
-            log_engine(f"EXEC_PROTECT stop OK deal={deal_id}")
-            return True
-        if hasattr(client, "ensure_protective_stops"):
-            try:
-                client.ensure_protective_stops(
-                    deal_id,
-                    epic=epic,
-                    stop_distance=float(stop_distance),
-                    limit_distance=0.0,
-                )
-            except Exception as e:
-                log_engine(f"EXEC_PROTECT stop attach retry failed: {e}")
-        time.sleep(0.02)
+
+    for attempt in range(1, retries + 1):
+        _attach_stop_once(
+            client,
+            deal_id=deal_id,
+            epic=epic,
+            stop_distance=stop_distance,
+        )
+        deadline = time.monotonic() + window_sec
+        while time.monotonic() < deadline:
+            if position_has_stop_protection(client, deal_id):
+                log_engine(f"EXEC_PROTECT stop OK deal={deal_id} attempt={attempt}")
+                return True
+            _attach_stop_once(
+                client,
+                deal_id=deal_id,
+                epic=epic,
+                stop_distance=stop_distance,
+            )
+            time.sleep(0.15)
+
+        log_engine(
+            f"EXEC_PROTECT stop attach attempt {attempt}/{retries} failed "
+            f"deal={deal_id} epic={epic}"
+        )
+        if attempt < retries and pause_sec > 0:
+            time.sleep(pause_sec)
 
     if position_has_stop_protection(client, deal_id):
+        log_engine(f"EXEC_PROTECT stop OK (final) deal={deal_id}")
         return True
 
-    reason = f"Stop loss not attached within {verify_ms}ms"
+    reason = (
+        f"Stop loss not attached after {retries} retries "
+        f"({verify_ms}ms window, {pause_sec}s backoff)"
+    )
     log_engine(f"EXEC_PROTECT STOP FAIL deal={deal_id} — {reason}")
+    _notify_stop_fail(epic, deal_id)
     emergency_close_position(
         client,
         deal_id=deal_id,
