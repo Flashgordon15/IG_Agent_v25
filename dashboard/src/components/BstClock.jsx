@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client.js";
 
 const POLL_MS = 1000;
@@ -34,9 +34,26 @@ function boundaryVerb(boundaryType) {
 /**
  * Live BST clock sourced from GET /api/time (agent timezone, not browser local).
  */
-export default function BstClock() {
+export default function BstClock({ agentPid = null }) {
   const [payload, setPayload] = useState(null);
   const [error, setError] = useState(false);
+  const baselinePidRef = useRef(null);
+  const [displayPid, setDisplayPid] = useState(null);
+  const [pidChanged, setPidChanged] = useState(false);
+
+  useEffect(() => {
+    const n = Number(agentPid);
+    if (!Number.isFinite(n) || n <= 0) return;
+    if (baselinePidRef.current == null) {
+      baselinePidRef.current = n;
+      setDisplayPid(n);
+      return;
+    }
+    if (n !== baselinePidRef.current) {
+      setPidChanged(true);
+      setDisplayPid(n);
+    }
+  }, [agentPid]);
 
   useEffect(() => {
     let cancelled = false;
@@ -122,7 +139,25 @@ export default function BstClock() {
         {boundaryLine ? (
           <span className="text-[10px] opacity-90">| {boundaryLine}</span>
         ) : null}
+        {displayPid != null ? (
+          <span
+            className={[
+              "text-[10px] font-semibold",
+              pidChanged ? "text-danger" : "opacity-90",
+            ].join(" ")}
+          >
+            | PID {displayPid}
+          </span>
+        ) : null}
       </div>
+      {pidChanged ? (
+        <span
+          className="inline-flex items-center rounded border border-danger/50 bg-danger/10 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-danger"
+          role="alert"
+        >
+          PID changed
+        </span>
+      ) : null}
       {mismatch > MISMATCH_MINUTES ? (
         <span
           className="inline-flex items-center rounded border border-danger/50 bg-danger/10 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-danger"

@@ -351,7 +351,7 @@ class TradingLoopTests(unittest.TestCase):
     def test_closed_trades_payload_includes_dry_run_and_deal_ref(self) -> None:
         loop = _make_loop()
         loop._epic = "CS.D.CFPGOLD.CFP.IP"
-        loop._store.recent_closed_trades.return_value = [
+        loop._store.recent_agent_closed_trades.return_value = [
             {
                 "epic": "CS.D.CFPGOLD.CFP.IP",
                 "side": "BUY",

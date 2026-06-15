@@ -30,8 +30,8 @@ class TestClosedTradesApi(unittest.TestCase):
             """
             INSERT INTO trades (
                 opened_at, closed_at, market, epic, side, entry, exit, size,
-                pnl_points, result, dry_run, source
-            ) VALUES (?, ?, ?, ?, 'BUY', 100, 101, 1, 1.0, 'WIN', 0, 'strategy')
+                pnl_points, result, dry_run, source, setup_key
+            ) VALUES (?, ?, ?, ?, 'BUY', 100, 101, 1, 1.0, 'WIN', 0, 'strategy', 'BUY|bear|london|setup')
             """,
             (closed_at, closed_at, epic, epic),
         )

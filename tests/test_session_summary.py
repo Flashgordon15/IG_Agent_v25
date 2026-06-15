@@ -165,8 +165,8 @@ class SessionTradesFilterTests(unittest.TestCase):
             """
             INSERT INTO trades (
                 opened_at, closed_at, market, epic, side, entry, exit,
-                size, pnl_points, result, dry_run, ig_pnl_currency
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                size, pnl_points, result, dry_run, ig_pnl_currency, setup_key, source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'BUY|bear|london|setup', 'strategy')
             """,
             (
                 "2026-05-27 18:30:00",
@@ -186,8 +186,8 @@ class SessionTradesFilterTests(unittest.TestCase):
             """
             INSERT INTO trades (
                 opened_at, closed_at, market, epic, side, entry, exit,
-                size, pnl_points, result, dry_run, ig_pnl_currency
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                size, pnl_points, result, dry_run, ig_pnl_currency, setup_key, source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'BUY|bear|london|setup', 'strategy')
             """,
             (
                 "2026-05-26 19:00:00",

@@ -41,6 +41,14 @@ _INIT_EARLY_CLEAR_SEC = 90.0
 _INIT_HARD_CLEAR_SEC = 120.0
 
 
+def _agent_pid() -> int:
+    return os.getpid()
+
+
+def _health_pid_fields() -> dict[str, Any]:
+    return {"agent_pid": _agent_pid()}
+
+
 def _port_bound(port: int = _API_PORT) -> bool:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
@@ -542,6 +550,7 @@ def build_health_status() -> dict[str, Any]:
         {
             "ok": trading_healthy and watchdog and supervision_drift.get("ok", True),
             "agent_alive": True,
+            **_health_pid_fields(),
             "trading_healthy": trading_healthy,
             "boot_metrics": boot_metrics,
             "system_status": system_status,
@@ -611,6 +620,7 @@ def _build_fast_health_status() -> dict[str, Any]:
         {
             "ok": bool(loops_running and not paused),
             "agent_alive": True,
+            **_health_pid_fields(),
             "trading_healthy": bool(health["trading_healthy"]),
             "boot_metrics": boot_metrics,
             "trading_loops_running": loops_running,

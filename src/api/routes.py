@@ -28,6 +28,7 @@ from api.close_handler import close_deal
 from api.dashboard_data import (
     dismiss_splash,
     get_closed_trades,
+    get_shadow_closed_trades,
     get_signal_log,
     get_system_info,
     read_version_state,
@@ -177,6 +178,12 @@ def api_trades(limit: int = 10) -> dict[str, Any]:
     trades = get_closed_trades(limit=min(100, max(1, limit)))
     points_total = sum(float(t.get("points_score") or 0) for t in trades)
     return {"trades": trades, "points_total": points_total}
+
+
+@router.get("/api/trades/shadow")
+def api_shadow_trades(limit: int = 20) -> dict[str, Any]:
+    trades = get_shadow_closed_trades(limit=min(200, max(1, limit)))
+    return {"trades": trades, "count": len(trades)}
 
 
 @router.post("/api/trades/reconcile")

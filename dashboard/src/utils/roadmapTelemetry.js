@@ -34,16 +34,12 @@ export function resolveBootMetrics(state) {
 }
 
 export function resolveInitCleared(state) {
+  if (state?.init_force_cleared === true) return true;
   const boot = resolveBootMetrics(state);
   if (boot?.ready === true) return true;
   if (String(boot?.stage || "").toLowerCase() === "ready") return true;
   if (Number(boot?.percent ?? 0) >= 100) return true;
-  if (state?.init_force_cleared === true) return true;
-  const loopsRunning = state?.trading_loops_running !== false;
-  const quotesLive =
-    state?.quotes_fresh === true || Number(state?.quotes_fresh_count ?? 0) > 0;
-  const liveSec = Number(state?.init_live_sec ?? 0);
-  return loopsRunning && quotesLive && liveSec >= 90;
+  return false;
 }
 
 /** Progress label while boot is incomplete; null when init is cleared. */
@@ -53,15 +49,10 @@ export function resolveInitBannerText(state) {
   const pctRaw = boot?.percent;
   const pct = pctRaw != null ? Math.round(Number(pctRaw)) : null;
   const label = boot?.label || "starting";
-  const stage = boot?.stage || "boot";
-  const liveSec = Math.round(Number(state?.init_live_sec ?? 0));
-  if (pct != null && pct > 0) {
-    return `INITIALIZING — ${pct}% — ${label}`;
+  if (pct != null && pct >= 0) {
+    return `Starting — ${label} (${pct}%)`;
   }
-  if (liveSec > 0) {
-    return `INITIALIZING — Stage: ${stage} (${liveSec}s)`;
-  }
-  return `INITIALIZING — Stage: ${stage}`;
+  return `Starting — ${label}`;
 }
 
 export function resolveActiveEpics(state) {

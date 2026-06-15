@@ -378,6 +378,7 @@ export default function App() {
       supervision_drift_ok:
         healthOverlay.supervision_drift_ok ?? state.supervision_drift_ok,
       watchdog_active: healthOverlay.watchdog_active ?? state.watchdog_active,
+      agent_pid: healthOverlay.agent_pid ?? state.agent_pid,
       health_ts: healthOverlay.ts ?? state.health_ts,
     };
   }, [state, healthOverlay]);
@@ -538,7 +539,7 @@ export default function App() {
       }
     };
     checkHealth();
-    const id = window.setInterval(checkHealth, 10000);
+    const id = window.setInterval(checkHealth, 5000);
     return () => window.clearInterval(id);
   }, [launchStage]);
 
@@ -866,6 +867,7 @@ export default function App() {
     watchdogActive: mergedState?.watchdog_active,
     initForceCleared: mergedState?.init_force_cleared,
     bootMetrics: mergedState?.boot_metrics,
+    agentPid: mergedState?.agent_pid,
     quotesFresh: mergedState?.quotes_fresh,
     quotesFreshCount: mergedState?.quotes_fresh_count,
     initLiveSec: mergedState?.init_live_sec,

@@ -3221,7 +3221,7 @@ class TradingLoop:
                 is_excluded_display_row,
             )
 
-            rows = self._store.recent_closed_trades(limit=100)
+            rows = self._store.recent_agent_closed_trades(limit=100)
             filtered = [r for r in rows if not is_excluded_display_row(r)]
             deduped = deduplicate_ig_imports(filtered)
             deduped.sort(key=lambda r: str(r.get("closed_at") or ""), reverse=True)
@@ -3311,13 +3311,16 @@ class TradingLoop:
             if self._store is None or not hasattr(self._store, "recent_closed_trades"):
                 return []
             from system.closed_trades_display import is_excluded_display_row
+            from system.learning_trade_policy import is_agent_learning_row
 
-            rows = self._store.recent_closed_trades(100)
+            rows = self._store.recent_agent_closed_trades(100)
             rows_sorted = sorted(
                 (
                     r
                     for r in rows
-                    if r.get("closed_at") and not is_excluded_display_row(r)
+                    if r.get("closed_at")
+                    and not is_excluded_display_row(r)
+                    and is_agent_learning_row(r)
                 ),
                 key=lambda r: str(r.get("closed_at") or ""),
             )

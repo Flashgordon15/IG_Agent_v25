@@ -101,7 +101,7 @@ def dismiss_splash() -> dict[str, Any]:
 
 
 def get_closed_trades(limit: int = 10) -> list[dict[str, Any]]:
-    """Last *limit* closed trades by close time (no session/today cutoff)."""
+    """Last *limit* closed agent trades by close time (excludes IG imports)."""
     try:
         from data.learning_store import LearningStore
         from system.config_loader import ConfigLoader
@@ -110,8 +110,7 @@ def get_closed_trades(limit: int = 10) -> list[dict[str, Any]]:
         cfg = ConfigLoader(config_dir() / "config_v25.json").load_config()
         store = LearningStore(str(cfg.learning_db))
         want = max(1, int(limit))
-        # Over-fetch so SIM/soak exclusions and deduplication still yield *want* rows.
-        rows = store.recent_closed_trades(limit=max(want * 8, 80))
+        rows = store.recent_agent_closed_trades(limit=max(want * 4, 40))
         filtered: list[dict[str, Any]] = [
             r for r in rows if not is_excluded_display_row(r)
         ]
@@ -123,6 +122,22 @@ def get_closed_trades(limit: int = 10) -> list[dict[str, Any]]:
             if len(out) >= want:
                 break
         return out
+    except Exception:
+        return []
+
+
+def get_shadow_closed_trades(limit: int = 20) -> list[dict[str, Any]]:
+    """IG-import / shadow history rows for TRADES tab (not agent decisions)."""
+    try:
+        from data.learning_store import LearningStore
+        from system.config_loader import ConfigLoader
+        from system.paths import config_dir
+
+        cfg = ConfigLoader(config_dir() / "config_v25.json").load_config()
+        store = LearningStore(str(cfg.learning_db))
+        want = max(1, int(limit))
+        rows = store.recent_shadow_import_trades(limit=want)
+        return [_format_trade_row(row) for row in rows]
     except Exception:
         return []
 

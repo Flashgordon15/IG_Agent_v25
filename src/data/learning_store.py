@@ -771,17 +771,15 @@ class LearningStore:
             return
         # Only count strategy-originated trades so IG-imported rows don't dilute
         # the setup statistics used by the adaptive engine.
-        from system.learning_trade_policy import (
-            agent_trades_sql_clause,
-        )
+        from system.learning_trade_policy import setup_stats_sql_clause
 
-        clause = agent_trades_sql_clause()
+        clause = setup_stats_sql_clause()
         rows = list(
             self.conn.execute(
                 f"""
                 SELECT pnl_points, ig_pnl_currency, result FROM trades
                 WHERE setup_key=? AND closed_at IS NOT NULL
-                  AND ({clause} OR source = 'shadow')
+                  AND ({clause})
                 """,
                 (setup_key,),
             )
@@ -1296,9 +1294,13 @@ class LearningStore:
 
     @_locked
     def sum_closed_pnl(self) -> float:
+        from system.learning_trade_policy import agent_trades_sql_clause
+
         expr = self._realised_pnl_expr()
+        clause = agent_trades_sql_clause()
         row = self.conn.execute(
-            f"SELECT COALESCE(SUM({expr}), 0) AS s FROM trades WHERE closed_at IS NOT NULL"
+            f"SELECT COALESCE(SUM({expr}), 0) AS s FROM trades "
+            f"WHERE closed_at IS NOT NULL AND ({clause})"
         ).fetchone()
         return float(row["s"] or 0) if row else 0.0
 
@@ -1347,13 +1349,16 @@ class LearningStore:
 
     @_locked
     def closed_trade_stats_since(self, since_ts: str) -> dict[str, int]:
-        """Closed non-dry-run trades with closed_at >= since_ts (YYYY-MM-DD HH:MM:SS)."""
+        """Closed agent trades with closed_at >= since_ts (YYYY-MM-DD HH:MM:SS)."""
+        from system.learning_trade_policy import agent_trades_sql_clause
+
+        clause = agent_trades_sql_clause()
         rows = self.conn.execute(
-            """
+            f"""
             SELECT result FROM trades
             WHERE closed_at IS NOT NULL
               AND closed_at >= ?
-              AND dry_run = 0
+              AND ({clause})
             """,
             (since_ts,),
         ).fetchall()
@@ -1423,13 +1428,15 @@ class LearningStore:
 
     @_locked
     def rolling_stats(self, n: int = 20) -> dict[str, Any]:
-        """Win-rate stats for the most recent n closed strategy trades."""
+        """Win-rate stats for the most recent n closed agent trades."""
+        from system.learning_trade_policy import agent_trades_sql_clause
+
+        clause = agent_trades_sql_clause()
         rows = list(
             self.conn.execute(
-                """
+                f"""
                 SELECT pnl_points, ig_pnl_currency, result FROM trades
-                WHERE closed_at IS NOT NULL AND dry_run = 0
-                  AND (source IS NULL OR source = 'strategy')
+                WHERE closed_at IS NOT NULL AND ({clause})
                 ORDER BY closed_at DESC LIMIT ?
                 """,
                 (n,),
@@ -1450,13 +1457,15 @@ class LearningStore:
 
     @_locked
     def global_stats(self) -> dict[str, Any]:
-        """All-time stats for strategy trades only (excludes IG-imported rows)."""
+        """All-time stats for agent trades only (excludes IG-imported rows)."""
+        from system.learning_trade_policy import agent_trades_sql_clause
+
+        clause = agent_trades_sql_clause()
         rows = list(
             self.conn.execute(
-                """
+                f"""
                 SELECT pnl_points, ig_pnl_currency, result FROM trades
-                WHERE closed_at IS NOT NULL
-                  AND (source IS NULL OR source = 'strategy')
+                WHERE closed_at IS NOT NULL AND ({clause})
                 """
             )
         )
@@ -1595,13 +1604,53 @@ class LearningStore:
 
     @_locked
     def count_closed_trades(self) -> int:
+        from system.learning_trade_policy import agent_trades_sql_clause
+
+        clause = agent_trades_sql_clause()
         row = self.conn.execute(
-            "SELECT COUNT(*) AS n FROM trades WHERE closed_at IS NOT NULL"
+            f"SELECT COUNT(*) AS n FROM trades WHERE closed_at IS NOT NULL AND ({clause})"
         ).fetchone()
         return int(row["n"]) if row else 0
 
     @_locked
+    def recent_agent_closed_trades(self, limit: int = 50) -> list[dict[str, Any]]:
+        from system.learning_trade_policy import agent_trades_sql_clause
+
+        clause = agent_trades_sql_clause()
+        rows = self.conn.execute(
+            f"""
+            SELECT * FROM trades
+            WHERE closed_at IS NOT NULL AND ({clause})
+            ORDER BY closed_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    @_locked
+    def recent_shadow_import_trades(self, limit: int = 50) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT * FROM trades
+            WHERE closed_at IS NOT NULL
+              AND dry_run = 0
+              AND (
+                LOWER(COALESCE(source, '')) IN ('ig_import', 'ig|imported', 'ig_imported')
+                OR UPPER(COALESCE(source, '')) IN ('IG_IMPORT', 'IG|IMPORTED')
+                OR UPPER(COALESCE(setup_key, '')) LIKE 'IG|%'
+                OR UPPER(COALESCE(setup_key, '')) IN ('IG_IMPORT', 'IG|IMPORTED')
+              )
+            ORDER BY closed_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    @_locked
     def recent_closed_trades(self, limit: int = 50) -> list[dict[str, Any]]:
+        """All closed rows (internal sync/reconcile). Display uses recent_agent_closed_trades."""
         rows = self.conn.execute(
             """
             SELECT * FROM trades
@@ -1615,20 +1664,23 @@ class LearningStore:
 
     @_locked
     def recent_confirmed_closed_trades(self, limit: int = 20) -> list[dict[str, Any]]:
-        """Last *limit* IG-confirmed closes (ig_pnl_currency set), excluding SIM/soak rows."""
+        """Last *limit* IG-confirmed agent closes (ig_pnl_currency set), excluding SIM/soak."""
+        from system.learning_trade_policy import agent_trades_sql_clause
+
         cols = {
             row[1] for row in self.conn.execute("PRAGMA table_info(trades)").fetchall()
         }
         if "ig_pnl_currency" not in cols:
             return []
+        clause = agent_trades_sql_clause()
         rows = self.conn.execute(
-            """
+            f"""
             SELECT *,
                    COALESCE(ig_pnl_currency, pnl_points, 0) AS pnl
             FROM trades
             WHERE closed_at IS NOT NULL
               AND ig_pnl_currency IS NOT NULL
-              AND dry_run = 0
+              AND ({clause})
             ORDER BY closed_at DESC
             LIMIT ?
             """,

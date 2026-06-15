@@ -30,25 +30,50 @@ def is_agent_learning_row(row: dict[str, Any] | Any) -> bool:
     if is_ig_import_setup_key(setup_key):
         return False
     src = source.lower().strip()
+    if src in ("ig_import", "ig|imported", "ig_imported", "ig transaction history"):
+        return False
+    if source.upper() in ("IG_IMPORT", "IG|IMPORTED"):
+        return False
     if src and src not in _AGENT_SOURCES and src not in ("", "strategy"):
-        if src in ("ig_import", "ig|imported", "ig_imported", "ig transaction history"):
-            return False
+        return False
     if dry_run in (1, True, "1", "true"):
         return False
     return True
 
 
-def agent_trades_sql_clause(*, table_alias: str = "") -> str:
-    """SQL fragment excluding IG-import setup keys and non-strategy sources."""
-    prefix = f"{table_alias}." if table_alias else ""
+def _ig_import_exclusion_sql(*, prefix: str = "") -> str:
     return f"""
         {prefix}setup_key IS NOT NULL
         AND TRIM({prefix}setup_key) != ''
         AND UPPER({prefix}setup_key) NOT LIKE 'IG|%'
         AND UPPER({prefix}setup_key) NOT LIKE 'IG\\_%' ESCAPE '\\'
         AND UPPER({prefix}setup_key) NOT IN ('IG_IMPORT', 'IG|IMPORTED')
-        AND ({prefix}source IS NULL OR {prefix}source IN ('strategy', 'shadow', 'agent'))
+        AND LOWER(COALESCE({prefix}source, 'strategy')) NOT IN (
+            'ig_import', 'ig|imported', 'ig_imported', 'ig transaction history'
+        )
+        AND UPPER(COALESCE({prefix}source, '')) NOT IN ('IG_IMPORT', 'IG|IMPORTED')
+    """
+
+
+def agent_trades_sql_clause(*, table_alias: str = "") -> str:
+    """SQL fragment excluding IG-import setup keys and non-agent sources."""
+    prefix = f"{table_alias}." if table_alias else ""
+    return f"""
+        ({_ig_import_exclusion_sql(prefix=prefix).strip()})
         AND COALESCE({prefix}dry_run, 0) = 0
+    """
+
+
+def setup_stats_sql_clause(*, table_alias: str = "") -> str:
+    """Setup stats rebuild — includes shadow counterfactuals (dry_run=1, source=shadow)."""
+    prefix = f"{table_alias}." if table_alias else ""
+    return f"""
+        ({_ig_import_exclusion_sql(prefix=prefix).strip()})
+        AND (
+            {prefix}source IS NULL
+            OR LOWER({prefix}source) IN ('strategy', 'shadow', 'agent')
+            OR UPPER({prefix}source) IN ('STRATEGY', 'SHADOW', 'AGENT')
+        )
     """
 
 

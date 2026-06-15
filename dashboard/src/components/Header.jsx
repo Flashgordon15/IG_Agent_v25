@@ -270,6 +270,7 @@ export default function Header({
   envScorerFallbackActive,
   initForceCleared,
   bootMetrics,
+  agentPid,
   quotesFresh,
   quotesFreshCount,
   initLiveSec,
@@ -396,7 +397,7 @@ export default function Header({
         {/* Divider */}
         <span className="hidden sm:block h-5 w-px bg-border shrink-0" aria-hidden />
 
-        <BstClock />
+        <BstClock agentPid={agentPid} />
 
         <div className="mx-6 flex shrink-0 items-center gap-4">
           <RoadmapAiStatusPills
@@ -406,6 +407,7 @@ export default function Header({
             envScorerFallbackActive={envScorerFallbackActive}
             initForceCleared={initForceCleared}
             bootMetrics={bootMetrics}
+            agentPid={agentPid}
             quotesFresh={quotesFresh}
             quotesFreshCount={quotesFreshCount}
             initLiveSec={initLiveSec}

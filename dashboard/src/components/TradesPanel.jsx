@@ -124,6 +124,7 @@ function resolveClosedTrades(state) {
   if (!Array.isArray(raw)) return [];
   return raw
     .filter((trade) => VALID_RESULTS.has(String(trade?.result ?? "").toUpperCase()))
+    .filter((trade) => !isIgImportTrade(trade))
     .sort((a, b) => tradeTimeMs(b) - tradeTimeMs(a))
     .slice(0, 100);
 }
@@ -258,6 +259,22 @@ function UnconfirmedBadge() {
   );
 }
 
+function AgentBadge() {
+  return (
+    <span className="ml-1.5 inline-flex rounded border border-success/40 bg-success/10 px-1 py-0.5 text-[9px] font-bold uppercase tracking-wide text-success">
+      AGENT
+    </span>
+  );
+}
+
+function ShadowBadge() {
+  return (
+    <span className="ml-1.5 inline-flex rounded border border-muted/50 bg-muted/10 px-1 py-0.5 text-[9px] font-bold uppercase tracking-wide text-muted">
+      SHADOW
+    </span>
+  );
+}
+
 function StatBox({ label, value, valueClassName = "text-foreground" }) {
   return (
     <div className="flex flex-col items-center rounded-lg border border-border bg-surface p-3">
@@ -303,18 +320,36 @@ function ClosePositionButton({ dealId, epic }) {
 
 export default function TradesPanel({ state }) {
   const [showTestTrades, setShowTestTrades] = React.useState(false);
+  const [showShadowHistory, setShowShadowHistory] = React.useState(false);
   const [learningHealth, setLearningHealth] = React.useState(null);
+  const [shadowTrades, setShadowTrades] = React.useState([]);
+  const [shadowCount, setShadowCount] = React.useState(0);
 
   React.useEffect(() => {
     let cancelled = false;
     const load = async () => {
       try {
-        const res = await fetch("/api/learning-health", {
-          credentials: "include",
-          headers: authHeaders(),
-        });
-        if (!cancelled && res.ok) {
-          setLearningHealth(await res.json());
+        const [healthRes, shadowRes] = await Promise.all([
+          fetch("/api/learning-health", {
+            credentials: "include",
+            headers: authHeaders(),
+          }),
+          fetch("/api/trades/shadow?limit=50", {
+            credentials: "include",
+            headers: authHeaders(),
+          }),
+        ]);
+        if (!cancelled && healthRes.ok) {
+          setLearningHealth(await healthRes.json());
+        }
+        if (!cancelled && shadowRes.ok) {
+          const data = await shadowRes.json();
+          setShadowTrades(Array.isArray(data?.trades) ? data.trades : []);
+          const registry =
+            state?.system_status?.shadow_training_registry?.trade_count ??
+            state?.system_status?.shadow_analytics?.shadow_training_registry
+              ?.trade_count;
+          setShadowCount(Number(data?.count ?? registry ?? 0));
         }
       } catch {
         /* optional enrichment */
@@ -326,7 +361,7 @@ export default function TradesPanel({ state }) {
       cancelled = true;
       window.clearInterval(id);
     };
-  }, []);
+  }, [state?.system_status]);
 
   if (!state) {
     return (
@@ -338,7 +373,15 @@ export default function TradesPanel({ state }) {
 
   const positions       = resolvePositions(state);
   const allClosedTrades = resolveClosedTrades(state);
-  const closedTrades    = showTestTrades ? allClosedTrades : allClosedTrades.filter((t) => !isTestTrade(t));
+  const agentTrades     = allClosedTrades.filter((t) => !isTestTrade(t));
+  const closedTrades    = showTestTrades
+    ? allClosedTrades
+    : agentTrades;
+  const agentTradeCount =
+    Number(state?.system_status?.agent_sourced?.trade_count ?? agentTrades.length);
+  const historicalCount =
+    shadowCount ||
+    Number(state?.system_status?.shadow_training_registry?.trade_count ?? 0);
   const testTradeCount  = allClosedTrades.filter((t) => isTestTrade(t)).length;
   const dryRunCount     = allClosedTrades.filter((t) => isDryRunTrade(t)).length;
   const syncMeta        = resolveTradeSyncMeta(state, closedTrades.length);
@@ -462,20 +505,12 @@ export default function TradesPanel({ state }) {
         </div>
       </Card>
 
-      {/* 4. Closed trades */}
-      <Card title="Closed trades">
+      {/* 4. Agent closed trades */}
+      <Card title={`Agent Trades — ${agentTradeCount} confirmed live trades`}>
         <div className="mb-3 space-y-1 rounded-md border border-border/70 bg-surface/60 px-3 py-2 text-[11px]">
-          {syncMeta.showBreakdown ? (
-            <p className="text-success">
-              ● SYNCED — showing {syncMeta.agentCount} agent trades + {syncMeta.historicalInView} historical
-              {syncMeta.historicalCount > 0 ? ` (${syncMeta.historicalCount} in shadow registry)` : ""}
-            </p>
-          ) : (
-            <p className="text-muted">
-              ● SYNCED — {syncMeta.agentCount} agent trades
-              {syncMeta.historicalCount > 0 ? ` · ${syncMeta.historicalCount} historical in registry` : ""}
-            </p>
-          )}
+          <p className="text-success">
+            ● Agent-only performance metrics — IG import history excluded
+          </p>
           <p className="text-muted">Last synced with IG: {syncMeta.lastSync}</p>
         </div>
         {/* Test trades toggle */}
@@ -535,6 +570,7 @@ export default function TradesPanel({ state }) {
                       <td className="px-2 py-2 tabular-nums text-muted">{fmtTs(time)}</td>
                       <td className="px-2 py-2 font-medium text-foreground not-italic">
                         <span className={isTest ? "italic" : ""}>{trade.epic ?? trade.market ?? "—"}</span>
+                        {!isTest && !isIgImportTrade(trade) ? <AgentBadge /> : null}
                         {isTest && <TestBadge trade={trade} />}
                         {unconfirmed && <UnconfirmedBadge />}
                       </td>
@@ -550,6 +586,72 @@ export default function TradesPanel({ state }) {
             </tbody>
           </table>
         </div>
+      </Card>
+
+      <Card
+        title={`Shadow History — ${historicalCount} import records (click to expand)`}
+      >
+        <button
+          type="button"
+          className="mb-3 text-[11px] font-semibold text-muted hover:text-foreground"
+          onClick={() => setShowShadowHistory((v) => !v)}
+        >
+          {showShadowHistory ? "Hide shadow import history" : "Show shadow import history"}
+        </button>
+        {showShadowHistory && (
+          <div className="-mx-1 overflow-x-auto">
+            <table className="w-full min-w-[620px] text-left text-[11px] sm:text-[12px]">
+              <thead>
+                <tr className="border-b border-border text-muted">
+                  <th className="px-2 py-1.5 font-normal">Time</th>
+                  <th className="px-2 py-1.5 font-normal">Market</th>
+                  <th className="px-2 py-1.5 font-normal">Side</th>
+                  <th className="px-2 py-1.5 font-normal">P&amp;L</th>
+                  <th className="px-2 py-1.5 font-normal">Result</th>
+                </tr>
+              </thead>
+              <tbody>
+                {shadowTrades.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="px-2 py-4 text-center text-muted">
+                      No shadow import rows loaded
+                    </td>
+                  </tr>
+                ) : (
+                  shadowTrades.map((trade, idx) => {
+                    const { side, color: sideColor } = sideMeta(trade);
+                    const pnl = trade.pnl_gbp ?? trade.pnl;
+                    const pnlNum = pnl != null ? Number(pnl) : null;
+                    return (
+                      <tr
+                        key={tradeKey(trade, idx)}
+                        className="border-b border-border/60 last:border-0 opacity-80"
+                      >
+                        <td className="px-2 py-2 tabular-nums text-muted">
+                          {fmtTs(trade.closed_at ?? trade.time)}
+                        </td>
+                        <td className="px-2 py-2 text-muted">
+                          {trade.market ?? trade.epic ?? "—"}
+                          <ShadowBadge />
+                        </td>
+                        <td className={`px-2 py-2 font-bold ${sideColor}`}>{side || "—"}</td>
+                        <td className={`px-2 py-2 font-mono tabular-nums ${pnlColor(pnlNum)}`}>
+                          {fmtGbp(pnlNum)}
+                        </td>
+                        <td className="px-2 py-2">
+                          <ResultBadge result={trade.result} />
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+            <p className="mt-2 text-[10px] text-muted">
+              Shadow imports are IG history — not agent decisions. Excluded from win rate, P&amp;L, and caps.
+            </p>
+          </div>
+        )}
       </Card>
     </div>
   );
