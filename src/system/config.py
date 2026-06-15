@@ -816,6 +816,62 @@ class Config:
         ]
         return list(self._data.get("trading_session_whitelist", default))
 
+    # --- Entry protection ---
+    @property
+    def entry_protection(self) -> dict[str, Any]:
+        raw = self._data.get("entry_protection")
+        return dict(raw) if isinstance(raw, dict) else {}
+
+    @property
+    def entry_protection_enabled(self) -> bool:
+        return bool(self.entry_protection.get("enabled", True))
+
+    @property
+    def session_blackout_enabled(self) -> bool:
+        return bool(self.entry_protection.get("session_blackout_enabled", True))
+
+    @property
+    def gold_epic(self) -> str:
+        return str(
+            self.entry_protection.get("gold_epic", "CS.D.CFPGOLD.CFP.IP")
+        )
+
+    @property
+    def reentry_cooldown_minutes(self) -> int:
+        return int(self.entry_protection.get("reentry_cooldown_minutes", 15))
+
+    @property
+    def reentry_cooldown_after_loss_minutes(self) -> int:
+        return int(
+            self.entry_protection.get("reentry_cooldown_after_loss_minutes", 30)
+        )
+
+    @property
+    def ranging_filter_enabled(self) -> bool:
+        return bool(self.entry_protection.get("ranging_filter_enabled", True))
+
+    @property
+    def ranging_atr_ratio_threshold(self) -> float:
+        return float(self.entry_protection.get("ranging_atr_ratio_threshold", 1.5))
+
+    @property
+    def ranging_h1_bars(self) -> int:
+        return int(self.entry_protection.get("ranging_h1_bars", 20))
+
+    @property
+    def max_trades_per_epic_per_day(self) -> int:
+        return int(self.entry_protection.get("max_trades_per_epic_per_day", 8))
+
+    @property
+    def ml_min_rows_for_trust(self) -> int:
+        return int(self.entry_protection.get("ml_min_rows_for_trust", 50))
+
+    @property
+    def ml_insufficient_rows_threshold(self) -> float:
+        return float(
+            self.entry_protection.get("ml_insufficient_rows_threshold", 99)
+        )
+
     # --- Test parity ---
     @property
     def test_parity_mode(self) -> bool:

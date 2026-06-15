@@ -195,6 +195,8 @@ class TradeManager:
         if ig_deal_id:
             self.store.set_ig_deal_id(trade_id, ig_deal_id)
 
+        self._entry_protection_on_open(epic)
+
         entry_atr = float(
             execution.get("atr")
             or execution.get("entry_atr")
@@ -514,6 +516,7 @@ class TradeManager:
                     hit,
                     f"Closed on {hit} at {exit_price:.1f}; target was {target:.1f}",
                 )
+                self._entry_protection_on_close(epic, trade_id, pnl)
                 get_lifecycle_bus().mark_position_closed(
                     message=f"Bot closed {hit}",
                     result=hit,
@@ -842,6 +845,33 @@ class TradeManager:
                 profit_pts,
             ),
         )
+
+    def _entry_protection_on_open(self, epic: str) -> None:
+        try:
+            from trading.entry_protection import increment_daily_trade_count
+
+            increment_daily_trade_count(epic)
+        except Exception:
+            pass
+
+    def _entry_protection_on_close(
+        self, epic: str, trade_id: int, pnl_pts: float
+    ) -> None:
+        try:
+            from trading.entry_protection import record_epic_close
+
+            row = self.store.conn.execute(
+                "SELECT ig_pnl_currency FROM trades WHERE id=?",
+                (int(trade_id),),
+            ).fetchone()
+            pnl_gbp: float | None = None
+            if row is not None and row["ig_pnl_currency"] is not None:
+                pnl_gbp = float(row["ig_pnl_currency"])
+            elif pnl_pts != 0:
+                pnl_gbp = float(pnl_pts)
+            record_epic_close(epic, pnl_gbp)
+        except Exception:
+            pass
 
     def _release_trade_protect_state(self, trade_id: int) -> None:
         """Clear per-trade in-memory protect state after close (partial mocks safe)."""
@@ -1179,6 +1209,7 @@ class TradeManager:
             hit,
             f"Max age {max_age}m exceeded ({age_mins:.0f}m open)",
         )
+        self._entry_protection_on_close(epic, trade_id, pnl)
         self._telegram_trade_closed(
             trade_id,
             exit_price=exit_price,
@@ -1239,6 +1270,7 @@ class TradeManager:
             hit,
             "Friday 20:30 UTC auto-close (weekend gap protection)",
         )
+        self._entry_protection_on_close(epic, trade_id, pnl)
         self._telegram_trade_closed(
             trade_id,
             exit_price=exit_price,
@@ -1320,6 +1352,7 @@ class TradeManager:
             hit,
             f"Hard cap +{HARD_CAP_ATR_MULTIPLE:.1f}x ATR at {exit_price:.1f}",
         )
+        self._entry_protection_on_close(epic, trade_id, pnl)
         self._telegram_trade_closed(
             trade_id,
             exit_price=exit_price,
@@ -1847,6 +1880,7 @@ class TradeManager:
             "UNKNOWN",
             notes=f"IG sync: position gone at broker (HTTP 404) deal={deal_id}",
         )
+        self._entry_protection_on_close(epic, trade_id, 0.0)
         log_engine(
             f"IG position gone — closed local trade id={trade_id} epic={epic} deal={deal_id}"
         )

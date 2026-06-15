@@ -497,6 +497,12 @@ class MarketOrchestrator:
         if self._running:
             return
         try:
+            from trading.entry_protection import log_ml_insufficient_data_warning
+
+            log_ml_insufficient_data_warning(self._config)
+        except Exception:
+            pass
+        try:
             from system.market_data_hub import get_market_data_hub
             from system.stream_ready import is_stream_ready, signal_stream_ready
 

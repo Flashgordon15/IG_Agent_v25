@@ -75,7 +75,15 @@ class SignalEngine:
 
             floor = signal_threshold_floor()
             if floor is not None:
-                threshold = max(threshold, floor)
+                threshold = max(threshold, float(floor))
+        except Exception:
+            pass
+        try:
+            from trading.entry_protection import ml_insufficient_data_threshold
+
+            ml_floor = ml_insufficient_data_threshold(cfg)
+            if ml_floor is not None:
+                threshold = max(threshold, float(ml_floor))
         except Exception:
             pass
         return threshold
@@ -425,6 +433,58 @@ class SignalEngine:
             )
             self._log_evaluation_shadow(market, result)
             return result
+
+        try:
+            from trading.entry_protection import (
+                check_daily_trade_cap,
+                check_ranging_regime,
+                check_reentry_cooldown,
+                check_session_blackout,
+                resolve_epic_for_market,
+            )
+
+            epic = resolve_epic_for_market(market, cfg)
+            protection_blocks: list[tuple[bool, str, str]] = [
+                (
+                    *check_session_blackout(epic, cfg, market=market),
+                    "session_blackout",
+                ),
+                (
+                    *check_reentry_cooldown(epic, cfg, market=market),
+                    "reentry_cooldown",
+                ),
+                (
+                    *check_daily_trade_cap(epic, cfg, market=market),
+                    "daily_trade_cap",
+                ),
+                (
+                    *check_ranging_regime(self, market, cfg),
+                    "ranging_regime",
+                ),
+            ]
+            for is_blocked, reason, block_key in protection_blocks:
+                if not is_blocked:
+                    continue
+                blocked_result = SignalResult(
+                    "WAIT",
+                    0.0,
+                    0.0,
+                    0.0,
+                    f"WAIT|{block_key}",
+                    f"Entry blocked: {reason}",
+                    {"entry_protection": block_key, "block_reason": reason},
+                )
+                self._append_shadow_log(
+                    market,
+                    direction="WAIT",
+                    raw_score=0.0,
+                    adjusted_score=0.0,
+                    would_have_fired=False,
+                    snapshot=blocked_result.snapshot,
+                )
+                return blocked_result
+        except Exception:
+            pass
 
         atr_ok = (
             cfg.min_atr_points <= 0 or float(last.get("atr", 0)) >= cfg.min_atr_points

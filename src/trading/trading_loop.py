@@ -1194,6 +1194,8 @@ class TradingLoop:
             try:
                 if name == "session_open":
                     results.append(self._gate_session_open())
+                elif name == "session_blackout":
+                    results.append(self._gate_session_blackout())
                 elif name == "cold_start_gap":
                     results.append(self._gate_cold_start_gap(quote))
                 elif name == "environment_fitness":
@@ -1415,6 +1417,28 @@ class TradingLoop:
             passed=open_now,
             value={"open": open_now, "next_open": next_open_iso},
             detail=detail,
+        )
+
+    def _gate_session_blackout(self) -> GateResult:
+        from trading.entry_protection import check_session_blackout
+
+        blocked, reason = check_session_blackout(
+            self._epic,
+            self._config,
+            market=self._market,
+        )
+        if blocked:
+            return GateResult(
+                name="session_blackout",
+                passed=False,
+                value={"blocked": True, "reason": reason},
+                detail=f"outside trading window ({reason})",
+            )
+        return GateResult(
+            name="session_blackout",
+            passed=True,
+            value={"blocked": False},
+            detail="within trading window",
         )
 
     def _gate_cold_start_gap(self, quote: Quote) -> GateResult:

@@ -17,6 +17,7 @@ _DEBUG_SIGNAL_KEYS_LOGGED = False
 
 GATE_NAMES: tuple[str, ...] = (
     "session_open",
+    "session_blackout",
     "cold_start_gap",
     "environment_fitness",
     "points_state",
