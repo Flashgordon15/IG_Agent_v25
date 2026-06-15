@@ -70,9 +70,8 @@ def setup_stats_sql_clause(*, table_alias: str = "") -> str:
     return f"""
         ({_ig_import_exclusion_sql(prefix=prefix).strip()})
         AND (
-            {prefix}source IS NULL
-            OR LOWER({prefix}source) IN ('strategy', 'shadow', 'agent')
-            OR UPPER({prefix}source) IN ('STRATEGY', 'SHADOW', 'AGENT')
+            COALESCE({prefix}dry_run, 0) = 0
+            OR LOWER(COALESCE({prefix}source, '')) = 'shadow'
         )
     """
 

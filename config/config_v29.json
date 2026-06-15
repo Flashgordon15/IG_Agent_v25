@@ -72,6 +72,12 @@
     "use_limit_at_touch": false,
     "_note": "Execution boundary only — spread MA gate, atomic SL/TP payload, stop fail-safe close, micro breakeven. Does not alter entry signals or indicators."
   },
+  "startup_test_suite": {
+    "enabled": true,
+    "timeout_sec": 600,
+    "block_trading_on_failure": true,
+    "_note": "Final launch gate — full pytest suite runs after stream connect, before trading loops start. Skipped on watchdog restart (IG_AGENT_SKIP_DEPLOY_CHECK=1) and during IG_AGENT_PYTEST."
+  },
   "scalping_framework": {
     "enabled": true,
     "spread_ma_periods": 20,
