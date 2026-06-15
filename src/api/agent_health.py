@@ -35,6 +35,7 @@ _RUNTIME_TICK_LOCK = threading.Lock()
 _INIT_QUOTES_LIVE_SINCE: float | None = None
 _INIT_HARD_CLEAR_LOGGED = False
 _INIT_PERMANENTLY_CLEARED = False
+_INIT_SAW_PRICE_TICK = False
 _AGENT_BOOT_MONO = time.monotonic()
 _INIT_EARLY_CLEAR_SEC = 90.0
 _INIT_HARD_CLEAR_SEC = 120.0
@@ -331,22 +332,26 @@ def _quotes_live_for_init(status: dict[str, Any]) -> bool:
 
 def _apply_supervision_init_timeout(status: dict[str, Any]) -> dict[str, Any]:
     """Clear stuck INITIALIZING once prices are live and trading loops are running."""
-    global _INIT_QUOTES_LIVE_SINCE, _INIT_HARD_CLEAR_LOGGED, _INIT_PERMANENTLY_CLEARED
+    global _INIT_QUOTES_LIVE_SINCE, _INIT_HARD_CLEAR_LOGGED, _INIT_PERMANENTLY_CLEARED, _INIT_SAW_PRICE_TICK
 
     out = dict(status)
     quotes_live = _quotes_live_for_init(out)
     now = time.time()
     uptime_sec = max(0.0, time.monotonic() - _AGENT_BOOT_MONO)
     loops_running = bool(out.get("trading_loops_running"))
-    has_price_tick = quotes_live or int(out.get("quotes_fresh_count") or 0) > 0
+    fresh_count = int(out.get("quotes_fresh_count") or 0)
+    has_price_tick = (
+        quotes_live or fresh_count > 0 or bool(out.get("quotes_fresh"))
+    )
+    if has_price_tick:
+        _INIT_SAW_PRICE_TICK = True
 
     if quotes_live:
         if _INIT_QUOTES_LIVE_SINCE is None:
             _INIT_QUOTES_LIVE_SINCE = now
-    else:
+    elif not _INIT_PERMANENTLY_CLEARED and not _INIT_SAW_PRICE_TICK:
         _INIT_QUOTES_LIVE_SINCE = None
-        if not _INIT_PERMANENTLY_CLEARED:
-            _INIT_HARD_CLEAR_LOGGED = False
+        _INIT_HARD_CLEAR_LOGGED = False
 
     live_sec = (
         max(0.0, now - _INIT_QUOTES_LIVE_SINCE) if _INIT_QUOTES_LIVE_SINCE else 0.0
@@ -357,14 +362,14 @@ def _apply_supervision_init_timeout(status: dict[str, Any]) -> dict[str, Any]:
         out["init_force_cleared"] = True
     elif (
         loops_running
-        and has_price_tick
-        and (live_sec >= _INIT_EARLY_CLEAR_SEC or uptime_sec >= _INIT_EARLY_CLEAR_SEC)
+        and _INIT_SAW_PRICE_TICK
+        and uptime_sec >= _INIT_EARLY_CLEAR_SEC
     ):
         _INIT_PERMANENTLY_CLEARED = True
         out["init_force_cleared"] = True
         if not _INIT_HARD_CLEAR_LOGGED:
             _INIT_HARD_CLEAR_LOGGED = True
-            elapsed = round(max(live_sec, uptime_sec))
+            elapsed = round(uptime_sec)
             log_engine(
                 f"[INIT] Cleared after {elapsed}s — prices live, loops running"
             )
@@ -400,10 +405,11 @@ def _apply_supervision_init_timeout(status: dict[str, Any]) -> dict[str, Any]:
 
 
 def reset_init_timeout_state_for_tests() -> None:
-    global _INIT_QUOTES_LIVE_SINCE, _INIT_HARD_CLEAR_LOGGED, _INIT_PERMANENTLY_CLEARED, _AGENT_BOOT_MONO
+    global _INIT_QUOTES_LIVE_SINCE, _INIT_HARD_CLEAR_LOGGED, _INIT_PERMANENTLY_CLEARED, _INIT_SAW_PRICE_TICK, _AGENT_BOOT_MONO
     _INIT_QUOTES_LIVE_SINCE = None
     _INIT_HARD_CLEAR_LOGGED = False
     _INIT_PERMANENTLY_CLEARED = False
+    _INIT_SAW_PRICE_TICK = False
     _AGENT_BOOT_MONO = time.monotonic()
 
 

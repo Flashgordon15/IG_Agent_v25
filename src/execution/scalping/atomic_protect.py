@@ -199,7 +199,7 @@ def _attach_stop_once(
 
 
 def _notify_stop_fail(epic: str, deal_id: str) -> None:
-    msg = f"[STOP FAIL] Position closed — no stop attached ({epic} deal={deal_id})"
+    msg = f"[STOP FAIL] {epic} closed — stop attachment failed"
     log_engine(f"[STOP FAIL] {epic} — stop attachment failed after 3 retries")
     try:
         from system.telegram_notifier import send_critical_alert

@@ -32,7 +32,12 @@ def test_boot_metrics_stages_increment():
         mark("learning")
         boot = get_boot_metrics()
         assert boot["percent"] == 80
-        assert boot["label"] == "Initialization Complete"
+        assert boot["label"] == "Learning Plane"
+
+        mark("test_suite")
+        boot = get_boot_metrics()
+        assert boot["percent"] == 95
+        assert boot["label"] == "Full Test Suite"
 
         mark("ready")
         boot = get_boot_metrics()

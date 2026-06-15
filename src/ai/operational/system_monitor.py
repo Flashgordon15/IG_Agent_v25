@@ -178,6 +178,19 @@ class SystemMonitor:
         cap = max(1, min(limit, 200))
         return list(self._lines[-cap:])
 
+    def record_startup_test_failure(self, note: str, *, tail: str = "") -> None:
+        """Persist startup test-suite failure for operational AI / self-heal review."""
+        event = {
+            "ts": _utc_now(),
+            "type": "startup_test_suite_failed",
+            "note": str(note or "")[:500],
+            "output_tail": str(tail or "")[-4000:],
+            "agent_pid": self.agent_pid,
+            "pid_alive": pid_alive(self.agent_pid),
+            "port_open": port_open(self.host, self.port),
+        }
+        self._append_diagnostic(event)
+
     def _background_pass(self) -> None:
         self._maybe_clear_boot_lock()
         snap = self.snapshot()

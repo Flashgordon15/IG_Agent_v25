@@ -22,7 +22,11 @@ class SplashTests(unittest.TestCase):
             with patch("api.dashboard_data.version_json_path", return_value=path):
                 state = read_version_state()
             self.assertFalse(state["shown"])
-            self.assertEqual(state["version"], "29.1.0")
+            from system.app_identity import APP_VERSION
+
+            self.assertEqual(state["version"], APP_VERSION)
+            self.assertIsInstance(state.get("changelog"), list)
+            self.assertGreater(len(state["changelog"]), 0)
 
     def test_shown_true_in_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

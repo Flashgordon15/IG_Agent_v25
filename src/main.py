@@ -642,6 +642,28 @@ class AgentRuntime:
                 wire_hub_quotes_to_position_protect(min_interval=0.05)
                 self._stream_client = start_market_stream(cfg, rest_client=rest)
                 _startup_mark("stream")
+                from system.startup_test_suite import run_startup_test_suite
+                from system.startup_tracker import set_error as _startup_error
+
+                suite = run_startup_test_suite()
+                _startup_mark("test_suite", note=suite.note)
+                if not suite.ok:
+                    err = f"Full test suite failed: {suite.note}"
+                    _startup_error(err)
+                    log_engine(f"startup BLOCKED — {err}")
+                    try:
+                        from system.telegram_notifier import send_critical_alert
+
+                        send_critical_alert(
+                            f"Startup BLOCKED — full test suite failed\n{suite.note}",
+                            dedupe_key="startup_test_suite_block",
+                        )
+                    except Exception as e:
+                        log_engine(
+                            f"startup test suite block alert failed: "
+                            f"{type(e).__name__}: {e}"
+                        )
+                    return
                 # Auto-start trading loops — no dashboard Start button required.
                 result = start_trading()
                 if not result.get("ok"):

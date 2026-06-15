@@ -25,8 +25,9 @@ PHASES: list[tuple[str, str, int]] = [
     ("deploy_check", "Deployment verification passed", 65),
     ("ohlc", "Market data loaded", 70),
     ("loops", "Trading loops built", 82),
-    ("stream", "Live stream connected", 90),
-    ("learning", "Learning plane online", 95),
+    ("stream", "Live stream connected", 88),
+    ("learning", "Learning plane online", 92),
+    ("test_suite", "Full test suite passed", 98),
     ("ready", "All systems ready", 100),
 ]
 

@@ -1,19 +1,26 @@
-import { useEffect } from "react";
+import { useEffect, useMemo } from "react";
 
-const V29_1_PERFORMANCE_NOTES = [
-  "🚀 LOW LATENCY: Sub-microsecond Trailing Stop Evaluation Engine (~0.42µs math loop).",
-  "⚡ EXECUTION: Decoupled 50ms High-Frequency Price Feed & Async Non-Blocking Broker Order Dispatch.",
-  "🧠 AI PROTECTION: Dynamic Linear RSI Scaling Ramp (NaN-guarded up to 500 records).",
-  "📊 ANALYTICS: Read-Only Shadow Training Registry Log Exporter (.CSV via System Tab).",
-  "🛡️ RESILIENCE: Adaptive HTTP 429/Timeout Back-off Wrapper & Launchd Unattended Reboot Guardrails.",
-];
+function resolveHighlights(versionData) {
+  const fromApi = versionData?.changelog;
+  if (Array.isArray(fromApi) && fromApi.length) {
+    return fromApi.map((item) => String(item).trim()).filter(Boolean);
+  }
+  return [
+    "Release notes are loaded from CHANGELOG.md — add a section for the current APP_VERSION.",
+  ];
+}
 
 /**
  * Stage 3 — release notes (full-screen during launch; drawer optional elsewhere).
+ * Content is sourced from CHANGELOG.md via /api/splash (see src/system/release_notes.py).
  */
 export default function SplashScreen({ versionData, onDismiss, variant = "launch" }) {
-  const version = versionData?.version ?? "29.1.0";
+  const version = versionData?.version ?? "—";
+  const versionLabel = versionData?.version_label ?? `v${version}`;
   const buildDate = versionData?.build_date ?? "";
+  const title =
+    versionData?.splash_title ?? `${versionLabel} Upgrades`;
+  const highlights = useMemo(() => resolveHighlights(versionData), [versionData]);
   const isLaunch = variant === "launch";
 
   useEffect(() => {
@@ -85,11 +92,11 @@ export default function SplashScreen({ versionData, onDismiss, variant = "launch
               IG Agent · Stage 3 of 3
             </p>
             <h2 style={{ fontSize: "1.25rem", fontWeight: 600, color: "#e2e8f0", margin: 0 }}>
-              v29.1 Performance Upgrades
+              {title}
             </h2>
             {buildDate && (
               <p style={{ fontSize: "11px", color: "#64748b", marginTop: "0.2rem" }}>
-                Build {buildDate} · v{version}
+                Build {buildDate} · {versionLabel}
               </p>
             )}
           </div>
@@ -125,7 +132,7 @@ export default function SplashScreen({ versionData, onDismiss, variant = "launch
               gap: "0.65rem",
             }}
           >
-            {V29_1_PERFORMANCE_NOTES.map((note) => (
+            {highlights.map((note) => (
               <li key={note} style={{ display: "flex", alignItems: "flex-start", gap: "0.5rem" }}>
                 <span
                   style={{

@@ -131,7 +131,9 @@ function RoadmapAiStatusPills({
   envScorerFallbackActive,
   initForceCleared,
   quotesFresh,
+  quotesFreshCount,
   initLiveSec,
+  tradingLoopsRunning,
   marketsOpenCount,
   overnightSupervision,
 }) {
@@ -140,7 +142,9 @@ function RoadmapAiStatusPills({
     watchdog_active: watchdogActive,
     init_force_cleared: initForceCleared,
     quotes_fresh: quotesFresh,
+    quotes_fresh_count: quotesFreshCount,
     init_live_sec: initLiveSec,
+    trading_loops_running: tradingLoopsRunning,
     markets_open_count: marketsOpenCount,
     overnight_supervision: overnightSupervision,
   });
@@ -256,6 +260,7 @@ export default function Header({
   envScorerFallbackActive,
   initForceCleared,
   quotesFresh,
+  quotesFreshCount,
   initLiveSec,
   overnightSupervision,
 }) {
@@ -390,7 +395,9 @@ export default function Header({
             envScorerFallbackActive={envScorerFallbackActive}
             initForceCleared={initForceCleared}
             quotesFresh={quotesFresh}
+            quotesFreshCount={quotesFreshCount}
             initLiveSec={initLiveSec}
+            tradingLoopsRunning={tradingLoopsRunning}
             marketsOpenCount={marketsOpenCount}
             overnightSupervision={overnightSupervision}
           />

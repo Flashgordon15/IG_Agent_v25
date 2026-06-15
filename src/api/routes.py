@@ -118,6 +118,14 @@ def get_startup_status() -> dict[str, Any]:
 
     status = get_status()
     status["boot_metrics"] = get_boot_metrics()
+    try:
+        from system.startup_test_suite import read_failure_report
+
+        report = read_failure_report()
+        if report:
+            status["startup_test_failure"] = report
+    except Exception:
+        pass
     return status
 
 

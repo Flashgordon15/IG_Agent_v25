@@ -1360,23 +1360,40 @@ class IGRestClient:
         if entry <= 0:
             return False
 
-        # Convert distance to absolute level — PUT endpoint only accepts stopLevel/limitLevel
+        from system.pnl_math import ig_points_to_price_delta, pip_size_for_epic
+
+        is_fx = pip_size_for_epic(epic) is not None
         stop_level = None
         limit_level = None
-        if not has_stop and float(stop_distance) > 0:
-            stop_level = (
-                (entry + float(stop_distance))
-                if direction == "SELL"
-                else (entry - float(stop_distance))
-            )
-        if not has_limit and float(limit_distance) > 0:
-            limit_level = (
-                (entry - float(limit_distance))
-                if direction == "SELL"
-                else (entry + float(limit_distance))
-            )
+        stop_dist = None
+        limit_dist = None
 
-        if stop_level is None and limit_level is None:
+        if is_fx:
+            # FX CFD: IG stopDistance/limitDistance are in points (pips), not price units.
+            # Using entry ± distance as absolute stopLevel produces invalid levels (~46 on 1.34).
+            if not has_stop and float(stop_distance) > 0:
+                stop_dist = float(stop_distance)
+            if not has_limit and float(limit_distance) > 0:
+                limit_dist = float(limit_distance)
+        else:
+            # Index/commodity: convert IG points to price delta, then absolute level.
+            if not has_stop and float(stop_distance) > 0:
+                delta = ig_points_to_price_delta(epic, float(stop_distance))
+                stop_level = (
+                    (entry + delta) if direction == "SELL" else (entry - delta)
+                )
+            if not has_limit and float(limit_distance) > 0:
+                delta = ig_points_to_price_delta(epic, float(limit_distance))
+                limit_level = (
+                    (entry - delta) if direction == "SELL" else (entry + delta)
+                )
+
+        if (
+            stop_level is None
+            and limit_level is None
+            and stop_dist is None
+            and limit_dist is None
+        ):
             return True
 
         try:
@@ -1384,15 +1401,20 @@ class IGRestClient:
                 deal_id,
                 stop_level=stop_level,
                 limit_level=limit_level,
+                stop_distance=stop_dist,
+                limit_distance=limit_dist,
             )
             log_demo_rest(
-                "PUT /positions/otc — attach stops (absolute levels)",
+                "PUT /positions/otc — attach stops"
+                + (" (FX distances)" if is_fx else " (absolute levels)"),
                 deal_id=deal_id,
                 epic=epic,
                 direction=direction,
                 entry=entry,
                 stop_level=stop_level,
                 limit_level=limit_level,
+                stop_distance=stop_dist,
+                limit_distance=limit_dist,
             )
             return True
         except Exception as e:

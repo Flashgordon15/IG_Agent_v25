@@ -834,8 +834,8 @@ export default function App() {
     watchdogActive: state?.watchdog_active,
     initForceCleared: state?.init_force_cleared,
     quotesFresh: state?.quotes_fresh,
+    quotesFreshCount: state?.quotes_fresh_count,
     initLiveSec: state?.init_live_sec,
-    marketsOpenCount: state?.markets_open_count,
     overnightSupervision: state?.overnight_supervision,
     sessionStyle: resolveSessionStyle(state, viewState),
     envScorerFallbackActive: Boolean(

@@ -15,6 +15,12 @@ from system.closed_trades_display import deduplicate_ig_imports, is_excluded_dis
 from system.paths import data_dir, logs_dir, project_root
 
 
+def _current_version() -> str:
+    from system.app_identity import APP_VERSION
+
+    return APP_VERSION
+
+
 def version_json_path() -> Path:
     return data_dir() / "version.json"
 
@@ -35,16 +41,31 @@ def _build_date() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
-CURRENT_VERSION = "29.1.0"
+CURRENT_VERSION = None  # resolved via _current_version() — do not hardcode here
+
+
+def _splash_release_fields() -> dict[str, Any]:
+    from system.release_notes import current_release_notes
+
+    notes = current_release_notes()
+    return {
+        "version": notes["version"],
+        "version_label": notes.get("version_label"),
+        "splash_title": notes.get("title"),
+        "changelog": notes.get("highlights") or [],
+        "changelog_found": bool(notes.get("changelog_found")),
+    }
 
 
 def read_version_state() -> dict[str, Any]:
+    version = _current_version()
+    release = _splash_release_fields()
     path = version_json_path()
     defaults: dict[str, Any] = {
-        "version": CURRENT_VERSION,
+        "version": version,
         "shown": False,
         "build_date": _build_date(),
-        "changelog": [],
+        **release,
     }
     if not path.exists():
         return defaults
@@ -52,14 +73,12 @@ def read_version_state() -> dict[str, Any]:
         data = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(data, dict):
             data.setdefault("build_date", _build_date())
-            data.setdefault("changelog", [])
-            # Auto-show splash when version advances
-            if str(data.get("version") or "") != CURRENT_VERSION:
-                data["version"] = CURRENT_VERSION
+            data.update(release)
+            if str(data.get("version") or "") != version:
+                data["version"] = version
                 data["shown"] = False
                 data["shown_for_version"] = str(data.get("shown_for_version") or "")
-            elif str(data.get("shown_for_version") or "") != CURRENT_VERSION:
-                # Shown field is for a different version — force re-show
+            elif str(data.get("shown_for_version") or "") != version:
                 data["shown"] = False
             return data
     except Exception:
@@ -68,9 +87,10 @@ def read_version_state() -> dict[str, Any]:
 
 
 def dismiss_splash() -> dict[str, Any]:
+    version = _current_version()
     data = read_version_state()
     data["shown"] = True
-    data["shown_for_version"] = CURRENT_VERSION
+    data["shown_for_version"] = version
     data["dismissed_at"] = (
         datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
     )

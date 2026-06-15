@@ -6,10 +6,11 @@ const WARM_STEP_MS = 5000
 const WARM_TOTAL_MS = 25000
 
 const WARM_MILESTONES = [
-  { pct: 20, label: 'Verifying Broker Session Handshake...' },
-  { pct: 40, label: 'Auditing Database Integrity...' },
-  { pct: 60, label: 'Arming Trading Gate Arrays...' },
-  { pct: 80, label: 'Indexing Learning Plane Records...' },
+  { pct: 16, label: 'Verifying Broker Session Handshake...' },
+  { pct: 32, label: 'Auditing Database Integrity...' },
+  { pct: 48, label: 'Arming Trading Gate Arrays...' },
+  { pct: 64, label: 'Indexing Learning Plane Records...' },
+  { pct: 82, label: 'Running Full Test Suite...' },
   { pct: 100, label: 'System Operational Baseline Ready.' },
 ]
 

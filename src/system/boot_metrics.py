@@ -1,8 +1,8 @@
 """
 Lightweight boot progress for the dashboard 2-stage launch experience.
 
-Maps startup_tracker phase completions to five operator-facing milestones
-(20 / 40 / 60 / 80 / 100). Read-only, lock-friendly — safe on /api/health hot path.
+Maps startup_tracker phase completions to operator-facing milestones
+(20 / 40 / 60 / 80 / 95 / 100). Read-only, lock-friendly — safe on /api/health hot path.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ _MILESTONES: tuple[tuple[str, int, str], ...] = (
     ("database", 40, "Database Core"),
     ("loops", 60, "Trading Gates"),
     ("learning", 80, "Learning Plane"),
+    ("test_suite", 95, "Full Test Suite"),
     ("ready", 100, "Initialization Complete"),
 )
 
@@ -42,11 +43,19 @@ def get_boot_metrics() -> dict[str, Any]:
         label = "Initialization Complete"
         stage = "ready"
     else:
-        for phase_id, _pct, lbl in _MILESTONES:
-            if phase_id not in done_ids:
-                label = lbl
-                stage = phase_id
+        for phase in status.get("phases") or []:
+            if phase.get("status") == "in_progress" and phase.get("id") == "test_suite":
+                label = "Full Test Suite"
+                stage = "test_suite"
+                percent = max(percent, 90)
                 break
+        else:
+            for phase_id, _pct, lbl in _MILESTONES:
+                if phase_id not in done_ids:
+                    if phase_id not in ("test_suite", "ready") or percent <= 0:
+                        label = lbl
+                        stage = phase_id
+                    break
 
     error = status.get("error")
     return {

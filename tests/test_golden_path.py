@@ -135,6 +135,36 @@ class TestBootSequence(unittest.TestCase):
         )
         self.assertTrue(out.get("init_force_cleared"))
 
+    def test_initializing_stays_cleared_after_first_clear(self) -> None:
+        import api.agent_health as ah
+        from api.agent_health import _apply_supervision_init_timeout, reset_init_timeout_state_for_tests
+
+        reset_init_timeout_state_for_tests()
+        ah._AGENT_BOOT_MONO = time.monotonic() - 120.0
+        first = _apply_supervision_init_timeout(
+            {
+                "quotes_fresh": True,
+                "quotes_fresh_count": 2,
+                "trading_loops_running": True,
+                "watchdog_active": False,
+                "supervision_drift_ok": False,
+            }
+        )
+        self.assertTrue(first.get("init_force_cleared"))
+
+        # Quote flicker / desktop launcher must not re-enter INITIALIZING.
+        second = _apply_supervision_init_timeout(
+            {
+                "quotes_fresh": False,
+                "quotes_fresh_count": 0,
+                "markets_open_count": 0,
+                "trading_loops_running": True,
+                "watchdog_active": False,
+                "supervision_drift_ok": False,
+            }
+        )
+        self.assertTrue(second.get("init_force_cleared"))
+
     def test_trading_healthy_true_when_all_epics_live(self) -> None:
         from api.agent_health import evaluate_trading_health
 
@@ -697,6 +727,79 @@ class TestStopAttachment(unittest.TestCase):
         self.assertTrue(ok)
         args, kwargs = client.ensure_protective_stops.call_args
         self.assertEqual(kwargs.get("stop_distance"), 8.0)
+
+
+class TestEnsureProtectiveStopsFX(unittest.TestCase):
+    def _bare_client(self) -> MagicMock:
+        from ig_api.rest_client import IGRestClient
+
+        client = IGRestClient.__new__(IGRestClient)
+        client.update_position_stops = MagicMock(return_value={})
+        return client
+
+    def test_stop_attachment_gbpusd_sell_specifically(self) -> None:
+        client = self._bare_client()
+        client.find_open_position = MagicMock(
+            return_value={
+                "position": {
+                    "direction": "SELL",
+                    "level": 1.34289,
+                    "stopLevel": 0,
+                    "stopDistance": 0,
+                    "limitLevel": 0,
+                    "limitDistance": 0,
+                }
+            }
+        )
+        from ig_api.rest_client import IGRestClient
+
+        ok = IGRestClient.ensure_protective_stops(
+            client,
+            "DIAAAAXRFFR3FAZ",
+            epic="CS.D.GBPUSD.CFD.IP",
+            stop_distance=8.0,
+            limit_distance=24.0,
+        )
+        self.assertTrue(ok)
+        client.update_position_stops.assert_called_once_with(
+            "DIAAAAXRFFR3FAZ",
+            stop_level=None,
+            limit_level=None,
+            stop_distance=8.0,
+            limit_distance=24.0,
+        )
+
+    def test_gold_uses_absolute_levels_not_fx_distances(self) -> None:
+        client = self._bare_client()
+        client.find_open_position = MagicMock(
+            return_value={
+                "position": {
+                    "direction": "BUY",
+                    "level": 4300.0,
+                    "stopLevel": 0,
+                    "stopDistance": 0,
+                    "limitLevel": 0,
+                    "limitDistance": 0,
+                }
+            }
+        )
+        from ig_api.rest_client import IGRestClient
+
+        ok = IGRestClient.ensure_protective_stops(
+            client,
+            "GOLD1",
+            epic="CS.D.CFPGOLD.CFP.IP",
+            stop_distance=45.0,
+            limit_distance=90.0,
+        )
+        self.assertTrue(ok)
+        client.update_position_stops.assert_called_once_with(
+            "GOLD1",
+            stop_level=4255.0,
+            limit_level=4390.0,
+            stop_distance=None,
+            limit_distance=None,
+        )
 
 
 if __name__ == "__main__":
