@@ -361,6 +361,9 @@ class DryRunExecutorTests(unittest.TestCase):
         from data.learning_store import LearningStore
         from execution.live_executor import LiveExecutor
         from system.config import Config
+        from system.rate_limit_manager import get_rate_limit_manager
+
+        get_rate_limit_manager().reset_for_tests()
 
         with tempfile.TemporaryDirectory() as tmp:
             cfg_data = {
