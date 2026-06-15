@@ -245,7 +245,7 @@ class IGStreamingClient:
             for epic in epics_this_tick:
                 snap = hub.fetch_if_stale(
                     epic,
-                    min_interval=self._poll_interval,
+                    min_interval=0.0,
                     propagate_transient_errors=True,
                 )
                 if not snap or snap.bid <= 0:

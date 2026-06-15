@@ -268,6 +268,26 @@ class HardCapTests(unittest.TestCase):
                     budget.acquire(label=f"GET /markets/EPIC_{i}")
             budget.acquire(label="GET /accounts")
 
+    def test_stream_quote_poll_burst_market_min_interval(self) -> None:
+        """All subscribed epics can refresh in one poll tick (200ms spacing)."""
+        budget = RestApiBudget(min_interval_seconds=5.0, warn_per_minute=60)
+        with (
+            patch.object(budget, "_maybe_warn_locked"),
+            patch.object(budget, "_maybe_periodic_log_locked"),
+            patch(
+                "system.rest_api_budget.hub_quote_stream_genuinely_stale",
+                return_value=False,
+            ),
+            patch("system.rate_limit_manager.get_rate_limit_manager") as mgr_mock,
+        ):
+            mgr_mock.return_value = self._mgr_patch()
+            t0 = time.time()
+            with stream_quote_poll_rest_window():
+                for i in range(5):
+                    budget.acquire(label=f"GET /markets/EPIC_{i}")
+            elapsed = time.time() - t0
+        self.assertLess(elapsed, 2.0)
+
     def test_e2e_diagnostics_bypasses_hard_cap(self) -> None:
         """E2E diagnostic window bypasses the hard cap."""
         budget = RestApiBudget(

@@ -364,22 +364,25 @@ class RestApiBudget:
             priority
             or cat in ESSENTIAL_REST_CATEGORIES
             or e2e_diagnostics_rest_active()
+            or (stream_quote_poll_rest_active() and cat == "market")
         )
+        _burst_market_poll = stream_quote_poll_rest_active() and cat == "market"
+        _slot_interval = 0.2 if _burst_market_poll else self._min_interval
         while True:
             with self._lock:
                 now = time.time()
                 elapsed = now - self._last_ts
-                if priority or elapsed >= self._min_interval:
+                if priority or elapsed >= _slot_interval:
                     if not _exempt_cap and self._hard_cap_exceeded_locked(now):
                         raise RestBudgetPausedError("hard_rate_cap")
-                    if priority and elapsed < self._min_interval:
+                    if priority and elapsed < _slot_interval:
                         log_engine(
                             f"REST budget: bypassing cap for critical confirm_deal "
-                            f"(label={label!r}, skipped {self._min_interval - elapsed:.1f}s wait)"
+                            f"(label={label!r}, skipped {_slot_interval - elapsed:.1f}s wait)"
                         )
                     self._last_ts = now  # Reserve this slot
                     break
-                wait = self._min_interval - elapsed
+                wait = _slot_interval - elapsed
             self._total_waits += 1
             time.sleep(wait)
 
