@@ -262,14 +262,19 @@ def _health_quote_max_age_sec(*, epic_count: int = 1) -> float:
 def _quotes_fresh_by_epic(
     epics: list[str], *, max_age: float | None = None
 ) -> dict[str, bool]:
-    from system.rest_api_budget import hub_quote_stream_fresh
+    """Hub snapshot age check — aligned with trading-loop LIVE/STALE display."""
+    from system.rest_api_budget import hub_quote_stream_tick_age
 
     age = (
         float(max_age)
         if max_age is not None
         else _health_quote_max_age_sec(epic_count=len(epics))
     )
-    return {epic: hub_quote_stream_fresh(epic=epic, max_age=age) for epic in epics}
+    fresh: dict[str, bool] = {}
+    for epic in epics:
+        tick_age = hub_quote_stream_tick_age(epic=epic)
+        fresh[epic] = tick_age is not None and tick_age <= age
+    return fresh
 
 
 def _epic_quote_exempt(epic: str) -> bool:

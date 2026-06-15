@@ -117,3 +117,12 @@ def test_supervision_init_hard_timeout_logs_once() -> None:
 
         _apply_supervision_init_timeout(out)
         mock_log.assert_called_once()
+
+
+def test_quotes_fresh_by_epic_uses_hub_tick_age() -> None:
+    from api.agent_health import _quotes_fresh_by_epic
+
+    with patch("system.rest_api_budget.hub_quote_stream_tick_age") as mock_age:
+        mock_age.side_effect = lambda epic: 30.0 if epic == "EPIC_A" else None
+        result = _quotes_fresh_by_epic(["EPIC_A", "EPIC_B"], max_age=60.0)
+    assert result == {"EPIC_A": True, "EPIC_B": False}
