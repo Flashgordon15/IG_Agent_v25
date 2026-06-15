@@ -65,6 +65,19 @@ def enrich_tick_runtime(tick: dict[str, Any]) -> dict[str, Any]:
     loops = is_trading_running()
     out["trading_loops_running"] = loops
     out.update(get_runtime_tick_fields())
+    try:
+        from system.rest_api_budget import get_rest_api_budget
+        from system.rest_poll_status import snapshot_fields as rest_poll_fields
+
+        metrics = get_rest_api_budget().metrics()
+        util = float(metrics.get("hard_cap_utilization_pct") or 0)
+        out["rest_budget_pct"] = max(0, 100 - int(util))
+        out["rest_calls_min"] = out.get("rest_calls_min") or metrics.get(
+            "calls_last_minute", 0
+        )
+        out.update(rest_poll_fields())
+    except Exception:
+        pass
     if "trading_healthy" not in out:
         out["trading_healthy"] = loops and not is_paused()
     return out

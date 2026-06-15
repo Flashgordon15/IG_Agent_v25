@@ -269,7 +269,14 @@ class IGStreamingClient:
                 self._mark_connected_on_first_tick()
 
         if got_tick:
+            from system.rest_poll_status import record_poll_success
+
+            record_poll_success()
             self._failures = 0
+        else:
+            from system.rest_poll_status import record_poll_cycle_without_tick
+
+            record_poll_cycle_without_tick()
 
         now = time.time()
         if self._on_account and now - last_heartbeat >= self._heartbeat_interval:
