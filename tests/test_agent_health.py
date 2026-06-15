@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import time
 from unittest.mock import patch
 
 from api.agent_health import (
+    _apply_supervision_init_timeout,
     _health_quote_max_age_sec,
     evaluate_trading_health,
+    reset_init_timeout_state_for_tests,
 )
 
 
@@ -71,3 +74,46 @@ def test_evaluate_trading_health_all_snapshot_closed_skips_quotes() -> None:
     assert health["markets_open_count"] == 0
     assert health["trading_healthy"] is True
     assert not any("quotes_stale" in i for i in health["issues"])
+
+
+def test_supervision_init_timeout_clears_null_fields_after_live_quotes() -> None:
+    import api.agent_health as ah
+
+    reset_init_timeout_state_for_tests()
+    ah._INIT_QUOTES_LIVE_SINCE = time.time() - 65.0
+
+    out = _apply_supervision_init_timeout(
+        {
+            "quotes_fresh": True,
+            "markets_open_count": 2,
+            "supervision_drift_ok": None,
+            "watchdog_active": None,
+        }
+    )
+    assert out["supervision_drift_ok"] is True
+    assert out["watchdog_active"] is True
+    assert out["init_force_cleared"] is True
+    assert out["init_live_sec"] >= 60.0
+
+
+def test_supervision_init_hard_timeout_logs_once() -> None:
+    import api.agent_health as ah
+
+    reset_init_timeout_state_for_tests()
+    ah._INIT_QUOTES_LIVE_SINCE = time.time() - 125.0
+
+    with patch("api.agent_health.log_engine") as mock_log:
+        out = _apply_supervision_init_timeout(
+            {
+                "quotes_fresh": True,
+                "markets_open_count": 1,
+                "supervision_drift_ok": None,
+                "watchdog_active": None,
+            }
+        )
+        assert out["init_force_cleared"] is True
+        mock_log.assert_called_once()
+        assert "[INIT] Forced clear after timeout" in mock_log.call_args[0][0]
+
+        _apply_supervision_init_timeout(out)
+        mock_log.assert_called_once()

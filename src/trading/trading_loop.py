@@ -3246,9 +3246,18 @@ class TradingLoop:
                     result = "LOSS"
                 else:
                     result = "BREAKEVEN"
+                deal_ref = (
+                    row.get("deal_reference")
+                    or row.get("ig_deal_id")
+                    or row.get("deal_id")
+                )
+                dry_run = row.get("dry_run")
                 out.append(
                     {
                         "deal_id": row.get("deal_id") or row.get("ig_deal_id"),
+                        "deal_reference": deal_ref,
+                        "ig_deal_id": row.get("ig_deal_id"),
+                        "dry_run": bool(dry_run) if dry_run is not None else False,
                         "market": epic_market_label(row_epic),
                         "epic": row_epic,
                         "side": row.get("side") or row.get("direction"),

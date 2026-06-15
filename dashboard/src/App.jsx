@@ -832,6 +832,11 @@ export default function App() {
     digestUnread: isDigestUnread(digestDay),
     supervisionDriftOk: state?.supervision_drift_ok,
     watchdogActive: state?.watchdog_active,
+    initForceCleared: state?.init_force_cleared,
+    quotesFresh: state?.quotes_fresh,
+    initLiveSec: state?.init_live_sec,
+    marketsOpenCount: state?.markets_open_count,
+    overnightSupervision: state?.overnight_supervision,
     sessionStyle: resolveSessionStyle(state, viewState),
     envScorerFallbackActive: Boolean(
       state?.env_scorer_fallback_active ?? state?.health?.env_scorer_fallback_active,

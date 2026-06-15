@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from api.agent_control import get_trading_loop, is_paused, is_trading_running
+from system.engine_log import log_engine
 from system.gate_activity import last_gate_check_by_epic, seconds_since_last_gate_eval
 from system.paths import data_dir, logs_dir
 
@@ -30,6 +31,11 @@ _HEALTH_REFRESH_INTERVAL_SEC = 5.0
 
 _RUNTIME_TICK_FIELDS: dict[str, Any] = {}
 _RUNTIME_TICK_LOCK = threading.Lock()
+
+_INIT_QUOTES_LIVE_SINCE: float | None = None
+_INIT_HARD_CLEAR_LOGGED = False
+_INIT_EARLY_CLEAR_SEC = 60.0
+_INIT_HARD_CLEAR_SEC = 120.0
 
 
 def _port_bound(port: int = _API_PORT) -> bool:
@@ -311,6 +317,61 @@ def _markets_open_count(epics: list[str]) -> int:
         return len(epics)
 
 
+def _quotes_live_for_init(status: dict[str, Any]) -> bool:
+    """True when open markets have fresh hub quotes (init timeout may apply)."""
+    return bool(status.get("quotes_fresh")) and int(status.get("markets_open_count") or 0) > 0
+
+
+def _apply_supervision_init_timeout(status: dict[str, Any]) -> dict[str, Any]:
+    """Clear stuck INITIALIZING telemetry once live prices have been up long enough."""
+    global _INIT_QUOTES_LIVE_SINCE, _INIT_HARD_CLEAR_LOGGED
+
+    out = dict(status)
+    quotes_live = _quotes_live_for_init(out)
+    now = time.time()
+
+    if quotes_live:
+        if _INIT_QUOTES_LIVE_SINCE is None:
+            _INIT_QUOTES_LIVE_SINCE = now
+    else:
+        _INIT_QUOTES_LIVE_SINCE = None
+        _INIT_HARD_CLEAR_LOGGED = False
+
+    live_sec = (
+        max(0.0, now - _INIT_QUOTES_LIVE_SINCE) if _INIT_QUOTES_LIVE_SINCE else 0.0
+    )
+    out["init_live_sec"] = round(live_sec, 1)
+
+    drift = out.get("supervision_drift_ok")
+    watchdog = out.get("watchdog_active")
+    stuck = drift is None and watchdog is None
+
+    if quotes_live and stuck and live_sec >= _INIT_EARLY_CLEAR_SEC:
+        if out.get("supervision_drift_ok") is None:
+            out["supervision_drift_ok"] = True
+        if out.get("watchdog_active") is None:
+            try:
+                out["watchdog_active"] = bool(_watchdog_active())
+            except Exception:
+                out["watchdog_active"] = True
+        out["init_force_cleared"] = True
+        if live_sec >= _INIT_HARD_CLEAR_SEC and not _INIT_HARD_CLEAR_LOGGED:
+            _INIT_HARD_CLEAR_LOGGED = True
+            log_engine(
+                "[INIT] Forced clear after timeout — prices confirmed live"
+            )
+    elif out.get("init_force_cleared"):
+        out["init_force_cleared"] = True
+
+    return out
+
+
+def reset_init_timeout_state_for_tests() -> None:
+    global _INIT_QUOTES_LIVE_SINCE, _INIT_HARD_CLEAR_LOGGED
+    _INIT_QUOTES_LIVE_SINCE = None
+    _INIT_HARD_CLEAR_LOGGED = False
+
+
 def evaluate_trading_health(
     *,
     loops_running: bool,
@@ -436,31 +497,33 @@ def build_health_status() -> dict[str, Any]:
             "error": None,
         }
 
-    return {
-        "ok": trading_healthy and watchdog and supervision_drift.get("ok", True),
-        "agent_alive": True,
-        "trading_healthy": trading_healthy,
-        "boot_metrics": boot_metrics,
-        "system_status": system_status,
-        "gate_relaxations": gate_relaxations,
-        "trading_loops_running": loops_running,
-        "trading_paused": paused,
-        "port_bound": _port_bound(),
-        "watchdog_active": watchdog,
-        "env_scorer_fallback_active": env_scorer_fallback,
-        "quotes_fresh": health["quotes_fresh"],
-        "quotes_fresh_count": health["quotes_fresh_count"],
-        "quotes_total": health["quotes_total"],
-        "markets_open_count": health["markets_open_count"],
-        "quotes_required_for_health": health["quotes_required_for_health"],
-        "issues": all_issues,
-        "last_log_age_sec": log_age,
-        "last_gate_check_age_sec": gate_age,
-        "markets": _build_market_health(),
-        "quote_fresh_by_epic": quote_fresh,
-        **_overnight_health_fields(),
-        **supervision_drift,
-    }
+    return _apply_supervision_init_timeout(
+        {
+            "ok": trading_healthy and watchdog and supervision_drift.get("ok", True),
+            "agent_alive": True,
+            "trading_healthy": trading_healthy,
+            "boot_metrics": boot_metrics,
+            "system_status": system_status,
+            "gate_relaxations": gate_relaxations,
+            "trading_loops_running": loops_running,
+            "trading_paused": paused,
+            "port_bound": _port_bound(),
+            "watchdog_active": watchdog,
+            "env_scorer_fallback_active": env_scorer_fallback,
+            "quotes_fresh": health["quotes_fresh"],
+            "quotes_fresh_count": health["quotes_fresh_count"],
+            "quotes_total": health["quotes_total"],
+            "markets_open_count": health["markets_open_count"],
+            "quotes_required_for_health": health["quotes_required_for_health"],
+            "issues": all_issues,
+            "last_log_age_sec": log_age,
+            "last_gate_check_age_sec": gate_age,
+            "markets": _build_market_health(),
+            "quote_fresh_by_epic": quote_fresh,
+            **_overnight_health_fields(),
+            **supervision_drift,
+        }
+    )
 
 
 def _build_fast_health_status() -> dict[str, Any]:
@@ -503,75 +566,85 @@ def _build_fast_health_status() -> dict[str, Any]:
             "stage": "ig_auth",
             "error": None,
         }
-    return {
-        "ok": bool(loops_running and not paused),
-        "agent_alive": True,
-        "trading_healthy": bool(health["trading_healthy"]),
-        "boot_metrics": boot_metrics,
-        "trading_loops_running": loops_running,
-        "trading_paused": paused,
-        "port_bound": _port_bound(),
-        "watchdog_active": True,
-        "quotes_fresh": bool(health["quotes_fresh"]),
-        "quotes_fresh_count": health["quotes_fresh_count"],
-        "quotes_total": health["quotes_total"],
-        "markets_open_count": health["markets_open_count"],
-        "quotes_required_for_health": health["quotes_required_for_health"],
-        "issues": issues,
-        "last_log_age_sec": None,
-        "last_gate_check_age_sec": gate_age,
-        "markets": markets,
-        "quote_fresh_by_epic": {},
-        "supervision_drift_ok": True,
-        "supervision_drift": {},
-        "supervision_warnings": [],
-        "overnight_supervision": {},
-        "independent_of_cursor": False,
-        "overnight_armed": False,
-        "env_scorer_fallback_active": _env_scorer_fallback_active(),
-        "gate_relaxations": {},
-    }
+    return _apply_supervision_init_timeout(
+        {
+            "ok": bool(loops_running and not paused),
+            "agent_alive": True,
+            "trading_healthy": bool(health["trading_healthy"]),
+            "boot_metrics": boot_metrics,
+            "trading_loops_running": loops_running,
+            "trading_paused": paused,
+            "port_bound": _port_bound(),
+            "watchdog_active": None,
+            "quotes_fresh": bool(health["quotes_fresh"]),
+            "quotes_fresh_count": health["quotes_fresh_count"],
+            "quotes_total": health["quotes_total"],
+            "markets_open_count": health["markets_open_count"],
+            "quotes_required_for_health": health["quotes_required_for_health"],
+            "issues": issues,
+            "last_log_age_sec": None,
+            "last_gate_check_age_sec": gate_age,
+            "markets": markets,
+            "quote_fresh_by_epic": {},
+            "supervision_drift_ok": None,
+            "supervision_drift": {},
+            "supervision_warnings": [],
+            "overnight_supervision": {},
+            "independent_of_cursor": False,
+            "overnight_armed": False,
+            "env_scorer_fallback_active": _env_scorer_fallback_active(),
+            "gate_relaxations": {},
+        }
+    )
 
 
 def get_runtime_tick_fields() -> dict[str, Any]:
     """Cached dashboard fields — refreshed by the health-cache thread only."""
     with _RUNTIME_TICK_LOCK:
         if _RUNTIME_TICK_FIELDS:
-            return dict(_RUNTIME_TICK_FIELDS)
+            return _apply_supervision_init_timeout(dict(_RUNTIME_TICK_FIELDS))
     fast = _build_fast_health_status()
-    return {
-        "last_gate_check_age_sec": fast.get("last_gate_check_age_sec"),
-        "quotes_fresh": fast.get("quotes_fresh"),
-        "markets_open_count": fast.get("markets_open_count"),
-        "trading_healthy": fast.get("trading_healthy"),
-        "watchdog_active": fast.get("watchdog_active"),
-        "supervision_drift_ok": fast.get("supervision_drift_ok"),
-        "supervision_drift": fast.get("supervision_drift"),
-        "supervision_warnings": fast.get("supervision_warnings"),
-        "overnight_supervision": fast.get("overnight_supervision"),
-        "independent_of_cursor": fast.get("independent_of_cursor"),
-        "overnight_armed": fast.get("overnight_armed"),
-        "env_scorer_fallback_active": fast.get("env_scorer_fallback_active"),
-        "gate_relaxations": fast.get("gate_relaxations") or {},
-    }
+    return _apply_supervision_init_timeout(
+        {
+            "last_gate_check_age_sec": fast.get("last_gate_check_age_sec"),
+            "quotes_fresh": fast.get("quotes_fresh"),
+            "markets_open_count": fast.get("markets_open_count"),
+            "trading_healthy": fast.get("trading_healthy"),
+            "watchdog_active": fast.get("watchdog_active"),
+            "supervision_drift_ok": fast.get("supervision_drift_ok"),
+            "supervision_drift": fast.get("supervision_drift"),
+            "supervision_warnings": fast.get("supervision_warnings"),
+            "overnight_supervision": fast.get("overnight_supervision"),
+            "independent_of_cursor": fast.get("independent_of_cursor"),
+            "overnight_armed": fast.get("overnight_armed"),
+            "env_scorer_fallback_active": fast.get("env_scorer_fallback_active"),
+            "gate_relaxations": fast.get("gate_relaxations") or {},
+            "init_force_cleared": fast.get("init_force_cleared"),
+            "init_live_sec": fast.get("init_live_sec"),
+        }
+    )
 
 
 def _update_runtime_tick_fields(status: dict[str, Any]) -> None:
-    fields = {
-        "last_gate_check_age_sec": status.get("last_gate_check_age_sec"),
-        "quotes_fresh": status.get("quotes_fresh"),
-        "markets_open_count": status.get("markets_open_count"),
-        "trading_healthy": status.get("trading_healthy"),
-        "watchdog_active": status.get("watchdog_active"),
-        "supervision_drift_ok": status.get("supervision_drift_ok"),
-        "supervision_drift": status.get("supervision_drift"),
-        "supervision_warnings": status.get("supervision_warnings"),
-        "overnight_supervision": status.get("overnight_supervision"),
-        "independent_of_cursor": status.get("independent_of_cursor"),
-        "overnight_armed": status.get("overnight_armed"),
-        "env_scorer_fallback_active": status.get("env_scorer_fallback_active"),
-        "gate_relaxations": status.get("gate_relaxations") or {},
-    }
+    fields = _apply_supervision_init_timeout(
+        {
+            "last_gate_check_age_sec": status.get("last_gate_check_age_sec"),
+            "quotes_fresh": status.get("quotes_fresh"),
+            "markets_open_count": status.get("markets_open_count"),
+            "trading_healthy": status.get("trading_healthy"),
+            "watchdog_active": status.get("watchdog_active"),
+            "supervision_drift_ok": status.get("supervision_drift_ok"),
+            "supervision_drift": status.get("supervision_drift"),
+            "supervision_warnings": status.get("supervision_warnings"),
+            "overnight_supervision": status.get("overnight_supervision"),
+            "independent_of_cursor": status.get("independent_of_cursor"),
+            "overnight_armed": status.get("overnight_armed"),
+            "env_scorer_fallback_active": status.get("env_scorer_fallback_active"),
+            "gate_relaxations": status.get("gate_relaxations") or {},
+            "init_force_cleared": status.get("init_force_cleared"),
+            "init_live_sec": status.get("init_live_sec"),
+        }
+    )
     with _RUNTIME_TICK_LOCK:
         global _RUNTIME_TICK_FIELDS
         _RUNTIME_TICK_FIELDS = fields
@@ -626,6 +699,7 @@ def stop_health_cache_refresher() -> None:
 def reset_health_cache_for_tests() -> None:
     global _HEALTH_CACHE, _HEALTH_REFRESH_THREAD, _RUNTIME_TICK_FIELDS
     stop_health_cache_refresher()
+    reset_init_timeout_state_for_tests()
     with _HEALTH_CACHE_LOCK:
         _HEALTH_CACHE = None
     with _RUNTIME_TICK_LOCK:

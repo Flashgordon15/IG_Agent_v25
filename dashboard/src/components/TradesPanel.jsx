@@ -29,10 +29,29 @@ function resolvePositions(state) {
   return [];
 }
 
-function isTestTrade(trade) {
-  if (trade?.dry_run === 1 || trade?.dry_run === true || trade?.dry_run === "1" || trade?.dry_run === "true") return true;
+function isDryRunTrade(trade) {
+  return (
+    trade?.dry_run === 1 ||
+    trade?.dry_run === true ||
+    trade?.dry_run === "1" ||
+    trade?.dry_run === "true"
+  );
+}
+
+function isSimSourceTrade(trade) {
   const src = String(trade?.source ?? trade?.setup ?? trade?.setup_key ?? "").toLowerCase();
   return TEST_SOURCE_TAGS.some((tag) => src.includes(tag));
+}
+
+function isTestTrade(trade) {
+  return isDryRunTrade(trade) || isSimSourceTrade(trade);
+}
+
+function hasIgDealRef(trade) {
+  const ref = trade?.deal_reference ?? trade?.ig_deal_id ?? trade?.deal_id;
+  if (ref == null) return false;
+  const text = String(ref).trim();
+  return text !== "" && text.toUpperCase() !== "NULL";
 }
 
 function tradeTimeMs(trade) {
@@ -165,10 +184,18 @@ function ResultBadge({ result }) {
 }
 
 function TestBadge({ trade }) {
-  const label = trade?.dry_run === 1 || trade?.dry_run === true || trade?.dry_run === "1" ? "DRY RUN" : "TEST";
+  const label = isDryRunTrade(trade) ? "DRY RUN" : "TEST";
   return (
     <span className="ml-1.5 inline-flex rounded border border-warning/40 bg-warning/10 px-1 py-0.5 text-[9px] font-bold uppercase tracking-wide text-warning">
       {label}
+    </span>
+  );
+}
+
+function UnconfirmedBadge() {
+  return (
+    <span className="ml-1.5 inline-flex rounded border border-muted/50 bg-muted/10 px-1 py-0.5 text-[9px] font-bold uppercase tracking-wide text-muted">
+      UNCONFIRMED
     </span>
   );
 }
@@ -231,6 +258,7 @@ export default function TradesPanel({ state }) {
   const allClosedTrades = resolveClosedTrades(state);
   const closedTrades    = showTestTrades ? allClosedTrades : allClosedTrades.filter((t) => !isTestTrade(t));
   const testTradeCount  = allClosedTrades.filter((t) => isTestTrade(t)).length;
+  const dryRunCount     = allClosedTrades.filter((t) => isDryRunTrade(t)).length;
 
   const { wins, losses, total, winRate, totalPnl, openPnl } = buildPerformanceSummary(closedTrades, positions);
   const marketBreakdown = buildMarketBreakdown(closedTrades);
@@ -356,7 +384,7 @@ export default function TradesPanel({ state }) {
             Show test / dry-run trades
             {testTradeCount > 0 && (
               <span className="rounded border border-warning/30 bg-warning/10 px-1 py-0.5 text-[9px] font-bold text-warning">
-                {testTradeCount}
+                {testTradeCount}{dryRunCount > 0 ? ` (${dryRunCount} dry)` : ""}
               </span>
             )}
           </label>
@@ -385,6 +413,7 @@ export default function TradesPanel({ state }) {
                   const pnlNum = pnl != null ? Number(pnl) : null;
                   const time = trade.closed_at ?? trade.closed_time ?? trade.time ?? trade.ts ?? trade.timestamp;
                   const isTest = isTestTrade(trade);
+                  const unconfirmed = !isTest && !hasIgDealRef(trade);
                   return (
                     <tr
                       key={tradeKey(trade, idx)}
@@ -394,6 +423,7 @@ export default function TradesPanel({ state }) {
                       <td className="px-2 py-2 font-medium text-foreground not-italic">
                         <span className={isTest ? "italic" : ""}>{trade.epic ?? trade.market ?? "—"}</span>
                         {isTest && <TestBadge trade={trade} />}
+                        {unconfirmed && <UnconfirmedBadge />}
                       </td>
                       <td className={`px-2 py-2 font-bold ${sideColor}`}>{side || "—"}</td>
                       <td className="px-2 py-2 font-mono tabular-nums">{fmtPrice(trade.entry ?? trade.entry_price)}</td>

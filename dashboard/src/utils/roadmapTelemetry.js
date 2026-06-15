@@ -28,6 +28,22 @@ export function resolveActiveEpics(state) {
   if (Array.isArray(fromOrch) && fromOrch.length) return fromOrch.filter(Boolean);
   const flat = state?.active_epics;
   if (Array.isArray(flat) && flat.length) return flat.filter(Boolean);
+  const initCleared =
+    state?.init_force_cleared === true ||
+    (state?.quotes_fresh === true &&
+      Number(state?.init_live_sec ?? 0) >= 60 &&
+      (state?.markets_open_count ?? 0) > 0);
+  if (initCleared) {
+    const enabled = state?.enabled_epics;
+    if (Array.isArray(enabled) && enabled.length) {
+      return enabled.filter(Boolean).slice(0, 3);
+    }
+    const markets = state?.markets;
+    if (markets && typeof markets === "object") {
+      const keys = Object.keys(markets).filter(Boolean);
+      if (keys.length) return keys.slice(0, 3);
+    }
+  }
   return [];
 }
 
@@ -78,11 +94,20 @@ export function resolveAppAiHealth(state) {
   }
   const driftOk = state.supervision_drift_ok;
   const watchdogActive = state.watchdog_active;
+  const quotesLive =
+    state.quotes_fresh === true && Number(state.markets_open_count ?? 0) > 0;
+  const initCleared =
+    state.init_force_cleared === true ||
+    (quotesLive && Number(state.init_live_sec ?? 0) >= 60);
   const initializing =
-    driftOk == null && watchdogActive == null && !state?.overnight_supervision;
+    !initCleared &&
+    driftOk == null &&
+    watchdogActive == null &&
+    !state?.overnight_supervision?.launchd_watchdog;
   const ok =
+    !initializing &&
     driftOk !== false &&
     (watchdogActive === true ||
       state?.overnight_supervision?.launchd_watchdog === true);
-  return { ready: !initializing, driftOk, watchdogActive, initializing, ok };
+  return { ready: !initializing, driftOk, watchdogActive, initializing, ok, initCleared };
 }

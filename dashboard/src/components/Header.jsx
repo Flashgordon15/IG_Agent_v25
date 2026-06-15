@@ -8,7 +8,7 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import { fmtPrice } from "../utils/fmtPrice.js";
-import { APP_VERSION_LABEL } from "../utils/roadmapTelemetry.js";
+import { APP_VERSION_LABEL, resolveAppAiHealth } from "../utils/roadmapTelemetry.js";
 import { RoadmapProgressButton } from "./RoadmapProgressModal.jsx";
 import { DailyDigestButton } from "./DailyDigestModal.jsx";
 import MarketStatusTimer, { buildMarketStatusTimerProps } from "./MarketStatusTimer.jsx";
@@ -128,13 +128,26 @@ function RoadmapAiStatusPills({
   watchdogActive,
   sessionStyle,
   envScorerFallbackActive,
+  initForceCleared,
+  quotesFresh,
+  initLiveSec,
+  marketsOpenCount,
+  overnightSupervision,
 }) {
-  const appInitializing =
-    supervisionDriftOk == null && watchdogActive == null;
+  const appAi = resolveAppAiHealth({
+    supervision_drift_ok: supervisionDriftOk,
+    watchdog_active: watchdogActive,
+    init_force_cleared: initForceCleared,
+    quotes_fresh: quotesFresh,
+    init_live_sec: initLiveSec,
+    markets_open_count: marketsOpenCount,
+    overnight_supervision: overnightSupervision,
+  });
+  const appInitializing = appAi.initializing;
   const appHealthy =
     !appInitializing &&
-    supervisionDriftOk !== false &&
-    (watchdogActive === true || supervisionDriftOk === true);
+    appAi.driftOk !== false &&
+    (watchdogActive === true || appAi.driftOk === true);
 
   let appClass =
     "border-border bg-card/60 text-muted";
@@ -240,6 +253,10 @@ export default function Header({
   watchdogActive,
   sessionStyle,
   envScorerFallbackActive,
+  initForceCleared,
+  quotesFresh,
+  initLiveSec,
+  overnightSupervision,
 }) {
   const [safeLeaveModal, setSafeLeaveModal] = useState(null);
 
@@ -368,6 +385,11 @@ export default function Header({
             watchdogActive={watchdogActive}
             sessionStyle={sessionStyle}
             envScorerFallbackActive={envScorerFallbackActive}
+            initForceCleared={initForceCleared}
+            quotesFresh={quotesFresh}
+            initLiveSec={initLiveSec}
+            marketsOpenCount={marketsOpenCount}
+            overnightSupervision={overnightSupervision}
           />
         </div>
 

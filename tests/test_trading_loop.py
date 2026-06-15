@@ -317,6 +317,42 @@ class TradingLoopTests(unittest.TestCase):
         pnl = loop._daily_pnl_signed_gbp([{"deal_id": "D1"}])
         self.assertEqual(pnl, 25.0)
 
+    def test_closed_trades_payload_includes_dry_run_and_deal_ref(self) -> None:
+        loop = _make_loop()
+        loop._epic = "CS.D.CFPGOLD.CFP.IP"
+        loop._store.recent_closed_trades.return_value = [
+            {
+                "epic": "CS.D.CFPGOLD.CFP.IP",
+                "side": "BUY",
+                "entry_price": 100.0,
+                "exit_price": 101.0,
+                "ig_pnl_currency": 5.0,
+                "closed_at": "2026-06-15 08:00:00",
+                "setup_key": "agent|setup",
+                "source": "agent",
+                "dry_run": 0,
+                "deal_reference": "RDJXR6A5",
+                "ig_deal_id": "RDJXR6A5",
+            },
+            {
+                "epic": "CS.D.CFPGOLD.CFP.IP",
+                "side": "SELL",
+                "entry_price": 200.0,
+                "exit_price": 199.0,
+                "ig_pnl_currency": -2.0,
+                "closed_at": "2026-06-15 07:00:00",
+                "setup_key": "agent|setup",
+                "source": "agent",
+                "dry_run": 0,
+            },
+        ]
+        rows = loop._closed_trades_payload()
+        self.assertEqual(len(rows), 2)
+        confirmed = next(r for r in rows if r.get("deal_reference") == "RDJXR6A5")
+        self.assertFalse(confirmed.get("dry_run"))
+        unconfirmed = next(r for r in rows if not r.get("deal_reference"))
+        self.assertFalse(unconfirmed.get("dry_run"))
+
     def test_positions_fallback_to_position_sync(self) -> None:
         loop = _make_loop()
         loop._execution_loop.execution_engine.trade_tracker.snapshot.return_value = {
