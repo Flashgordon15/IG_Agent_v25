@@ -122,6 +122,30 @@ class TestSessionBlackout(unittest.TestCase):
         self.assertTrue(blocked)
         self.assertIn("blackout", reason.lower())
 
+    def test_monday_1218_allowed(self) -> None:
+        cfg = _cfg()
+        at = _london_dt(2026, 6, 15, 12, 18)
+        blocked, reason = check_session_blackout(GOLD, cfg, now=at, market="Gold")
+        self.assertFalse(blocked, reason)
+
+    def test_friday_2005_blocked(self) -> None:
+        cfg = _cfg()
+        at = _london_dt(2026, 6, 19, 20, 5)
+        blocked, _ = check_session_blackout(GOLD, cfg, now=at, market="Gold")
+        self.assertTrue(blocked)
+
+    def test_monday_0559_blocked(self) -> None:
+        cfg = _cfg()
+        at = _london_dt(2026, 6, 15, 5, 59)
+        blocked, _ = check_session_blackout(GOLD, cfg, now=at, market="Gold")
+        self.assertTrue(blocked)
+
+    def test_monday_0601_allowed(self) -> None:
+        cfg = _cfg()
+        at = _london_dt(2026, 6, 15, 6, 1)
+        blocked, reason = check_session_blackout(GOLD, cfg, now=at, market="Gold")
+        self.assertFalse(blocked, reason)
+
 
 class TestReentryCooldown(unittest.TestCase):
     def setUp(self) -> None:

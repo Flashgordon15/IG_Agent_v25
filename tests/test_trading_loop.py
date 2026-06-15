@@ -252,6 +252,37 @@ class TradingLoopTests(unittest.TestCase):
         self.assertEqual(payload["type"], "tick")
         self.assertIn("health", payload)
 
+    @patch(
+        "system.market_watch.japan225_session.japan225_strategy_paused",
+        return_value=(False, ""),
+    )
+    def test_rotation_soft_block_keeps_market_state_open(self, _j225: MagicMock) -> None:
+        """Muted rotation epics must not show CLOSED when IG session is open."""
+        loop = _make_loop()
+        loop._config.get = MagicMock(
+            side_effect=lambda key, default=None: {
+                "ig_point_value_gbp": 1.0,
+                "risk_cap_gbp": None,
+                "enforce_top3_rotation_filter": True,
+                "spread_to_atr_circuit_breaker_max": 0.30,
+            }.get(key, default)
+        )
+        loop._session.is_session_open.return_value = True
+        loop._gate_active_rotation = MagicMock(
+            return_value=GateResult(
+                name="active_rotation",
+                passed=False,
+                value={"epic": loop._epic},
+                detail="soft block",
+            )
+        )
+        ctx = loop.run_once()
+        assert ctx is not None
+        session_gate = next(g for g in ctx.gates if g.name == "session_open")
+        self.assertTrue(session_gate.passed)
+        payload = loop.build_snapshot_payload(ctx)
+        self.assertEqual(payload.get("market_state"), "OPEN")
+
     @patch("trading.trading_loop.publish_tick")
     @patch("trading.trading_loop.time.sleep")
     def test_flatten_invoked_when_attempt_due(

@@ -14,6 +14,7 @@ from system.engine_log import log_engine
 
 _LONDON = ZoneInfo("Europe/London")
 _DOW = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+_DOW_LABEL = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 _LONDON_OPEN_MIN = 7 * 60
 _US_OPEN_MIN = 13 * 60 + 30
 
@@ -189,11 +190,6 @@ def check_session_blackout(
         return False, ""
     at = _london_now(now)
     label = str(market or epic)
-    log_engine(
-        f"[SESSION CHECK] {label} local={at.strftime('%Y-%m-%d %H:%M %Z')} "
-        f"(weekday {rules['weekday_start']}-{rules['weekday_end']}, "
-        f"weekend {rules['weekend_start']}–{rules['weekend_end']})"
-    )
     weekday_block = _in_weekday_overnight_blackout(
         at,
         start=rules["weekday_start"],
@@ -204,7 +200,13 @@ def check_session_blackout(
         start=rules["weekend_start"],
         end=rules["weekend_end"],
     )
-    if weekday_block or weekend_block:
+    blocked = weekday_block or weekend_block
+    dow = _DOW_LABEL[at.weekday()] if 0 <= at.weekday() < 7 else "?"
+    status = "BLOCKED" if blocked else "ALLOWED"
+    log_engine(
+        f"[SESSION CHECK] {label} — BST {at.strftime('%H:%M')} {dow} — {status}"
+    )
+    if blocked:
         parts: list[str] = []
         if weekday_block:
             parts.append(

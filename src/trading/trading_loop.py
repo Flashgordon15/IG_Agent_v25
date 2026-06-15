@@ -1125,8 +1125,15 @@ class TradingLoop:
                 value=rotation.value,
                 detail=SOFT_BLOCK_NOT_IN_TOP_3,
             )
-            results: list[GateResult] = [blocked]
+            # Keep session_open / session_blackout accurate for dashboard market_state.
+            results: list[GateResult] = [
+                blocked,
+                self._gate_session_open(),
+                self._gate_session_blackout(),
+            ]
             for name in GATE_NAMES:
+                if name in ("session_open", "session_blackout"):
+                    continue
                 results.append(
                     GateResult(
                         name=name,
@@ -2813,11 +2820,7 @@ class TradingLoop:
         open_positions = self._positions_payload(quote)
         realized_daily_pnl = self._daily_pnl_signed_gbp(open_positions)
 
-        session_open = False
-        for g in ctx.gates:
-            if g.name == "session_open":
-                session_open = bool(g.passed)
-                break
+        session_open = bool(self._session.is_session_open(at=quote_time(self._clock())))
 
         hub_maint, session_maint = self._snapshot_maintenance_flags()
 

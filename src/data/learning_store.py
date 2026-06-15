@@ -1384,7 +1384,11 @@ class LearningStore:
         row = self.conn.execute(
             """
             SELECT COUNT(*) AS n FROM trades
-            WHERE substr(opened_at, 1, 10) = ? AND dry_run = 0
+            WHERE substr(opened_at, 1, 10) = ?
+              AND dry_run = 0
+              AND COALESCE(source, '') NOT IN ('ig_import', 'ig|imported')
+              AND UPPER(COALESCE(setup_key, '')) NOT LIKE 'IG|%'
+              AND UPPER(COALESCE(setup_key, '')) NOT IN ('IG_IMPORT', 'IG|IMPORTED')
             """,
             (d,),
         ).fetchone()

@@ -80,7 +80,7 @@ def test_supervision_init_timeout_clears_null_fields_after_live_quotes() -> None
     import api.agent_health as ah
 
     reset_init_timeout_state_for_tests()
-    ah._INIT_QUOTES_LIVE_SINCE = time.time() - 65.0
+    ah._INIT_QUOTES_LIVE_SINCE = time.time() - 95.0
 
     out = _apply_supervision_init_timeout(
         {
@@ -93,7 +93,7 @@ def test_supervision_init_timeout_clears_null_fields_after_live_quotes() -> None
     assert out["supervision_drift_ok"] is True
     assert out["watchdog_active"] is True
     assert out["init_force_cleared"] is True
-    assert out["init_live_sec"] >= 60.0
+    assert out["init_live_sec"] >= 90.0
 
 
 def test_supervision_init_hard_timeout_logs_once() -> None:

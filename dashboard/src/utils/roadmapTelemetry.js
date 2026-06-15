@@ -31,7 +31,7 @@ export function resolveActiveEpics(state) {
   const initCleared =
     state?.init_force_cleared === true ||
     (state?.quotes_fresh === true &&
-      Number(state?.init_live_sec ?? 0) >= 60 &&
+      Number(state?.init_live_sec ?? 0) >= 90 &&
       (state?.markets_open_count ?? 0) > 0);
   if (initCleared) {
     const enabled = state?.enabled_epics;
@@ -98,7 +98,7 @@ export function resolveAppAiHealth(state) {
     state.quotes_fresh === true && Number(state.markets_open_count ?? 0) > 0;
   const initCleared =
     state.init_force_cleared === true ||
-    (quotesLive && Number(state.init_live_sec ?? 0) >= 60);
+    (quotesLive && Number(state.init_live_sec ?? 0) >= 90);
   const initializing =
     !initCleared &&
     driftOk == null &&

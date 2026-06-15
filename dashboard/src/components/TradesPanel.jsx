@@ -43,8 +43,19 @@ function isSimSourceTrade(trade) {
   return TEST_SOURCE_TAGS.some((tag) => src.includes(tag));
 }
 
+function isIgImportTrade(trade) {
+  const setup = String(trade?.setup_key ?? trade?.setup ?? "").toLowerCase();
+  const src = String(trade?.source ?? "").toLowerCase();
+  return (
+    src === "ig_import" ||
+    setup === "ig_import" ||
+    setup === "ig|imported" ||
+    setup.startsWith("ig|")
+  );
+}
+
 function isTestTrade(trade) {
-  return isDryRunTrade(trade) || isSimSourceTrade(trade);
+  return isDryRunTrade(trade) || isSimSourceTrade(trade) || isIgImportTrade(trade);
 }
 
 function hasIgDealRef(trade) {

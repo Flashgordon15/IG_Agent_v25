@@ -594,10 +594,16 @@ class TestRoadmapE2EIntegration(unittest.TestCase):
         )
         loop._rotation_grace_remaining = 0
         gates = loop._evaluate_gates_core(_quote())
-        self.assertFalse(any(g.passed for g in gates))
+        self.assertFalse(next(g for g in gates if g.name == "active_rotation").passed)
+        passed = {g.name for g in gates if g.passed}
+        self.assertEqual(passed, {"session_open", "session_blackout"})
         self.assertTrue(
-            all(g.detail == SOFT_BLOCK_NOT_IN_TOP_3 for g in gates),
-            [g.detail for g in gates],
+            all(
+                g.detail == SOFT_BLOCK_NOT_IN_TOP_3
+                for g in gates
+                if g.name not in ("session_open", "session_blackout")
+            ),
+            [g.name for g in gates if g.detail != SOFT_BLOCK_NOT_IN_TOP_3],
         )
 
     def test_session_style_utc_asian_and_western_weights(self) -> None:
