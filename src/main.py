@@ -19,44 +19,32 @@ import webbrowser
 from pathlib import Path
 from typing import Any
 
-from api.agent_control import register_trading_loop
-from api.server import create_app, register_api_startup
-from system.app_identity import APP_DISPLAY_NAME, APP_VERSION_LABEL
-from system.config import Config
-from system.config_loader import ConfigLoader
-from system.config_validator import (
-    apply_config_defaults,
-    emergency_stop_lock_present,
-    validate_config,
-)
-from system.credentials_holder import bootstrap_credentials, get_credentials_holder
-from system.credentials_loader import try_load_credentials
-from system.engine_log import log_engine
-from system.instance_lock import (
-    acquire_instance_lock,
-    release_instance_lock,
-)
-from system.instance_lock import (
-    lock_path as instance_lock_path,
-)
-from system.paths import logs_dir, project_root
-
-try:
-    from system.startup_tracker import mark as _startup_mark
-except Exception:
-
-    def _startup_mark(phase_id: str, note: str | None = None) -> None:  # type: ignore[misc]
-        pass
-
-
 EXIT_OK = 0
 EXIT_LOCK = 2
 EXIT_CONFIG = 3
 EXIT_INSTANCE = 4
 
-_SESSION_REFRESH_INTERVAL_SEC = 45 * 60  # 45 minutes
+_BROWSER_DELAY_SEC = 3.0
 _LOG_ROTATE_MAX_BYTES = 20 * 1024 * 1024  # 20 MB — rotate shell-written logs
 _LOG_KEEP_BACKUPS = 3
+_API_HOST = "127.0.0.1"
+_API_PORT = 8080
+_DASHBOARD_URL = "http://localhost:8080/"
+
+
+def _log_engine(message: str) -> None:
+    from system.engine_log import log_engine
+
+    log_engine(message)
+
+
+def _startup_mark(phase_id: str, note: str | None = None) -> None:
+    try:
+        from system.startup_tracker import mark
+
+        mark(phase_id, note)
+    except Exception:
+        pass
 
 
 def _rotate_oversized_logs() -> None:
@@ -86,49 +74,20 @@ def _rotate_oversized_logs() -> None:
             pass
 
 
-def _start_session_refresh_watchdog(rest_client: Any) -> None:
-    """Background thread that proactively refreshes the IG session every 45 minutes.
+def _init_telegram_from_config() -> None:
+    """Configure Telegram as early as possible so failure paths can alert."""
+    try:
+        raw = load_raw_config_dict()
+        from system.config import Config
+        from system.config_loader import _sync_operating_mode_from_credentials
+        from system.config_validator import apply_config_defaults
+        from system.telegram_notifier import configure_telegram
 
-    Without this, a long-running Lightstreamer session (no REST calls) can let
-    the session token expire silently, causing an auth failure on the next trade.
-    """
-    if rest_client is None:
-        return
-
-    def _refresh_loop() -> None:
-        while True:
-            time.sleep(_SESSION_REFRESH_INTERVAL_SEC)
-            try:
-                refreshed = rest_client.proactive_refresh_if_needed()
-                if not refreshed:
-                    # Force a lightweight REST call to keep the session alive
-                    try:
-                        rest_client.ensure_session()
-                        log_engine("IG session keep-alive: session verified")
-                    except Exception as e:
-                        log_engine(
-                            f"IG session keep-alive failed: {type(e).__name__}: {e}"
-                        )
-                else:
-                    log_engine(
-                        "IG session keep-alive: proactive token refresh completed"
-                    )
-            except Exception as e:
-                log_engine(
-                    f"IG session refresh watchdog error: {type(e).__name__}: {e}"
-                )
-
-    t = threading.Thread(target=_refresh_loop, name="ig-session-refresh", daemon=True)
-    t.start()
-    log_engine(
-        f"IG session refresh watchdog started (interval {_SESSION_REFRESH_INTERVAL_SEC // 60}m)"
-    )
-
-
-_BROWSER_DELAY_SEC = 3.0
-_API_HOST = "127.0.0.1"
-_API_PORT = 8080
-_DASHBOARD_URL = "http://localhost:8080/"
+        merged = apply_config_defaults(raw)
+        _sync_operating_mode_from_credentials(merged)
+        configure_telegram(Config(_data=merged))
+    except Exception as e:
+        _log_engine(f"telegram early init failed: {type(e).__name__}: {e}")
 
 
 def _is_benign_startup_lock_failure(message: str) -> bool:
@@ -149,15 +108,24 @@ def _is_benign_startup_lock_failure(message: str) -> bool:
 
 
 def check_port_available(port: int) -> bool:
-    """Return True if nothing is accepting TCP connections on 127.0.0.1:port."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    result = s.connect_ex((_API_HOST, port))
-    s.close()
-    return result != 0
+    """Return True when 127.0.0.1:port is free to bind (no localhost DNS)."""
+    import socket
+
+    host = "127.0.0.1"
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        probe.bind((host, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        probe.close()
 
 
 def _port_in_use_banner(port: int) -> str:
+    from system.app_identity import APP_DISPLAY_NAME
+
     return (
         "\n"
         "================================================================================\n"
@@ -184,11 +152,15 @@ def _config_path() -> Path:
 
 def load_raw_config_dict() -> dict[str, Any]:
     """Load fully merged config (respects v29 → v25 $extends chain)."""
+    from system.config_loader import ConfigLoader
+
     return ConfigLoader(_config_path()).load_config(validate=False).as_dict()
 
 
 def merge_credentials_for_validation(data: dict[str, Any]) -> dict[str, Any]:
     """Overlay IG credentials from credentials.json for validator critical keys."""
+    from system.credentials_loader import try_load_credentials
+
     merged = dict(data)
     status = try_load_credentials()
     if status.credentials is not None:
@@ -217,102 +189,114 @@ def _clear_pycache() -> None:
             cleared += 1
         except Exception:
             pass
-    log_engine(
+    _log_engine(
         f"startup: cleared {cleared} __pycache__ dirs — fresh bytecode guaranteed"
     )
 
 
-def _init_telegram_from_config() -> None:
-    """Configure Telegram as early as possible so failure paths can alert."""
+def _resolve_killable_pid(raw_pid: str | int) -> int | None:
+    """
+    Normalize pgrep/lsof PID text and skip protected processes.
+
+    Returns an int PID to signal, or None when invalid / self / parent.
+    """
+    clean_target_str = str(raw_pid).strip()
+    if not clean_target_str.isdigit():
+        return None
+
+    target_pid_int = int(clean_target_str)
+
+    if target_pid_int == os.getpid() or target_pid_int == os.getppid():
+        return None
+
+    return target_pid_int
+
+
+def _pre_startup_kill_orphan_agents(*, wait_sec: float = 1.0) -> list[int]:
+    """SIGTERM (then optional SIGKILL) stale src/main.py processes — never self."""
+    if os.environ.get("IG_AGENT_PYTEST") == "1":
+        return []
+    killed: list[int] = []
     try:
-        raw = load_raw_config_dict()
-        from system.config import Config
-        from system.config_loader import _sync_operating_mode_from_credentials
-        from system.config_validator import apply_config_defaults
-        from system.telegram_notifier import configure_telegram
-
-        merged = apply_config_defaults(raw)
-        _sync_operating_mode_from_credentials(merged)
-        configure_telegram(Config(_data=merged))
+        result = subprocess.run(
+            ["/usr/bin/pgrep", "-f", "src/main.py"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        for pid_str in result.stdout.strip().splitlines():
+            target_pid_int = _resolve_killable_pid(pid_str)
+            if target_pid_int is None:
+                continue
+            try:
+                os.kill(target_pid_int, signal.SIGTERM)
+                killed.append(target_pid_int)
+                _log_engine(
+                    f"pre-startup: SIGTERM orphan agent PID {target_pid_int}"
+                )
+            except ProcessLookupError:
+                pass
+            except Exception as e:
+                _log_engine(
+                    f"pre-startup: could not SIGTERM PID {target_pid_int}: {e}"
+                )
     except Exception as e:
-        log_engine(f"telegram early init failed: {type(e).__name__}: {e}")
+        _log_engine(f"pre-startup: pgrep failed: {e}")
+        return killed
 
+    if not killed:
+        return killed
 
-def _run_deployment_verification() -> None:
-    """Run deployment health checks — abort startup if any fail."""
-    if os.environ.get("IG_AGENT_SKIP_DEPLOY_CHECK") == "1":
-        log_engine(
-            "Deployment verification skipped (IG_AGENT_SKIP_DEPLOY_CHECK=1 — watchdog restart)"
-        )
-        _startup_mark("deploy_check", note="skipped watchdog restart")
-        return
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "tests/test_deployment_verified.py",
-            "-q",
-            "--tb=short",
-        ],
-        capture_output=True,
-        text=True,
-        cwd=Path(__file__).resolve().parents[1],
-        env={
-            **os.environ,
-            "PYTHONPATH": str(Path(__file__).resolve().parent),
-            "IG_AGENT_PYTEST": "1",
-        },
-    )
-    if result.returncode != 0:
-        log_engine(
-            f"DEPLOYMENT VERIFICATION FAILED — agent will not start trading:\n"
-            f"{result.stdout}\n{result.stderr}"
-        )
+    deadline = time.time() + wait_sec
+    while time.time() < deadline:
+        alive: list[int] = []
+        for target_pid in killed:
+            if _resolve_killable_pid(target_pid) is None:
+                continue
+            try:
+                os.kill(target_pid, 0)
+                alive.append(target_pid)
+            except ProcessLookupError:
+                pass
+            except Exception:
+                pass
+        if not alive:
+            break
+        time.sleep(0.2)
+
+    for target_pid in killed:
+        if _resolve_killable_pid(target_pid) is None:
+            continue
         try:
-            from system.telegram_notifier import send_critical_alert
-
-            send_critical_alert("Startup BLOCKED — deployment check failed")
+            os.kill(target_pid, 0)
+            os.kill(target_pid, signal.SIGKILL)
+            _log_engine(f"pre-startup: SIGKILL orphan agent PID {target_pid}")
+        except ProcessLookupError:
+            pass
         except Exception:
             pass
-        raise SystemExit(
-            "Deployment verification failed. Fix the issues above before launching."
-        )
-    last_line = (
-        result.stdout.strip().splitlines()[-1] if result.stdout.strip() else "ok"
-    )
-    log_engine(f"Deployment verification passed ({last_line})")
-    _startup_mark("deploy_check", note="all checks passed")
+    return killed
 
 
 def _pre_startup_cleanup() -> None:
-    """Kill any stale agent processes and release resources before acquiring a new lock.
+    """Kill stale processes and release resources before Gate 1 acquires the instance lock."""
+    from system.instance_lock import lock_path as instance_lock_path
 
-    Runs every time the agent starts so a previous crash, force-quit, or silent
-    background session never blocks the next launch.
-    """
-    _clear_pycache()
+    if os.environ.get("IG_AGENT_CLEAR_PYCACHE", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        _clear_pycache()
     from system.shutdown_cleanup import clear_manual_stop
 
     clear_manual_stop()
     _init_telegram_from_config()
-    _run_deployment_verification()
 
-    import os
-
-    my_pid = os.getpid()
     lock_file = instance_lock_path()
-    killed_pids: list[int] = []
 
-    # 1. Find and SIGTERM any other agent processes
-    from system.shutdown_cleanup import kill_other_agent_processes
-
-    killed_pids = kill_other_agent_processes(
-        exclude_pid=my_pid,
-        sigkill_survivors=True,
-        wait_sec=5.0,
-        log_label="pre-startup",
-    )
+    # 1. Find and SIGTERM any other agent processes (never this PID).
+    killed_pids = _pre_startup_kill_orphan_agents(wait_sec=1.0)
 
     # 2b. Orphan watchdog from a prior session can race this startup — stop it first.
     try:
@@ -322,17 +306,17 @@ def _pre_startup_cleanup() -> None:
             from api.agent_health import stop_watchdog
 
             stop_watchdog(preserve_launchd=False)
-            log_engine("pre-startup: cleared standalone watchdog from prior session")
+            _log_engine("pre-startup: cleared standalone watchdog from prior session")
     except Exception as e:
-        log_engine(f"pre-startup: watchdog cleanup error (ignored): {e}")
+        _log_engine(f"pre-startup: watchdog cleanup error (ignored): {e}")
 
     # 3. Remove stale lock
     try:
         if lock_file.exists():
             lock_file.unlink()
-            log_engine("pre-startup: removed stale instance lock")
+            _log_engine("pre-startup: removed stale instance lock")
     except Exception as e:
-        log_engine(f"pre-startup: could not remove lock: {e}")
+        _log_engine(f"pre-startup: could not remove lock: {e}")
 
     # 4. Kill any process still bound to port 8080 (lsof catches zombie workers
     #    that pgrep may have missed, e.g. uvicorn sub-processes).
@@ -345,12 +329,15 @@ def _pre_startup_cleanup() -> None:
     for _ in range(10):  # up to 3 s
         with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
             s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
-            if s.connect_ex(("127.0.0.1", _API_PORT)) != 0:
+            try:
+                s.bind(("127.0.0.1", _API_PORT))
                 _port_free = True
                 break
+            except OSError:
+                pass
         time.sleep(0.3)
     if not _port_free:
-        log_engine(
+        _log_engine(
             "pre-startup: port 8080 still in use after cleanup — proceeding anyway"
         )
 
@@ -366,12 +353,12 @@ def _pre_startup_cleanup() -> None:
         cleared_pending = recover_pending_state_for_startup()
         cleared_inflight = recover_startup_inflight_state()
         if cleared_pending or cleared_inflight:
-            log_engine(
+            _log_engine(
                 f"pre-startup: cleared {cleared_pending} stale pending order(s) "
                 f"and {cleared_inflight} in-flight entry/ies from previous session"
             )
     except Exception as e:
-        log_engine(f"pre-startup: inflight/pending clear failed (ignored): {e}")
+        _log_engine(f"pre-startup: inflight/pending clear failed (ignored): {e}")
 
     # 7. Mark startup phase (visible in splash screen)
     note = (
@@ -380,16 +367,18 @@ def _pre_startup_cleanup() -> None:
         else "no previous session running"
     )
     _startup_mark("session_cleanup", note)
-    log_engine(f"pre-startup: cleanup complete — {note}")
+    _log_engine(f"pre-startup: cleanup complete — {note}")
 
 
 def _ensure_watchdog_running() -> None:
     """Start scripts/watchdog.sh when absent — skip if launchd already owns supervision."""
+    from system.paths import logs_dir, project_root
+
     try:
         from system.overnight_supervision import launchd_watchdog_active
 
         if launchd_watchdog_active():
-            log_engine(
+            _log_engine(
                 "startup: launchd watchdog active — skipping manual watchdog spawn"
             )
             return
@@ -400,17 +389,17 @@ def _ensure_watchdog_running() -> None:
         from api.agent_health import _watchdog_active
 
         if _watchdog_active():
-            log_engine("startup: watchdog already running")
+            _log_engine("startup: watchdog already running")
             return
     except Exception:
         pass
 
     wd = project_root() / "scripts" / "watchdog.sh"
     if not wd.is_file():
-        log_engine(f"startup: watchdog script missing ({wd})")
+        _log_engine(f"startup: watchdog script missing ({wd})")
         return
     if not os.access(wd, os.X_OK):
-        log_engine("startup: watchdog script not executable")
+        _log_engine("startup: watchdog script not executable")
         return
 
     log_path = logs_dir() / "watchdog.log"
@@ -424,9 +413,9 @@ def _ensure_watchdog_running() -> None:
                 start_new_session=True,
                 cwd=str(project_root()),
             )
-        log_engine("startup: watchdog started")
+        _log_engine("startup: watchdog started")
     except Exception as e:
-        log_engine(f"startup: watchdog start failed: {type(e).__name__}: {e}")
+        _log_engine(f"startup: watchdog start failed: {type(e).__name__}: {e}")
 
 
 def _force_cleanup_port(port: int = 8080) -> None:
@@ -435,9 +424,10 @@ def _force_cleanup_port(port: int = 8080) -> None:
     Uses ``lsof -ti :<port>`` which catches zombie uvicorn workers that
     ``pgrep -f src/main.py`` misses.  Safe to call at startup and on exit.
     """
+    from system.instance_lock import lock_path as instance_lock_path
+
     if os.environ.get("IG_AGENT_PYTEST") == "1":
         return
-    own_pid = os.getpid()
     try:
         result = subprocess.run(
             ["lsof", "-iTCP", f":{port}", "-sTCP:LISTEN", "-t"],
@@ -446,19 +436,16 @@ def _force_cleanup_port(port: int = 8080) -> None:
             timeout=5,
         )
         for pid_str in result.stdout.strip().splitlines():
-            try:
-                pid = int(pid_str.strip())
-            except ValueError:
-                continue
-            if pid == own_pid:
+            target_pid_int = _resolve_killable_pid(pid_str)
+            if target_pid_int is None:
                 continue
             try:
-                os.kill(pid, signal.SIGKILL)
-                log_engine(f"cleanup: SIGKILL PID {pid} on port {port}")
+                os.kill(target_pid_int, signal.SIGKILL)
+                _log_engine(f"cleanup: SIGKILL PID {target_pid_int} on port {port}")
             except ProcessLookupError:
                 pass
             except Exception as e:
-                log_engine(f"cleanup: could not kill PID {pid}: {e}")
+                _log_engine(f"cleanup: could not kill PID {target_pid_int}: {e}")
     except Exception:
         pass
     instance_lock_path().unlink(missing_ok=True)
@@ -466,6 +453,11 @@ def _force_cleanup_port(port: int = 8080) -> None:
 
 def run_preflight() -> int:
     """Steps 1–4. Returns exit code (0 = continue)."""
+    from system.app_identity import APP_DISPLAY_NAME
+    from system.config_validator import emergency_stop_lock_present, validate_config
+    from system.credentials_holder import bootstrap_credentials
+    from system.instance_lock import acquire_instance_lock
+
     if emergency_stop_lock_present():
         print(
             f"{APP_DISPLAY_NAME}: emergency_stop.lock present — delete it to restart.",
@@ -494,9 +486,9 @@ def run_preflight() -> int:
         if not demo_ok:
             print(f"{APP_DISPLAY_NAME}: {demo_msg}", file=sys.stderr)
             return EXIT_CONFIG
-        log_engine(f"preflight: {demo_msg}")
+        _log_engine(f"preflight: {demo_msg}")
     except Exception as e:
-        log_engine(f"preflight: demo guard error (continuing): {type(e).__name__}: {e}")
+        _log_engine(f"preflight: demo guard error (continuing): {type(e).__name__}: {e}")
 
     ok, msg = acquire_instance_lock()
     if not ok:
@@ -518,9 +510,9 @@ def run_preflight() -> int:
 
     holder = bootstrap_credentials()
     if holder.credentials:
-        log_engine(f"credentials bootstrap: loaded ({holder.credentials.account_type})")
+        _log_engine(f"credentials bootstrap: loaded ({holder.credentials.account_type})")
     else:
-        log_engine(f"credentials bootstrap: not ready — {holder.status.error}")
+        _log_engine(f"credentials bootstrap: not ready — {holder.status.error}")
 
     _startup_mark("preflight")
     return EXIT_OK
@@ -532,41 +524,25 @@ def _open_browser_delayed(url: str, delay: float = _BROWSER_DELAY_SEC) -> None:
         try:
             webbrowser.open(url, new=1)
         except Exception as e:
-            log_engine(f"browser open failed: {type(e).__name__}: {e}")
+            _log_engine(f"browser open failed: {type(e).__name__}: {e}")
 
     threading.Thread(target=_worker, name="open-browser", daemon=True).start()
-
-
-def _load_config() -> Config:
-    return ConfigLoader(_config_path()).load_config()
-
-
-def _rest_client_if_ready() -> Any | None:
-    holder = get_credentials_holder()
-    if not holder.credentials:
-        return None
-    try:
-        from system.ig_rest_session import ensure_shared_authenticated
-
-        return ensure_shared_authenticated(holder.credentials)
-    except Exception as e:
-        log_engine(f"IG REST session skipped: {type(e).__name__}: {e}")
-        return None
 
 
 class AgentRuntime:
     """Process runtime — trading loop + API server."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, boot_context: Any | None = None) -> None:
         self.trading_loop: Any | None = None
         self._stream_client: Any | None = None
         self._shutting_down = False
+        self._boot_context = boot_context
 
     def shutdown(self, *, source: str = "runtime") -> None:
         if self._shutting_down:
             return
         self._shutting_down = True
-        log_engine(f"shutdown: graceful teardown (source={source})")
+        _log_engine(f"shutdown: graceful teardown (source={source})")
         self._stream_client = None
         from system.shutdown_cleanup import perform_shutdown_cleanup
 
@@ -577,15 +553,21 @@ class AgentRuntime:
 
                 send_critical_alert(f"🛑 Agent stopped (source: {source})")
             except Exception as e:
-                log_engine(f"telegram shutdown notify failed: {type(e).__name__}: {e}")
-        log_engine("shutdown complete")
+                _log_engine(f"telegram shutdown notify failed: {type(e).__name__}: {e}")
+        _log_engine("shutdown complete")
 
     def run(self) -> int:
-        code = run_preflight()
-        if code != EXIT_OK:
-            if code == EXIT_INSTANCE:
-                release_instance_lock()
-            return code
+        from api.server import create_app
+        from system.instance_lock import release_instance_lock
+        from system.paths import logs_dir, project_root
+        from system.system_state import get_system_state
+
+        if not get_system_state().gate_complete("G1"):
+            code = run_preflight()
+            if code != EXIT_OK:
+                if code == EXIT_INSTANCE:
+                    release_instance_lock()
+                return code
 
         if not check_port_available(_API_PORT):
             print(_port_in_use_banner(_API_PORT), file=sys.stderr)
@@ -597,153 +579,19 @@ class AgentRuntime:
         logs_dir().mkdir(parents=True, exist_ok=True)
 
         try:
-            cfg = _load_config()
-            merged = apply_config_defaults(cfg.as_dict())
-            cfg = Config(_data=merged)
-            n_instruments = len(
-                [
-                    k
-                    for k, v in (cfg.get("instruments") or {}).items()
-                    if isinstance(v, dict) and v.get("enabled")
-                ]
+            _ensure_watchdog_running()
+
+            app = create_app(
+                watch_snapshot=True,
+                use_boot_pipeline=True,
+                boot_context=self._boot_context,
             )
-            _startup_mark(
-                "config", note=f"{n_instruments} instruments" if n_instruments else None
-            )
-
-            rest = _rest_client_if_ready()
-            from api.snapshot_store import wire_hub_quotes_to_dashboard
-            from runtime.agent_bootstrap import (
-                build_market_orchestrator,
-                start_market_stream,
-            )
-            from runtime.ig_account_verify import verify_account_on_broker
-            from system.credentials_loader import try_load_credentials
-
-            cred_status = try_load_credentials()
-            if rest is not None and cred_status.ok and cred_status.credentials:
-                verify_account_on_broker(rest, cred_status.credentials)
-            _startup_mark(
-                "ig_auth",
-                note="demo account" if rest is not None else "credentials not loaded",
-            )
-
-            self.trading_loop = build_market_orchestrator(cfg, rest_client=rest)
-            register_trading_loop(self.trading_loop)
-
-            def _start_live_engines() -> None:
-                from api.agent_control import start_trading
-
-                wire_hub_quotes_to_dashboard(min_interval=0.25)
-                from execution.position_protect_hub import (
-                    wire_hub_quotes_to_position_protect,
-                )
-
-                wire_hub_quotes_to_position_protect(min_interval=0.05)
-                self._stream_client = start_market_stream(cfg, rest_client=rest)
-                _startup_mark("stream")
-                from system.startup_test_suite import run_startup_test_suite
-                from system.startup_tracker import set_error as _startup_error
-
-                suite = run_startup_test_suite()
-                _startup_mark("test_suite", note=suite.note)
-                if not suite.ok:
-                    err = f"Full test suite failed: {suite.note}"
-                    _startup_error(err)
-                    log_engine(f"startup BLOCKED — {err}")
-                    try:
-                        from system.telegram_notifier import send_critical_alert
-
-                        send_critical_alert(
-                            f"Startup BLOCKED — full test suite failed\n{suite.note}",
-                            dedupe_key="startup_test_suite_block",
-                        )
-                    except Exception as e:
-                        log_engine(
-                            f"startup test suite block alert failed: "
-                            f"{type(e).__name__}: {e}"
-                        )
-                    return
-                # Auto-start trading loops — no dashboard Start button required.
-                result = start_trading()
-                if not result.get("ok"):
-                    self.trading_loop.start()
-                _startup_mark("ready")
-                from api.agent_health import start_health_cache_refresher
-                from system.replay_daily_scheduler import start_replay_daily_scheduler
-                from system.trading_health_monitor import start_trading_health_monitor
-
-                start_replay_daily_scheduler()
-                start_health_cache_refresher()
-                start_trading_health_monitor()
-                try:
-                    from data.learning_store import LearningStore
-                    from system.paths import data_dir
-                    from system.setup_registry_refresh import (
-                        refresh_setup_registry_from_store,
-                    )
-
-                    store = LearningStore(data_dir() / "learning_db.sqlite3")
-                    summary = refresh_setup_registry_from_store(store, enabled=True)
-                    log_engine(
-                        "setup_registry refreshed at startup: "
-                        f"banned={summary.get('banned_count')} "
-                        f"gate={'on' if summary.get('enabled') else 'off'}"
-                    )
-                    _startup_mark("learning")
-                except Exception as e:
-                    log_engine(
-                        f"setup_registry startup refresh skipped: "
-                        f"{type(e).__name__}: {e}"
-                    )
-                    _startup_mark("learning", note="skipped")
-                from system.gate_coherence_scheduler import (
-                    start_gate_coherence_scheduler,
-                )
-                from system.telegram_alerts import (
-                    start_hourly_executive_telegram_scheduler,
-                )
-                from system.v26_shadow_service import start_v26_shadow_service
-
-                start_v26_shadow_service()
-                start_gate_coherence_scheduler()
-                start_hourly_executive_telegram_scheduler()
-                try:
-                    from ai.operational.system_monitor import get_system_monitor
-
-                    get_system_monitor().run_background()
-                    log_engine("v27 sentinel monitor started (background)")
-                except Exception as e:
-                    log_engine(f"v27 sentinel monitor failed: {type(e).__name__}: {e}")
-                _start_session_refresh_watchdog(rest)
-                log_engine("orchestrator trading loop started (background)")
-                try:
-                    from system.telegram_notifier import send_critical_alert
-
-                    send_critical_alert("✅ Agent started — trading loops active")
-                except Exception as e:
-                    log_engine(
-                        f"telegram startup alert failed: {type(e).__name__}: {e}"
-                    )
-                from system.engine_log import _intermittent_settings
-
-                on, iv = _intermittent_settings()
-                if on:
-                    log_engine(
-                        f"Intermittent engine logging enabled "
-                        f"(stream/hub quotes every {iv:.0f}s per epic)"
-                    )
-
-            register_api_startup(_ensure_watchdog_running)
-            register_api_startup(_start_live_engines)
-
-            app = create_app(watch_snapshot=True)
             if not os.environ.get("IG_AGENT_FROM_LAUNCHER"):
                 _open_browser_delayed(_DASHBOARD_URL)
 
             import uvicorn
 
-            log_engine(f"API server: binding on port {_API_PORT}")
+            _log_engine(f"API server: binding on port {_API_PORT}")
             uvicorn.run(app, host=_API_HOST, port=_API_PORT, log_level="info")
             return EXIT_OK
         finally:
@@ -752,7 +600,7 @@ class AgentRuntime:
 
 def _install_signal_handlers(runtime: AgentRuntime) -> None:
     def _handle(signum: int, _frame: Any) -> None:
-        log_engine(f"signal {signum} received — graceful shutdown")
+        _log_engine(f"signal {signum} received — graceful shutdown")
         runtime.shutdown(source=f"signal:{signum}")
         raise SystemExit(128 + (signum if signum < 128 else 0))
 
@@ -764,11 +612,27 @@ def _install_signal_handlers(runtime: AgentRuntime) -> None:
 
 
 def main() -> None:
+    from system.paths import project_root
+    from system.system_state import stamp_process_boot_start
+
+    os.environ.setdefault("IG_AGENT_ROOT", str(project_root()))
+    stamp_process_boot_start()
+
+    from system.app_identity import APP_DISPLAY_NAME, APP_VERSION_LABEL
+    from system.boot.exceptions import Gate1FatalError
+    from system.boot.gate1_preflight import run_gate1_preflight
+
     atexit.register(_force_cleanup_port)
     _rotate_oversized_logs()
-    log_engine(f"=== {APP_DISPLAY_NAME} {APP_VERSION_LABEL} full restart ===")
+    _log_engine(f"=== {APP_DISPLAY_NAME} {APP_VERSION_LABEL} full restart ===")
     _pre_startup_cleanup()
-    runtime = AgentRuntime()
+
+    try:
+        boot_ctx = run_gate1_preflight()
+    except Gate1FatalError as exc:
+        sys.exit(exc.exit_code)
+
+    runtime = AgentRuntime(boot_context=boot_ctx)
     _install_signal_handlers(runtime)
     try:
         raise SystemExit(runtime.run())
@@ -777,7 +641,7 @@ def main() -> None:
             runtime.shutdown()
         raise
     except Exception as e:
-        log_engine(f"CRITICAL: {type(e).__name__}: {e}")
+        _log_engine(f"CRITICAL: {type(e).__name__}: {e}")
         try:
             from system.telegram_notifier import send_critical_alert
 

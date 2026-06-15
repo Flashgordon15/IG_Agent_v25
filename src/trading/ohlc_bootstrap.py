@@ -6,7 +6,7 @@ import json
 import re
 import time
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from data.models import Quote
 from signals.signal_engine import SignalEngine
@@ -362,6 +362,7 @@ def bootstrap_ohlc_parallel(
     loops: list[Any],
     *,
     max_workers: int = 3,
+    on_loop_complete: Callable[[Any], None] | None = None,
 ) -> None:
     """Bootstrap OHLC for all trading loops.
 
@@ -408,6 +409,13 @@ def bootstrap_ohlc_parallel(
         from trading.ohlc_readiness import record_bootstrap
 
         record_bootstrap(loop._epic, loop._market, count)
+        if on_loop_complete is not None:
+            try:
+                on_loop_complete(loop)
+            except Exception as e:
+                log_engine(
+                    f"OHLC bootstrap progress callback failed: {type(e).__name__}: {e}"
+                )
         return count
 
     if cached_loops:

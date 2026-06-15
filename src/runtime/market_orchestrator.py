@@ -568,6 +568,14 @@ class MarketOrchestrator:
         )
         self._health_monitor_thread.start()
 
+    def unpause_from_boot(self) -> None:
+        """Release dormant loops after SystemState READY (Gate 5)."""
+        for loop in self._loops:
+            unpause = getattr(loop, "unpause_from_boot", None)
+            if callable(unpause):
+                unpause()
+        log_engine(f"market_orchestrator: {len(self._loops)} loop(s) released from boot pause")
+
     def _loop_health_monitor(self) -> None:
         """Detect and respawn individual trading loops that stopped due to deadlock."""
         import time

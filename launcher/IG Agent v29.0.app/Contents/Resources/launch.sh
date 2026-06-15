@@ -37,8 +37,9 @@ API_HEALTH_URL="http://localhost:8080/api/health"
 open_dashboard() {
   if command -v open >/dev/null 2>&1; then
     # Fresh URL forces full SPA reload so the 3-stage launch sequence always runs.
+    # -g opens in background so Finder does not try to re-activate this .app.
     local launch_url="${DASHBOARD_URL}?launch=$(date +%s)"
-    open "${launch_url}" 2>/dev/null || true
+    open -g "${launch_url}" 2>/dev/null || open "${launch_url}" 2>/dev/null || true
   fi
 }
 
@@ -48,6 +49,47 @@ dashboard_healthy() {
     return $?
   fi
   return 1
+}
+
+dashboard_ui_ready() {
+  if ! command -v curl >/dev/null 2>&1; then
+    return 1
+  fi
+  local body=""
+  # -f treats HTTP 404 (FastAPI JSON) as failure — only HTML 200 passes.
+  body="$(curl -sf --max-time 2 "${DASHBOARD_URL}" 2>/dev/null)" || return 1
+  if [[ "$body" == *'"detail"'* ]] || [[ "$body" == *'"Not Found"'* ]]; then
+    return 1
+  fi
+  if [[ "$body" == *"<!DOCTYPE"* ]] || [[ "$body" == *"<html"* ]]; then
+    return 0
+  fi
+  return 1
+}
+
+force_restart_stale_agent() {
+  log "forcing agent restart — dashboard UI or code refresh required"
+  if command -v lsof >/dev/null 2>&1; then
+    for pid in $(lsof -t -iTCP:8080 -sTCP:LISTEN 2>/dev/null); do
+      kill -TERM "$pid" 2>/dev/null || true
+    done
+    sleep 1
+    for pid in $(lsof -t -iTCP:8080 -sTCP:LISTEN 2>/dev/null); do
+      kill -KILL "$pid" 2>/dev/null || true
+    done
+  fi
+  if command -v pgrep >/dev/null 2>&1; then
+    for pid in $(pgrep -f "${ROOT}/src/main.py" 2>/dev/null); do
+      kill -TERM "$pid" 2>/dev/null || true
+    done
+    sleep 1
+    for pid in $(pgrep -f "${ROOT}/src/main.py" 2>/dev/null); do
+      kill -KILL "$pid" 2>/dev/null || true
+    done
+  fi
+  rm -f "${LOCK_FILE}" "${LEGACY_LOCK_FILE}"
+  clear_manual_stop_flag
+  sleep 1
 }
 
 ensure_watchdog() {
@@ -95,26 +137,21 @@ trading_healthy() {
 
 wait_for_dashboard() {
   local mode="$1"
-  # Startup can take up to ~12 minutes: OHLC bootstrap (22s stagger × 7 markets)
-  # + REST rate limits before :8080 binds and trading_healthy clears.
+  local opened="0"
+  # Wait up to 12 minutes for :8080 + dashboard HTML (OHLC bootstrap on cold start).
   for _ in $(seq 1 1440); do
-    if dashboard_healthy; then
-      if trading_healthy; then
+    if dashboard_healthy && dashboard_ui_ready; then
+      if [ "$opened" = "0" ]; then
         open_dashboard
-        log "dashboard ready — trading healthy (${mode})"
-        exit 0
+        opened=1
+        log "dashboard UI open (${mode})"
       fi
-      log "dashboard up — awaiting trading_healthy (${mode})"
+      # Success once the SPA is reachable — trading may still be warming up in the boot bar.
+      exit 0
     fi
     sleep 0.5
   done
-  if dashboard_healthy; then
-    open_dashboard
-    log "WARN: dashboard up but trading_healthy not confirmed within 720s (${mode})"
-    notify_failure "Agent started but trading is not healthy. Check dashboard and engine.log."
-    exit 0
-  fi
-  log "WARN: dashboard did not become healthy within 720s (${mode})"
+  log "WARN: dashboard did not become reachable within 720s (${mode})"
   if [ -f "${ROOT}/src/data/logs/engine.log" ]; then
     notify_failure "Agent did not reach healthy state in 12 minutes. Check src/data/logs/engine.log and watchdog.log — OHLC bootstrap may still be running."
   else
@@ -182,6 +219,7 @@ from pathlib import Path
 root = Path(sys.argv[1])
 markers = [
     root / "src" / "main.py",
+    root / "src" / "api" / "server.py",
     root / "src" / "api" / "routes.py",
     root / "dashboard" / "dist" / "index.html",
     root / "config" / "config_v29.json",
@@ -211,16 +249,22 @@ notify_user() {
 }
 
 if dashboard_healthy; then
-  ensure_watchdog
-  log "agent already running — opening dashboard"
-  if code_newer_than_agent; then
-    log "WARN: code on disk is newer than running agent — Stop Agent then relaunch to load changes"
-    notify_user "Code updated since this session started. Use Stop Agent, then launch again."
+  if ! dashboard_ui_ready || code_newer_than_agent; then
+    if code_newer_than_agent; then
+      log "code on disk is newer than running agent — restarting for dashboard UI"
+      notify_user "Updating agent to latest code…"
+    else
+      log "WARN: :8080 health OK but / missing dashboard HTML — restarting agent"
+      notify_user "Restarting agent for dashboard UI…"
+    fi
+    force_restart_stale_agent
   else
+    ensure_watchdog
+    log "agent already running with dashboard UI — opening browser"
     notify_user "Opening dashboard…"
+    open_dashboard
+    exit 0
   fi
-  open_dashboard
-  exit 0
 fi
 
 if command -v launchctl >/dev/null 2>&1; then

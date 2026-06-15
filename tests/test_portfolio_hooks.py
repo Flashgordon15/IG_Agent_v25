@@ -17,7 +17,7 @@ from execution.portfolio_hooks import (
     risk_gbp_from_trade_row,
 )
 from execution.types import TradeSignal
-from system.portfolio_envelope import snapshot
+from system.portfolio_envelope import can_allocate, snapshot
 
 
 class PortfolioHooksTests(unittest.TestCase):
@@ -46,6 +46,8 @@ class PortfolioHooksTests(unittest.TestCase):
         with patch(
             "system.portfolio_envelope.portfolio_gate_enabled", return_value=True
         ):
+            ok, _ = can_allocate(10.0, reserve=True)
+            self.assertTrue(ok)
             record_portfolio_entry_from_signal("DEAL1", signal, params, config=config)
             snap = snapshot()
             self.assertEqual(snap["concurrent_risk_gbp"], 10.0)

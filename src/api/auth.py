@@ -12,6 +12,8 @@ import threading
 import time
 from typing import Any
 
+from fastapi import FastAPI, HTTPException, Response
+from pydantic import BaseModel
 from starlette.requests import Request
 
 # Workspace fallback when ADMIN_PASSWORD is unset (set env in production).
@@ -87,3 +89,28 @@ def reset_auth_for_tests() -> None:
 
 def login_response_headers(token: str) -> dict[str, str]:
     return {"X-Auth-Token": token}
+
+
+class LoginRequest(BaseModel):
+    password: str
+
+
+def register_auth_login_route(app: FastAPI) -> None:
+    """Register POST /api/auth/login at factory time (before deferred routers)."""
+
+    @app.post("/api/auth/login", include_in_schema=False)
+    def api_auth_login(body: LoginRequest, response: Response) -> dict[str, bool]:
+        if not verify_password(body.password):
+            raise HTTPException(status_code=401, detail="Access Denied")
+        token = issue_session_token()
+        response.set_cookie(
+            key=SESSION_COOKIE,
+            value=token,
+            httponly=True,
+            samesite="lax",
+            path="/",
+            max_age=int(SESSION_TTL_SEC),
+        )
+        for key, value in login_response_headers(token).items():
+            response.headers[key] = value
+        return {"authenticated": True}

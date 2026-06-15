@@ -14,6 +14,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from ml.interim_scorer import (
     InterimConfidenceScorer,
+    invalidate_ml_clean_training_rows_cache,
+    ml_clean_training_rows,
     ml_min_rows_for_model,
     should_use_interim_scorer,
 )
@@ -190,6 +192,19 @@ class InterimScorerTests(unittest.TestCase):
     def test_ml_min_rows_configurable(self) -> None:
         cfg = Config(_data={"ml_min_rows_for_model": 75})
         self.assertEqual(ml_min_rows_for_model(cfg), 75)
+
+    def test_ml_clean_training_rows_session_cache(self) -> None:
+        cfg = _cfg()
+        invalidate_ml_clean_training_rows_cache()
+        with patch(
+            "ml.interim_scorer._query_ml_clean_training_rows", return_value=42
+        ) as query_mock:
+            self.assertEqual(ml_clean_training_rows(cfg), 42)
+            self.assertEqual(ml_clean_training_rows(cfg), 42)
+            self.assertEqual(query_mock.call_count, 1)
+            invalidate_ml_clean_training_rows_cache()
+            self.assertEqual(ml_clean_training_rows(cfg), 42)
+            self.assertEqual(query_mock.call_count, 2)
 
 
 if __name__ == "__main__":

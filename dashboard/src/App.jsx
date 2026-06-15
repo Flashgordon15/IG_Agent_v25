@@ -365,8 +365,13 @@ export default function App() {
     if (!healthOverlay) return state;
     return {
       ...state,
+      system_state: healthOverlay.system_state ?? state.system_state,
       init_force_cleared:
-        healthOverlay.init_force_cleared === true || state.init_force_cleared === true,
+        healthOverlay.system_state?.ready === true ||
+        healthOverlay.boot_metrics?.ready === true ||
+        healthOverlay.init_force_cleared === true ||
+        state.system_state?.ready === true ||
+        state.init_force_cleared === true,
       boot_metrics: healthOverlay.boot_metrics ?? state.boot_metrics,
       system_status: healthOverlay.system_status ?? state.system_status,
       init_live_sec: healthOverlay.init_live_sec ?? state.init_live_sec,

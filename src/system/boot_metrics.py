@@ -1,31 +1,53 @@
 """
-Lightweight boot progress for the dashboard 2-stage launch experience.
+Boot progress bridge for the dashboard.
 
-Maps startup_tracker phase completions to operator-facing milestones
-(20 / 40 / 60 / 80 / 95 / 100). Read-only, lock-friendly — safe on /api/health hot path.
+Primary source: ``SystemState`` (BootState pipeline).
+Falls back to legacy ``startup_tracker`` when SystemState has not started.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-# phase_id must be marked in startup_tracker before this percent is reached
-_MILESTONES: tuple[tuple[str, int, str], ...] = (
-    ("ig_auth", 20, "Broker Handshake"),
-    ("database", 40, "Database Core"),
-    ("loops", 60, "Trading Gates"),
-    ("learning", 80, "Learning Plane"),
-    ("test_suite", 95, "Full Test Suite"),
-    ("ready", 100, "Initialization Complete"),
-)
+
+def _stage_from_system_state(snap: dict[str, Any]) -> str:
+    if snap.get("ready"):
+        return "ready"
+    phase = str(snap.get("phase") or "BOOTING").lower()
+    return phase.replace("_streaming", "_streaming")
 
 
 def get_boot_metrics() -> dict[str, Any]:
-    """Return {percent, label, ready, stage} derived from startup_tracker (non-blocking)."""
+    """Return {percent, label, ready, stage, system_state} for dashboard/API."""
+    try:
+        from system.system_state import get_system_state
+
+        snap = get_system_state().snapshot()
+        if snap.get("started_at") or snap.get("percent", 0) > 0 or snap.get("ready"):
+            return {
+                "percent": int(snap.get("percent") or 0),
+                "label": str(snap.get("phase_label") or "System Booting"),
+                "ready": bool(snap.get("ready")),
+                "stage": _stage_from_system_state(snap),
+                "error": snap.get("error"),
+                "system_state": snap,
+            }
+    except Exception:
+        pass
+
     from system.startup_tracker import get_status
 
     status = get_status()
     done_ids = {p["id"] for p in status.get("phases") or [] if p.get("status") == "done"}
+
+    _MILESTONES: tuple[tuple[str, int, str], ...] = (
+        ("ig_auth", 20, "Broker Handshake"),
+        ("database", 40, "Database Core"),
+        ("loops", 60, "Trading Gates"),
+        ("learning", 80, "Learning Plane"),
+        ("test_suite", 95, "Full Test Suite"),
+        ("ready", 100, "Initialization Complete"),
+    )
 
     percent = 0
     label = _MILESTONES[0][2]
@@ -42,26 +64,11 @@ def get_boot_metrics() -> dict[str, Any]:
         percent = 100
         label = "Initialization Complete"
         stage = "ready"
-    else:
-        for phase in status.get("phases") or []:
-            if phase.get("status") == "in_progress" and phase.get("id") == "test_suite":
-                label = "Full Test Suite"
-                stage = "test_suite"
-                percent = max(percent, 90)
-                break
-        else:
-            for phase_id, _pct, lbl in _MILESTONES:
-                if phase_id not in done_ids:
-                    if phase_id not in ("test_suite", "ready") or percent <= 0:
-                        label = lbl
-                        stage = phase_id
-                    break
 
-    error = status.get("error")
     return {
         "percent": int(percent),
         "label": label,
         "ready": ready,
         "stage": stage,
-        "error": error,
+        "error": status.get("error"),
     }

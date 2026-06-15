@@ -374,6 +374,26 @@ def test_api_health_endpoint_defined() -> None:
     assert "last_gate_check" in health
 
 
+def test_create_app_defers_trading_routes_until_post_bind() -> None:
+    """G1→bind fast path: heavy API routers must not register at factory time."""
+    from api.server import create_app
+
+    app = create_app(watch_snapshot=False)
+    assert not getattr(app.state, "deferred_routes_registered", False)
+    assert not getattr(app.state, "deferred_routers_mounted", False)
+    server_src = (_SRC / "api" / "server.py").read_text(encoding="utf-8")
+    create_block = server_src.split("def create_app", 1)[1].split("\ndef main", 1)[0]
+    assert "register_deferred_route_tables" not in create_block
+
+
+def test_uvicorn_lifespan_yields_before_deferred_worker() -> None:
+    """Port :8080 binds at lifespan yield; G2–G5 run in background task."""
+    server_src = (_SRC / "api" / "server.py").read_text(encoding="utf-8")
+    assert "deferred_task = asyncio.create_task" in server_src
+    assert "await mount_done.wait()" in server_src
+    assert "# Detached from lifespan startup — Uvicorn binds at ``yield`` below." in server_src
+
+
 def test_heartbeat_no_auto_shutdown() -> None:
     """_start_heartbeat_monitor must be a no-op — browser disconnect must not kill agent."""
     routes = (_SRC / "api" / "routes.py").read_text(encoding="utf-8")
@@ -594,7 +614,7 @@ def test_startup_cleanup_symmetry_with_shutdown() -> None:
     main = _MAIN_PY.read_text(encoding="utf-8")
     shutdown = (_SRC / "system" / "shutdown_cleanup.py").read_text(encoding="utf-8")
 
-    assert "kill_other_agent_processes" in main
+    assert "_pre_startup_kill_orphan_agents" in main
     assert "_force_cleanup_port" in main
     assert "agent_fully_started" in shutdown
     assert "agent_fully_stopped" in shutdown
@@ -626,7 +646,8 @@ def test_pre_startup_cleanup_kills_duplicate_processes() -> None:
                 break
             body.append(line)
     func_body = "\n".join(body)
-    assert "kill_other_agent_processes" in func_body
+    assert "_pre_startup_kill_orphan_agents" in func_body
+    assert "os.getpid()" in _MAIN_PY.read_text(encoding="utf-8")
     assert "stop_watchdog" in func_body
     assert "_force_cleanup_port" in func_body
 

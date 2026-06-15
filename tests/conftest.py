@@ -38,6 +38,18 @@ def isolate_engine_log(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
     rsp.set_state_path_for_tests(tmp_path / "runtime_state.json")
     yield
+    try:
+        from system.alert_dispatcher import reset_alert_dispatcher_for_tests
+
+        reset_alert_dispatcher_for_tests()
+    except Exception:
+        pass
+    try:
+        from trading.points_engine import reset_points_persist_for_tests
+
+        reset_points_persist_for_tests()
+    except Exception:
+        pass
     rsp.reset_persist_state_for_tests()
 
 

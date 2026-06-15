@@ -42,10 +42,15 @@ def resolve_python(root: Path) -> Path:
 
 
 def check_port_available(host: str = _API_HOST, port: int = _API_PORT) -> bool:
-    """Return True when nothing is accepting TCP on host:port."""
+    """Return True when 127.0.0.1:port is free to bind (never use localhost)."""
+    bind_host = "127.0.0.1" if host in ("localhost", "127.0.0.1", _API_HOST) else host
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        return sock.connect_ex((host, port)) != 0
+        try:
+            sock.bind((bind_host, port))
+            return True
+        except OSError:
+            return False
 
 
 def network_interfaces_ready() -> bool:

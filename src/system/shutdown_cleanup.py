@@ -84,6 +84,15 @@ def reset_shutdown_cleanup_for_tests() -> None:
     _cleanup_done = False
 
 
+def _should_skip_pid(pid: int, exclude_pid: int | None) -> bool:
+    """Never signal the running process; also honour an explicit exclude PID."""
+    if pid == os.getpid():
+        return True
+    if exclude_pid is not None and pid == exclude_pid:
+        return True
+    return False
+
+
 def kill_other_agent_processes(
     *,
     exclude_pid: int | None = None,
@@ -94,7 +103,6 @@ def kill_other_agent_processes(
     """SIGTERM (then optional SIGKILL) any other src/main.py processes."""
     if os.environ.get("IG_AGENT_PYTEST") == "1":
         return []
-    own = exclude_pid if exclude_pid is not None else os.getpid()
     killed: list[int] = []
     try:
         result = subprocess.run(
@@ -108,7 +116,7 @@ def kill_other_agent_processes(
                 pid = int(pid_str.strip())
             except ValueError:
                 continue
-            if pid == own:
+            if _should_skip_pid(pid, exclude_pid):
                 continue
             try:
                 os.kill(pid, signal.SIGTERM)
@@ -141,6 +149,8 @@ def kill_other_agent_processes(
         time.sleep(0.2)
 
     for pid in killed:
+        if _should_skip_pid(pid, exclude_pid):
+            continue
         try:
             os.kill(pid, 0)
             os.kill(pid, signal.SIGKILL)

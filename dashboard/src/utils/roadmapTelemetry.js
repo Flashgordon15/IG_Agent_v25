@@ -34,11 +34,13 @@ export function resolveBootMetrics(state) {
 }
 
 export function resolveInitCleared(state) {
+  if (state?.system_state?.ready === true) return true;
+  if (state?.boot_metrics?.ready === true) return true;
   if (state?.init_force_cleared === true) return true;
   const boot = resolveBootMetrics(state);
   if (boot?.ready === true) return true;
   if (String(boot?.stage || "").toLowerCase() === "ready") return true;
-  if (Number(boot?.percent ?? 0) >= 100) return true;
+  if (Number(boot?.percent ?? 0) >= 100 && boot?.ready === true) return true;
   return false;
 }
 

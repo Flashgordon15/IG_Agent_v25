@@ -199,6 +199,7 @@ class TradingLoop:
         publish_snapshots: bool = True,
         on_snapshot: Callable[[dict[str, Any]], None] | None = None,
         instrument_id: str = "",
+        paused_at_boot: bool = False,
     ) -> None:
         self._config = config
         self._market = market
@@ -248,6 +249,7 @@ class TradingLoop:
         self._last_sig_direction: str = "WAIT"
         self._gate_signal_cache: SignalResult | None = None
         self._entry_circuit_breaker: str = ""
+        self._portfolio_reserved_risk_gbp: float = 0.0
         from runtime.market_orchestrator import ROTATION_GRACE_CYCLES
 
         try:
@@ -255,6 +257,21 @@ class TradingLoop:
         except (TypeError, ValueError):
             grace = ROTATION_GRACE_CYCLES
         self._rotation_grace_remaining: int = max(0, grace)
+
+        self._paused_at_boot = bool(paused_at_boot)
+        self._boot_ticks_enabled = threading.Event()
+        if not self._paused_at_boot:
+            self._boot_ticks_enabled.set()
+
+    def unpause_from_boot(self) -> None:
+        """Allow the loop thread to process live ticks (Gate 5 READY flip)."""
+        self._paused_at_boot = False
+        self._boot_ticks_enabled.set()
+
+    @property
+    def paused_at_boot(self) -> bool:
+        with self._lock:
+            return self._paused_at_boot
 
     @property
     def config(self) -> Config:
@@ -339,6 +356,21 @@ class TradingLoop:
 
     def _loop_thread(self) -> None:
         from system.stream_ready import wait_stream_ready
+
+        if self._paused_at_boot:
+            log_engine(
+                f"trading_loop thread starting epic={self._epic} — dormant (paused_at_boot)"
+            )
+            while not self._stop.is_set():
+                if self._boot_ticks_enabled.wait(timeout=0.5):
+                    break
+            if self._stop.is_set():
+                with self._lock:
+                    self._running = False
+                return
+            log_engine(
+                f"trading_loop thread epic={self._epic} — boot READY, arming tick loop"
+            )
 
         log_engine(
             f"trading_loop thread starting epic={self._epic} — awaiting stream_ready"
@@ -560,6 +592,7 @@ class TradingLoop:
             return ctx
 
         self._tick_count += 1
+        self._portfolio_reserved_risk_gbp = 0.0
         self._reset_gate_signal_cache()
         try:
             from system.market_data_hub import get_market_data_hub
@@ -685,6 +718,19 @@ class TradingLoop:
                 all_passed = False
         else:
             log_engine(f"WAIT — {wait_reason}")
+
+        if self._portfolio_reserved_risk_gbp > 0 and not self._execution_reserved_committed(
+            outcome
+        ):
+            try:
+                from system.portfolio_envelope import release_allocation
+
+                release_allocation(self._portfolio_reserved_risk_gbp)
+            except Exception as e:
+                log_engine(
+                    f"portfolio envelope release failed: {type(e).__name__}: {e}"
+                )
+        self._portfolio_reserved_risk_gbp = 0.0
 
         ctx = TickContext(
             quote=quote,
@@ -1003,11 +1049,23 @@ class TradingLoop:
             )
             break
 
+    def _execution_reserved_committed(self, outcome: Any | None) -> bool:
+        """True when a gate-time portfolio reservation should be kept."""
+        if outcome is None:
+            return False
+        execution = getattr(outcome, "execution", None)
+        if execution is None:
+            return False
+        if not bool(getattr(execution, "success", False)):
+            return False
+        action = str(getattr(execution, "action", "") or "")
+        return action in ("SUBMITTED", "EXECUTED", "DRY_RUN")
+
     def _gate_execution_params_from_gates(
         self, gates: list[GateResult]
     ) -> dict[str, Any] | None:
         """Approved sizing from risk_validation — single source for order submission."""
-        from execution.types import normalize_gate_execution_params
+        from execution.types import freeze_gate_execution_params
 
         for g in gates:
             if g.name != "risk_validation" or not g.passed:
@@ -1034,7 +1092,7 @@ class TradingLoop:
                 "risk_cap_gbp": v.get("risk_cap_gbp"),
                 "sizing_confidence": v.get("sizing_confidence"),
             }
-            return normalize_gate_execution_params(raw)
+            return freeze_gate_execution_params(raw)
         return None
 
     def _trade_size_from_gates(
@@ -1107,12 +1165,28 @@ class TradingLoop:
         return gates
 
     def _evaluate_gates(self, quote: Quote) -> list[GateResult]:
+        import time
+
         from ai.operational.profiler_hooks import probe_hot_path
 
+        gate_us: dict[str, float] = {}
+        t0 = time.perf_counter()
         with probe_hot_path("probe_gate_evaluation", epic=self._epic):
-            return self._evaluate_gates_core(quote)
+            results = self._evaluate_gates_core(quote, gate_us=gate_us)
+        total_us = (time.perf_counter() - t0) * 1_000_000.0
+        try:
+            from system.diagnostics.perf_metrics import record_tick_gate_evaluation
 
-    def _evaluate_gates_core(self, quote: Quote) -> list[GateResult]:
+            record_tick_gate_evaluation(
+                self._epic, total_us=total_us, gate_us=gate_us
+            )
+        except Exception:
+            pass
+        return results
+
+    def _evaluate_gates_core(
+        self, quote: Quote, *, gate_us: dict[str, float] | None = None
+    ) -> list[GateResult]:
         breaker = self.entry_circuit_breaker()
         if breaker:
             return self._hard_block_all_gates(breaker, primary_gate="broker_feed")
@@ -1199,6 +1273,9 @@ class TradingLoop:
 
         results: list[GateResult] = []
         for name in GATE_NAMES:
+            import time as _time
+
+            _g0 = _time.perf_counter()
             try:
                 if name == "session_open":
                     results.append(self._gate_session_open())
@@ -1263,6 +1340,9 @@ class TradingLoop:
                 results.append(
                     GateResult(name=name, passed=False, value=None, detail=detail)
                 )
+            finally:
+                if gate_us is not None:
+                    gate_us[name] = (_time.perf_counter() - _g0) * 1_000_000.0
         return results
 
     def _spread_to_atr_circuit_max(self) -> float:
@@ -1675,26 +1755,32 @@ class TradingLoop:
             if tier == "hard" and not getattr(self, "_daily_loss_alert_sent", False):
                 self._daily_loss_alert_sent = True
                 try:
-                    from system.telegram_notifier import send_critical_alert
+                    from system.alert_dispatcher import enqueue_critical_alert
 
-                    send_critical_alert("🛑 Drawdown limit hit — trading halted")
+                    enqueue_critical_alert(
+                        "🛑 Drawdown limit hit — trading halted",
+                        dedupe_key="daily_loss_hard",
+                    )
                 except Exception as e:
                     log_engine(
-                        f"telegram daily-loss alert failed: {type(e).__name__}: {e}"
+                        f"telegram daily-loss alert enqueue failed: "
+                        f"{type(e).__name__}: {e}"
                     )
             elif tier == "soft" and not getattr(
                 self, "_daily_soft_pause_alert_sent", False
             ):
                 self._daily_soft_pause_alert_sent = True
                 try:
-                    from system.telegram_notifier import send_critical_alert
+                    from system.alert_dispatcher import enqueue_critical_alert
 
-                    send_critical_alert(
-                        f"⚠️ Daily soft pause — {loss_detail} (v29.1 entries blocked)"
+                    enqueue_critical_alert(
+                        f"⚠️ Daily soft pause — {loss_detail} (v29.1 entries blocked)",
+                        dedupe_key="daily_loss_soft",
                     )
                 except Exception as e:
                     log_engine(
-                        f"telegram soft-pause alert failed: {type(e).__name__}: {e}"
+                        f"telegram soft-pause alert enqueue failed: "
+                        f"{type(e).__name__}: {e}"
                     )
         else:
             detail = f"points {state} — {loss_detail}"
@@ -1979,7 +2065,9 @@ class TradingLoop:
             from system.portfolio_envelope import can_allocate, portfolio_gate_enabled
 
             if portfolio_gate_enabled():
-                portfolio_ok, portfolio_detail = can_allocate(risk_gbp)
+                portfolio_ok, portfolio_detail = can_allocate(risk_gbp, reserve=True)
+                if portfolio_ok:
+                    self._portfolio_reserved_risk_gbp = float(risk_gbp)
         except Exception:
             portfolio_ok = True
 
@@ -2159,6 +2247,7 @@ class TradingLoop:
 
                 scorer = get_ml_scorer()
 
+                # Session-scoped count — refreshed on position open/close only.
                 _ml_records = ml_clean_training_rows(self._config)
                 min_model_rows = ml_min_rows_for_model(self._config)
                 snap = sig.snapshot or {}

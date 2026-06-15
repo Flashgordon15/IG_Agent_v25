@@ -134,6 +134,7 @@ def _build_single_loop(
     store: LearningStore,
     points_engine: PointsEngine,
     position_sync: Any | None,
+    paused_at_boot: bool = False,
 ) -> AgentTradingLoop:
     market = str(inst.get("name") or instrument_id)
     epic = str(inst.get("epic") or cfg.epic)
@@ -227,6 +228,7 @@ def _build_single_loop(
         position_sync=position_sync,
         publish_snapshots=True,
         instrument_id=instrument_id,
+        paused_at_boot=paused_at_boot,
     )
 
     return loop
@@ -237,6 +239,9 @@ def build_market_orchestrator(
     *,
     rest_client: Any | None = None,
     mode: ExecutionMode | None = None,
+    boot_mode: bool = False,
+    paused_at_boot: bool = False,
+    defer_ohlc: bool = False,
 ) -> MarketOrchestrator:
     """Phase A — one loop per enabled instrument, shared PointsEngine."""
     from system.startup_tracker import mark as _startup_mark
@@ -306,49 +311,50 @@ def build_market_orchestrator(
         log_engine(f"gate coherence audit skipped: {type(e).__name__}: {e}")
 
     # Quick self-test — run deployed-fixes regression suite to catch stale code
-    try:
-        import os
-        import subprocess
-        import sys
+    if not boot_mode:
+        try:
+            import os
+            import subprocess
+            import sys
 
-        from system.paths import project_root
+            from system.paths import project_root
 
-        if os.environ.get("IG_AGENT_SKIP_DEPLOY_CHECK") == "1":
-            _startup_mark("self_test", note="skipped watchdog restart")
-            log_engine("startup self-test skipped (IG_AGENT_SKIP_DEPLOY_CHECK=1)")
-        else:
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "pytest",
-                    "tests/test_deployed_fixes.py",
-                    "-x",
-                    "-q",
-                    "--tb=no",
-                ],
-                cwd=str(project_root()),
-                env={
-                    **__import__("os").environ,
-                    "PYTHONPATH": str(project_root() / "src"),
-                    "IG_AGENT_PYTEST": "1",
-                },
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            passed = result.returncode == 0
-            note = (
-                "all passed" if passed else f"FAILED — {result.stdout.strip()[-200:]}"
-            )
-            _startup_mark("self_test", note)
-            if not passed:
-                log_engine(f"startup self-test FAILED:\n{result.stdout[-400:]}")
+            if os.environ.get("IG_AGENT_SKIP_DEPLOY_CHECK") == "1":
+                _startup_mark("self_test", note="skipped watchdog restart")
+                log_engine("startup self-test skipped (IG_AGENT_SKIP_DEPLOY_CHECK=1)")
             else:
-                log_engine("startup self-test: all deployed-fixes checks passed")
-    except Exception as e:
-        _startup_mark("self_test", f"skipped: {type(e).__name__}")
-        log_engine(f"startup self-test skipped: {type(e).__name__}: {e}")
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "pytest",
+                        "tests/test_deployed_fixes.py",
+                        "-x",
+                        "-q",
+                        "--tb=no",
+                    ],
+                    cwd=str(project_root()),
+                    env={
+                        **__import__("os").environ,
+                        "PYTHONPATH": str(project_root() / "src"),
+                        "IG_AGENT_PYTEST": "1",
+                    },
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                passed = result.returncode == 0
+                note = (
+                    "all passed" if passed else f"FAILED — {result.stdout.strip()[-200:]}"
+                )
+                _startup_mark("self_test", note)
+                if not passed:
+                    log_engine(f"startup self-test FAILED:\n{result.stdout[-400:]}")
+                else:
+                    log_engine("startup self-test: all deployed-fixes checks passed")
+        except Exception as e:
+            _startup_mark("self_test", f"skipped: {type(e).__name__}")
+            log_engine(f"startup self-test skipped: {type(e).__name__}: {e}")
 
     # Smoke test — verify no known blocking conditions carried over from previous session
     try:
@@ -500,78 +506,79 @@ def build_market_orchestrator(
                 store=store,
                 points_engine=points_engine,
                 position_sync=position_sync,
+                paused_at_boot=paused_at_boot,
             )
         )
     _startup_mark("loops", note=f"{len(loops)} markets ready")
 
-    # Run OHLC bootstrap (cache-first) synchronously so indicators are warm before
-    # the first tick. Yahoo pre-seeding for any cold caches runs in a background
-    # thread so it does NOT delay the API server startup.
-    from trading.ohlc_bootstrap import bootstrap_ohlc_parallel
+    if not defer_ohlc:
+        # Run OHLC bootstrap (cache-first) synchronously so indicators are warm before
+        # the first tick. Yahoo pre-seeding for any cold caches runs in a background
+        # thread so it does NOT delay the API server startup.
+        from trading.ohlc_bootstrap import bootstrap_ohlc_parallel
 
-    def _background_yahoo_seed(loops_ref: list) -> None:
-        """Fetch missing OHLC caches from Yahoo in the background after startup."""
-        try:
-            from trading.ohlc_bootstrap import (
-                is_historical_allowance_lockout,
-                local_cache_ready,
-                strict_local_cache_first,
-            )
-
-            if strict_local_cache_first() or is_historical_allowance_lockout():
-                log_engine(
-                    "OHLC background seed: skipped — strict local-cache-first "
-                    "(no Yahoo fallback during IG historical lockout)"
+        def _background_yahoo_seed(loops_ref: list) -> None:
+            """Fetch missing OHLC caches from Yahoo in the background after startup."""
+            try:
+                from trading.ohlc_bootstrap import (
+                    is_historical_allowance_lockout,
+                    local_cache_ready,
+                    strict_local_cache_first,
                 )
-                return
 
-            from data.ohlc_yahoo_seeder import EPIC_YAHOO_MAP, fetch_yahoo_ohlc_for_epic
-            from system.paths import data_dir as _data_dir
-
-            _ohlc_dir = _data_dir() / "ohlc_cache"
-            _ohlc_dir.mkdir(parents=True, exist_ok=True)
-            for loop in loops_ref:
-                _epic = loop._epic
-                _market = getattr(loop, "_market", "")
-                if local_cache_ready(_epic, _market):
-                    continue
-                if _epic not in EPIC_YAHOO_MAP:
-                    continue
-                _slug = _epic.replace(".", "_").replace("/", "_")
-                _cache = _ohlc_dir / f"{_slug}_5m.jsonl"
-                if _cache.exists() and _cache.stat().st_size > 1024:
-                    continue
-                try:
-                    _symbol, _market_name = EPIC_YAHOO_MAP[_epic]
+                if strict_local_cache_first() or is_historical_allowance_lockout():
                     log_engine(
-                        f"OHLC background seed: fetching {_market_name} from Yahoo ({_symbol})"
+                        "OHLC background seed: skipped — strict local-cache-first "
+                        "(no Yahoo fallback during IG historical lockout)"
                     )
-                    fetch_yahoo_ohlc_for_epic(_epic, market=_market_name)
-                    log_engine(f"OHLC background seed: {_market_name} cache populated")
-                    # Inject newly seeded bars into the running signal engine
+                    return
+
+                from data.ohlc_yahoo_seeder import EPIC_YAHOO_MAP, fetch_yahoo_ohlc_for_epic
+                from system.paths import data_dir as _data_dir
+
+                _ohlc_dir = _data_dir() / "ohlc_cache"
+                _ohlc_dir.mkdir(parents=True, exist_ok=True)
+                for loop in loops_ref:
+                    _epic = loop._epic
+                    _market = getattr(loop, "_market", "")
+                    if local_cache_ready(_epic, _market):
+                        continue
+                    if _epic not in EPIC_YAHOO_MAP:
+                        continue
+                    _slug = _epic.replace(".", "_").replace("/", "_")
+                    _cache = _ohlc_dir / f"{_slug}_5m.jsonl"
+                    if _cache.exists() and _cache.stat().st_size > 1024:
+                        continue
                     try:
-                        bootstrap_ohlc_parallel(rest_client, [loop])
-                    except Exception:
-                        pass
-                except Exception as _ye:
-                    log_engine(
-                        f"OHLC background seed skipped {_epic}: {type(_ye).__name__}: {_ye}"
-                    )
-        except Exception as _e:
-            log_engine(f"OHLC background seed error: {type(_e).__name__}: {_e}")
+                        _symbol, _market_name = EPIC_YAHOO_MAP[_epic]
+                        log_engine(
+                            f"OHLC background seed: fetching {_market_name} from Yahoo ({_symbol})"
+                        )
+                        fetch_yahoo_ohlc_for_epic(_epic, market=_market_name)
+                        log_engine(f"OHLC background seed: {_market_name} cache populated")
+                        try:
+                            bootstrap_ohlc_parallel(rest_client, [loop])
+                        except Exception:
+                            pass
+                    except Exception as _ye:
+                        log_engine(
+                            f"OHLC background seed skipped {_epic}: {type(_ye).__name__}: {_ye}"
+                        )
+            except Exception as _e:
+                log_engine(f"OHLC background seed error: {type(_e).__name__}: {_e}")
 
-    import threading as _threading
+        import threading as _threading
 
-    _seed_thread = _threading.Thread(
-        target=_background_yahoo_seed,
-        args=(loops,),
-        name="ohlc-yahoo-seed",
-        daemon=True,
-    )
-    _seed_thread.start()
+        _seed_thread = _threading.Thread(
+            target=_background_yahoo_seed,
+            args=(loops,),
+            name="ohlc-yahoo-seed",
+            daemon=True,
+        )
+        _seed_thread.start()
 
-    bootstrap_ohlc_parallel(rest_client, loops)
-    _startup_mark("ohlc", note=f"{len(loops)} markets loaded")
+        bootstrap_ohlc_parallel(rest_client, loops)
+        _startup_mark("ohlc", note=f"{len(loops)} markets loaded")
 
     if rest_client is None:
         from system.stream_ready import signal_stream_ready
@@ -645,7 +652,12 @@ def build_trading_loop(
     return loop
 
 
-def start_market_stream(cfg: Config, *, rest_client: Any | None) -> Any | None:
+def start_market_stream(
+    cfg: Config,
+    *,
+    rest_client: Any | None,
+    clear_stream_ready: bool = True,
+) -> Any | None:
     """Connect IG price stream and subscribe all enabled epics."""
     global _stream_client
     if rest_client is None:
@@ -665,9 +677,10 @@ def start_market_stream(cfg: Config, *, rest_client: Any | None) -> Any | None:
     if not epics:
         epics = [str(cfg.epic)]
 
-    from system.stream_ready import reset_stream_ready
+    if clear_stream_ready:
+        from system.stream_ready import reset_stream_ready
 
-    reset_stream_ready()
+        reset_stream_ready()
 
     hub = get_market_data_hub()
     hub.attach_rest(rest_client)

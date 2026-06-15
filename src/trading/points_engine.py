@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import threading
 import time
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -28,6 +29,7 @@ DAY_STOP_SESSION_SCORE = -50.0
 RAPID_DRAWDOWN_GBP = 2000.0
 RAPID_DRAWDOWN_WINDOW_SEC = 3600.0
 RAPID_DRAWDOWN_COOLDOWN_SEC = 300.0
+PERSIST_FLUSH_INTERVAL_SEC = 5.0
 
 CONF_HIGH = 92.0
 CONF_STANDARD_MIN = 85.0
@@ -35,6 +37,10 @@ CONF_MARGINAL_MIN = 55.0
 
 _lock = threading.RLock()
 _path_override: Path | None = None
+_pending_engines: weakref.WeakSet[PointsEngine] = weakref.WeakSet()
+_persist_worker_lock = threading.Lock()
+_persist_worker: threading.Thread | None = None
+_persist_worker_stop = threading.Event()
 
 
 def _default_path() -> Path:
@@ -47,6 +53,57 @@ def set_points_state_path_for_tests(path: Path | str | None) -> None:
     global _path_override
     with _lock:
         _path_override = Path(path) if path else None
+
+
+def _persist_worker_loop() -> None:
+    while not _persist_worker_stop.wait(PERSIST_FLUSH_INTERVAL_SEC):
+        flush_points_persist()
+    flush_points_persist()
+
+
+def _ensure_persist_worker() -> None:
+    global _persist_worker
+    with _persist_worker_lock:
+        if _persist_worker is not None and _persist_worker.is_alive():
+            return
+        _persist_worker_stop.clear()
+        _persist_worker = threading.Thread(
+            target=_persist_worker_loop,
+            name="PointsPersistWorker",
+            daemon=True,
+        )
+        _persist_worker.start()
+
+
+def flush_points_persist() -> None:
+    """Synchronously write all dirty points engines (tests / shutdown)."""
+    for engine in list(_pending_engines):
+        try:
+            engine._flush_persist_if_dirty()
+        except Exception as e:
+            log_engine(
+                f"points_engine background flush failed: {type(e).__name__}: {e}"
+            )
+
+
+def stop_points_persist_worker(*, flush: bool = True) -> None:
+    """Stop the background persist worker."""
+    global _persist_worker
+    if flush:
+        flush_points_persist()
+    _persist_worker_stop.set()
+    with _persist_worker_lock:
+        thread = _persist_worker
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=PERSIST_FLUSH_INTERVAL_SEC + 1.0)
+    with _persist_worker_lock:
+        _persist_worker = None
+
+
+def reset_points_persist_for_tests() -> None:
+    """Reset worker state between tests."""
+    stop_points_persist_worker(flush=True)
+    _persist_worker_stop.clear()
 
 
 HEALTHY_CUMULATIVE_MIN = 4.0  # was 6.0 — faster recovery to full size after drawdown
@@ -212,6 +269,8 @@ class PointsEngine:
         self._roadmap_compound_boost = False
         self._equity_lock_announced = False
         self._operator_reset_healthy = False
+        self._persist_dirty = False
+        _pending_engines.add(self)
         self._load()
 
     def equity_lock_active(self) -> bool:
@@ -285,11 +344,36 @@ class PointsEngine:
         self._rapid_cooldown_until = max(0.0, restored_cooldown)
         self._operator_reset_healthy = bool(data.get("operator_reset_healthy", False))
 
-    def _persist(self) -> None:
+    def _request_persist(self) -> None:
+        """Mark state dirty and schedule a background JSON flush (non-blocking)."""
+        self._persist_dirty = True
+        _ensure_persist_worker()
+
+    def _flush_persist_if_dirty(self) -> None:
+        if not self._persist_dirty:
+            return
+        with _lock:
+            if not self._persist_dirty:
+                return
+            payload = self._payload()
+            path = self._path
+            self._persist_dirty = False
         try:
-            atomic_write_json(self._path, self._payload())
+            atomic_write_json(path, payload)
         except Exception as e:
+            with _lock:
+                self._persist_dirty = True
             log_engine(f"points_engine persist failed: {type(e).__name__}: {e}")
+
+    def flush_persist(self) -> None:
+        """Force an immediate disk write (tests / operator paths)."""
+        with _lock:
+            self._persist_dirty = True
+        self._flush_persist_if_dirty()
+
+    def _persist(self) -> None:
+        """Backward-compatible synchronous persist (tests / admin)."""
+        self.flush_persist()
 
     def _load(self) -> None:
         data = read_json_file(self._path)
@@ -425,7 +509,7 @@ class PointsEngine:
                 if total > RAPID_DRAWDOWN_GBP:
                     self._rapid_cooldown_until = now + RAPID_DRAWDOWN_COOLDOWN_SEC
                     log_engine("RAPID DRAWDOWN — cooling 30min")
-                    self._persist()
+                    self._request_persist()
         except Exception as e:
             log_engine(f"points_engine rapid drawdown failed: {type(e).__name__}: {e}")
 
@@ -508,7 +592,7 @@ class PointsEngine:
                 new_nominal = _nominal_state(self._cumulative)
                 self._on_nominal_transition(new_nominal)
                 self._sync_stop_latch()
-                self._persist()
+                self._request_persist()
             self._maybe_notify_telegram_state()
             return score
         except Exception as e:
@@ -801,7 +885,7 @@ class PointsEngine:
                 self._on_nominal_transition(new_nominal)
                 self._sync_stop_latch()
                 cumulative_after = float(self._cumulative)
-                self._persist()
+                self._request_persist()
             log_engine(
                 f"POINTS MILESTONE +{score:.2f} ({kind_u}) "
                 f"trade={trade_id or '—'} {market or '—'} "
@@ -853,7 +937,7 @@ class PointsEngine:
             if self._signals_to_skip <= 0:
                 return False
             self._signals_to_skip -= 1
-            self._persist()
+            self._request_persist()
             return True
 
     def reset_session(self) -> None:
@@ -865,13 +949,13 @@ class PointsEngine:
             self._day_stopped = False
             self._recovery_wins = 0
             self._equity_lock_announced = False
-            self._persist()
+            self._request_persist()
 
     def clear_stop(self) -> None:
         """Manual review — release STOP latch (spec: no auto-recovery from STOP)."""
         with _lock:
             self._stop_latched = False
-            self._persist()
+        self.flush_persist()
 
     def admin_reset_cumulative(self) -> tuple[float, PointsStateName]:
         """Operator reset — zero cumulative, clear WARNING/STOP latch, return HEALTHY."""
@@ -890,8 +974,8 @@ class PointsEngine:
             self._last_nominal = "HEALTHY"
             self._equity_lock_announced = False
             self._operator_reset_healthy = True
-            self._persist()
-            return previous, "HEALTHY"
+        self.flush_persist()
+        return previous, "HEALTHY"
 
     def snapshot(self) -> PointsSnapshot:
         with _lock:

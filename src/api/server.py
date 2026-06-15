@@ -1,355 +1,27 @@
 """
-FastAPI API server — Slice 4 Step 1 (v25 read-only state endpoints + WS stream).
+FastAPI API server — lazy router bootstrap for fast Uvicorn bind.
 
-All endpoints are read-only snapshots. POST /api/replay/run spawns a
-subprocess trigger only — it never imports trading_loop and never writes
-state files directly.
+Bootstrap routes (health + dashboard SPA shell) register at factory time so
+port :8080 serves ``/`` immediately. Trading API routers mount via
+``mount_deferred_routers`` after the socket is listening.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import json
+import os
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from api.agent_control import enrich_tick_runtime
-from api.snapshot_store import get_tick, subscribe, watch_snapshot_file
-from system.paths import data_dir, project_root
-
-# ---------------------------------------------------------------------------
-# File-path helpers (read-only)
-# ---------------------------------------------------------------------------
-
-
-def _data(filename: str) -> Path:
-    return data_dir() / filename
-
-
-def _watchdog_failed() -> bool:
-    return _data("watchdog_failed.txt").exists()
-
-
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.is_file():
-        return []
-    out: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line:
-            try:
-                out.append(json.loads(line))
-            except json.JSONDecodeError:
-                pass
-    return out
-
-
-def _read_json_safe(path: Path) -> dict[str, Any]:
-    if not path.is_file():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-# ---------------------------------------------------------------------------
-# State router  (READ-ONLY)
-# ---------------------------------------------------------------------------
-
-router = APIRouter()
-
-
-@router.get("/health")
-def health() -> dict[str, Any]:
-    from system.app_identity import APP_VERSION_LABEL
-
-    return {"status": "ok", "version": APP_VERSION_LABEL}
-
-
-@router.get("/api/state")
-def api_state() -> dict[str, Any]:
-    tick = get_tick()
-    sig = tick.get("signal") or {}
-    pts = tick.get("points") or {}
-    return {
-        "bid": tick.get("bid"),
-        "offer": tick.get("offer"),
-        "agent_state": pts.get("state", "CAUTION"),
-        "points_trade": float(pts.get("last_trade") or 0),
-        "points_session": float(pts.get("session") or 0),
-        "points_cumulative": float(pts.get("cumulative") or 0),
-        "ml_confidence": float(sig.get("confidence") or 0),
-        "signal_strength": float(sig.get("confidence") or 0),
-        "fitness_score": float(sig.get("fitness") or 0),
-        "fitness_factors": sig.get("fitness_factors") or {},
-        "signal_threshold": float(sig.get("threshold") or 0),
-        "config_signal_threshold": float(sig.get("config_signal_threshold") or 0),
-        "min_size_threshold": float(sig.get("min_size_threshold") or 0),
-        "points_confidence_floor": float(sig.get("points_confidence_floor") or 0),
-        "regime": tick.get("regime"),
-        "win_rate_today": tick.get("win_rate_today"),
-        "win_rate_alltime": tick.get("win_rate_20"),
-        "daily_pnl_gbp": float(tick.get("daily_pnl_gbp") or 0),
-        "stream_status": tick.get("stream_status", "DISCONNECTED"),
-        "rest_budget": tick.get("rest_calls_min", 0),
-        "spread_current": tick.get("spread"),
-        "spread_normal": tick.get("spread_normal"),
-        "sentiment_factor": tick.get("sentiment_factor"),
-        "watchdog_failed": _watchdog_failed(),
-    }
-
-
-@router.get("/api/trades")
-def api_trades() -> dict[str, Any]:
-    tick = get_tick()
-    active: list[dict[str, Any]] = list(tick.get("positions") or [])
-    closed: list[dict[str, Any]] = []
-    try:
-        from api.dashboard_data import get_closed_trades
-
-        for row in get_closed_trades(limit=100):
-            if not row.get("deal_id"):
-                continue
-            if row.get("pending"):
-                continue
-            result = str(row.get("result") or "").upper()
-            if result not in ("WIN", "LOSS", "PENDING"):
-                continue
-            closed.append(
-                {
-                    "deal_id": row["deal_id"],
-                    "direction": row.get("direction"),
-                    "market": row.get("market"),
-                    "entry": row.get("entry"),
-                    "exit": row.get("exit"),
-                    "pnl_gbp": row.get("pnl_gbp"),
-                    "result": result,
-                    "closed_at": row.get("closed_at"),
-                    "setup": row.get("setup"),
-                }
-            )
-    except Exception:
-        pass
-    return {"active": active, "closed": closed}
-
-
-@router.get("/api/points")
-def api_points() -> dict[str, Any]:
-    pts = get_tick().get("points") or {}
-    return {
-        "trade": float(pts.get("last_trade") or 0),
-        "session": float(pts.get("session") or 0),
-        "cumulative": float(pts.get("cumulative") or 0),
-        "agent_state": pts.get("state", "CAUTION"),
-    }
-
-
-@router.get("/api/replay/summary")
-def api_replay_summary() -> dict[str, Any]:
-    from system.replay_scheduler_state import load_replay_scheduler_state
-
-    rows = _read_jsonl(_data("replay_results.jsonl"))
-    last_entry = rows[-1] if rows else {}
-    replay_state = load_replay_scheduler_state()
-    return {"last_result": last_entry, "replay_state": replay_state}
-
-
-@router.get("/api/shadow/today")
-def api_shadow_today() -> dict[str, Any]:
-    """Tail-read today's shadow log — avoids reading the full 40MB+ file."""
-    from api.intelligence_data import shadow_today as _shadow_today
-
-    return _shadow_today()
-
-
-@router.get("/api/learning/status")
-def api_learning_status() -> dict[str, Any]:
-    """Defer to optimised implementation in intelligence_data."""
-    from api.intelligence_data import learning_status as _learning_status
-
-    return _learning_status()
-
-
-@router.get("/api/learning/status_legacy")
-def api_learning_status_legacy() -> dict[str, Any]:
-    """Legacy full implementation — kept for reference."""
-    ml_store_rows = len(_read_jsonl(_data("ml_training_store.jsonl")))
-    confirmed_trade_count = 0
-    top_setups_by_win_rate: list[dict[str, Any]] = []
-    try:
-        from data.learning_store import LearningStore
-        from system.config_loader import ConfigLoader
-        from system.paths import config_dir
-
-        cfg = ConfigLoader(config_dir() / "config_v25.json").load_config()
-        store = LearningStore(str(cfg.learning_db))
-        if hasattr(store, "recent_confirmed_closed_trades"):
-            confirmed_trade_count = len(store.recent_confirmed_closed_trades(limit=500))
-        rows = store.conn.execute(
-            """
-            SELECT setup_key, COUNT(*) AS n,
-                   ROUND(SUM(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) * 1.0 / COUNT(*), 3) AS win_rate
-            FROM trades WHERE closed_at IS NOT NULL AND setup_key IS NOT NULL
-            GROUP BY setup_key ORDER BY win_rate DESC LIMIT 5
-            """
-        ).fetchall()
-        top_setups_by_win_rate = [
-            {"setup_key": r[0], "count": int(r[1]), "win_rate": float(r[2])}
-            for r in rows
-        ]
-    except Exception:
-        pass
-    target = 500
-    progress = min(100.0, round(100 * ml_store_rows / target, 1)) if target else 0.0
-    return {
-        "ml_store_rows": ml_store_rows,
-        "confirmed_trade_count": confirmed_trade_count,
-        "top_setups_by_win_rate": top_setups_by_win_rate,
-        "progress_to_500": progress,
-    }
-
-
-_replay_mutex = threading.Lock()
-
-
-@router.post("/api/replay/run")
-def api_replay_run() -> JSONResponse:
-    from system.replay_scheduler_runner import in_replay_api_window, run_replay_pipeline
-    from system.replay_scheduler_state import load_replay_scheduler_state
-
-    if not in_replay_api_window():
-        return JSONResponse(
-            {"ok": False, "error": "outside trading window 07:00\u201322:30 London"},
-            status_code=409,
-        )
-    state = load_replay_scheduler_state()
-    if str(state.get("status") or "") == "running":
-        return JSONResponse(
-            {"ok": False, "error": "replay already running"},
-            status_code=423,
-        )
-    with _replay_mutex:
-
-        def _run() -> None:
-            try:
-                run_replay_pipeline(scheduled=False)
-            except Exception as exc:
-                from system.engine_log import log_engine
-
-                log_engine(f"api replay run failed: {type(exc).__name__}: {exc}")
-
-        try:
-            # Check live thread count — high thread counts indicate agent needs restart
-            live = threading.active_count()
-            if live > 400:
-                return JSONResponse(
-                    {
-                        "ok": False,
-                        "error": (
-                            f"thread count high ({live}) — restart agent to free threads, "
-                            "then retry replay"
-                        ),
-                    },
-                    status_code=503,
-                )
-            threading.Thread(target=_run, name="replay-manual", daemon=True).start()
-        except Exception as exc:
-            return JSONResponse(
-                {"ok": False, "error": f"launch failed: {type(exc).__name__}: {exc}"},
-                status_code=500,
-            )
-    return JSONResponse({"ok": True, "status": "accepted"}, status_code=202)
-
-
-# ---------------------------------------------------------------------------
-# WebSocket /ws/stream
-# ---------------------------------------------------------------------------
-
-ws_router = APIRouter()
-
-
-class _StreamHub:
-    """Fan-out snapshot_store tick updates to /ws/stream WebSocket clients."""
-
-    def __init__(self) -> None:
-        self._queues: dict[WebSocket, asyncio.Queue[dict[str, Any]]] = {}
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._unsub: Any | None = None
-
-    def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
-        self._loop = loop
-        if self._unsub is None:
-            self._unsub = subscribe(self._on_tick_threadsafe)
-
-    def _deliver(self, tick: dict[str, Any]) -> None:
-        enriched = enrich_tick_runtime(tick)
-        for q in list(self._queues.values()):
-            try:
-                q.put_nowait(enriched)
-            except asyncio.QueueFull:
-                try:
-                    q.get_nowait()
-                except asyncio.QueueEmpty:
-                    pass
-                try:
-                    q.put_nowait(enriched)
-                except asyncio.QueueFull:
-                    pass
-
-    def _on_tick_threadsafe(self, tick: dict[str, Any]) -> None:
-        if self._loop is not None:
-            self._loop.call_soon_threadsafe(lambda: self._deliver(tick))
-
-    def register(self, ws: WebSocket, queue: asyncio.Queue[dict[str, Any]]) -> None:
-        self._queues[ws] = queue
-
-    def unregister(self, ws: WebSocket) -> None:
-        self._queues.pop(ws, None)
-
-
-stream_hub = _StreamHub()
-
-
-@ws_router.websocket("/ws/stream")
-async def ws_stream(ws: WebSocket) -> None:
-    await ws.accept()
-    outbound: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=64)
-    stream_hub.register(ws, outbound)
-    await outbound.put(enrich_tick_runtime(get_tick()))
-
-    async def _reader() -> None:
-        while True:
-            await ws.receive_text()
-
-    async def _writer() -> None:
-        while True:
-            tick = await outbound.get()
-            await ws.send_json(tick)
-
-    try:
-        await asyncio.gather(_reader(), _writer())
-    except WebSocketDisconnect:
-        pass
-    except Exception:
-        pass
-    finally:
-        stream_hub.unregister(ws)
-
-
-# ---------------------------------------------------------------------------
-# App factory
-# ---------------------------------------------------------------------------
-
 _startup_hooks: list = []
+_DEFERRED_YIELD_ROUNDS = 8
 
 
 def register_api_startup(callback) -> None:
@@ -367,54 +39,213 @@ def _run_startup_hooks() -> None:
             log_engine(f"API startup hook failed: {type(exc).__name__}: {exc}")
 
 
-def _dashboard_dist() -> Path:
-    return project_root() / "dashboard" / "dist"
+def _register_bootstrap_routes(app: FastAPI) -> None:
+    """Minimal routes for watchdog + boot splash — no trading imports."""
+    from api.auth import register_auth_login_route
 
+    register_auth_login_route(app)
 
-def create_app(*, watch_snapshot: bool = True) -> FastAPI:
-    @asynccontextmanager
-    async def lifespan(app: FastAPI):
-        loop = asyncio.get_running_loop()
-        stream_hub.bind_loop(loop)
-        from api import ws as _legacy_ws
+    @app.get("/health", include_in_schema=False)
+    def bootstrap_health() -> dict[str, Any]:
+        from system.app_identity import APP_VERSION_LABEL
 
-        _legacy_ws.hub.bind_loop(loop)
+        return {"status": "ok", "version": APP_VERSION_LABEL, "bootstrapping": True}
 
-        # Warm /api/health cache without blocking the event loop.
+    @app.get("/api/startup/status", include_in_schema=False)
+    def bootstrap_startup_status() -> dict[str, Any]:
+        from system.boot_metrics import get_boot_metrics
+        from system.system_state import get_system_state
+
+        boot_metrics = get_boot_metrics()
+        system_state = get_system_state().snapshot()
+        phases: list[Any] = []
         try:
-            from api.agent_health import start_health_cache_refresher
+            from system.startup_tracker import get_status
 
-            start_health_cache_refresher()
+            phases = list(get_status().get("phases") or [])
+        except Exception:
+            pass
+        return {
+            "boot_metrics": boot_metrics,
+            "system_state": system_state,
+            "ready": bool(system_state.get("ready")),
+            "background_verify": system_state.get("background_verify") or {},
+            "phases": phases,
+        }
+
+    @app.get("/api/ui/status", include_in_schema=False)
+    def bootstrap_ui_status() -> dict[str, Any]:
+        dist = getattr(app.state, "dashboard_dist", None)
+        return {
+            "ui_ready": bool(getattr(app.state, "dashboard_static_mounted", False)),
+            "dist": str(dist) if dist else None,
+        }
+
+
+_DASHBOARD_NO_CACHE = {
+    "Cache-Control": "no-cache, no-store, must-revalidate",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
+
+
+_BOOT_SPLASH_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>IG Agent — Starting</title>
+  <style>
+    body{font-family:system-ui,sans-serif;background:#0b1220;color:#e8eef7;
+         display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
+    .card{max-width:32rem;padding:2rem;border:1px solid #243049;border-radius:12px;
+          background:#121a2b;text-align:center}
+    h1{font-size:1.25rem;margin:0 0 .75rem}
+    p{margin:.35rem 0;color:#9fb0cc;font-size:.95rem}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>IG Agent dashboard loading…</h1>
+    <p id="status">API online — waiting for built dashboard assets.</p>
+    <p>Run: <code>cd dashboard && npm install && npm run build</code></p>
+  </div>
+  <script>
+    (function poll(){
+      fetch('/api/startup/status').then(r=>r.json()).then(d=>{
+        const pct = d.system_state && d.system_state.percent;
+        document.getElementById('status').textContent =
+          'Boot ' + (pct != null ? pct : 0) + '% — reloading when dist is ready…';
+        if (d.ready) location.reload();
+      }).catch(()=>{});
+      setTimeout(poll, 1500);
+    })();
+  </script>
+</body>
+</html>"""
+
+
+def _ensure_ig_agent_root_env() -> None:
+    """Ensure dashboard path resolution works before first request."""
+    if os.environ.get("IG_AGENT_ROOT", "").strip():
+        return
+    repo = Path(__file__).resolve().parents[2]
+    if (repo / "src" / "main.py").is_file():
+        os.environ["IG_AGENT_ROOT"] = str(repo)
+        return
+    try:
+        from system.paths import project_root
+
+        os.environ.setdefault("IG_AGENT_ROOT", str(project_root()))
+    except Exception:
+        pass
+
+
+def resolve_dashboard_dist() -> Path | None:
+    """
+    Locate ``dashboard/dist`` using absolute paths (launcher / terminal / cwd safe).
+
+    Resolution order:
+    1. ``$IG_AGENT_ROOT/dashboard/dist`` (desktop launcher, launchd)
+    2. Repo root derived from this file — ``src/api/server.py`` → parents[2]
+    3. ``system.paths.project_root()`` (bundle / frozen exe aware)
+    """
+    candidates: list[Path] = []
+    _ensure_ig_agent_root_env()
+    env_root = os.environ.get("IG_AGENT_ROOT", "").strip()
+    if env_root:
+        candidates.append((Path(env_root).resolve() / "dashboard" / "dist"))
+    repo_from_file = Path(__file__).resolve().parents[2]
+    candidates.append((repo_from_file / "dashboard" / "dist"))
+    candidates.append((Path.cwd().resolve() / "dashboard" / "dist"))
+    try:
+        from system.paths import project_root
+
+        pr = (project_root() / "dashboard" / "dist").resolve()
+        if pr not in candidates:
+            candidates.append(pr)
+    except Exception:
+        pass
+
+    seen: set[Path] = set()
+    for dist in candidates:
+        dist = dist.resolve()
+        if dist in seen:
+            continue
+        seen.add(dist)
+        if (dist / "index.html").is_file():
+            return dist
+    return None
+
+
+def _mount_dashboard_static(app: FastAPI) -> None:
+    """Register ``/``, ``/assets/*``, and favicon at factory time (fast path)."""
+    if getattr(app.state, "dashboard_static_mounted", False):
+        return
+
+    _ensure_ig_agent_root_env()
+    dist = resolve_dashboard_dist()
+    index: Path | None = None
+    if dist is not None:
+        index = dist / "index.html"
+
+    if dist is not None and index is not None and index.is_file():
+        assets = dist / "assets"
+        if assets.is_dir():
+            app.mount(
+                "/assets",
+                StaticFiles(directory=str(assets)),
+                name="dashboard-assets",
+            )
+
+        favicon = dist / "favicon.svg"
+
+        @app.get("/", include_in_schema=False)
+        async def dashboard_root() -> FileResponse:
+            return FileResponse(index, headers=_DASHBOARD_NO_CACHE)
+
+        if favicon.is_file():
+
+            @app.get("/favicon.svg", include_in_schema=False)
+            async def dashboard_favicon() -> FileResponse:
+                return FileResponse(favicon, headers=_DASHBOARD_NO_CACHE)
+
+        app.state.dashboard_dist = dist
+        try:
+            from system.engine_log import log_engine
+
+            log_engine(f"API: dashboard static shell mounted from {dist}")
+        except Exception:
+            pass
+    else:
+        searched = [
+            str((Path(os.environ.get("IG_AGENT_ROOT", "")).resolve() / "dashboard" / "dist"))
+            if os.environ.get("IG_AGENT_ROOT")
+            else "",
+            str(Path(__file__).resolve().parents[2] / "dashboard" / "dist"),
+        ]
+        try:
+            from system.engine_log import log_engine
+
+            log_engine(
+                "API: dashboard/dist/index.html not found — serving boot splash at /. "
+                f"Searched: {', '.join(p for p in searched if p)}"
+            )
         except Exception:
             pass
 
-        # Heavy startup (streams, trading loops) must not block uvicorn bind.
-        threading.Thread(
-            target=_run_startup_hooks,
-            name="api-startup-hooks",
-            daemon=True,
-        ).start()
+        @app.get("/", include_in_schema=False)
+        async def dashboard_boot_splash() -> HTMLResponse:
+            return HTMLResponse(_BOOT_SPLASH_HTML, headers=_DASHBOARD_NO_CACHE)
 
-        watcher = None
-        if watch_snapshot:
-            watcher = asyncio.create_task(watch_snapshot_file())
-        app.state.snapshot_watcher = watcher
-        yield
-        if watcher is not None:
-            watcher.cancel()
-            try:
-                await watcher
-            except asyncio.CancelledError:
-                pass
+    app.state.dashboard_static_mounted = True
 
-    app = FastAPI(
-        title="IG Agent v25 API",
-        version="v25",
-        description="Read-only state API, WebSocket stream, and static dashboard UI",
-        lifespan=lifespan,
-    )
 
+def _register_api_middleware(app: FastAPI) -> None:
+    """Register auth/CORS at factory time — Starlette forbids add_middleware after start."""
     from fastapi.middleware.cors import CORSMiddleware
+
+    from api.auth_middleware import AdminAuthMiddleware
 
     app.add_middleware(
         CORSMiddleware,
@@ -428,59 +259,145 @@ def create_app(*, watch_snapshot: bool = True) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-
-    from api.auth_middleware import AdminAuthMiddleware
-
     app.add_middleware(AdminAuthMiddleware)
 
-    app.include_router(router)
-    app.include_router(ws_router)
 
-    from api import routes as _legacy_routes
-    from api import ws as _legacy_ws
-
-    app.include_router(_legacy_routes.router)
-    app.include_router(_legacy_ws.router)
-
-    dist = _dashboard_dist()
-    if dist.is_dir() and (dist / "index.html").is_file():
-        _mount_dashboard(app, dist)
-
-    return app
+async def _yield_event_loop(rounds: int = _DEFERRED_YIELD_ROUNDS) -> None:
+    """Cooperative scheduler drain before heavy sync/thread boot work."""
+    for _ in range(rounds):
+        await asyncio.sleep(0)
 
 
-def _mount_dashboard(app: FastAPI, dist: Path) -> None:
-    assets = dist / "assets"
-    if assets.is_dir():
-        app.mount(
-            "/assets",
-            StaticFiles(directory=str(assets)),
-            name="dashboard-assets",
+async def _start_snapshot_watcher(watch_snapshot: bool) -> asyncio.Task | None:
+    if not watch_snapshot:
+        return None
+    from api.snapshot_store import watch_snapshot_file
+
+    return asyncio.create_task(watch_snapshot_file())
+
+
+async def _cancel_snapshot_watcher(watcher: asyncio.Task | None) -> None:
+    if watcher is None:
+        return
+    watcher.cancel()
+    try:
+        await watcher
+    except asyncio.CancelledError:
+        pass
+
+
+async def _run_boot_pipeline(
+    app: FastAPI,
+    *,
+    watch_snapshot: bool,
+    shutdown: asyncio.Event,
+    mount_done: asyncio.Event,
+) -> None:
+    watcher: asyncio.Task | None = None
+    await _yield_event_loop()
+    try:
+        from system.boot_coordinator import boot_lifespan
+
+        async with boot_lifespan(app):
+            mount_done.set()
+            watcher = await _start_snapshot_watcher(watch_snapshot)
+            app.state.snapshot_watcher = watcher
+            await shutdown.wait()
+    finally:
+        await _cancel_snapshot_watcher(watcher)
+
+
+async def _run_legacy_deferred_mount(
+    app: FastAPI,
+    loop: asyncio.AbstractEventLoop,
+    *,
+    watch_snapshot: bool,
+    shutdown: asyncio.Event,
+    mount_done: asyncio.Event,
+) -> None:
+    watcher: asyncio.Task | None = None
+    await _yield_event_loop()
+    try:
+        from api.server_deferred import mount_deferred_routers
+
+        await asyncio.to_thread(mount_deferred_routers, app, loop)
+        mount_done.set()
+        threading.Thread(
+            target=_run_startup_hooks,
+            name="api-startup-hooks",
+            daemon=True,
+        ).start()
+        watcher = await _start_snapshot_watcher(watch_snapshot)
+        app.state.snapshot_watcher = watcher
+        await shutdown.wait()
+    finally:
+        await _cancel_snapshot_watcher(watcher)
+
+
+def create_app(
+    *,
+    watch_snapshot: bool = True,
+    use_boot_pipeline: bool = True,
+    boot_context: Any | None = None,
+) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        loop = asyncio.get_running_loop()
+        shutdown = asyncio.Event()
+        mount_done = asyncio.Event()
+        app.state._api_shutdown = shutdown
+        app.state._mount_done = mount_done
+
+        async def _deferred_worker() -> None:
+            if use_boot_pipeline:
+                await _run_boot_pipeline(
+                    app,
+                    watch_snapshot=watch_snapshot,
+                    shutdown=shutdown,
+                    mount_done=mount_done,
+                )
+            else:
+                await _run_legacy_deferred_mount(
+                    app,
+                    loop,
+                    watch_snapshot=watch_snapshot,
+                    shutdown=shutdown,
+                    mount_done=mount_done,
+                )
+
+        # Detached from lifespan startup — Uvicorn binds at ``yield`` below.
+        deferred_task = asyncio.create_task(
+            _deferred_worker(), name="api-deferred-startup"
         )
-    index = dist / "index.html"
 
-    _NO_CACHE = {
-        "Cache-Control": "no-cache, no-store, must-revalidate",
-        "Pragma": "no-cache",
-        "Expires": "0",
-    }
+        if os.environ.get("IG_AGENT_PYTEST") == "1":
+            await mount_done.wait()
 
-    @app.get("/", include_in_schema=False)
-    async def dashboard_root() -> FileResponse:
-        return FileResponse(index, headers=_NO_CACHE)
+        try:
+            yield
+        finally:
+            shutdown.set()
+            deferred_task.cancel()
+            try:
+                await deferred_task
+            except asyncio.CancelledError:
+                pass
 
-    @app.get("/{full_path:path}", include_in_schema=False)
-    async def dashboard_static_or_spa(full_path: str) -> FileResponse:
-        if full_path.startswith("api/") or full_path in ("ws", "ws/stream"):
-            raise HTTPException(status_code=404, detail="Not Found")
-        candidate = dist / full_path
-        if candidate.is_file():
-            return FileResponse(candidate)
-        # SPA fallback — index.html must never be cached so CSS hashes stay fresh
-        return FileResponse(index, headers=_NO_CACHE)
+    app = FastAPI(
+        title="IG Agent v25 API",
+        version="v25",
+        description="Read-only state API, WebSocket stream, and static dashboard UI",
+        lifespan=lifespan,
+    )
+    if boot_context is not None:
+        app.state.boot_context = boot_context
 
-
-app = create_app()
+    # Fast path — health + dashboard shell available the instant :8080 binds.
+    # Trading API routers register in mount_deferred_routers (post-bind), not here.
+    _register_api_middleware(app)
+    _register_bootstrap_routes(app)
+    _mount_dashboard_static(app)
+    return app
 
 
 def main() -> None:
@@ -491,11 +408,11 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8080)
     args = parser.parse_args()
     uvicorn.run(
-        "api.server:app",
+        "api.server:create_app",
+        factory=True,
         host=args.host,
         port=args.port,
         reload=False,
-        factory=False,
     )
 
 

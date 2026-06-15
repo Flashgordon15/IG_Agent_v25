@@ -15,9 +15,10 @@ const WARM_MILESTONES = [
 ]
 
 function isBackendBootComplete(boot) {
-  if (!boot || typeof boot !== 'object') return false
-  const pct = Number(boot.percent)
-  return pct === 100 && boot.stage === 'ready' && boot.ready === true
+  if (!boot || typeof boot !== "object") return false
+  if (boot.ready === true && Number(boot.percent) >= 100) return true
+  const stage = String(boot.stage || "").toLowerCase()
+  return (stage === "ready" || stage === "active") && boot.ready === true
 }
 
 function warmMilestoneForElapsed(elapsedMs) {

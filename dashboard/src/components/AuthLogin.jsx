@@ -70,7 +70,8 @@ export default function AuthLogin({ onSuccess }) {
           />
 
           <p className="auth-gate__hint">
-            Host password is set via <code>ADMIN_PASSWORD</code> on the Mac Mini (launchd plist).
+            Password is <code>ADMIN_PASSWORD</code> from launchd (default:{" "}
+            <code>ig-agent-v29-workspace</code>).
           </p>
 
           {error && (

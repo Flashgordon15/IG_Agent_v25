@@ -10,12 +10,6 @@ from typing import Any
 
 from system.paths import project_root
 
-_lock = threading.RLock()
-_concurrent_risk_gbp: float = 0.0
-_daily_deployed_gbp: float = 0.0
-_daily_pnl_gbp: float = 0.0
-_envelope_utc_day: str = ""
-
 
 @lru_cache(maxsize=1)
 def _envelope_config() -> dict[str, Any]:
@@ -45,38 +39,162 @@ def portfolio_gate_enabled() -> bool:
     return bool(_gate_config().get("enabled", False))
 
 
-def reset_portfolio_envelope_for_tests() -> None:
-    global _concurrent_risk_gbp, _daily_deployed_gbp, _daily_pnl_gbp, _envelope_utc_day
-    with _lock:
-        _concurrent_risk_gbp = 0.0
-        _daily_deployed_gbp = 0.0
-        _daily_pnl_gbp = 0.0
-        _envelope_utc_day = ""
-    _envelope_config.cache_clear()
-    _gate_config.cache_clear()
+class PortfolioEnvelope:
+    """Process-wide portfolio risk budget with atomic check-and-reserve."""
 
+    def __init__(self) -> None:
+        self._allocation_lock = threading.RLock()
+        self._concurrent_risk_gbp: float = 0.0
+        self._daily_deployed_gbp: float = 0.0
+        self._daily_pnl_gbp: float = 0.0
+        self._envelope_utc_day: str = ""
 
-def _maybe_roll_utc_day() -> None:
-    """Reset daily deploy/P&L counters at UTC midnight (in-memory envelope)."""
-    global _daily_deployed_gbp, _daily_pnl_gbp, _envelope_utc_day
-    today = date.today().isoformat()
-    with _lock:
-        rolled = bool(_envelope_utc_day and _envelope_utc_day != today)
+    def reset_for_tests(self) -> None:
+        with self._allocation_lock:
+            self._concurrent_risk_gbp = 0.0
+            self._daily_deployed_gbp = 0.0
+            self._daily_pnl_gbp = 0.0
+            self._envelope_utc_day = ""
+        _envelope_config.cache_clear()
+        _gate_config.cache_clear()
+
+    def _maybe_roll_utc_day_unlocked(self) -> None:
+        today = date.today().isoformat()
+        rolled = bool(self._envelope_utc_day and self._envelope_utc_day != today)
         if rolled:
-            _daily_deployed_gbp = 0.0
-            _daily_pnl_gbp = 0.0
-        _envelope_utc_day = today
-    if rolled:
-        try:
-            from data.learning_store import LearningStore
-            from system.config_loader import get_config
-            from system.daily_loss_policy import effective_daily_pnl
+            self._daily_deployed_gbp = 0.0
+            self._daily_pnl_gbp = 0.0
+        self._envelope_utc_day = today
+        if rolled:
+            try:
+                from data.learning_store import LearningStore
+                from system.config_loader import get_config
+                from system.daily_loss_policy import effective_daily_pnl
 
-            store = LearningStore(str(get_config().learning_db))
-            with _lock:
-                _daily_pnl_gbp = float(effective_daily_pnl(store, day=today))
-        except Exception:
-            pass
+                store = LearningStore(str(get_config().learning_db))
+                self._daily_pnl_gbp = float(effective_daily_pnl(store, day=today))
+            except Exception:
+                pass
+
+    def rehydrate(
+        self,
+        *,
+        concurrent_risk_gbp: float = 0.0,
+        daily_deployed_gbp: float = 0.0,
+        daily_pnl_gbp: float = 0.0,
+    ) -> None:
+        with self._allocation_lock:
+            self._concurrent_risk_gbp = max(0.0, float(concurrent_risk_gbp))
+            self._daily_deployed_gbp = max(0.0, float(daily_deployed_gbp))
+            self._daily_pnl_gbp = float(daily_pnl_gbp)
+
+    def record_entry(self, risk_gbp: float) -> None:
+        """Increment deployed risk (legacy direct path / tests)."""
+        risk = float(risk_gbp)
+        with self._allocation_lock:
+            self._concurrent_risk_gbp += risk
+            self._daily_deployed_gbp += risk
+
+    def record_exit(self, risk_gbp: float, *, pnl_gbp: float = 0.0) -> None:
+        with self._allocation_lock:
+            self._concurrent_risk_gbp = max(
+                0.0, self._concurrent_risk_gbp - float(risk_gbp)
+            )
+            self._daily_pnl_gbp += float(pnl_gbp)
+
+    def release_allocation(self, risk_gbp: float) -> None:
+        """Undo a gate-time reservation when execution does not proceed."""
+        risk = max(0.0, float(risk_gbp))
+        if risk <= 0:
+            return
+        with self._allocation_lock:
+            self._concurrent_risk_gbp = max(0.0, self._concurrent_risk_gbp - risk)
+            self._daily_deployed_gbp = max(0.0, self._daily_deployed_gbp - risk)
+
+    def can_allocate(
+        self, risk_gbp: float, *, reserve: bool = True
+    ) -> tuple[bool, str]:
+        """
+        Atomically evaluate envelope caps and optionally claim the risk budget.
+
+        When reserve=True (default), a passing check immediately increments
+        concurrent and daily-deploy counters under the allocation lock.
+        """
+        env = _envelope_config()
+        max_concurrent = float(env.get("max_concurrent_risk_gbp") or 1200)
+        max_daily = float(env.get("max_daily_risk_deployed_gbp") or 2500)
+        min_avail = float(env.get("min_available_gbp") or 100)
+        balance = float(env.get("account_balance_gbp") or 10000)
+        reserve_pct = float(env.get("reserve_pct") or 0.10)
+        risk = max(0.0, float(risk_gbp))
+
+        from system.daily_loss_policy import (
+            hard_daily_loss_limit_gbp,
+            soft_pause_threshold_gbp,
+        )
+
+        hard = hard_daily_loss_limit_gbp()
+        soft = soft_pause_threshold_gbp()
+
+        with self._allocation_lock:
+            self._maybe_roll_utc_day_unlocked()
+            concurrent = self._concurrent_risk_gbp
+            daily_dep = self._daily_deployed_gbp
+            daily_pnl = self._daily_pnl_gbp
+
+            loss_gbp = max(0.0, -daily_pnl)
+            if loss_gbp >= hard:
+                return False, f"daily loss £{loss_gbp:.2f} >= £{hard:.0f} (hard stop)"
+            if loss_gbp >= soft:
+                return (
+                    False,
+                    f"soft pause — daily loss £{loss_gbp:.2f} >= £{soft:.0f} "
+                    "(entries blocked)",
+                )
+            if concurrent + risk > max_concurrent:
+                return (
+                    False,
+                    f"concurrent £{concurrent:.0f}+£{risk:.0f} > £{max_concurrent:.0f}",
+                )
+            if daily_dep + risk > max_daily:
+                return (
+                    False,
+                    f"daily deploy £{daily_dep:.0f}+£{risk:.0f} > £{max_daily:.0f}",
+                )
+            available = balance * (1.0 - reserve_pct) - concurrent
+            if available - risk < min_avail:
+                return False, f"available £{available:.0f} below min £{min_avail:.0f}"
+
+            if reserve and risk > 0:
+                self._concurrent_risk_gbp += risk
+                self._daily_deployed_gbp += risk
+            return True, "ok"
+
+    def snapshot(self) -> dict[str, Any]:
+        env = _envelope_config()
+        max_concurrent = float(env.get("max_concurrent_risk_gbp") or 1200)
+        with self._allocation_lock:
+            concurrent = self._concurrent_risk_gbp
+            daily_dep = self._daily_deployed_gbp
+            daily_pnl = self._daily_pnl_gbp
+        return {
+            "concurrent_risk_gbp": round(concurrent, 2),
+            "daily_deployed_gbp": round(daily_dep, 2),
+            "daily_pnl_gbp": round(daily_pnl, 2),
+            "max_concurrent_risk_gbp": max_concurrent,
+            "gate_enabled": portfolio_gate_enabled(),
+        }
+
+
+_ENVELOPE = PortfolioEnvelope()
+
+
+def _envelope() -> PortfolioEnvelope:
+    return _ENVELOPE
+
+
+def reset_portfolio_envelope_for_tests() -> None:
+    _envelope().reset_for_tests()
 
 
 def rehydrate(
@@ -85,83 +203,28 @@ def rehydrate(
     daily_deployed_gbp: float = 0.0,
     daily_pnl_gbp: float = 0.0,
 ) -> None:
-    """Restore in-memory envelope from open trades / today's ledger (agent restart)."""
-    global _concurrent_risk_gbp, _daily_deployed_gbp, _daily_pnl_gbp
-    with _lock:
-        _concurrent_risk_gbp = max(0.0, float(concurrent_risk_gbp))
-        _daily_deployed_gbp = max(0.0, float(daily_deployed_gbp))
-        _daily_pnl_gbp = float(daily_pnl_gbp)
+    _envelope().rehydrate(
+        concurrent_risk_gbp=concurrent_risk_gbp,
+        daily_deployed_gbp=daily_deployed_gbp,
+        daily_pnl_gbp=daily_pnl_gbp,
+    )
 
 
 def record_entry(risk_gbp: float) -> None:
-    global _concurrent_risk_gbp, _daily_deployed_gbp
-    with _lock:
-        _concurrent_risk_gbp += float(risk_gbp)
-        _daily_deployed_gbp += float(risk_gbp)
+    _envelope().record_entry(risk_gbp)
 
 
 def record_exit(risk_gbp: float, *, pnl_gbp: float = 0.0) -> None:
-    global _concurrent_risk_gbp, _daily_pnl_gbp
-    with _lock:
-        _concurrent_risk_gbp = max(0.0, _concurrent_risk_gbp - float(risk_gbp))
-        _daily_pnl_gbp += float(pnl_gbp)
+    _envelope().record_exit(risk_gbp, pnl_gbp=pnl_gbp)
 
 
-def can_allocate(risk_gbp: float) -> tuple[bool, str]:
-    _maybe_roll_utc_day()
-    env = _envelope_config()
-    max_concurrent = float(env.get("max_concurrent_risk_gbp") or 1200)
-    max_daily = float(env.get("max_daily_risk_deployed_gbp") or 2500)
-    max_loss = float(env.get("max_daily_loss_gbp") or 500)
-    min_avail = float(env.get("min_available_gbp") or 100)
-    balance = float(env.get("account_balance_gbp") or 10000)
-    reserve_pct = float(env.get("reserve_pct") or 0.10)
-    risk = float(risk_gbp)
+def release_allocation(risk_gbp: float) -> None:
+    _envelope().release_allocation(risk_gbp)
 
-    with _lock:
-        concurrent = _concurrent_risk_gbp
-        daily_dep = _daily_deployed_gbp
-        daily_pnl = _daily_pnl_gbp
 
-    from system.daily_loss_policy import (
-        hard_daily_loss_limit_gbp,
-        soft_pause_threshold_gbp,
-    )
-
-    loss_gbp = max(0.0, -daily_pnl)
-    hard = hard_daily_loss_limit_gbp()
-    soft = soft_pause_threshold_gbp()
-    if loss_gbp >= hard:
-        return False, f"daily loss £{loss_gbp:.2f} >= £{hard:.0f} (hard stop)"
-    if loss_gbp >= soft:
-        return (
-            False,
-            f"soft pause — daily loss £{loss_gbp:.2f} >= £{soft:.0f} (entries blocked)",
-        )
-    if concurrent + risk > max_concurrent:
-        return (
-            False,
-            f"concurrent £{concurrent:.0f}+£{risk:.0f} > £{max_concurrent:.0f}",
-        )
-    if daily_dep + risk > max_daily:
-        return False, f"daily deploy £{daily_dep:.0f}+£{risk:.0f} > £{max_daily:.0f}"
-    available = balance * (1.0 - reserve_pct) - concurrent
-    if available - risk < min_avail:
-        return False, f"available £{available:.0f} below min £{min_avail:.0f}"
-    return True, "ok"
+def can_allocate(risk_gbp: float, *, reserve: bool = True) -> tuple[bool, str]:
+    return _envelope().can_allocate(risk_gbp, reserve=reserve)
 
 
 def snapshot() -> dict[str, Any]:
-    env = _envelope_config()
-    max_concurrent = float(env.get("max_concurrent_risk_gbp") or 1200)
-    with _lock:
-        concurrent = _concurrent_risk_gbp
-        daily_dep = _daily_deployed_gbp
-        daily_pnl = _daily_pnl_gbp
-    return {
-        "concurrent_risk_gbp": round(concurrent, 2),
-        "daily_deployed_gbp": round(daily_dep, 2),
-        "daily_pnl_gbp": round(daily_pnl, 2),
-        "max_concurrent_risk_gbp": max_concurrent,
-        "gate_enabled": portfolio_gate_enabled(),
-    }
+    return _envelope().snapshot()

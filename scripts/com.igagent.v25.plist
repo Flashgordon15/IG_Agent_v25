@@ -30,6 +30,8 @@
 		<string>__IG_AGENT_ROOT__/src</string>
 		<key>IG_AGENT_ROOT</key>
 		<string>__IG_AGENT_ROOT__</string>
+		<key>ADMIN_PASSWORD</key>
+		<string>ig-agent-v29-workspace</string>
 	</dict>
 </dict>
 </plist>

@@ -19,6 +19,7 @@ from system.daily_loss_policy import (
     daily_loss_gate_status,
     effective_daily_loss_gbp,
     effective_daily_pnl,
+    invalidate_daily_loss_gate_cache,
 )
 from system.v291_upgrade import apply_v291_upgrade
 
@@ -52,6 +53,16 @@ class DailyLossPolicyTests(unittest.TestCase):
         ok, detail, meta = daily_loss_gate_status(store, cfg)
         self.assertFalse(ok)
         self.assertEqual(meta.get("tier"), "hard")
+
+    def test_daily_loss_gate_status_ttl_cache(self) -> None:
+        store = MagicMock()
+        store.sum_daily_pnl.return_value = -100.0
+        store.get_runtime_state.return_value = None
+        cfg = Config(_data={"max_daily_loss_gbp": 500})
+        invalidate_daily_loss_gate_cache()
+        daily_loss_gate_status(store, cfg)
+        daily_loss_gate_status(store, cfg)
+        self.assertEqual(store.sum_daily_pnl.call_count, 1)
 
 
 class GateCoherenceEffectivePnlTests(unittest.TestCase):

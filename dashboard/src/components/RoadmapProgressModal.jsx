@@ -1,5 +1,15 @@
 import { useCallback, useEffect, useState } from "react";
-import { CheckCircle2, Clock, Target, X, TrendingUp } from "lucide-react";
+import {
+  CheckCircle2,
+  Clock,
+  Cpu,
+  Layers,
+  Shield,
+  Target,
+  TrendingUp,
+  X,
+  Zap,
+} from "lucide-react";
 import { api } from "../api/client.js";
 import { APP_VERSION_LABEL } from "../utils/roadmapTelemetry.js";
 
@@ -35,6 +45,163 @@ function PctBar({ pct, className = "" }) {
         {n}%
       </span>
     </div>
+  );
+}
+
+/** Locked v29.1 execution blueprint — mirrors docs/architecture/trading_pipeline.md */
+const V291_GATE_SEQUENCE = [
+  "session_open",
+  "session_blackout",
+  "cold_start_gap",
+  "environment_fitness",
+  "points_state",
+  "correlation_ok",
+  "risk_validation",
+  "expectancy_ok",
+  "calendar_ok",
+  "signal_confidence",
+  "ml_veto",
+  "execution",
+];
+
+const V291_TTL_CACHES = [
+  "Daily loss gate — 2s process-wide TTL (daily_loss_policy)",
+  "Setup registry — 30s hot-path registry cache",
+  "Snapshot slow enrich — 60s dashboard merge TTL",
+  "Edge analysis API — 60s response cache",
+  "Shadow analytics metrics — 60s rollup cache",
+  "Demo readiness — 300s readiness snapshot cache",
+];
+
+const V291_BACKGROUND_WORKERS = [
+  {
+    name: "OrderConfirmWorker",
+    role: "POST /positions/otc + confirm poll off tick thread",
+    shield: "try/except Exception → release_allocation + audit",
+  },
+  {
+    name: "AlertDispatcherWorker",
+    role: "Telegram critical alerts via bounded queue",
+    shield: "try/except Exception per job — never blocks gates",
+  },
+  {
+    name: "PointsPersistWorker",
+    role: "5s flush of points_state.json off hot path",
+    shield: "try/except Exception per engine flush cycle",
+  },
+];
+
+function V291ArchitectureCanvas() {
+  return (
+    <section className="rounded-lg border border-accent/35 bg-gradient-to-br from-accent/10 via-bg to-card/40 p-3 shadow-inner">
+      <div className="mb-3 flex items-start gap-2">
+        <Layers className="mt-0.5 h-4 w-4 shrink-0 text-accent" aria-hidden />
+        <div>
+          <h3 className="text-[12px] font-bold uppercase tracking-wide text-accent">
+            v29.1 Core Execution &amp; Low-Latency Architecture Canvas
+          </h3>
+          <p className="mt-1 text-[10px] leading-relaxed text-muted">
+            Hub-pull per-epic loops · single-pipeline Gatekeeper boot · thread-safe
+            TTL caches · async broker confirm leg. Production locked {APP_VERSION_LABEL}.
+          </p>
+        </div>
+      </div>
+
+      <div className="mb-3 rounded-md border border-border/80 bg-bg/60 p-2.5">
+        <div className="mb-1.5 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-foreground">
+          <Cpu className="h-3 w-3 text-accent" aria-hidden />
+          12-Gate Hub-Pull Execution Model
+        </div>
+        <p className="mb-2 text-[10px] leading-snug text-muted">
+          Lightstreamer / REST poll writes to{" "}
+          <span className="font-mono text-foreground">MarketDataHub</span>; each{" "}
+          <span className="font-mono text-foreground">TradingLoop</span> thread pulls
+          quotes every ~5s. Gates run in strict sequence — no epic thread blocks
+          another on broker I/O.
+        </p>
+        <ol className="grid grid-cols-2 gap-1 sm:grid-cols-3">
+          {V291_GATE_SEQUENCE.map((gate, idx) => (
+            <li
+              key={gate}
+              className="flex items-center gap-1 rounded border border-border/60 bg-card/50 px-1.5 py-1 text-[9px] font-mono text-foreground"
+            >
+              <span className="shrink-0 text-accent">{idx + 1}.</span>
+              <span className="truncate">{gate}</span>
+            </li>
+          ))}
+        </ol>
+      </div>
+
+      <div className="mb-3 grid gap-2 sm:grid-cols-2">
+        <div className="rounded-md border border-success/25 bg-success/5 p-2.5">
+          <div className="mb-1 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-success">
+            <Shield className="h-3 w-3" aria-hidden />
+            Single-Pipeline Gatekeeper
+          </div>
+          <ul className="space-y-1 text-[10px] leading-snug text-muted">
+            <li>
+              <span className="text-foreground">G1→G5</span> sequential boot via{" "}
+              <span className="font-mono">BootCoordinator</span>
+            </li>
+            <li>Gate N+1 blocked until Gate N reports COMPLETE</li>
+            <li>
+              Uvicorn binds early;{" "}
+              <span className="font-mono">SystemState.READY</span> is sole truth
+            </li>
+            <li>Lazy router mount — one <span className="font-mono">create_app()</span> per process</li>
+          </ul>
+        </div>
+        <div className="rounded-md border border-warning/25 bg-warning/5 p-2.5">
+          <div className="mb-1 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-warning">
+            <Zap className="h-3 w-3" aria-hidden />
+            Thread-Safe TTL Memory Caches
+          </div>
+          <ul className="space-y-1 text-[10px] leading-snug text-muted">
+            {V291_TTL_CACHES.map((line) => (
+              <li key={line} className="flex items-start gap-1">
+                <span className="mt-0.5 text-warning">•</span>
+                <span>{line}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      </div>
+
+      <div className="rounded-md border border-accent/30 bg-accent/5 p-2.5">
+        <div className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-accent">
+          Asynchronous OrderConfirmWorker Routing Leg
+        </div>
+        <p className="mb-2 text-[10px] leading-snug text-muted">
+          Validated signals return{" "}
+          <span className="font-mono text-foreground">SUBMITTED</span> immediately;
+          daemon worker owns IG REST POST + confirm polling. Gate-time portfolio
+          reservation released on worker failure via{" "}
+          <span className="font-mono">release_allocation()</span>.
+        </p>
+        <div className="overflow-x-auto rounded border border-border/60">
+          <table className="min-w-full text-left text-[9px]">
+            <thead className="bg-card/80 text-muted">
+              <tr>
+                <th className="px-2 py-1 font-semibold">Worker</th>
+                <th className="px-2 py-1 font-semibold">Role</th>
+                <th className="px-2 py-1 font-semibold">Exception shield</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border/50 text-foreground">
+              {V291_BACKGROUND_WORKERS.map((row) => (
+                <tr key={row.name} className="bg-bg/40">
+                  <td className="whitespace-nowrap px-2 py-1.5 font-mono text-accent">
+                    {row.name}
+                  </td>
+                  <td className="px-2 py-1.5 text-muted">{row.role}</td>
+                  <td className="px-2 py-1.5 text-muted">{row.shield}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -169,6 +336,8 @@ export default function RoadmapProgressModal({ open, onClose }) {
             items={ROADMAP_PLANNED}
             variant="planned"
           />
+
+          <V291ArchitectureCanvas />
 
           {error ? (
             <p className="rounded-md border border-border bg-card/50 px-3 py-2 text-[11px] text-muted">

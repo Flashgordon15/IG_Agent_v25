@@ -343,6 +343,28 @@ def _apply_supervision_init_timeout(status: dict[str, Any]) -> dict[str, Any]:
     global _INIT_QUOTES_LIVE_SINCE, _INIT_HARD_CLEAR_LOGGED, _INIT_PERMANENTLY_CLEARED, _INIT_SAW_PRICE_TICK
 
     out = dict(status)
+    try:
+        from system.system_state import get_system_state
+
+        sys_snap = get_system_state().snapshot()
+        out["system_state"] = sys_snap
+        if sys_snap.get("ready"):
+            _INIT_PERMANENTLY_CLEARED = True
+            out["init_force_cleared"] = True
+            boot = dict(out.get("boot_metrics") or {})
+            boot.update(
+                {
+                    "percent": 100,
+                    "label": sys_snap.get("phase_label") or "ACTIVE",
+                    "ready": True,
+                    "stage": "ready",
+                    "system_state": sys_snap,
+                }
+            )
+            out["boot_metrics"] = boot
+            return out
+    except Exception:
+        pass
     quotes_live = _quotes_live_for_init(out)
     now = time.time()
     uptime_sec = max(0.0, time.monotonic() - _AGENT_BOOT_MONO)

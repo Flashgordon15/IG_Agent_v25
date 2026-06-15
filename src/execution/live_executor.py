@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import threading
 from typing import Any
 
@@ -284,11 +285,12 @@ class LiveExecutor:
             },
         )
 
+        worker_params = copy.deepcopy(execution_params)
         worker = threading.Thread(
             target=self._order_worker,
-            args=(signal, execution_params, trade_manager, cooldown, mode),
+            args=(signal, worker_params, trade_manager, cooldown, mode),
             daemon=True,
-            name="OrderConfirmWorker",
+            name=f"OrderConfirmWorker-{signal.epic[-12:]}",
         )
         with self._workers_lock:
             self._pending_workers = [t for t in self._pending_workers if t.is_alive()]
@@ -297,12 +299,21 @@ class LiveExecutor:
             worker.start()
         except Exception:
             clear_entry(signal.epic)
+            self._handle_order_worker_failure(
+                signal,
+                worker_params,
+                "OrderConfirmWorker failed to start",
+                mark_pending=False,
+            )
             raise
-        log_engine("Order submitted — background worker handling confirm")
+        log_engine(
+            "Order submitted — background worker handling confirm "
+            "(tick thread returns without waiting for IG REST)"
+        )
         return ExecutionResult(
             success=True,
             action="SUBMITTED",
-            execution_params=execution_params,
+            execution_params=worker_params,
             messages=["Order confirm running in background worker"],
         )
 
@@ -343,6 +354,73 @@ class LiveExecutor:
             messages=["dry_run=true — simulated fill, no IG order"],
         )
 
+    def _handle_order_worker_failure(
+        self,
+        signal: TradeSignal,
+        execution_params: dict[str, Any],
+        reason: str,
+        *,
+        mark_pending: bool = False,
+        deal_reference: str = "",
+    ) -> None:
+        """Contain broker/worker failures — release capital and observability only."""
+        detail = str(reason or "Order failed").strip() or "Order failed"
+        log_engine(
+            f"OrderConfirmWorker failure epic={signal.epic} dir={signal.direction}: "
+            f"{detail}"
+        )
+        update_demo_diagnostics(last_rejection=detail)
+        try:
+            from execution.correlation_guard import undo as _cg_undo
+
+            _cg_undo(signal.direction)
+        except Exception:
+            pass
+        try:
+            from execution.portfolio_hooks import release_portfolio_allocation_from_execution
+
+            release_portfolio_allocation_from_execution(
+                execution_params,
+                config=self._cfg,
+            )
+        except Exception as e:
+            log_engine(
+                f"portfolio release in OrderConfirmWorker failed: "
+                f"{type(e).__name__}: {e}"
+            )
+        try:
+            from system.trade_audit import log_trade_audit
+
+            log_trade_audit(
+                "execution_rejected",
+                market=signal.market,
+                epic=signal.epic,
+                signal=signal.direction,
+                reason=detail,
+                deal_reference=deal_reference or None,
+            )
+        except Exception:
+            pass
+        try:
+            bus = get_lifecycle_bus()
+            bus.emit(STAGE_IG_RESPONSE, STATUS_FAIL, detail)
+            bus.finalize_failure(reason=detail)
+        except Exception:
+            pass
+        if mark_pending:
+            try:
+                mark_pending(
+                    signal.epic,
+                    side=signal.direction,
+                    order_type=ORDER_TYPE_ENTRY,
+                    deal_reference=deal_reference or None,
+                )
+            except Exception as e:
+                log_engine(
+                    f"pending reconcile mark failed epic={signal.epic}: "
+                    f"{type(e).__name__}: {e}"
+                )
+
     def _order_worker(
         self,
         signal: TradeSignal,
@@ -355,38 +433,32 @@ class LiveExecutor:
 
         begin_order_in_flight()
         try:
-            result = self._execute_order_blocking(
-                signal, execution_params, trade_manager, cooldown, mode=mode
-            )
-            if result.success:
-                resolve_pending(signal.epic, reason="entry confirmed by broker")
-                log_engine(
-                    f"Order confirmed: deal={result.deal_id or '—'} "
-                    f"ref={result.deal_reference or '—'}"
-                )
-            else:
-                log_engine(
-                    f"Order failed: reason={result.rejection_reason or result.action}"
-                )
-                try:
-                    from execution.correlation_guard import undo as _cg_undo
-
-                    _cg_undo(signal.direction)
-                except Exception:
-                    pass
-        except Exception as e:
-            mark_pending(
-                signal.epic,
-                side=signal.direction,
-                order_type=ORDER_TYPE_ENTRY,
-            )
-            log_engine(f"Order failed: reason={type(e).__name__}: {e}")
             try:
-                from execution.correlation_guard import undo as _cg_undo
-
-                _cg_undo(signal.direction)
-            except Exception:
-                pass
+                result = self._execute_order_blocking(
+                    signal, execution_params, trade_manager, cooldown, mode=mode
+                )
+                if result.success:
+                    resolve_pending(signal.epic, reason="entry confirmed by broker")
+                    log_engine(
+                        f"Order confirmed: deal={result.deal_id or '—'} "
+                        f"ref={result.deal_reference or '—'}"
+                    )
+                else:
+                    self._handle_order_worker_failure(
+                        signal,
+                        execution_params,
+                        result.rejection_reason or result.action or "Order rejected",
+                        mark_pending=bool(result.deal_reference),
+                        deal_reference=str(result.deal_reference or ""),
+                    )
+            except Exception as e:
+                detail = f"{type(e).__name__}: {e}"
+                self._handle_order_worker_failure(
+                    signal,
+                    execution_params,
+                    detail,
+                    mark_pending=True,
+                )
         finally:
             clear_entry(signal.epic)
             end_order_in_flight()

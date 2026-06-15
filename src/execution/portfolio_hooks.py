@@ -27,6 +27,14 @@ def _risk_gbp_from_params(
     *,
     config: Any | None = None,
 ) -> float:
+    gate_risk = execution_params.get("risk_gbp")
+    if gate_risk is not None:
+        try:
+            parsed = float(gate_risk)
+            if parsed > 0:
+                return parsed
+        except (TypeError, ValueError):
+            pass
     stop = float(
         execution_params.get("risk")
         or execution_params.get("stop_distance")
@@ -45,6 +53,37 @@ def _risk_gbp_from_params(
     return stop * size * point_value
 
 
+def release_portfolio_allocation_from_execution(
+    execution_params: dict[str, Any] | None,
+    *,
+    config: Any | None = None,
+) -> float:
+    """
+    Release gate-time portfolio reservation after a failed async execution.
+
+    Safe to call from OrderConfirmWorker; no-op when portfolio gate is disabled.
+    """
+    if not execution_params:
+        return 0.0
+    try:
+        from system.portfolio_envelope import portfolio_gate_enabled, release_allocation
+
+        if not portfolio_gate_enabled():
+            return 0.0
+        risk = _risk_gbp_from_params(execution_params, config=config)
+        if risk > 0:
+            release_allocation(risk)
+            log_engine(
+                f"portfolio_envelope released gate reservation risk_gbp={risk:.2f}"
+            )
+        return risk
+    except Exception as e:
+        log_engine(
+            f"portfolio_envelope release failed: {type(e).__name__}: {e}"
+        )
+        return 0.0
+
+
 def record_portfolio_entry_from_signal(
     deal_id: str,
     signal: TradeSignal,
@@ -53,18 +92,17 @@ def record_portfolio_entry_from_signal(
     config: Any | None = None,
 ) -> None:
     try:
-        from system.portfolio_envelope import portfolio_gate_enabled, record_entry
+        from system.portfolio_envelope import portfolio_gate_enabled
 
         if not portfolio_gate_enabled():
             return
         risk = _risk_gbp_from_params(execution_params, config=config)
         if risk <= 0:
             return
-        record_entry(risk)
         _deal_risk_gbp[str(deal_id)] = risk
         log_engine(
             f"portfolio_envelope entry deal={deal_id} risk_gbp={risk:.2f} "
-            f"epic={signal.epic}"
+            f"epic={signal.epic} (gate-reserved)"
         )
     except Exception as e:
         log_engine(

@@ -4,6 +4,7 @@ Interim rules-based confidence scorer — active until ML store reaches threshol
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -59,8 +60,23 @@ def ml_clean_start_date(cfg: Config) -> str:
     ).strip()
 
 
-def ml_clean_training_rows(cfg: Config) -> int:
-    """ML training rows on/after the post-fix clean baseline date."""
+_ml_clean_training_rows_lock = threading.Lock()
+_ml_clean_training_rows_cache: dict[str, int] = {}
+
+
+def invalidate_ml_clean_training_rows_cache() -> None:
+    """Force refresh after ML training store changes (position open/close)."""
+    with _ml_clean_training_rows_lock:
+        _ml_clean_training_rows_cache.clear()
+
+
+def _ml_clean_training_rows_cache_key(cfg: Config) -> str:
+    start = ml_clean_start_date(cfg)
+    return start if start else "__all__"
+
+
+def _query_ml_clean_training_rows(cfg: Config) -> int:
+    """ML training rows on/after the post-fix clean baseline date (SQLite)."""
     try:
         from data.ml_training_store import MLTrainingStore
 
@@ -71,6 +87,36 @@ def ml_clean_training_rows(cfg: Config) -> int:
         return int(store.record_count())
     except Exception:
         return 0
+
+
+def ml_clean_training_rows(cfg: Config) -> int:
+    """
+    Session-scoped ML row count — one SQLite count per process until invalidated.
+
+    Invalidated on position open/close via ``execution.ml_training_hooks``.
+    """
+    key = _ml_clean_training_rows_cache_key(cfg)
+    with _ml_clean_training_rows_lock:
+        if key in _ml_clean_training_rows_cache:
+            try:
+                from system.diagnostics.perf_metrics import record_ml_rows_cache
+
+                record_ml_rows_cache(hit=True)
+            except Exception:
+                pass
+            return _ml_clean_training_rows_cache[key]
+
+    try:
+        from system.diagnostics.perf_metrics import record_ml_rows_cache
+
+        record_ml_rows_cache(hit=False)
+    except Exception:
+        pass
+
+    count = _query_ml_clean_training_rows(cfg)
+    with _ml_clean_training_rows_lock:
+        _ml_clean_training_rows_cache[key] = count
+    return count
 
 
 def should_use_interim_scorer(cfg: Config) -> bool:

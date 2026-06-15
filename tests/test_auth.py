@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from api.auth import admin_password, reset_auth_for_tests
 from api.close_handler import reset_close_handler_for_tests
 from api.server import create_app
+import api.server_deferred as server_deferred
 from api.snapshot_store import reset_snapshot_store_for_tests, set_snapshot_path_for_tests
 
 
@@ -39,10 +40,14 @@ class AdminAuthTests(unittest.TestCase):
         reset_snapshot_store_for_tests()
         reset_close_handler_for_tests()
         set_snapshot_path_for_tests(snap)
-        self.client = TestClient(create_app(watch_snapshot=False))
+        server_deferred._router_mounted = False
+        self._client_ctx = TestClient(
+            create_app(watch_snapshot=False, use_boot_pipeline=False)
+        )
+        self.client = self._client_ctx.__enter__()
 
     def tearDown(self) -> None:
-        self.client.close()
+        self._client_ctx.__exit__(None, None, None)
         reset_auth_for_tests()
         reset_snapshot_store_for_tests()
         reset_close_handler_for_tests()
@@ -81,6 +86,20 @@ class AdminAuthTests(unittest.TestCase):
         body = res.json()
         self.assertIn("boot_metrics", body)
         self.assertIn("phases", body)
+
+    def test_login_available_before_deferred_mount(self) -> None:
+        """Auth gate runs before trading routers mount — login must work immediately."""
+        with patch.dict(os.environ, {"IG_AGENT_PYTEST": ""}, clear=False):
+            client = TestClient(create_app(watch_snapshot=False))
+            try:
+                res = client.post(
+                    "/api/auth/login",
+                    json={"password": admin_password()},
+                )
+                self.assertEqual(res.status_code, 200, res.text)
+                self.assertTrue(res.json().get("authenticated"))
+            finally:
+                client.close()
 
     def test_admin_password_from_env(self) -> None:
         with patch.dict(os.environ, {"ADMIN_PASSWORD": "test-secret-123"}, clear=False):

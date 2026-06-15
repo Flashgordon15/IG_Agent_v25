@@ -13,7 +13,6 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Response
-from pydantic import BaseModel
 from fastapi.responses import JSONResponse, Response
 
 from api.agent_control import (
@@ -56,31 +55,6 @@ _heartbeat_lock = threading.Lock()
 router = APIRouter()
 
 
-class LoginRequest(BaseModel):
-    password: str
-
-
-@router.post("/api/auth/login")
-def api_auth_login(body: LoginRequest, response: Response) -> dict[str, bool]:
-    """Verify admin password and issue a session token (cookie + X-Auth-Token header)."""
-    from api.auth import issue_session_token, login_response_headers, verify_password
-
-    if not verify_password(body.password):
-        raise HTTPException(status_code=401, detail="Access Denied")
-    token = issue_session_token()
-    response.set_cookie(
-        key="ig_agent_auth",
-        value=token,
-        httponly=True,
-        samesite="lax",
-        path="/",
-        max_age=86400,
-    )
-    for key, value in login_response_headers(token).items():
-        response.headers[key] = value
-    return {"authenticated": True}
-
-
 @router.get("/health")
 def health() -> dict[str, Any]:
     age = snapshot_age_s_fast()
@@ -113,21 +87,18 @@ def get_agent_time() -> dict[str, Any]:
 
 @router.get("/api/startup/status")
 def get_startup_status() -> dict[str, Any]:
-    """Real-time startup phase progress — polled by the StartupSplash component."""
+    """Real-time boot progress — polled by StartupSplash and dashboard init banner."""
     from system.boot_metrics import get_boot_metrics
-    from system.startup_tracker import get_status
+    from system.system_state import get_system_state
 
-    status = get_status()
-    status["boot_metrics"] = get_boot_metrics()
-    try:
-        from system.startup_test_suite import read_failure_report
-
-        report = read_failure_report()
-        if report:
-            status["startup_test_failure"] = report
-    except Exception:
-        pass
-    return status
+    boot_metrics = get_boot_metrics()
+    system_state = get_system_state().snapshot()
+    return {
+        "boot_metrics": boot_metrics,
+        "system_state": system_state,
+        "ready": bool(system_state.get("ready")),
+        "background_verify": system_state.get("background_verify") or {},
+    }
 
 
 @router.get("/state")

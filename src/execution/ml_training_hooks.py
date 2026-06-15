@@ -126,6 +126,9 @@ def record_ml_entry_from_signal(
                 "version": ML_VERSION,
             },
         )
+        from ml.interim_scorer import invalidate_ml_clean_training_rows_cache
+
+        invalidate_ml_clean_training_rows_cache()
     except Exception as e:
         log_engine(
             f"ml_training_store entry hook failed deal={deal_id}: "
@@ -162,6 +165,9 @@ def record_ml_exit_for_deal(
                 "version": ML_VERSION,
             },
         )
+        from ml.interim_scorer import invalidate_ml_clean_training_rows_cache
+
+        invalidate_ml_clean_training_rows_cache()
     except Exception as e:
         log_engine(
             f"ml_training_store exit hook failed deal={deal_id}: "

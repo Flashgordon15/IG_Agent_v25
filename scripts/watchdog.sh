@@ -23,12 +23,6 @@ STARTUP_GRACE_SEC=720
 
 mkdir -p "$AGENT_DIR/src/data/logs"
 
-main_py_booting() {
-    /usr/bin/pgrep -f "${AGENT_DIR}/src/main.py" >/dev/null 2>&1 \
-        || /usr/bin/pgrep -f "[Pp]ython.*src/main.py" >/dev/null 2>&1 \
-        || /usr/bin/pgrep -f "[Pp]ython.*main.py" >/dev/null 2>&1
-}
-
 watchdog_already_running() {
     if [ ! -f "$PID_FILE" ]; then
         return 1
@@ -54,9 +48,51 @@ if watchdog_already_running; then
 fi
 
 echo "$$" > "$PID_FILE"
+clear_stale_agent_lock
 
 agent_alive() {
     lsof -iTCP:"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1 && [ -f "$LOCK_FILE" ]
+}
+
+clear_stale_agent_lock() {
+    if [ ! -f "$LOCK_FILE" ]; then
+        return 0
+    fi
+    local lock_pid=""
+    lock_pid=$(head -1 "$LOCK_FILE" 2>/dev/null | awk '{print $1}' || true)
+    if [ -z "$lock_pid" ]; then
+        rm -f "$LOCK_FILE"
+        log "WATCHDOG: removed empty instance lock"
+        return 0
+    fi
+    if kill -0 "$lock_pid" 2>/dev/null \
+        && lsof -iTCP:"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then
+        return 0
+    fi
+    if ! kill -0 "$lock_pid" 2>/dev/null; then
+        rm -f "$LOCK_FILE"
+        log "WATCHDOG: removed stale instance lock (pid=${lock_pid} not running)"
+    elif ! lsof -iTCP:"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then
+        rm -f "$LOCK_FILE"
+        log "WATCHDOG: removed stale instance lock (pid=${lock_pid} but port ${PORT} free)"
+    fi
+}
+
+main_py_booting() {
+    if ! /usr/bin/pgrep -f "${AGENT_DIR}/src/main.py" >/dev/null 2>&1; then
+        return 1
+    fi
+    if lsof -iTCP:"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then
+        return 0
+    fi
+    if [ -f "$LOCK_FILE" ]; then
+        local lock_pid=""
+        lock_pid=$(head -1 "$LOCK_FILE" 2>/dev/null | awk '{print $1}' || true)
+        if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    return 1
 }
 
 manual_stop_active() {
@@ -140,14 +176,17 @@ resolve_python_bin() {
     printf '%s\n' "${PY}"
 }
 
-# Fresh watchdog process: always grant startup grace (never restart-storm on boot).
-last_restart_epoch=$(date +%s)
-if ! agent_alive; then
-    if main_py_booting; then
-        log "WATCHDOG: main.py booting — startup grace from now"
-    else
-        log "WATCHDOG: agent not ready yet — startup grace from now"
-    fi
+# Grace applies after watchdog or agent restarts an instance — not when agent is
+# simply down on a fresh watchdog start (otherwise kickstart waits 720s idle).
+last_restart_epoch=0
+if agent_alive; then
+    last_restart_epoch=$(date +%s)
+    log "WATCHDOG: agent already up — startup grace ${STARTUP_GRACE_SEC}s"
+elif main_py_booting; then
+    last_restart_epoch=$(date +%s)
+    log "WATCHDOG: main.py booting — startup grace ${STARTUP_GRACE_SEC}s"
+else
+    log "WATCHDOG: agent down on watchdog start — first restart check immediate"
 fi
 
 cleanup_stale() {

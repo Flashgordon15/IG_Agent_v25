@@ -524,7 +524,10 @@ class TradingLoop:
                     },
                 )
             if execution is not None and execution.action == "SUBMITTED":
-                log_engine("Order submitted — background worker handling confirm")
+                log_engine(
+                    "Order submitted — background OrderConfirmWorker owns IG REST "
+                    "(tick thread continues without blocking on POST /positions/otc)"
+                )
             elif execution is not None and not execution.success:
                 update_demo_diagnostics(
                     last_rejection=execution.rejection_reason or execution.action
