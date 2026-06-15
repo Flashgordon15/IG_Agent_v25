@@ -25,13 +25,43 @@ export function isRotationFilterBypassed(state) {
 
 const TOP_ROTATION_DISPLAY_SLOTS = 5;
 
+export function resolveBootMetrics(state) {
+  const direct = state?.boot_metrics;
+  if (direct && typeof direct === "object") return direct;
+  const nested = state?.health?.boot_metrics;
+  if (nested && typeof nested === "object") return nested;
+  return null;
+}
+
 export function resolveInitCleared(state) {
+  const boot = resolveBootMetrics(state);
+  if (boot?.ready === true) return true;
+  if (String(boot?.stage || "").toLowerCase() === "ready") return true;
+  if (Number(boot?.percent ?? 0) >= 100) return true;
   if (state?.init_force_cleared === true) return true;
   const loopsRunning = state?.trading_loops_running !== false;
   const quotesLive =
     state?.quotes_fresh === true || Number(state?.quotes_fresh_count ?? 0) > 0;
   const liveSec = Number(state?.init_live_sec ?? 0);
   return loopsRunning && quotesLive && liveSec >= 90;
+}
+
+/** Progress label while boot is incomplete; null when init is cleared. */
+export function resolveInitBannerText(state) {
+  if (resolveInitCleared(state)) return null;
+  const boot = resolveBootMetrics(state);
+  const pctRaw = boot?.percent;
+  const pct = pctRaw != null ? Math.round(Number(pctRaw)) : null;
+  const label = boot?.label || "starting";
+  const stage = boot?.stage || "boot";
+  const liveSec = Math.round(Number(state?.init_live_sec ?? 0));
+  if (pct != null && pct > 0) {
+    return `INITIALIZING — ${pct}% — ${label}`;
+  }
+  if (liveSec > 0) {
+    return `INITIALIZING — Stage: ${stage} (${liveSec}s)`;
+  }
+  return `INITIALIZING — Stage: ${stage}`;
 }
 
 export function resolveActiveEpics(state) {
@@ -109,5 +139,5 @@ export function resolveAppAiHealth(state) {
     driftOk !== false &&
     (watchdogActive === true ||
       state?.overnight_supervision?.launchd_watchdog === true);
-  return { ready: !initializing, driftOk, watchdogActive, initializing, ok, initCleared };
+  return { ready: initCleared, driftOk, watchdogActive, initializing, ok, initCleared };
 }

@@ -4,6 +4,8 @@ import {
   isRotationFilterBypassed,
   resolveActiveEpics,
   resolveGateRelaxations,
+  resolveInitBannerText,
+  resolveInitCleared,
   TOP_ROTATION_DISPLAY_SLOTS,
 } from "../utils/roadmapTelemetry.js";
 
@@ -19,17 +21,19 @@ export default function ActiveGatesRibbon({ state }) {
   const relax = resolveGateRelaxations(state);
   const soakActive = relax?.demo_soak_mode === true;
   const rotationBypass = isRotationFilterBypassed(state);
+  const initCleared = resolveInitCleared(state);
+  const initBanner = resolveInitBannerText(state);
   const activeEpics = resolveActiveEpics(state);
   const labels = state?.instrument_labels || {};
 
-  if (!activeEpics.length && !rotationBypass) {
+  if (!activeEpics.length && !rotationBypass && !initCleared) {
     return (
       <div className="border-b border-border/80 bg-card/40 px-3 py-2 text-[10px] text-muted sm:px-4 sm:text-[11px]">
         <span className="font-semibold uppercase tracking-wide text-muted/80">
           Top rotation:
         </span>{" "}
         <span className="inline-flex items-center gap-1 rounded-full border border-border bg-card/60 px-2.5 py-1 text-muted">
-          INITIALIZING…
+          {initBanner || "INITIALIZING…"}
         </span>
         <span className="ml-2 text-[9px] text-muted/70">{APP_VERSION_LABEL}</span>
       </div>

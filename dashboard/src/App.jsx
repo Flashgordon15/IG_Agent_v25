@@ -296,6 +296,7 @@ export default function App() {
   const [digestOpen, setDigestOpen] = useState(false);
   const [digestAutoOpened, setDigestAutoOpened] = useState(false);
   const [digestDay, setDigestDay] = useState(null);
+  const [healthOverlay, setHealthOverlay] = useState(null);
   const healthFailRef = useRef(0);
   const prevStateRef = useRef(null);
   const soundRef = useRef(null);
@@ -358,9 +359,32 @@ export default function App() {
     }
   }, [state, selectedEpic]);
 
+  const mergedState = useMemo(() => {
+    if (!state && !healthOverlay) return null;
+    if (!state) return healthOverlay;
+    if (!healthOverlay) return state;
+    return {
+      ...state,
+      init_force_cleared:
+        healthOverlay.init_force_cleared === true || state.init_force_cleared === true,
+      boot_metrics: healthOverlay.boot_metrics ?? state.boot_metrics,
+      system_status: healthOverlay.system_status ?? state.system_status,
+      init_live_sec: healthOverlay.init_live_sec ?? state.init_live_sec,
+      trading_healthy: healthOverlay.trading_healthy ?? state.trading_healthy,
+      quotes_fresh: healthOverlay.quotes_fresh ?? state.quotes_fresh,
+      quotes_fresh_count: healthOverlay.quotes_fresh_count ?? state.quotes_fresh_count,
+      trading_loops_running:
+        healthOverlay.trading_loops_running ?? state.trading_loops_running,
+      supervision_drift_ok:
+        healthOverlay.supervision_drift_ok ?? state.supervision_drift_ok,
+      watchdog_active: healthOverlay.watchdog_active ?? state.watchdog_active,
+      health_ts: healthOverlay.ts ?? state.health_ts,
+    };
+  }, [state, healthOverlay]);
+
   const viewState = useMemo(
-    () => resolveMarketView(state, selectedEpic),
-    [state, selectedEpic],
+    () => resolveMarketView(mergedState, selectedEpic),
+    [mergedState, selectedEpic],
   );
 
   useEffect(() => {
@@ -495,6 +519,14 @@ export default function App() {
           healthFailRef.current = 0;
           setAgentAlive(true);
           clearDeliberateStop();
+          try {
+            const data = await res.json();
+            if (data && typeof data === "object") {
+              setHealthOverlay(data);
+            }
+          } catch {
+            /* ignore malformed health payload */
+          }
           return;
         }
       } catch {
@@ -799,29 +831,29 @@ export default function App() {
     state: viewState,
     bid: viewState?.bid,
     offer: viewState?.offer,
-    agentState: state?.points?.state ?? state?.agent_state,
-    tradingLoopsRunning: state?.trading_loops_running,
-    tradingPaused: state?.trading_paused,
-    tradingHealthy: state?.trading_healthy,
+    agentState: mergedState?.points?.state ?? mergedState?.agent_state,
+    tradingLoopsRunning: mergedState?.trading_loops_running,
+    tradingPaused: mergedState?.trading_paused,
+    tradingHealthy: mergedState?.trading_healthy,
     agentAlive,
-    pointsTrade: state?.points?.last_trade,
-    pointsSession: state?.points?.session,
-    pointsCumulative: state?.points?.cumulative,
+    pointsTrade: mergedState?.points?.last_trade,
+    pointsSession: mergedState?.points?.session,
+    pointsCumulative: mergedState?.points?.cumulative,
     fitness: viewState?.signal?.fitness,
-    winRate: state?.win_rate_20,
-    dailyPnl: state?.daily_pnl_gbp,
+    winRate: mergedState?.win_rate_20,
+    dailyPnl: mergedState?.daily_pnl_gbp,
     streamStatus: viewState?.stream_status,
     marketState: viewState?.market_state,
-    markets: state?.markets,
-    marketsOpenCount: state?.markets_open_count,
+    markets: mergedState?.markets,
+    marketsOpenCount: mergedState?.markets_open_count,
     epic: viewState?.epic ?? selectedEpic,
     spreadCurrent: viewState?.spread_current ?? viewState?.spread,
     spreadNormal: viewState?.spread_normal,
     sentiment: viewState?.sentiment,
     wsConnected,
     reconnecting,
-    openPositions: (state?.positions ?? []).length,
-    maxPositions: state?.max_open_positions ?? 10,
+    openPositions: (mergedState?.positions ?? []).length,
+    maxPositions: mergedState?.max_open_positions ?? 10,
     onStopAgent: handleStopAgent,
     onOpenStrategyHelp: () => setStrategyHelpOpen(true),
     onOpenRoadmap: () => setRoadmapOpen(true),
@@ -830,16 +862,17 @@ export default function App() {
       setDigestOpen(true);
     },
     digestUnread: isDigestUnread(digestDay),
-    supervisionDriftOk: state?.supervision_drift_ok,
-    watchdogActive: state?.watchdog_active,
-    initForceCleared: state?.init_force_cleared,
-    quotesFresh: state?.quotes_fresh,
-    quotesFreshCount: state?.quotes_fresh_count,
-    initLiveSec: state?.init_live_sec,
-    overnightSupervision: state?.overnight_supervision,
-    sessionStyle: resolveSessionStyle(state, viewState),
+    supervisionDriftOk: mergedState?.supervision_drift_ok,
+    watchdogActive: mergedState?.watchdog_active,
+    initForceCleared: mergedState?.init_force_cleared,
+    bootMetrics: mergedState?.boot_metrics,
+    quotesFresh: mergedState?.quotes_fresh,
+    quotesFreshCount: mergedState?.quotes_fresh_count,
+    initLiveSec: mergedState?.init_live_sec,
+    overnightSupervision: mergedState?.overnight_supervision,
+    sessionStyle: resolveSessionStyle(mergedState, viewState),
     envScorerFallbackActive: Boolean(
-      state?.env_scorer_fallback_active ?? state?.health?.env_scorer_fallback_active,
+      mergedState?.env_scorer_fallback_active ?? mergedState?.health?.env_scorer_fallback_active,
     ),
   };
 
@@ -1126,21 +1159,21 @@ export default function App() {
         {tab === "live" && (
           <LivePanel
             state={viewState}
-            rawState={state}
+            rawState={mergedState}
             selectedEpic={selectedEpic}
             onSelectEpic={setSelectedEpic}
             wsConnected={wsConnected}
           />
         )}
-        {tab === "trades" && <TradesPanel state={state} />}
-        {tab === "points" && <PointsPanel state={state} />}
+        {tab === "trades" && <TradesPanel state={mergedState} />}
+        {tab === "points" && <PointsPanel state={mergedState} />}
         {tab === "stats" && <StatsTab />}
-        {tab === "intelligence" && <IntelligencePanel state={state} />}
+        {tab === "intelligence" && <IntelligencePanel state={mergedState} />}
         {tab === "profit" && <ProfitPanel />}
         {tab === "cert" && <CertPanel />}
         {tab === "system" && (
           <SystemPanel
-            state={state}
+            state={mergedState}
             wsConnected={wsConnected}
             reconnecting={reconnecting}
           />

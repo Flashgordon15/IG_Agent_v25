@@ -1,8 +1,55 @@
 import React from "react";
+import { authHeaders } from "../api/client.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+function formatBstTime(ts) {
+  if (!ts) return "—";
+  const normalized = String(ts).includes("T") ? ts : String(ts).replace(" ", "T");
+  const d = new Date(normalized);
+  if (Number.isNaN(d.getTime())) {
+    const match = String(ts).match(/(\d{2}:\d{2})/);
+    return match ? `${match[1]} BST` : "—";
+  }
+  return `${d.toLocaleTimeString("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone: "Europe/London",
+  })} BST`;
+}
+
+function resolveTradeSyncMeta(state, closedCount) {
+  const block = state?.system_status?.shadow_analytics ?? state?.system_status ?? {};
+  const agentSourced = block?.agent_sourced ?? state?.system_status?.agent_sourced ?? {};
+  const shadowRegistry =
+    block?.shadow_training_registry ?? state?.system_status?.shadow_training_registry ?? {};
+  const agentCount = Number(agentSourced?.trade_count ?? 0);
+  const historicalCount = Number(shadowRegistry?.trade_count ?? 0);
+  const displayedCount = Number(closedCount ?? 0);
+  const historicalInView = Math.max(0, displayedCount - agentCount);
+  const showBreakdown = agentCount > 0 && agentCount < displayedCount;
+  return {
+    agentCount,
+    historicalCount,
+    historicalInView,
+    showBreakdown,
+    lastSync: formatBstTime(state?.health_ts ?? state?.position_sync_status),
+  };
+}
+
+function resolveMlTrainingCount(state, learningHealth) {
+  const fromState = state?.ml_training_records;
+  if (fromState != null && Number.isFinite(Number(fromState))) {
+    return Number(fromState);
+  }
+  const fromLearning = learningHealth?.ml?.training_records;
+  if (fromLearning != null && Number.isFinite(Number(fromLearning))) {
+    return Number(fromLearning);
+  }
+  return Number(learningHealth?.ml_records ?? 0);
+}
 
 const TEST_SOURCE_TAGS = ["sim", "soak", "proof", "replay", "test"];
 const VALID_RESULTS = new Set(["WIN", "LOSS", "PENDING", "BREAKEVEN"]);
@@ -255,6 +302,32 @@ function ClosePositionButton({ dealId, epic }) {
 // ---------------------------------------------------------------------------
 
 export default function TradesPanel({ state }) {
+  const [showTestTrades, setShowTestTrades] = React.useState(false);
+  const [learningHealth, setLearningHealth] = React.useState(null);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const res = await fetch("/api/learning-health", {
+          credentials: "include",
+          headers: authHeaders(),
+        });
+        if (!cancelled && res.ok) {
+          setLearningHealth(await res.json());
+        }
+      } catch {
+        /* optional enrichment */
+      }
+    };
+    load();
+    const id = window.setInterval(load, 30000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, []);
+
   if (!state) {
     return (
       <div className="mx-auto max-w-5xl space-y-3 px-1">
@@ -263,19 +336,34 @@ export default function TradesPanel({ state }) {
     );
   }
 
-  const [showTestTrades, setShowTestTrades] = React.useState(false);
-
   const positions       = resolvePositions(state);
   const allClosedTrades = resolveClosedTrades(state);
   const closedTrades    = showTestTrades ? allClosedTrades : allClosedTrades.filter((t) => !isTestTrade(t));
   const testTradeCount  = allClosedTrades.filter((t) => isTestTrade(t)).length;
   const dryRunCount     = allClosedTrades.filter((t) => isDryRunTrade(t)).length;
+  const syncMeta        = resolveTradeSyncMeta(state, closedTrades.length);
+  const mlRecords       = resolveMlTrainingCount(state, learningHealth);
+  const mlTarget        = Number(learningHealth?.ml?.training_records_required ?? 500);
 
   const { wins, losses, total, winRate, totalPnl, openPnl } = buildPerformanceSummary(closedTrades, positions);
   const marketBreakdown = buildMarketBreakdown(closedTrades);
 
   return (
     <div className="mx-auto max-w-5xl space-y-3 px-1 pb-4">
+
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border/80 bg-card/40 px-3 py-2 text-[11px]">
+        <span className="font-semibold text-foreground">
+          ML Training: {mlRecords} / {mlTarget} records
+        </span>
+        {syncMeta.showBreakdown && (
+          <span className="text-success">
+            ● SYNCED — showing {syncMeta.agentCount} agent trades + {syncMeta.historicalInView} historical
+          </span>
+        )}
+        <span className="text-muted">
+          Last synced with IG: {syncMeta.lastSync}
+        </span>
+      </div>
 
       {/* 1. Performance summary stats */}
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 sm:gap-3">
@@ -376,6 +464,20 @@ export default function TradesPanel({ state }) {
 
       {/* 4. Closed trades */}
       <Card title="Closed trades">
+        <div className="mb-3 space-y-1 rounded-md border border-border/70 bg-surface/60 px-3 py-2 text-[11px]">
+          {syncMeta.showBreakdown ? (
+            <p className="text-success">
+              ● SYNCED — showing {syncMeta.agentCount} agent trades + {syncMeta.historicalInView} historical
+              {syncMeta.historicalCount > 0 ? ` (${syncMeta.historicalCount} in shadow registry)` : ""}
+            </p>
+          ) : (
+            <p className="text-muted">
+              ● SYNCED — {syncMeta.agentCount} agent trades
+              {syncMeta.historicalCount > 0 ? ` · ${syncMeta.historicalCount} historical in registry` : ""}
+            </p>
+          )}
+          <p className="text-muted">Last synced with IG: {syncMeta.lastSync}</p>
+        </div>
         {/* Test trades toggle */}
         <div className="mb-2 flex items-center gap-2">
           <label className="flex cursor-pointer items-center gap-1.5 select-none text-[11px] text-muted">

@@ -8,7 +8,7 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import { fmtPrice } from "../utils/fmtPrice.js";
-import { APP_VERSION_LABEL, resolveAppAiHealth } from "../utils/roadmapTelemetry.js";
+import { APP_VERSION_LABEL, resolveAppAiHealth, resolveInitBannerText } from "../utils/roadmapTelemetry.js";
 import { RoadmapProgressButton } from "./RoadmapProgressModal.jsx";
 import { DailyDigestButton } from "./DailyDigestModal.jsx";
 import MarketStatusTimer, { buildMarketStatusTimerProps } from "./MarketStatusTimer.jsx";
@@ -130,6 +130,7 @@ function RoadmapAiStatusPills({
   sessionStyle,
   envScorerFallbackActive,
   initForceCleared,
+  bootMetrics,
   quotesFresh,
   quotesFreshCount,
   initLiveSec,
@@ -141,12 +142,21 @@ function RoadmapAiStatusPills({
     supervision_drift_ok: supervisionDriftOk,
     watchdog_active: watchdogActive,
     init_force_cleared: initForceCleared,
+    boot_metrics: bootMetrics,
     quotes_fresh: quotesFresh,
     quotes_fresh_count: quotesFreshCount,
     init_live_sec: initLiveSec,
     trading_loops_running: tradingLoopsRunning,
     markets_open_count: marketsOpenCount,
     overnight_supervision: overnightSupervision,
+  });
+  const initBanner = resolveInitBannerText({
+    init_force_cleared: initForceCleared,
+    boot_metrics: bootMetrics,
+    quotes_fresh: quotesFresh,
+    quotes_fresh_count: quotesFreshCount,
+    init_live_sec: initLiveSec,
+    trading_loops_running: tradingLoopsRunning,
   });
   const appInitializing = appAi.initializing;
   const appHealthy =
@@ -157,7 +167,7 @@ function RoadmapAiStatusPills({
   let appClass =
     "border-border bg-card/60 text-muted";
   let AppIcon = Shield;
-  let appLabel = "INITIALIZING…";
+  let appLabel = initBanner || "INITIALIZING…";
 
   if (!appInitializing) {
     if (appHealthy) {
@@ -175,7 +185,7 @@ function RoadmapAiStatusPills({
   const style = sessionStyle ? String(sessionStyle).toUpperCase() : null;
   let stratClass = "border-border bg-card/60 text-muted";
   let StratIcon = Brain;
-  let stratLabel = "INITIALIZING…";
+  let stratLabel = appInitializing ? (initBanner || "INITIALIZING…") : "Strategy: LIVE";
 
   if (envScorerFallbackActive) {
     stratClass =
@@ -259,6 +269,7 @@ export default function Header({
   sessionStyle,
   envScorerFallbackActive,
   initForceCleared,
+  bootMetrics,
   quotesFresh,
   quotesFreshCount,
   initLiveSec,
@@ -394,6 +405,7 @@ export default function Header({
             sessionStyle={sessionStyle}
             envScorerFallbackActive={envScorerFallbackActive}
             initForceCleared={initForceCleared}
+            bootMetrics={bootMetrics}
             quotesFresh={quotesFresh}
             quotesFreshCount={quotesFreshCount}
             initLiveSec={initLiveSec}
