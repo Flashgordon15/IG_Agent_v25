@@ -65,11 +65,20 @@ class TestMlMinRecordsGate(unittest.TestCase):
 
         loop = object.__new__(TradingLoop)
         loop._config = MagicMock()
-        loop._config.get = lambda k, d=False: k == "USE_ML_SIGNAL"
+
+        def _cfg_get(k, d=None):
+            if k == "USE_ML_SIGNAL":
+                return True
+            if k == "ml_min_rows_for_model":
+                return 50
+            return d if d is not None else False
+
+        loop._config.get = _cfg_get
         loop._config.signal_threshold = 80
         loop._config.stop_distance_points = 45
         loop._market = "Japan 225"
         loop._ml_decision_log = []
+        loop._store = MagicMock()
         loop._signal_engine = MagicMock()
         loop._points = MagicMock()
         loop._points.trade_confidence_threshold.return_value = 80
@@ -90,18 +99,22 @@ class TestMlMinRecordsGate(unittest.TestCase):
         scorer.score.return_value = 0.7
 
         empty_meta_dir = Path(tempfile.mkdtemp())
+        interim = MagicMock()
+        interim.score.return_value = MagicMock(total=88.0)
 
+        loop._gate_signal_cache = None
         with (
             patch("trading.ml_scorer.get_ml_scorer", return_value=scorer),
             patch("data.ml_training_store.MLTrainingStore") as mock_store_cls,
             patch("system.paths.data_dir", return_value=empty_meta_dir),
+            patch("ml.interim_scorer.get_interim_scorer", return_value=interim),
             patch("trading.trading_loop.log_engine") as mock_log,
         ):
             mock_store_cls.return_value.record_count.return_value = 11
             gate = loop._gate_signal_confidence()
 
         self.assertTrue(gate.passed)
-        mock_log.assert_any_call("ML blend skipped: 11 training records (need 500)")
+        mock_log.assert_any_call("[INTERIM SCORER] active")
 
 
 if __name__ == "__main__":

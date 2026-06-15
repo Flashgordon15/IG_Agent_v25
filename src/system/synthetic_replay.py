@@ -418,7 +418,12 @@ def run_synthetic_replay(
             )
             return 0
 
-        records = training_record_count(store)
+        # Explicit store_path (tests / isolated replay) — count that store only.
+        records = (
+            store.record_count()
+            if store_path is not None
+            else training_record_count(store)
+        )
 
         best = run_permutation_sweep(losses, history, cycles=cycles)
         if best is None or best.losses_blocked < best.loss_total:

@@ -42,6 +42,7 @@ class CalendarOkGateTests(unittest.TestCase):
 
         loop = TradingLoop.__new__(TradingLoop)
         loop._epic = "CS.D.EURUSD.CFD.IP"
+        loop._config = type("Cfg", (), {"get": lambda self, k, d=None: {"enabled": False} if k == "economic_calendar" else d})()
         with patch(
             "system.v26_config.calendar_settings",
             return_value={"enabled": False},

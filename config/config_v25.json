@@ -436,5 +436,37 @@
     "flatten_max_retries": 5,
     "flatten_retry_backoff_seconds": [30, 60, 120, 240, 480],
     "flatten_slow_monitor_interval_seconds": 600
+  },
+  "friday_flatten": {
+    "enabled": true,
+    "friday_flatten_time_bst": "19:30",
+    "friday_flatten_confirm_time_bst": "19:45",
+    "friday_flatten_override": false
+  },
+  "ml_min_rows_for_model": 50,
+  "interim_scorer_weights": {
+    "trend": 25,
+    "session": 25,
+    "volatility": 25,
+    "recent_performance": 25
+  },
+  "economic_calendar": {
+    "enabled": true,
+    "pre_event_blackout_minutes": 15,
+    "post_event_blackout_minutes": 30,
+    "events": [
+      {"date": "2026-06-18", "time_bst": "13:30", "description": "US CPI", "impact": "HIGH", "instruments": ["all"]},
+      {"date": "2026-06-19", "time_bst": "12:00", "description": "BoE rate decision", "impact": "HIGH", "instruments": ["all"]},
+      {"date": "2026-06-24", "time_bst": "19:00", "description": "FOMC rate decision", "impact": "HIGH", "instruments": ["all"]},
+      {"date": "2026-06-26", "time_bst": "13:30", "description": "US PCE", "impact": "HIGH", "instruments": ["all"]},
+      {"date": "2026-07-01", "time_bst": "07:00", "description": "UK CPI", "impact": "HIGH", "instruments": ["all"]},
+      {"date": "2026-07-03", "time_bst": "13:30", "description": "US Non-Farm Payrolls", "impact": "HIGH", "instruments": ["all"]},
+      {"date": "2026-07-10", "time_bst": "13:30", "description": "US CPI", "impact": "HIGH", "instruments": ["all"]},
+      {"date": "2026-07-15", "time_bst": "13:30", "description": "US PPI", "impact": "HIGH", "instruments": ["all"]},
+      {"date": "2026-07-17", "time_bst": "13:30", "description": "US Retail Sales", "impact": "HIGH", "instruments": ["all"]},
+      {"date": "2026-07-24", "time_bst": "13:45", "description": "ECB rate decision", "impact": "HIGH", "instruments": ["all"]},
+      {"date": "2026-07-30", "time_bst": "13:30", "description": "US GDP advance", "impact": "HIGH", "instruments": ["all"]},
+      {"date": "2026-07-31", "time_bst": "03:00", "description": "BoJ rate decision", "impact": "HIGH", "instruments": ["CS.D.CFPGOLD.CFP.IP", "IX.D.NIKKEI.IFM.IP"]}
+    ]
   }
 }

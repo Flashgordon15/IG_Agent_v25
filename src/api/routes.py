@@ -340,6 +340,23 @@ def api_learning_health(refresh_registry: bool = False) -> dict[str, Any]:
         ) from exc
 
 
+@router.get("/api/stats/edge-analysis")
+def api_edge_analysis() -> dict[str, Any]:
+    """Read-only edge statistics for STATS dashboard tab."""
+    from api.edge_analysis import get_edge_analysis
+    from data.learning_store import LearningStore
+
+    try:
+        store = LearningStore()
+        store.connect()
+        return get_edge_analysis(db_path=str(store.db_path))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"edge analysis unavailable: {type(exc).__name__}: {exc}",
+        ) from exc
+
+
 @router.get("/api/gates/attribution")
 def api_gates_attribution(days: int = 7, rotated: bool = True) -> dict[str, Any]:
     """Ranked gate blockers from engine.log WAIT lines."""

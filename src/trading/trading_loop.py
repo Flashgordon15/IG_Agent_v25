@@ -582,6 +582,7 @@ class TradingLoop:
         if self._session.is_session_open():
             self._session_tracker.reset_for_session(self._session.session_open_time)
 
+        self._friday_flatten_if_needed()
         self._flatten_if_needed()
 
         gates = self._evaluate_gates(quote)
@@ -2049,18 +2050,34 @@ class TradingLoop:
         )
 
     def _gate_calendar_ok(self) -> GateResult:
-        from system.calendar_gate import is_calendar_blocked
-        from system.v26_config import calendar_settings
+        from risk.economic_calendar import get_economic_calendar
 
-        cfg = calendar_settings()
-        if not cfg.get("enabled"):
+        cfg = getattr(self, "_config", None) or getattr(self, "config", None)
+        cal = get_economic_calendar(cfg)
+        if not cal.enabled:
+            from system.v26_config import calendar_settings
+
+            cfg = calendar_settings()
+            if not cfg.get("enabled"):
+                return GateResult(
+                    name="calendar_ok",
+                    passed=True,
+                    value="off",
+                    detail="calendar guard disabled",
+                )
+            from system.calendar_gate import is_calendar_blocked
+
+            blocked, reason = is_calendar_blocked(str(getattr(self, "_epic", "") or ""))
             return GateResult(
                 name="calendar_ok",
-                passed=True,
-                value="off",
-                detail="calendar guard disabled (config_v26.json)",
+                passed=not blocked,
+                value={"blocked": blocked},
+                detail=reason if blocked else "no high-impact event window",
             )
-        blocked, reason = is_calendar_blocked(str(getattr(self, "_epic", "") or ""))
+        blocked, reason = cal.check_block(
+            str(getattr(self, "_epic", "") or ""),
+            market=str(getattr(self, "_market", "") or ""),
+        )
         return GateResult(
             name="calendar_ok",
             passed=not blocked,
@@ -2123,15 +2140,18 @@ class TradingLoop:
         conf = float(sig.adjusted_confidence)
         rules_conf = conf
         ml_prob: float | None = None
+        interim_active = False
         if bool(self._config.get("USE_ML_SIGNAL", False)):
             try:
+                from data.ml_training_store import MLTrainingStore
+                from ml.interim_scorer import (
+                    get_interim_scorer,
+                    ml_min_rows_for_model,
+                )
+                from system.paths import data_dir
                 from trading.ml_scorer import get_ml_scorer
 
                 scorer = get_ml_scorer()
-                from data.ml_training_store import MLTrainingStore
-                from system.paths import data_dir
-
-                _ML_MIN_TRAINING_RECORDS = 500
 
                 def _ml_training_rows() -> int:
                     live = MLTrainingStore().record_count()
@@ -2148,8 +2168,22 @@ class TradingLoop:
                     return live
 
                 _ml_records = _ml_training_rows()
-                if scorer.is_trained() and _ml_records >= _ML_MIN_TRAINING_RECORDS:
-                    snap = sig.snapshot or {}
+                min_model_rows = ml_min_rows_for_model(self._config)
+                snap = sig.snapshot or {}
+                if _ml_records < min_model_rows:
+                    interim_active = True
+                    log_engine("[INTERIM SCORER] active")
+                    interim = get_interim_scorer().score(
+                        cfg=self._config,
+                        market=self._market,
+                        direction=str(sig.signal or "WAIT"),
+                        snapshot=snap,
+                        store=self._store,
+                    )
+                    conf = float(interim.total)
+                    ml_prob = conf / 100.0
+                elif scorer.is_trained() and _ml_records >= min_model_rows:
+                    log_engine("[ML MODEL] active")
                     last = snap.get("last")
                     _last = last if (last is not None and hasattr(last, "get")) else {}
                     _atr = float(_last.get("atr", 0) or 0)
@@ -2211,7 +2245,7 @@ class TradingLoop:
                 elif scorer.is_trained():
                     log_engine(
                         f"ML blend skipped: {_ml_records} training records "
-                        f"(need {_ML_MIN_TRAINING_RECORDS})"
+                        f"(need {min_model_rows})"
                     )
             except Exception as e:
                 log_engine(f"ML gate blend skipped: {type(e).__name__}: {e}")
@@ -2409,6 +2443,29 @@ class TradingLoop:
         except Exception:
             pass
         return 0.0
+
+    def _friday_flatten_if_needed(self) -> None:
+        try:
+            from trading.friday_flatten import run_friday_flatten_tick
+
+            at = quote_time(self._clock())
+            store = getattr(self, "_store", None)
+
+            def _list_positions() -> list[dict]:
+                if store is not None and hasattr(store, "active_trades"):
+                    return list(store.active_trades())
+                return []
+
+            run_friday_flatten_tick(
+                cfg=self._config,
+                now=at,
+                execute_close=self._execute_flatten_close,
+                verify_close=self._verify_flatten_after_close,
+                open_count_fn=self._ig_open_position_count,
+                list_positions_fn=_list_positions,
+            )
+        except Exception as e:
+            log_engine(f"friday_flatten tick failed: {type(e).__name__}: {e}")
 
     def _flatten_if_needed(self) -> None:
         at = quote_time(self._clock())
@@ -2922,7 +2979,7 @@ class TradingLoop:
         market_label = epic_market_label(self._epic)
         signal_core_score = int(round(confidence))
         display_confidence = float(confidence)
-        return {
+        payload: dict[str, Any] = {
             "type": "tick",
             "epic": self._epic,
             "market": market_label,
@@ -3023,6 +3080,21 @@ class TradingLoop:
             "pnl_history": self._pnl_history_payload(),
             "drawdown": self._drawdown_snapshot(),
         }
+        try:
+            from risk.economic_calendar import get_economic_calendar
+            from trading.friday_flatten import friday_flatten_snapshot
+
+            payload["friday_flatten"] = friday_flatten_snapshot(self._config)
+            blackouts = get_economic_calendar(self._config).active_blackouts(
+                self._epic
+            )
+            payload["calendar_blackout"] = blackouts
+            payload["calendar_blackout_active"] = bool(blackouts)
+        except Exception:
+            payload["friday_flatten"] = {"active": False}
+            payload["calendar_blackout"] = []
+            payload["calendar_blackout_active"] = False
+        return payload
 
     def _price_trend_payload(self, quote_ts: datetime) -> dict[str, Any] | None:
         try:

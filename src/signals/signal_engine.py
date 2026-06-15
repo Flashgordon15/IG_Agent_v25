@@ -441,12 +441,19 @@ class SignalEngine:
                 check_session_blackout,
                 resolve_epic_for_market,
             )
+            from risk.economic_calendar import check_economic_calendar_block
 
             epic = resolve_epic_for_market(market, cfg)
             protection_blocks: list[tuple[bool, str, str]] = [
                 (
                     *check_session_blackout(epic, cfg, market=market),
                     "session_blackout",
+                ),
+                (
+                    *check_economic_calendar_block(
+                        epic, cfg, market=market
+                    ),
+                    "economic_calendar",
                 ),
                 (
                     *check_reentry_cooldown(epic, cfg, market=market),
