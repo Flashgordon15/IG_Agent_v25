@@ -53,8 +53,28 @@ def ml_training_rows() -> int:
         return 0
 
 
+def ml_clean_start_date(cfg: Config) -> str:
+    return str(
+        cfg.get("stats_exclude_pre_fix_date") or cfg.get("ml_clean_start_date") or ""
+    ).strip()
+
+
+def ml_clean_training_rows(cfg: Config) -> int:
+    """ML training rows on/after the post-fix clean baseline date."""
+    try:
+        from data.ml_training_store import MLTrainingStore
+
+        store = MLTrainingStore()
+        start = ml_clean_start_date(cfg)
+        if start:
+            return int(store.record_count_since(start))
+        return int(store.record_count())
+    except Exception:
+        return 0
+
+
 def should_use_interim_scorer(cfg: Config) -> bool:
-    return ml_training_rows() < ml_min_rows_for_model(cfg)
+    return ml_clean_training_rows(cfg) < ml_min_rows_for_model(cfg)
 
 
 def _trend_score(

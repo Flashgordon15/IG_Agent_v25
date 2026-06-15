@@ -323,6 +323,51 @@ class MLTrainingStore:
             )
             return 0
 
+    def record_count_since(self, since_date: str) -> int:
+        """Count JSONL rows with exit_time on/after *since_date* (YYYY-MM-DD)."""
+        text = str(since_date or "").strip()
+        if not text:
+            return self.record_count()
+        try:
+            since_day = datetime.fromisoformat(text).date()
+        except ValueError:
+            return self.record_count()
+        if not self._path.exists():
+            return 0
+        count = 0
+        try:
+            with open(self._path, "r", encoding="utf-8") as f:
+                for line in f:
+                    raw = line.strip()
+                    if not raw:
+                        continue
+                    try:
+                        row = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    ts = (
+                        row.get("exit_time")
+                        or row.get("closed_at")
+                        or row.get("entry_time")
+                        or ""
+                    )
+                    if not ts:
+                        continue
+                    try:
+                        day = datetime.fromisoformat(
+                            str(ts).replace("Z", "+00:00")
+                        ).date()
+                    except ValueError:
+                        continue
+                    if day >= since_day:
+                        count += 1
+            return count
+        except Exception as e:
+            log_engine(
+                f"ml_training_store record_count_since failed: {type(e).__name__}: {e}"
+            )
+            return 0
+
     @staticmethod
     def confirmed_from_ig_row(row: dict[str, Any]) -> bool:
         """True when IG transaction sync has set ig_pnl_currency (PENDING promotion)."""

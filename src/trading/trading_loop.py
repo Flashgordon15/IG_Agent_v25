@@ -2143,31 +2143,16 @@ class TradingLoop:
         interim_active = False
         if bool(self._config.get("USE_ML_SIGNAL", False)):
             try:
-                from data.ml_training_store import MLTrainingStore
                 from ml.interim_scorer import (
                     get_interim_scorer,
+                    ml_clean_training_rows,
                     ml_min_rows_for_model,
                 )
-                from system.paths import data_dir
                 from trading.ml_scorer import get_ml_scorer
 
                 scorer = get_ml_scorer()
 
-                def _ml_training_rows() -> int:
-                    live = MLTrainingStore().record_count()
-                    meta_path = data_dir() / "ml_model" / "training_meta.json"
-                    try:
-                        if meta_path.is_file():
-                            import json as _json
-
-                            meta = _json.loads(meta_path.read_text(encoding="utf-8"))
-                            replay = int(meta.get("labelled_rows") or 0)
-                            return max(live, replay)
-                    except Exception:
-                        pass
-                    return live
-
-                _ml_records = _ml_training_rows()
+                _ml_records = ml_clean_training_rows(self._config)
                 min_model_rows = ml_min_rows_for_model(self._config)
                 snap = sig.snapshot or {}
                 if _ml_records < min_model_rows:

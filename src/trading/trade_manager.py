@@ -25,6 +25,11 @@ from system.trade_lifecycle_bus import (
     get_lifecycle_bus,
 )
 
+# P&L source of truth: ig_pnl_currency from IG transaction sync is authoritative
+# for GBP display once confirmed. realised_pnl_points() is used for in-flight
+# risk/points until IG posts the close; it does not deduct spread/commission —
+# those are embedded in IG's confirmed ig_pnl_currency figure.
+
 if TYPE_CHECKING:
     from execution.stop_dispatch_worker import StopDispatchJob
     from trading.points_engine import PointsEngine

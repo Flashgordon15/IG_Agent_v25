@@ -343,13 +343,10 @@ def api_learning_health(refresh_registry: bool = False) -> dict[str, Any]:
 @router.get("/api/stats/edge-analysis")
 def api_edge_analysis() -> dict[str, Any]:
     """Read-only edge statistics for STATS dashboard tab."""
-    from api.edge_analysis import get_edge_analysis
-    from data.learning_store import LearningStore
+    from api.edge_analysis import get_edge_analysis_payload
 
     try:
-        store = LearningStore()
-        store.connect()
-        return get_edge_analysis(db_path=str(store.db_path))
+        return get_edge_analysis_payload()
     except Exception as exc:
         raise HTTPException(
             status_code=500,

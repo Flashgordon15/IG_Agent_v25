@@ -37,11 +37,11 @@ def _cfg() -> Config:
 
 class InterimScorerTests(unittest.TestCase):
     def test_interim_scorer_activates_below_50_rows(self) -> None:
-        with patch("ml.interim_scorer.ml_training_rows", return_value=14):
+        with patch("ml.interim_scorer.ml_clean_training_rows", return_value=14):
             self.assertTrue(should_use_interim_scorer(_cfg()))
 
     def test_ml_model_activates_at_50_rows(self) -> None:
-        with patch("ml.interim_scorer.ml_training_rows", return_value=50):
+        with patch("ml.interim_scorer.ml_clean_training_rows", return_value=50):
             self.assertFalse(should_use_interim_scorer(_cfg()))
 
     def test_trend_score_strong_trend_returns_high(self) -> None:

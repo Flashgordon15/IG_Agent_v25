@@ -7,11 +7,12 @@ from __future__ import annotations
 import sqlite3
 import threading
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from signals.indicators import session_name
 from system.closed_trades_display import is_excluded_display_row
+from system.learning_trade_policy import is_agent_learning_row
 
 _CACHE_LOCK = threading.Lock()
 _CACHE_AT: float = 0.0
@@ -28,7 +29,11 @@ def resolve_learning_db_path() -> str:
 
 def get_edge_analysis_payload(*, force: bool = False) -> dict[str, Any]:
     """API entry point — read-only stats without instantiating LearningStore."""
-    return get_edge_analysis(db_path=resolve_learning_db_path(), force=force)
+    from system.config_loader import get_config
+
+    return get_edge_analysis(
+        db_path=resolve_learning_db_path(), cfg=get_config(), force=force
+    )
 
 
 def _patch_learning_store_default_db_path() -> None:
@@ -50,12 +55,33 @@ def _patch_learning_store_default_db_path() -> None:
 _patch_learning_store_default_db_path()
 
 
-def _parse_dt(text: str | None) -> Any:
+def _stats_filter_config(cfg: Any | None) -> tuple[int, str, date, date]:
+    """Return (lookback_days, exclude_before_iso, range_start, range_end)."""
+    from system.config_loader import get_config
+
+    active = cfg or get_config()
+    lookback = max(1, int(active.get("stats_lookback_days", 30)))
+    exclude_raw = str(active.get("stats_exclude_pre_fix_date") or "").strip()
+    range_end = date.today()
+    lookback_start = range_end - timedelta(days=lookback)
+    if exclude_raw:
+        try:
+            exclude_day = datetime.fromisoformat(exclude_raw).date()
+            range_start = max(lookback_start, exclude_day)
+            exclude_before = exclude_raw
+        except ValueError:
+            range_start = lookback_start
+            exclude_before = ""
+    else:
+        range_start = lookback_start
+        exclude_before = ""
+    return lookback, exclude_before, range_start, range_end
+
+
+def _parse_dt(text: str | None) -> datetime | None:
     if not text:
         return None
     try:
-        from datetime import datetime
-
         return datetime.fromisoformat(str(text).replace("Z", ""))
     except ValueError:
         return None
@@ -83,10 +109,21 @@ def _is_win(row: dict[str, Any]) -> bool:
     return _trade_pnl_gbp(row) > 0
 
 
-def _fetch_live_trades(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+def _fetch_live_trades(
+    conn: sqlite3.Connection, *, cfg: Any | None = None
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    lookback, exclude_before, range_start, range_end = _stats_filter_config(cfg)
     cols = {row[1] for row in conn.execute("PRAGMA table_info(trades)").fetchall()}
     if "ig_pnl_currency" not in cols:
-        return []
+        meta = {
+            "from": range_start.isoformat(),
+            "to": range_end.isoformat(),
+            "exclude_before": exclude_before or None,
+            "lookback_days": lookback,
+        }
+        return [], meta
+    start_ts = f"{range_start.isoformat()} 00:00:00"
+    end_ts = f"{range_end.isoformat()} 23:59:59"
     rows = conn.execute(
         """
         SELECT *
@@ -94,16 +131,27 @@ def _fetch_live_trades(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         WHERE closed_at IS NOT NULL
           AND ig_pnl_currency IS NOT NULL
           AND dry_run = 0
+          AND closed_at >= ?
+          AND closed_at <= ?
         ORDER BY closed_at ASC
-        """
+        """,
+        (start_ts, end_ts),
     ).fetchall()
     out: list[dict[str, Any]] = []
     for row in rows:
         d = dict(row)
         if is_excluded_display_row(d):
             continue
+        if not is_agent_learning_row(d):
+            continue
         out.append(d)
-    return out
+    meta = {
+        "from": range_start.isoformat(),
+        "to": range_end.isoformat(),
+        "exclude_before": exclude_before or None,
+        "lookback_days": lookback,
+    }
+    return out, meta
 
 
 def _profit_factor(pnls: list[float]) -> float | None:
@@ -172,27 +220,54 @@ def _display_name(epic: str, market: str) -> str:
         return epic
 
 
-def _ml_readiness(count: int, *, needed: int = 50) -> dict[str, Any]:
-    pct = min(100, int(round((count / needed) * 100))) if needed > 0 else 0
-    remaining = max(0, needed - count)
+def _ml_readiness(cfg: Any | None, *, live_trade_count: int = 0) -> dict[str, Any]:
+    """ML readiness from ml_training_store.jsonl — not SQLite trade count."""
+    from data.ml_training_store import MLTrainingStore
+    from ml.interim_scorer import ml_clean_start_date, ml_min_rows_for_model
+
+    from system.config_loader import get_config
+
+    active = cfg or get_config()
+    needed = ml_min_rows_for_model(active)
+    store = MLTrainingStore()
+    total_ml = int(store.record_count())
+    clean_start = ml_clean_start_date(active)
+    if clean_start:
+        clean_count = int(store.record_count_since(clean_start))
+    else:
+        clean_count = live_trade_count
+    interim = clean_count < needed
+    pct = min(100, int(round((clean_count / needed) * 100))) if needed > 0 else 0
+    remaining = max(0, needed - clean_count)
     est = None
-    if count < needed and count > 0:
+    if clean_count < needed and clean_count > 0:
         est = (date.today() + timedelta(days=max(7, remaining * 2))).isoformat()
-    elif count >= needed:
+    elif clean_count >= needed:
         est = date.today().isoformat()
+    scorer_label = (
+        f"Interim Scorer: ACTIVE ({clean_count}/{needed} clean trades)"
+        if interim
+        else "ML Model: ACTIVE"
+    )
     return {
-        "confirmed_live_trades": count,
+        "confirmed_live_trades": clean_count,
+        "ml_training_store_rows": total_ml,
+        "clean_trades_since_fix": clean_count,
         "trades_needed_for_ml": needed,
         "percentage_ready": pct,
         "estimated_ready_date": est,
+        "scorer_mode": "interim" if interim else "ml_model",
+        "scorer_label": scorer_label,
     }
 
 
-def compute_edge_analysis(db_path: str) -> dict[str, Any]:
+def compute_edge_analysis(
+    db_path: str, *, cfg: Any | None = None
+) -> dict[str, Any]:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
-        rows = _fetch_live_trades(conn)
+        rows, date_range = _fetch_live_trades(conn, cfg=cfg)
     finally:
         conn.close()
 
@@ -286,15 +361,18 @@ def compute_edge_analysis(db_path: str) -> dict[str, Any]:
         )
 
     return {
+        "date_range": date_range,
         "overall": overall,
         "by_instrument": by_instrument,
         "by_session": by_session,
         "by_hour_bst": by_hour_bst,
-        "ml_readiness": _ml_readiness(total),
+        "ml_readiness": _ml_readiness(cfg, live_trade_count=total),
     }
 
 
-def get_edge_analysis(*, db_path: str, force: bool = False) -> dict[str, Any]:
+def get_edge_analysis(
+    *, db_path: str, cfg: Any | None = None, force: bool = False
+) -> dict[str, Any]:
     global _CACHE_AT, _CACHE_PAYLOAD
     now = time.monotonic()
     with _CACHE_LOCK:
@@ -304,7 +382,7 @@ def get_edge_analysis(*, db_path: str, force: bool = False) -> dict[str, Any]:
             and (now - _CACHE_AT) < _CACHE_TTL_SEC
         ):
             return dict(_CACHE_PAYLOAD)
-    payload = compute_edge_analysis(db_path)
+    payload = compute_edge_analysis(db_path, cfg=cfg)
     with _CACHE_LOCK:
         _CACHE_PAYLOAD = payload
         _CACHE_AT = now

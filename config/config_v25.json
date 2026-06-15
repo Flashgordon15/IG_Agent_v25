@@ -444,6 +444,8 @@
     "friday_flatten_override": false
   },
   "ml_min_rows_for_model": 50,
+  "stats_lookback_days": 30,
+  "stats_exclude_pre_fix_date": "2026-06-15",
   "interim_scorer_weights": {
     "trend": 25,
     "session": 25,
