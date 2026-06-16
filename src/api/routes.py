@@ -281,6 +281,37 @@ async def api_admin_reset_points(request: Request) -> JSONResponse:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@router.post("/api/admin/toggle-rotation-filter")
+def api_admin_toggle_rotation_filter() -> dict[str, Any]:
+    """Flip enforce_top3_rotation_filter and persist to the primary config file."""
+    from runtime.market_orchestrator import MarketOrchestrator
+    from system.config_loader import get_config, update_config_values
+    from system.engine_log import log_engine
+
+    try:
+        cfg = get_config()
+        current = bool(cfg.get("enforce_top3_rotation_filter", True))
+        new_value = not current
+        updated = update_config_values(enforce_top3_rotation_filter=new_value)
+        try:
+            # Push the updated config into active loops immediately.
+            MarketOrchestrator.hot_reload_config(updated)
+        except Exception:
+            pass
+        log_engine(
+            "admin/toggle-rotation-filter: "
+            f"enforce_top3_rotation_filter={new_value}"
+        )
+        return {
+            "success": True,
+            "enforce_top3_rotation_filter": bool(
+                updated.get("enforce_top3_rotation_filter", new_value)
+            ),
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @router.get("/api/admin/risk-status")
 def api_admin_risk_status() -> dict[str, Any]:
     """Admin view — drawdown shield latch, closed-day loss, and daily loss gate."""

@@ -114,6 +114,8 @@ export const api = {
       body: JSON.stringify({ epic }),
     }),
   adminRiskStatus: () => fetchJson("/api/admin/risk-status"),
+  toggleRotationFilter: () =>
+    fetchJson("/api/admin/toggle-rotation-filter", { method: "POST" }),
   getHealth: () => fetchJson("/api/health"),
   time: () => fetchJson("/api/time"),
 };

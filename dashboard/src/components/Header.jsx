@@ -3,6 +3,8 @@ import {
   Activity,
   Brain,
   BrainCircuit,
+  Loader2,
+  Repeat,
   Shield,
   ShieldAlert,
   ShieldCheck,
@@ -277,8 +279,11 @@ export default function Header({
   initLiveSec,
   overnightSupervision,
   systemStandbyActive = false,
+  rotationFilterEnabled = false,
+  onToggleRotationFilter,
 }) {
   const [safeLeaveModal, setSafeLeaveModal] = useState(null);
+  const [rotationBusy, setRotationBusy] = useState(false);
 
   const handleSafeToLeave = useCallback(async () => {
     setSafeLeaveModal({ loading: true });
@@ -304,6 +309,16 @@ export default function Header({
       });
     }
   }, []);
+
+  const handleToggleRotationFilter = useCallback(async () => {
+    if (!onToggleRotationFilter || rotationBusy) return;
+    setRotationBusy(true);
+    try {
+      await onToggleRotationFilter();
+    } finally {
+      setRotationBusy(false);
+    }
+  }, [onToggleRotationFilter, rotationBusy]);
 
   const tradingStopped =
     agentAlive === false
@@ -365,6 +380,27 @@ export default function Header({
             {STANDBY_MESSAGE}
           </span>
         ) : null}
+
+        <button
+          type="button"
+          onClick={handleToggleRotationFilter}
+          disabled={!onToggleRotationFilter || rotationBusy}
+          className={[
+            "inline-flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] font-semibold",
+            rotationFilterEnabled
+              ? "border-success/50 bg-success/15 text-success"
+              : "border-border bg-card/80 text-muted",
+            rotationBusy ? "opacity-70 cursor-wait" : "hover:bg-card",
+          ].join(" ")}
+          title="Toggle enforce_top3_rotation_filter"
+        >
+          {rotationBusy ? (
+            <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
+          ) : (
+            <Repeat className="h-3 w-3" aria-hidden />
+          )}
+          🔄 Rotation Filter {rotationFilterEnabled ? "ON" : "OFF"}
+        </button>
 
         {/* Divider */}
         <span className="hidden sm:block h-5 w-px bg-border shrink-0" aria-hidden />

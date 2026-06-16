@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { WS_URL } from "./config.js";
 import { fetchState, fetchSplash } from "./api.js";
-import { authHeaders, clearAuthSession } from "./api/client.js";
+import { api, authHeaders, clearAuthSession } from "./api/client.js";
 
 const HEARTBEAT_INTERVAL_MS = 25000; // ping every 25 s (server times out at 10 min)
 import Header from "./components/Header.jsx";
@@ -405,6 +405,32 @@ export default function App() {
     () => resolveMarketView(mergedState, selectedEpic),
     [mergedState, selectedEpic],
   );
+
+  const refreshRestrictionDiagnostics = useCallback(async () => {
+    try {
+      const [nextState, health, startup] = await Promise.all([
+        fetchState(),
+        api.getHealth(),
+        api.getStartupStatus(),
+      ]);
+      if (nextState && typeof nextState === "object") {
+        applyState(nextState);
+      }
+      if (health && typeof health === "object") {
+        setHealthOverlay(health);
+      }
+      if (startup && typeof startup === "object") {
+        setStartupOverlay(startup);
+      }
+    } catch {
+      // Ignore transient refresh errors; background pollers will self-heal.
+    }
+  }, [applyState]);
+
+  const handleToggleRotationFilter = useCallback(async () => {
+    await api.toggleRotationFilter();
+    await refreshRestrictionDiagnostics();
+  }, [refreshRestrictionDiagnostics]);
 
   useEffect(() => {
     let mounted = true;
@@ -920,6 +946,12 @@ export default function App() {
       mergedState?.env_scorer_fallback_active ?? mergedState?.health?.env_scorer_fallback_active,
     ),
     systemStandbyActive,
+    rotationFilterEnabled: Boolean(
+      mergedState?.config?.enforce_top3_rotation_filter ??
+        mergedState?.system_state?.config?.enforce_top3_rotation_filter ??
+        false,
+    ),
+    onToggleRotationFilter: handleToggleRotationFilter,
   };
 
   // Agent stopped screen (with post-shutdown verification)
