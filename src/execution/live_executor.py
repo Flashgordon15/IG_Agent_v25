@@ -22,7 +22,7 @@ from execution.japan225_daily_risk import (
 from execution.pending_order_reconcile import (
     ORDER_TYPE_ENTRY,
     has_pending,
-    mark_pending,
+    mark_pending as mark_order_pending,
     resolve_pending,
 )
 from execution.trade_manager import TradeManager
@@ -397,18 +397,36 @@ class LiveExecutor:
             _cg_undo(signal.direction)
         except Exception:
             pass
-        try:
-            from execution.portfolio_hooks import release_portfolio_allocation_from_execution
+        if not mark_pending:
+            try:
+                from execution.portfolio_hooks import (
+                    release_portfolio_allocation_from_execution,
+                )
 
-            release_portfolio_allocation_from_execution(
-                execution_params,
-                config=self._cfg,
-            )
-        except Exception as e:
-            log_engine(
-                f"portfolio release in OrderConfirmWorker failed: "
-                f"{type(e).__name__}: {e}"
-            )
+                release_portfolio_allocation_from_execution(
+                    execution_params,
+                    config=self._cfg,
+                )
+            except Exception as e:
+                log_engine(
+                    f"portfolio release in OrderConfirmWorker failed: "
+                    f"{type(e).__name__}: {e}"
+                )
+        elif not str(deal_reference or "").strip():
+            try:
+                from execution.portfolio_hooks import (
+                    release_portfolio_allocation_from_execution,
+                )
+
+                release_portfolio_allocation_from_execution(
+                    execution_params,
+                    config=self._cfg,
+                )
+            except Exception as e:
+                log_engine(
+                    f"portfolio release in OrderConfirmWorker failed: "
+                    f"{type(e).__name__}: {e}"
+                )
         try:
             from system.trade_audit import log_trade_audit
 
@@ -429,12 +447,15 @@ class LiveExecutor:
         except Exception:
             pass
         if mark_pending:
+            reconcile = bool(str(deal_reference or "").strip())
             try:
-                mark_pending(
+                mark_order_pending(
                     signal.epic,
                     side=signal.direction,
                     order_type=ORDER_TYPE_ENTRY,
                     deal_reference=deal_reference or None,
+                    pending_reconcile=reconcile,
+                    execution_params=execution_params if reconcile else None,
                 )
             except Exception as e:
                 log_engine(
@@ -754,11 +775,13 @@ class LiveExecutor:
                 # order was never transmitted, so there is no uncertainty to
                 # reconcile — marking it pending would ghost-block the market.
                 if ref:
-                    mark_pending(
+                    mark_order_pending(
                         signal.epic,
                         side=signal.direction,
                         order_type=ORDER_TYPE_ENTRY,
                         deal_reference=ref,
+                        pending_reconcile=True,
+                        execution_params=execution_params,
                     )
                 return ExecutionResult(
                     success=False,
@@ -844,11 +867,13 @@ class LiveExecutor:
             if confirm.get("rejected"):
                 resolve_pending(signal.epic, reason="entry rejected by broker")
             else:
-                mark_pending(
+                mark_order_pending(
                     signal.epic,
                     side=signal.direction,
                     order_type=ORDER_TYPE_ENTRY,
                     deal_reference=ref,
+                    pending_reconcile=True,
+                    execution_params=execution_params,
                 )
             return ExecutionResult(
                 success=False,

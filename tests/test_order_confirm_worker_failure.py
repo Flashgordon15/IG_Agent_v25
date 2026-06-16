@@ -140,7 +140,7 @@ class OrderConfirmWorkerFailureTests(unittest.TestCase):
     @patch("execution.live_executor.japan225_daily_risk_paused", return_value=False)
     @patch("system.portfolio_envelope.portfolio_gate_enabled", return_value=True)
     @patch("system.portfolio_envelope.release_allocation")
-    def test_worker_exception_is_contained_and_releases_portfolio(
+    def test_worker_exception_without_ref_releases_immediately(
         self,
         mock_release: MagicMock,
         _gate: MagicMock,
@@ -169,6 +169,58 @@ class OrderConfirmWorkerFailureTests(unittest.TestCase):
 
         mock_release.assert_called_once()
         trade_mgr.open_trade_from_execution.assert_not_called()
+
+    @patch("system.rate_limit_manager.get_rate_limit_manager")
+    @patch("execution.live_executor.japan225_daily_risk_paused", return_value=False)
+    @patch("system.portfolio_envelope.portfolio_gate_enabled", return_value=True)
+    @patch("system.portfolio_envelope.release_allocation")
+    def test_worker_ambiguous_ref_defers_release_until_reconciler(
+        self,
+        mock_release: MagicMock,
+        _gate: MagicMock,
+        _risk_pause: MagicMock,
+        rate_mgr: MagicMock,
+    ) -> None:
+        rate_mgr.return_value.check_rest_allowed.return_value = None
+        executor = self._executor()
+        client = executor._client
+        client.confirm_deal.return_value = {
+            "accepted": False,
+            "rejected": True,
+            "reason": "confirm timeout",
+        }
+        client.open_positions.return_value = []
+        client.has_open_position.return_value = False
+        trade_mgr = MagicMock(spec=TradeManager)
+        cooldown = MagicMock(spec=CooldownTracker)
+
+        with patch.object(
+            executor,
+            "_execute_order_blocking",
+            return_value=ExecutionResult(
+                success=False,
+                action="REJECTED",
+                rejection_reason="socket dropout mid confirm",
+                deal_reference="REF-MID-DROP",
+                execution_params=_params(),
+            ),
+        ):
+            result = executor.execute(
+                _signal(),
+                _params(),
+                trade_mgr,
+                cooldown,
+                mode=ExecutionMode.DEMO,
+            )
+            self.assertEqual(result.action, "SUBMITTED")
+            executor.wait_pending_orders(timeout=5.0)
+
+        mock_release.assert_not_called()
+        from execution.order_reconciler_worker import reconcile_all_pending_orders
+
+        cleared = reconcile_all_pending_orders(client, config=executor._cfg)
+        self.assertEqual(cleared, 1)
+        mock_release.assert_called_once()
 
     @patch("system.rate_limit_manager.get_rate_limit_manager")
     @patch("execution.live_executor.japan225_daily_risk_paused", return_value=False)

@@ -10,10 +10,12 @@ from execution.types import TradeSignal
 from system.engine_log import log_engine
 
 _deal_risk_gbp: dict[str, float] = {}
+_pending_release_params: dict[str, dict[str, Any]] = {}
 
 
 def reset_portfolio_hooks_for_tests() -> None:
     _deal_risk_gbp.clear()
+    _pending_release_params.clear()
     try:
         from system.portfolio_envelope import reset_portfolio_envelope_for_tests
 
@@ -51,6 +53,33 @@ def _risk_gbp_from_params(
     if stop <= 0 or size <= 0:
         return 0.0
     return stop * size * point_value
+
+
+def stash_pending_portfolio_release(
+    epic: str, execution_params: dict[str, Any]
+) -> None:
+    """Hold gate reservation until OrderReconcilerWorker confirms broker outcome."""
+    key = str(epic or "").strip()
+    if not key or not execution_params:
+        return
+    _pending_release_params[key] = dict(execution_params)
+
+
+def clear_stashed_pending_portfolio(epic: str) -> None:
+    _pending_release_params.pop(str(epic or "").strip(), None)
+
+
+def release_stashed_pending_portfolio(
+    epic: str,
+    *,
+    config: Any | None = None,
+) -> float:
+    """Release a deferred gate reservation after broker confirms failure."""
+    key = str(epic or "").strip()
+    params = _pending_release_params.pop(key, None)
+    if not params:
+        return 0.0
+    return release_portfolio_allocation_from_execution(params, config=config)
 
 
 def release_portfolio_allocation_from_execution(

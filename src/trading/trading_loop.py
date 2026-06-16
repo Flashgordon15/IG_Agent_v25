@@ -250,6 +250,8 @@ class TradingLoop:
         self._gate_signal_cache: SignalResult | None = None
         self._entry_circuit_breaker: str = ""
         self._portfolio_reserved_risk_gbp: float = 0.0
+        self._tick_indicator_row: dict[str, Any] | None = None
+        self._tick_live_state_vector: dict[str, Any] | None = None
         from runtime.market_orchestrator import ROTATION_GRACE_CYCLES
 
         try:
@@ -560,6 +562,87 @@ class TradingLoop:
     def _reset_gate_signal_cache(self) -> None:
         self._gate_signal_cache = None
 
+    def _reset_tick_memo(self) -> None:
+        """Per-tick indicator / live_state_vector memo — gates 3 & 10."""
+        self._tick_indicator_row = None
+        self._tick_live_state_vector = None
+
+    def _tick_indicator_snapshot(self, quote: Quote) -> dict[str, Any]:
+        """Single quote_df / last_row read per tick (gate 3 cold_start_gap ATR)."""
+        if self._tick_indicator_row is not None:
+            return self._tick_indicator_row
+        row: dict[str, Any] = {}
+        try:
+            last_row_fn = getattr(self._signal_engine, "last_row", None)
+            if callable(last_row_fn):
+                r = last_row_fn(self._market, 15)
+                if r is not None:
+                    if hasattr(r, "to_dict"):
+                        row = dict(r.to_dict())
+                    elif isinstance(r, dict):
+                        row = dict(r)
+            if not row:
+                df = self._signal_engine.quote_df(self._market)
+                if df is not None and len(df) > 0:
+                    last = df.iloc[-1]
+                    row = (
+                        dict(last.to_dict())
+                        if hasattr(last, "to_dict")
+                        else dict(last)
+                    )
+        except Exception:
+            row = {}
+        self._tick_indicator_row = row
+        return row
+
+    def _build_live_state_vector(
+        self,
+        quote: Quote,
+        points_state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Memoized in-RAM feature vector — shared by gates 3, 10, horizon overlay."""
+        if self._tick_live_state_vector is not None:
+            return self._tick_live_state_vector
+        ind = self._tick_indicator_snapshot(quote)
+        merged = dict(points_state)
+        try:
+            _atr = float(ind.get("atr", 0) or 0)
+            _stop = max(1.0, float(self._config.stop_distance_points))
+            if not float(merged.get("atr_multiplier") or 0):
+                merged["atr_multiplier"] = _atr / _stop if _stop > 0 else 0.0
+        except Exception:
+            pass
+        from ml.interim_scorer import extract_live_state_vector
+
+        vector = extract_live_state_vector(self._market, quote, merged)
+        if isinstance(vector, dict):
+            vector = dict(vector)
+            vector["indicator_row"] = ind
+            vector["atr"] = float(ind.get("atr", 0) or 0.0)
+            vector["rsi"] = float(ind.get("rsi", 0) or 0.0)
+            self._tick_live_state_vector = vector
+            return vector
+        self._tick_live_state_vector = {}
+        return self._tick_live_state_vector
+
+    def _publish_ml_sizing_multiplier(self, multiplier: float) -> None:
+        """Write Gate 11 sizing into the shared per-tick live_state_vector."""
+        mult = float(multiplier)
+        self._ml_sizing_multiplier = mult
+        vec = self._tick_live_state_vector
+        if isinstance(vec, dict):
+            vec["ml_sizing_multiplier"] = mult
+
+    def _ml_sizing_multiplier_from_live_state(self) -> float:
+        """Gate 7 reads Gate 11 output from the shared live_state_vector object."""
+        vec = self._tick_live_state_vector
+        if isinstance(vec, dict):
+            try:
+                return float(vec.get("ml_sizing_multiplier", 1.0) or 1.0)
+            except (TypeError, ValueError):
+                return 1.0
+        return float(getattr(self, "_ml_sizing_multiplier", 1.0) or 1.0)
+
     def _get_gate_signal(self) -> SignalResult:
         """Single signal evaluation per tick — reused across gate stack (§20 latency)."""
         if getattr(self, "_gate_signal_cache", None) is None:
@@ -600,6 +683,7 @@ class TradingLoop:
         except Exception:
             pass
         self._reset_gate_signal_cache()
+        self._reset_tick_memo()
         try:
             from system.market_data_hub import get_market_data_hub
 
@@ -1074,12 +1158,16 @@ class TradingLoop:
         from execution.types import freeze_gate_execution_params
 
         live_state_vector: dict[str, Any] = {}
-        for g in gates:
-            if g.name == "signal_confidence" and isinstance(g.value, dict):
-                raw_vec = g.value.get("live_state_vector")
-                if isinstance(raw_vec, dict):
-                    live_state_vector = raw_vec
-                break
+        vec = self._tick_live_state_vector
+        if isinstance(vec, dict):
+            live_state_vector = vec
+        else:
+            for g in gates:
+                if g.name == "signal_confidence" and isinstance(g.value, dict):
+                    raw_vec = g.value.get("live_state_vector")
+                    if isinstance(raw_vec, dict):
+                        live_state_vector = raw_vec
+                    break
 
         for g in gates:
             if g.name != "risk_validation" or not g.passed:
@@ -1321,7 +1409,7 @@ class TradingLoop:
         # (risk_validation) must apply on the same tick. We therefore evaluate
         # signal_confidence + ml_veto before risk_validation.
         results: list[GateResult] = []
-        self._ml_sizing_multiplier = 1.0
+        self._publish_ml_sizing_multiplier(1.0)
         gate_order = (
             "session_open",
             "session_blackout",
@@ -1479,11 +1567,33 @@ class TradingLoop:
 
     def _gate_session_open(self) -> GateResult:
         from system.market_data_hub import get_market_data_hub
+        from system.market_watch.market_status_updater import (
+            cached_market_open,
+            ensure_market_status_updater_started,
+            get_cached_market_status,
+        )
 
         at = quote_time(self._clock())
         phase = self._session.snapshot().phase
         hub_maint = get_market_data_hub().is_in_maintenance(self._epic)
-        open_now = bool(self._session.is_session_open(at=at))
+        ensure_market_status_updater_started(
+            epics=[self._epic],
+            rest_client=self._rest_client(),
+        )
+        cached_open = cached_market_open(self._epic)
+        if cached_open is not None:
+            open_now = bool(cached_open)
+        else:
+            # Cold cache — local SessionManager state only (no sync REST/calendar).
+            open_now = bool(getattr(self._session, "_session_open", False))
+            if not open_now:
+                try:
+                    open_now = str(phase or "").upper() not in (
+                        "CLOSED",
+                        "MAINTENANCE",
+                    )
+                except Exception:
+                    open_now = False
         blocked, mins_left = self._session.is_entry_blocked_near_session_end(at=at)
         detail = "market closed"
         if blocked and open_now:
@@ -1534,11 +1644,9 @@ class TradingLoop:
         next_open_iso = ""
         if not open_now:
             try:
-                from system.market_watch.calendar import get_market_status
-
-                ms = get_market_status(self._epic)
+                ms = get_cached_market_status(self._epic)
                 if ms and ms.next_open_at:
-                    # Market physically closed — use calendar next open
+                    # Market physically closed — use cached next open
                     next_open_iso = ms.next_open_at.isoformat()
                 elif ms and ms.open:
                     # Market is physically open but blocked by session whitelist.
@@ -2060,10 +2168,7 @@ class TradingLoop:
 
         # Gate 11 ml_veto risk scaling (marginal probabilities → downscale
         # sizing instead of hard-blocking the entry path).
-        try:
-            ml_mult = float(getattr(self, "_ml_sizing_multiplier", 1.0) or 1.0)
-        except Exception:
-            ml_mult = 1.0
+        ml_mult = self._ml_sizing_multiplier_from_live_state()
         if ml_mult != 1.0:
             size_mult *= ml_mult
         risk_band_label = ""
@@ -2314,6 +2419,8 @@ class TradingLoop:
         try:
             snap = sig.snapshot or {}
             last = snap.get("last") or {}
+            if not last:
+                last = self._tick_indicator_snapshot(quote)
             _atr = float(last.get("atr", 0) or 0)
             _stop = max(1.0, float(self._config.stop_distance_points))
             atr_multiplier = _atr / _stop if _stop > 0 else 0.0
@@ -2329,10 +2436,7 @@ class TradingLoop:
             except Exception:
                 nominal_state = self._points.get_state()
 
-            from ml.interim_scorer import extract_live_state_vector
-
-            live_state_vector = extract_live_state_vector(
-                self._market,
+            live_state_vector = self._build_live_state_vector(
                 quote,
                 {
                     "session_score": session_score,
@@ -2340,6 +2444,7 @@ class TradingLoop:
                     "atr_multiplier": atr_multiplier,
                 },
             )
+            self._publish_ml_sizing_multiplier(1.0)
 
             prot = self._config.get("protective_learning") or {}
             session_score_floor = float(prot.get("session_score_floor") or -30.0)
@@ -2543,7 +2648,7 @@ class TradingLoop:
     def _gate_ml_veto(self) -> GateResult:
         # Gate 11 can set a sizing multiplier that Gate 7 must apply on the
         # same tick (ml_veto risk scaling → risk_validation sizing).
-        self._ml_sizing_multiplier = 1.0
+        self._publish_ml_sizing_multiplier(1.0)
         try:
             from system.gate_relaxation import soak_ml_veto_bypassed
 
@@ -2656,7 +2761,10 @@ class TradingLoop:
             passed = False
             sizing_multiplier = min_sizing_multiplier
 
-        self._ml_sizing_multiplier = float(sizing_multiplier)
+        self._publish_ml_sizing_multiplier(float(sizing_multiplier))
+        live_vec = self._tick_live_state_vector if isinstance(
+            self._tick_live_state_vector, dict
+        ) else {}
         return GateResult(
             name="ml_veto",
             passed=passed,
@@ -2666,6 +2774,7 @@ class TradingLoop:
                 "source": ml_source,
                 "sizing_multiplier": float(sizing_multiplier),
                 "marginal_scaled": bool(marginal_scaled),
+                "live_state_vector": live_vec,
             },
             detail=(
                 f"{ml_source} prob {ml_prob_f:.3f} ≥ {min_p_f:.3f}"
@@ -2686,14 +2795,9 @@ class TradingLoop:
 
     def _atr_estimate(self, quote: Quote) -> float:
         try:
-            row = getattr(self._signal_engine, "last_row", None)
-            if callable(row):
-                r = row(self._market, 15)
-                if r is not None:
-                    return float(r.get("atr", 0) or 0)
-            df = self._signal_engine.quote_df(self._market)
-            if df is not None and len(df) > 0:
-                return float(df.iloc[-1].get("atr", 0) or 0)
+            row = self._tick_indicator_snapshot(quote)
+            if row:
+                return float(row.get("atr", 0) or 0)
         except Exception:
             pass
         return 0.0

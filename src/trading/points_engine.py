@@ -955,7 +955,7 @@ class PointsEngine:
         """Manual review — release STOP latch (spec: no auto-recovery from STOP)."""
         with _lock:
             self._stop_latched = False
-        self.flush_persist()
+            self._request_persist()
 
     def admin_reset_cumulative(self) -> tuple[float, PointsStateName]:
         """Operator reset — zero cumulative, clear WARNING/STOP latch, return HEALTHY."""
@@ -974,7 +974,7 @@ class PointsEngine:
             self._last_nominal = "HEALTHY"
             self._equity_lock_announced = False
             self._operator_reset_healthy = True
-        self.flush_persist()
+            self._request_persist()
         return previous, "HEALTHY"
 
     def snapshot(self) -> PointsSnapshot:

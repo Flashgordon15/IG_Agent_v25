@@ -163,12 +163,24 @@ def ml_clean_start_date(cfg: Config) -> str:
 
 _ml_clean_training_rows_lock = threading.Lock()
 _ml_clean_training_rows_cache: dict[str, int] = {}
+_ml_clean_training_rows_stale: dict[str, int] = {}
+_ml_query_inflight = False
 
 
 def invalidate_ml_clean_training_rows_cache() -> None:
-    """Force refresh after ML training store changes (position open/close)."""
+    """Force async refresh after ML training store changes (position open/close)."""
+    with _ml_clean_training_rows_lock:
+        for key, count in _ml_clean_training_rows_cache.items():
+            _ml_clean_training_rows_stale[key] = count
+        _ml_clean_training_rows_cache.clear()
+
+
+def reset_ml_clean_training_rows_cache_for_tests() -> None:
+    global _ml_query_inflight
     with _ml_clean_training_rows_lock:
         _ml_clean_training_rows_cache.clear()
+        _ml_clean_training_rows_stale.clear()
+        _ml_query_inflight = False
 
 
 def _ml_clean_training_rows_cache_key(cfg: Config) -> str:
@@ -190,13 +202,35 @@ def _query_ml_clean_training_rows(cfg: Config) -> int:
         return 0
 
 
+def _schedule_ml_clean_training_rows_refresh(key: str, cfg: Config) -> None:
+    def _worker() -> None:
+        global _ml_query_inflight
+        try:
+            count = _query_ml_clean_training_rows(cfg)
+            with _ml_clean_training_rows_lock:
+                _ml_clean_training_rows_cache[key] = count
+                _ml_clean_training_rows_stale[key] = count
+        finally:
+            with _ml_clean_training_rows_lock:
+                _ml_query_inflight = False
+
+    threading.Thread(
+        target=_worker,
+        name=f"ml-rows-refresh-{key[:12]}",
+        daemon=True,
+    ).start()
+
+
 def ml_clean_training_rows(cfg: Config) -> int:
     """
-    Session-scoped ML row count — one SQLite count per process until invalidated.
+    Session-scoped ML row count — hot path never blocks on SQLite.
 
-    Invalidated on position open/close via ``execution.ml_training_hooks``.
+    Returns the last-known in-memory count immediately. Single-flight coalescing:
+    at most one background rehydration worker runs process-wide after invalidation.
     """
+    global _ml_query_inflight
     key = _ml_clean_training_rows_cache_key(cfg)
+    spawn_refresh = False
     with _ml_clean_training_rows_lock:
         if key in _ml_clean_training_rows_cache:
             try:
@@ -207,17 +241,48 @@ def ml_clean_training_rows(cfg: Config) -> int:
                 pass
             return _ml_clean_training_rows_cache[key]
 
-    try:
-        from system.diagnostics.perf_metrics import record_ml_rows_cache
+        stale = _ml_clean_training_rows_stale.get(key)
+        if _ml_query_inflight:
+            if stale is not None:
+                try:
+                    from system.diagnostics.perf_metrics import record_ml_rows_cache
 
-        record_ml_rows_cache(hit=False)
-    except Exception:
-        pass
+                    record_ml_rows_cache(hit=True)
+                except Exception:
+                    pass
+                return stale
+            try:
+                from system.diagnostics.perf_metrics import record_ml_rows_cache
 
-    count = _query_ml_clean_training_rows(cfg)
-    with _ml_clean_training_rows_lock:
-        _ml_clean_training_rows_cache[key] = count
-    return count
+                record_ml_rows_cache(hit=False)
+            except Exception:
+                pass
+            return 0
+
+        _ml_query_inflight = True
+        spawn_refresh = True
+        if stale is not None:
+            try:
+                from system.diagnostics.perf_metrics import record_ml_rows_cache
+
+                record_ml_rows_cache(hit=True)
+            except Exception:
+                pass
+            stale_value = stale
+        else:
+            try:
+                from system.diagnostics.perf_metrics import record_ml_rows_cache
+
+                record_ml_rows_cache(hit=False)
+            except Exception:
+                pass
+            stale_value = None
+
+    if spawn_refresh:
+        _schedule_ml_clean_training_rows_refresh(key, cfg)
+    if stale_value is not None:
+        return stale_value
+    return 0
 
 
 def should_use_interim_scorer(cfg: Config) -> bool:

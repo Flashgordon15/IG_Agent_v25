@@ -194,17 +194,33 @@ class InterimScorerTests(unittest.TestCase):
         self.assertEqual(ml_min_rows_for_model(cfg), 75)
 
     def test_ml_clean_training_rows_session_cache(self) -> None:
+        import time
+
+        from ml import interim_scorer as ims
+        from ml.interim_scorer import reset_ml_clean_training_rows_cache_for_tests
+
+        reset_ml_clean_training_rows_cache_for_tests()
         cfg = _cfg()
-        invalidate_ml_clean_training_rows_cache()
+        key = ims._ml_clean_training_rows_cache_key(cfg)
+        with ims._ml_clean_training_rows_lock:
+            ims._ml_clean_training_rows_cache[key] = 42
+            ims._ml_clean_training_rows_stale[key] = 42
         with patch(
-            "ml.interim_scorer._query_ml_clean_training_rows", return_value=42
+            "ml.interim_scorer._query_ml_clean_training_rows", return_value=99
         ) as query_mock:
             self.assertEqual(ml_clean_training_rows(cfg), 42)
             self.assertEqual(ml_clean_training_rows(cfg), 42)
-            self.assertEqual(query_mock.call_count, 1)
+            self.assertEqual(query_mock.call_count, 0)
             invalidate_ml_clean_training_rows_cache()
             self.assertEqual(ml_clean_training_rows(cfg), 42)
-            self.assertEqual(query_mock.call_count, 2)
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                with ims._ml_clean_training_rows_lock:
+                    if ims._ml_clean_training_rows_cache.get(key) == 99:
+                        break
+                time.sleep(0.02)
+            self.assertEqual(ml_clean_training_rows(cfg), 99)
+            self.assertEqual(query_mock.call_count, 1)
 
 
 if __name__ == "__main__":

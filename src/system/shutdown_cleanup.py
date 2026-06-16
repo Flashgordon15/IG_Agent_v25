@@ -205,11 +205,16 @@ def perform_shutdown_cleanup(
         log_engine(f"shutdown cleanup: stop_trading error (continuing): {e}")
 
     try:
-        from runtime.agent_bootstrap import stop_ig_position_sync, stop_market_stream
+        from runtime.agent_bootstrap import (
+            stop_ig_position_sync,
+            stop_market_stream,
+            stop_order_reconciler_worker,
+        )
 
         stop_market_stream()
+        stop_order_reconciler_worker()
         stop_ig_position_sync()
-        log_engine("shutdown cleanup: market stream and position sync stopped")
+        log_engine("shutdown cleanup: market stream, reconciler, and position sync stopped")
     except Exception as e:
         log_engine(f"shutdown cleanup: stream/sync stop error (continuing): {e}")
 

@@ -14,10 +14,6 @@ RUNTIME_DAY_KEY = "daily_loss_reset_day"
 RUNTIME_AT_KEY = "daily_loss_reset_at"
 
 _DAILY_LOSS_GATE_CACHE_TTL_SEC = 2.0
-_daily_loss_gate_cache_lock = threading.Lock()
-_daily_loss_gate_cache: dict[
-    tuple[int, str], tuple[float, tuple[bool, str, dict[str, Any]]]
-] = {}
 
 
 def _today() -> str:
@@ -25,9 +21,15 @@ def _today() -> str:
 
 
 def invalidate_daily_loss_gate_cache() -> None:
-    """Clear TTL cache (tests, baseline reset, manual refresh)."""
-    with _daily_loss_gate_cache_lock:
-        _daily_loss_gate_cache.clear()
+    """Clear TTL snapshot (tests, baseline reset, manual refresh)."""
+    from system.portfolio_envelope import _envelope
+
+    env = _envelope()
+    with env._allocation_lock:
+        env._daily_loss_gate_anchor_mono = 0.0
+        env._daily_loss_gate_cache_key = (-1, "")
+        env._daily_loss_gate_result = None
+        env._daily_loss_gate_refresh_inflight = False
 
 
 def daily_loss_reset_snapshot(store: Any | None) -> dict[str, Any]:
@@ -148,6 +150,28 @@ def _daily_loss_gate_status_uncached(
     return True, f"daily loss £{loss:.2f} < £{soft:.0f}", {**meta, "tier": "ok"}
 
 
+def _schedule_daily_loss_gate_refresh(
+    store: Any | None,
+    cfg: Any | None,
+    cache_key: tuple[int, str],
+) -> None:
+    def _worker() -> None:
+        from system.portfolio_envelope import _envelope
+
+        env = _envelope()
+        try:
+            result = _daily_loss_gate_status_uncached(store, cfg)
+            env.write_daily_loss_gate_snapshot(cache_key, result)
+        finally:
+            env.end_daily_loss_gate_refresh()
+
+    threading.Thread(
+        target=_worker,
+        name="daily-loss-gate-refresh",
+        daemon=True,
+    ).start()
+
+
 def daily_loss_gate_status(
     store: Any | None,
     cfg: Any | None = None,
@@ -155,23 +179,38 @@ def daily_loss_gate_status(
     """
     Returns (passed, detail, meta) for points_state / risk gates.
 
-    Uses a 2s process-wide TTL cache keyed by store identity and calendar day
-    so six epic loops do not each hit SQLite on every tick.
+    Process-wide 2s TTL snapshot anchored under ``PortfolioEnvelope._allocation_lock``.
+    On expiry, returns the last-known snapshot immediately and refreshes SQLite in a
+    background thread so concurrent epic loops never stampede the DB.
     """
-    d = _today()
-    cache_key = (id(store) if store is not None else 0, d)
-    now = time.monotonic()
-    with _daily_loss_gate_cache_lock:
-        cached = _daily_loss_gate_cache.get(cache_key)
-        if cached is not None and (now - cached[0]) < _DAILY_LOSS_GATE_CACHE_TTL_SEC:
-            ok, detail, meta = cached[1]
-            try:
-                from system.diagnostics.perf_metrics import record_daily_loss_cache
+    from system.portfolio_envelope import _envelope
 
-                record_daily_loss_cache(hit=True)
-            except Exception:
-                pass
-            return ok, detail, copy.deepcopy(meta)
+    cache_key = (id(store) if store is not None else 0, _today())
+    env = _envelope()
+
+    fresh = env.read_daily_loss_gate_snapshot(
+        cache_key, ttl_sec=_DAILY_LOSS_GATE_CACHE_TTL_SEC
+    )
+    if fresh is not None:
+        try:
+            from system.diagnostics.perf_metrics import record_daily_loss_cache
+
+            record_daily_loss_cache(hit=True)
+        except Exception:
+            pass
+        return fresh
+
+    stale, schedule_refresh = env.consume_expired_daily_loss_gate(cache_key)
+    if stale is not None:
+        if schedule_refresh:
+            _schedule_daily_loss_gate_refresh(store, cfg, cache_key)
+        try:
+            from system.diagnostics.perf_metrics import record_daily_loss_cache
+
+            record_daily_loss_cache(hit=True)
+        except Exception:
+            pass
+        return stale
 
     try:
         from system.diagnostics.perf_metrics import record_daily_loss_cache
@@ -181,8 +220,6 @@ def daily_loss_gate_status(
         pass
 
     result = _daily_loss_gate_status_uncached(store, cfg)
-    with _daily_loss_gate_cache_lock:
-        _daily_loss_gate_cache[cache_key] = (now, result)
-
+    env.write_daily_loss_gate_snapshot(cache_key, result)
     ok, detail, meta = result
     return ok, detail, copy.deepcopy(meta)

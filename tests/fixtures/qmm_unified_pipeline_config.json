@@ -1,0 +1,29 @@
+{
+  "operating_mode": "DEMO",
+  "dry_run": false,
+  "allow_live_trading": true,
+  "signal_threshold": 85,
+  "trade_size": 1.0,
+  "stop_distance_points": 40.0,
+  "default_stop_distance_points": 40.0,
+  "risk_points": 40,
+  "max_spread_points": 35.0,
+  "max_spread": 35.0,
+  "max_positions_per_epic": 2,
+  "reward_multiple": 2.0,
+  "adaptive_min_trade_size": 0.5,
+  "adaptive_max_trade_size": 5.0,
+  "enforce_top3_rotation_filter": false,
+  "spread_to_atr_circuit_breaker_max": 10.0,
+  "protective_learning": {
+    "session_score_floor": -30.0,
+    "signal_confidence_floor_min": 10.0,
+    "high_vol_atr_multiplier": 0.25,
+    "volatility_threshold_relax_strength": 0.95
+  },
+  "qmm_framework": {
+    "rotation_refresh_seconds": 60,
+    "scalp_atr_multiplier_max": 0.35,
+    "trend_atr_multiplier_min": 0.85
+  }
+}

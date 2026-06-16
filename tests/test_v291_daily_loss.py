@@ -25,6 +25,15 @@ from system.v291_upgrade import apply_v291_upgrade
 
 
 class DailyLossPolicyTests(unittest.TestCase):
+    def setUp(self) -> None:
+        invalidate_daily_loss_gate_cache()
+        try:
+            from system.portfolio_envelope import reset_portfolio_envelope_for_tests
+
+            reset_portfolio_envelope_for_tests()
+        except Exception:
+            pass
+
     def test_effective_pnl_zero_after_baseline_same_day(self) -> None:
         store = MagicMock()
         store.sum_daily_pnl.return_value = -1338.17

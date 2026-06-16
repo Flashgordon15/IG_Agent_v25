@@ -13,6 +13,58 @@ import {
 import { api } from "../api/client.js";
 import { APP_VERSION_LABEL } from "../utils/roadmapTelemetry.js";
 
+/** Permanent roadmap metadata log — boot / cleanup / hot-path phases. */
+const ROADMAP_METADATA_PHASES = [
+  {
+    id: "phase-1",
+    title: "Phase 1: Boot Lifecycle",
+    status: "COMPLETED",
+    summary:
+      "Sequential Gatekeeper boot (G1→G5) via BootCoordinator; Uvicorn binds early; SystemState.READY is sole trade-authority truth; lazy router mount and post_ready_services defer heavy workers until READY.",
+  },
+  {
+    id: "phase-2",
+    title: "Phase 2: Pre-Startup Cleanups",
+    status: "COMPLETED",
+    summary:
+      "main.py pre-startup tears down stale PIDs, frees :8080, evicts instance lock, and wipes inflight/pending runtime_state residue; manual_stop watchdog hold protocol prevents zombie relaunch during operator restarts.",
+  },
+  {
+    id: "phase-3",
+    title: "Phase 3: Execution Hot-Path Hardening",
+    status: "COMPLETED",
+    summary:
+      "Gate 1 market-status REST decoupled to MarketStatusUpdater (60s); daily-loss 2s TTL; ML rows async stale-while-revalidate; PointsPersistWorker 5s disk flush; OrderConfirmWorker + OrderReconcilerWorker (30s PENDING_RECONCILE scavenger) off tick thread.",
+  },
+];
+
+const V291_CONCURRENCY_CHAOS_MATRIX = [
+  {
+    title: "Process-wide ML single-flight lock",
+    detail:
+      "interim_scorer._ml_query_inflight — one background SQLite fetch per process; concurrent epic threads receive stale-while-revalidate rows instantly while a single worker refreshes the cache; inflight cleared in finally block.",
+    mono: "_ml_query_inflight: bool  # interim_scorer.py",
+  },
+  {
+    title: "Atomic daily-loss gate refresh",
+    detail:
+      "PortfolioEnvelope.consume_expired_daily_loss_gate() — under _allocation_lock only one winner sets _daily_loss_gate_refresh_inflight and spawns the background refresh thread; other threads read the 2s TTL snapshot without duplicate REST/ledger hits.",
+    mono: "consume_expired_daily_loss_gate(cache_key) → (stale, schedule_refresh)",
+  },
+  {
+    title: "Pass-by-reference live_state_vector (Gates 10 → 11 → 7)",
+    detail:
+      "TradingLoop._tick_live_state_vector is a mutable dict built once per tick via _build_live_state_vector(); Gate 10 (signal_confidence) publishes features; Gate 11 (ml_veto) calls _publish_ml_sizing_multiplier() writing ml_sizing_multiplier into the same object; Gate 7 (risk_validation) reads sizing via _ml_sizing_multiplier_from_live_state() — zero re-extract or duplicate ML queries on the hot path.",
+    mono: "_tick_live_state_vector: dict[str, Any] | None  # per-tick memo",
+  },
+  {
+    title: "Chaos shield matrix (QMM E2E)",
+    detail:
+      "test_qmm_chaos_monkey.py injects REST dropout mid-dispatch, LearningStore SQLite lock, and corrupted MarketDataHub quotes; global exception shields trap 100% of failures, polling threads survive, and portfolio gate reservations roll back via release_allocation / OrderReconcilerWorker.",
+    mono: "OrderReconcilerWorker · reconcile_all_pending_orders() · 30s cadence",
+  },
+];
+
 /** Verified production capabilities — shipped in v29.1 core. */
 const ROADMAP_COMPLETE = [
   "Sub-microsecond Trailing Stop Evaluation Engine (~1.5µs execution)",
@@ -85,11 +137,95 @@ const V291_BACKGROUND_WORKERS = [
     shield: "try/except Exception per job — never blocks gates",
   },
   {
+    name: "OrderReconcilerWorker",
+    role: "30s PENDING_RECONCILE scavenger — GET /positions/otc/{dealId}",
+    shield: "try/except Exception per tick; release_stashed_pending_portfolio on broker reject",
+  },
+  {
+    name: "MarketStatusUpdater",
+    role: "60s background Gate 1 session-open cache (no sync REST on tick thread)",
+    shield: "try/except Exception per poll — stale-while-revalidate for session_open gate",
+  },
+  {
     name: "PointsPersistWorker",
     role: "5s flush of points_state.json off hot path",
     shield: "try/except Exception per engine flush cycle",
   },
 ];
+
+function RoadmapMetadataLogCanvas() {
+  return (
+    <section className="rounded-lg border border-border/80 bg-card/30 p-3">
+      <div className="mb-3 flex items-start gap-2">
+        <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-success" aria-hidden />
+        <div>
+          <h3 className="text-[12px] font-bold uppercase tracking-wide text-foreground">
+            Permanent Roadmap Metadata Log
+          </h3>
+          <p className="mt-1 text-[10px] leading-relaxed text-muted">
+            Authoritative phase ledger — read-only technical status for boot,
+            cleanup, and execution hardening milestones ({APP_VERSION_LABEL}).
+          </p>
+        </div>
+      </div>
+      <ol className="space-y-2">
+        {ROADMAP_METADATA_PHASES.map((phase) => (
+          <li
+            key={phase.id}
+            className="rounded-md border border-success/30 bg-success/5 px-2.5 py-2"
+          >
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[11px] font-semibold text-foreground">
+                {phase.title}
+              </span>
+              <span className="rounded border border-success/40 bg-success/15 px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase tracking-wide text-success">
+                [COMPLETED]
+              </span>
+            </div>
+            <p className="mt-1 text-[10px] leading-snug text-muted">
+              {phase.summary}
+            </p>
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+}
+
+function V291ConcurrencyChaosMatrix() {
+  return (
+    <section
+      className="rounded-lg border border-success/35 bg-gradient-to-br from-success/10 via-bg to-card/40 p-3"
+      aria-readonly="true"
+    >
+      <div className="mb-3 flex items-start gap-2">
+        <Shield className="mt-0.5 h-4 w-4 shrink-0 text-success" aria-hidden />
+        <div>
+          <h3 className="text-[12px] font-bold uppercase tracking-wide text-success">
+            v29.1 Multi-Market Single-Flight Concurrency &amp; Chaos Shield Matrix
+          </h3>
+          <p className="mt-1 text-[10px] leading-relaxed text-muted">
+            Read-only specification — process-wide locks, atomic gate refresh
+            spawns, and mutable per-tick state object layout across the QMM
+            multi-epic execution plane.
+          </p>
+        </div>
+      </div>
+      <div className="space-y-2">
+        {V291_CONCURRENCY_CHAOS_MATRIX.map((row) => (
+          <div
+            key={row.title}
+            className="rounded-md border border-border/70 bg-bg/50 p-2.5"
+          >
+            <p className="text-[10px] font-semibold text-foreground">{row.title}</p>
+            <p className="mt-1 text-[10px] leading-snug text-muted">{row.detail}</p>
+            <p className="mt-1.5 font-mono text-[9px] text-accent">{row.mono}</p>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
 
 function V291InMemoryExecutionLayer() {
   const lazyRoutes = [
@@ -419,6 +555,10 @@ export default function RoadmapProgressModal({ open, onClose }) {
             items={ROADMAP_PLANNED}
             variant="planned"
           />
+
+          <RoadmapMetadataLogCanvas />
+
+          <V291ConcurrencyChaosMatrix />
 
           <V291ArchitectureCanvas />
 

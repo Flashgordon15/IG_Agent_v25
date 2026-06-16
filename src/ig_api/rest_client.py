@@ -1325,6 +1325,29 @@ class IGRestClient:
                 return item
         return None
 
+    def get_position_otc(self, deal_id: str) -> dict[str, Any] | None:
+        """GET /positions/otc/{dealId} — verify OTC position; fallback to list scan."""
+        want = str(deal_id).strip()
+        if not want:
+            return None
+        try:
+            self.ensure_session()
+            r = self.request(
+                "GET",
+                f"/positions/otc/{want}",
+                headers=self._auth_headers("2"),
+                budget_priority=True,
+            )
+            if r.status_code == 200:
+                body = r.json()
+                if isinstance(body, dict) and body:
+                    return body
+            if r.status_code == 404:
+                return None
+        except Exception:
+            pass
+        return self.find_open_position(want)
+
     def ensure_protective_stops(
         self,
         deal_id: str,

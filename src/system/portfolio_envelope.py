@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import threading
+import time
 from datetime import date
 from functools import lru_cache
 from typing import Any
 
 from system.paths import project_root
+
+_DAILY_LOSS_GATE_CACHE_TTL_SEC = 2.0
 
 
 @lru_cache(maxsize=1)
@@ -48,6 +52,13 @@ class PortfolioEnvelope:
         self._daily_deployed_gbp: float = 0.0
         self._daily_pnl_gbp: float = 0.0
         self._envelope_utc_day: str = ""
+        # Process-wide daily-loss gate snapshot (shared across epic loops).
+        self._daily_loss_gate_anchor_mono: float = 0.0
+        self._daily_loss_gate_cache_key: tuple[int, str] = (-1, "")
+        self._daily_loss_gate_result: (
+            tuple[bool, str, dict[str, Any]] | None
+        ) = None
+        self._daily_loss_gate_refresh_inflight: bool = False
 
     def reset_for_tests(self) -> None:
         with self._allocation_lock:
@@ -55,8 +66,85 @@ class PortfolioEnvelope:
             self._daily_deployed_gbp = 0.0
             self._daily_pnl_gbp = 0.0
             self._envelope_utc_day = ""
+            self._daily_loss_gate_anchor_mono = 0.0
+            self._daily_loss_gate_cache_key = (-1, "")
+            self._daily_loss_gate_result = None
+            self._daily_loss_gate_refresh_inflight = False
         _envelope_config.cache_clear()
         _gate_config.cache_clear()
+
+    def read_daily_loss_gate_snapshot(
+        self,
+        cache_key: tuple[int, str],
+        *,
+        ttl_sec: float = _DAILY_LOSS_GATE_CACHE_TTL_SEC,
+    ) -> tuple[bool, str, dict[str, Any]] | None:
+        with self._allocation_lock:
+            if self._daily_loss_gate_result is None:
+                return None
+            if self._daily_loss_gate_cache_key != cache_key:
+                return None
+            if (time.monotonic() - self._daily_loss_gate_anchor_mono) >= ttl_sec:
+                return None
+            ok, detail, meta = self._daily_loss_gate_result
+            return ok, detail, copy.deepcopy(meta)
+
+    def read_daily_loss_gate_stale(
+        self, cache_key: tuple[int, str]
+    ) -> tuple[bool, str, dict[str, Any]] | None:
+        with self._allocation_lock:
+            if (
+                self._daily_loss_gate_result is None
+                or self._daily_loss_gate_cache_key != cache_key
+            ):
+                return None
+            ok, detail, meta = self._daily_loss_gate_result
+            return ok, detail, copy.deepcopy(meta)
+
+    def write_daily_loss_gate_snapshot(
+        self,
+        cache_key: tuple[int, str],
+        result: tuple[bool, str, dict[str, Any]],
+        *,
+        anchor_mono: float | None = None,
+    ) -> None:
+        with self._allocation_lock:
+            self._daily_loss_gate_cache_key = cache_key
+            self._daily_loss_gate_result = result
+            self._daily_loss_gate_anchor_mono = (
+                float(anchor_mono)
+                if anchor_mono is not None
+                else time.monotonic()
+            )
+            self._daily_loss_gate_refresh_inflight = False
+
+    def consume_expired_daily_loss_gate(
+        self,
+        cache_key: tuple[int, str],
+    ) -> tuple[tuple[bool, str, dict[str, Any]] | None, bool]:
+        """
+        Single-flight stale serve when the TTL window has expired.
+
+        Returns ``(stale_snapshot, schedule_refresh)``. ``schedule_refresh`` is
+        True for exactly one caller that set ``_daily_loss_gate_refresh_inflight``
+        while still holding ``_allocation_lock``.
+        """
+        with self._allocation_lock:
+            if (
+                self._daily_loss_gate_result is None
+                or self._daily_loss_gate_cache_key != cache_key
+            ):
+                return None, False
+            ok, detail, meta = self._daily_loss_gate_result
+            stale = (ok, detail, copy.deepcopy(meta))
+            if self._daily_loss_gate_refresh_inflight:
+                return stale, False
+            self._daily_loss_gate_refresh_inflight = True
+            return stale, True
+
+    def end_daily_loss_gate_refresh(self) -> None:
+        with self._allocation_lock:
+            self._daily_loss_gate_refresh_inflight = False
 
     def _maybe_roll_utc_day_unlocked(self) -> None:
         today = date.today().isoformat()

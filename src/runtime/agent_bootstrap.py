@@ -28,6 +28,7 @@ from trading.trading_loop import TradingLoop as AgentTradingLoop
 
 _stream_client: Any | None = None
 _position_sync: Any | None = None
+_order_reconciler: Any | None = None
 
 
 _INSTRUMENT_CFG_KEYS = (
@@ -122,6 +123,45 @@ def stop_ig_position_sync(sync: Any | None = None) -> None:
         log_engine(f"IG position sync stop failed: {type(e).__name__}: {e}")
     if target is _position_sync:
         _position_sync = None
+
+
+def start_order_reconciler_worker(
+    rest_client: Any,
+    *,
+    config: Any | None = None,
+) -> Any | None:
+    """Start 30s scavenger for PENDING_RECONCILE broker ambiguity."""
+    global _order_reconciler
+    if rest_client is None:
+        return None
+    try:
+        from execution.order_reconciler_worker import (
+            start_order_reconciler_worker as _start,
+        )
+
+        worker = _start(rest_client, config=config)
+        _order_reconciler = worker
+        return worker
+    except Exception as e:
+        log_engine(f"OrderReconcilerWorker start failed: {type(e).__name__}: {e}")
+        return None
+
+
+def stop_order_reconciler_worker(worker: Any | None = None) -> None:
+    global _order_reconciler
+    target = worker if worker is not None else _order_reconciler
+    if target is None:
+        return
+    try:
+        from execution.order_reconciler_worker import (
+            stop_order_reconciler_worker as _stop,
+        )
+
+        _stop(target)
+    except Exception as e:
+        log_engine(f"OrderReconcilerWorker stop failed: {type(e).__name__}: {e}")
+    if target is _order_reconciler:
+        _order_reconciler = None
 
 
 def _build_single_loop(
@@ -493,6 +533,7 @@ def build_market_orchestrator(
             managed_epics=managed_epics,
             transaction_sync=txn_sync,
         )
+        start_order_reconciler_worker(rest_client, config=cfg)
 
     loops: list[AgentTradingLoop] = []
     for iid, inst in enabled:

@@ -923,15 +923,15 @@ class TestSession7InFlightAutoExpiry:
 
         sys.path.insert(0, str(SRC))
         src_text = (SRC / "execution" / "live_executor.py").read_text()
-        assert "if ref:" in src_text and "mark_pending(" in src_text, (
-            "live_executor.py must guard mark_pending() with 'if ref:' to skip "
+        assert "if ref:" in src_text and "mark_order_pending(" in src_text, (
+            "live_executor.py must guard mark_order_pending() with 'if ref:' to skip "
             "rate-cap-deferred orders that never reached IG"
         )
-        # The guard must appear BEFORE the mark_pending call in the IGAPIError handler
+        # The guard must appear BEFORE the mark_order_pending call in the IGAPIError handler
         guard_idx = src_text.index("if ref:")
-        mark_idx = src_text.index("mark_pending(", guard_idx)
+        mark_idx = src_text.index("mark_order_pending(", guard_idx)
         assert mark_idx > guard_idx, (
-            "The 'if ref:' guard must appear before the mark_pending() call "
+            "The 'if ref:' guard must appear before the mark_order_pending() call "
             "in the IGAPIError handler"
         )
 

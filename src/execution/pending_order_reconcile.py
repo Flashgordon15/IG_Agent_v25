@@ -44,6 +44,8 @@ _PENDING_LOAD_MAX_AGE_SEC = 120.0
 
 ORDER_TYPE_ENTRY = "entry"
 ORDER_TYPE_EXIT = "exit"
+# Ambiguous broker response (socket dropout / confirm timeout) — scavenger must verify.
+PENDING_RECONCILE = "PENDING_RECONCILE"
 
 _lock = threading.RLock()
 _pending: dict[str, "PendingOrder"] = {}
@@ -57,6 +59,7 @@ class PendingOrder:
     order_type: str
     local_created_at: float
     broker_deal_reference: str = ""
+    pending_reconcile: bool = False
 
 
 def _epic_key(epic: str) -> str:
@@ -69,6 +72,8 @@ def mark_pending(
     side: str,
     order_type: str,
     deal_reference: str = "",
+    pending_reconcile: bool = False,
+    execution_params: dict[str, Any] | None = None,
 ) -> None:
     """Mark an order as pending broker confirmation."""
     key = _epic_key(epic)
@@ -77,6 +82,7 @@ def mark_pending(
     if order_type not in (ORDER_TYPE_ENTRY, ORDER_TYPE_EXIT):
         return
     now = time.time()
+    reconcile = bool(pending_reconcile)
     with _lock:
         _pending[key] = PendingOrder(
             epic=key,
@@ -84,10 +90,22 @@ def mark_pending(
             order_type=order_type,
             local_created_at=now,
             broker_deal_reference=str(deal_reference or "").strip(),
+            pending_reconcile=reconcile,
         )
+    if reconcile and execution_params:
+        try:
+            from execution.portfolio_hooks import stash_pending_portfolio_release
+
+            stash_pending_portfolio_release(key, execution_params)
+        except Exception as e:
+            log_engine(
+                f"pending_order_reconcile: stash portfolio release failed "
+                f"epic={key}: {type(e).__name__}: {e}"
+            )
+    flag = f" {PENDING_RECONCILE}" if reconcile else ""
     log_engine(
         f"Order confirmation pending for {key} ({order_type} {side or '?'} "
-        f"ref={deal_reference or '-'})"
+        f"ref={deal_reference or '-'}{flag})"
     )
     _request_save()
 
@@ -106,8 +124,15 @@ def set_pending_deal_reference(epic: str, deal_reference: str) -> None:
             order_type=rec.order_type,
             local_created_at=rec.local_created_at,
             broker_deal_reference=str(deal_reference or "").strip(),
+            pending_reconcile=rec.pending_reconcile,
         )
     _request_save()
+
+
+def list_pending_orders() -> list[PendingOrder]:
+    """Snapshot of all live pending orders (may include expired on next has_pending)."""
+    with _lock:
+        return list(_pending.values())
 
 
 def has_pending(epic: str, *, expiry_sec: float = PENDING_HARD_EXPIRY_SEC) -> bool:
@@ -160,6 +185,12 @@ def resolve_pending(epic: str, *, reason: str = "") -> bool:
             f"Order confirmation resolved for {key} ({rec.order_type}) — {reason}"
         )
     if rec is not None:
+        try:
+            from execution.portfolio_hooks import clear_stashed_pending_portfolio
+
+            clear_stashed_pending_portfolio(key)
+        except Exception:
+            pass
         _request_save()
     return rec is not None
 
@@ -289,6 +320,7 @@ def dump_pending_state() -> dict[str, Any]:
                     "order_type": p.order_type,
                     "local_created_at": p.local_created_at,
                     "broker_deal_reference": p.broker_deal_reference,
+                    "pending_reconcile": p.pending_reconcile,
                 }
                 for p in _pending.values()
             ]
@@ -333,4 +365,5 @@ def load_pending_state(data: dict[str, Any]) -> None:
                 order_type=order_type,
                 local_created_at=ts,
                 broker_deal_reference=str(item.get("broker_deal_reference") or ""),
+                pending_reconcile=bool(item.get("pending_reconcile")),
             )

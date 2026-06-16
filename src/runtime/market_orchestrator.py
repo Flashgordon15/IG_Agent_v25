@@ -570,6 +570,28 @@ class MarketOrchestrator:
             )
         self._stop.clear()
         self._running = True
+        try:
+            from system.market_watch.market_status_updater import (
+                ensure_market_status_updater_started,
+            )
+
+            epics = [
+                str(loop._epic) for loop in self._loops if getattr(loop, "_epic", "")
+            ]
+            rest_client = None
+            primary = self.primary
+            if primary is not None:
+                rest_fn = getattr(primary, "_rest_client", None)
+                if callable(rest_fn):
+                    rest_client = rest_fn()
+            ensure_market_status_updater_started(
+                epics=epics,
+                rest_client=rest_client,
+            )
+        except Exception as e:
+            log_engine(
+                f"market_status_updater start skipped: {type(e).__name__}: {e}"
+            )
         for loop in self._loops:
             loop.start()
         log_engine(
