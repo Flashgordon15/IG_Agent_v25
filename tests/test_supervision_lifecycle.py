@@ -13,10 +13,12 @@ from system.shutdown_cleanup import agent_fully_stopped, stopped_verification_ch
 class SupervisionLifecycleTests(unittest.TestCase):
     def test_agent_fully_stopped_allows_launchd_watchdog(self) -> None:
         fake_data = Path("/tmp/ig_agent_test_supervision/data")
+        fake_lock = fake_data / ".ig_agent_v29.lock"
         with (
             patch("system.shutdown_cleanup._list_main_py_pids", return_value=[]),
             patch("system.shutdown_cleanup._port_bound", return_value=False),
             patch("system.shutdown_cleanup.data_dir", return_value=fake_data),
+            patch("system.instance_lock.lock_path", return_value=fake_lock),
             patch(
                 "system.overnight_supervision.launchd_watchdog_active",
                 return_value=True,
@@ -143,8 +145,11 @@ class LaunchdKeepAliveRegressionTests(unittest.TestCase):
         from fastapi.testclient import TestClient
 
         from api.server import create_app
+        from api.server_deferred import mount_deferred_routers
 
-        client = TestClient(create_app(watch_snapshot=False))
+        app = create_app(watch_snapshot=False, use_boot_pipeline=False)
+        mount_deferred_routers(app, None)
+        client = TestClient(app)
         with (
             patch("api.routes.os._exit"),
             patch("system.shutdown_cleanup.spawn_post_shutdown_verifier"),
@@ -172,10 +177,12 @@ class LaunchdKeepAliveRegressionTests(unittest.TestCase):
         )
 
         fake_data = Path("/tmp/ig_agent_test_supervision/data")
+        fake_lock = fake_data / ".ig_agent_v29.lock"
         with (
             patch("system.shutdown_cleanup._list_main_py_pids", return_value=[]),
             patch("system.shutdown_cleanup._port_bound", return_value=False),
             patch("system.shutdown_cleanup.data_dir", return_value=fake_data),
+            patch("system.instance_lock.lock_path", return_value=fake_lock),
             patch(
                 "system.overnight_supervision.launchd_watchdog_active",
                 return_value=True,
@@ -194,8 +201,11 @@ class LaunchdKeepAliveRegressionTests(unittest.TestCase):
         from fastapi.testclient import TestClient
 
         from api.server import create_app
+        from api.server_deferred import mount_deferred_routers
 
-        client = TestClient(create_app(watch_snapshot=False))
+        app = create_app(watch_snapshot=False, use_boot_pipeline=False)
+        mount_deferred_routers(app, None)
+        client = TestClient(app)
         fake_drift = {"ok": True, "issues": [], "warnings": []}
         fake_summary = {"launchd_watchdog": True, "overnight_armed": False}
         with (

@@ -11,6 +11,7 @@
     "enabled": true,
     "signal_threshold_floor": 62,
     "fitness_min_floor": 55,
+    "session_score_floor": -30.0,
     "_note": "Phase 2 — raise entry bar while collecting agent-labelled trades; works with demo_soak relaxations reduced below."
   },
   "sentiment_guard": {
@@ -28,7 +29,8 @@
   "enforce_1h_ema_filter": true,
   "enforce_top3_rotation_filter": false,
   "max_open_positions": 5,
-  "max_positions_per_epic": 3,
+  "max_positions_per_epic": 2,
+  "max_positions": 5,
   "_live_ops_note": "2026-06-13 — sizing headroom restored; rotation filter off; london_morning enabled for US indices",
   "trading_hours_enabled": true,
   "trading_session_whitelist": [
@@ -121,8 +123,17 @@
     "relax_all_epics": true,
     "disable_rotation_filter": true,
     "bypass_ml_veto": false,
-    "spread_to_atr_circuit_max": 0.35,
+    "spread_to_atr_circuit_max": 10.0,
     "require_points_healthy": true
+  },
+  "qmm_framework": {
+    "enabled": true,
+    "rotation_interval_sec": 60,
+    "scalp_atr_multiplier_max": 0.45,
+    "trend_atr_multiplier_min": 0.75,
+    "scalp_trailing_atr_mult": 0.35,
+    "trend_trailing_atr_mult": 1.25,
+    "_note": "QMM — dynamic multi-market selector + adaptive scalp/trend execution horizons (in-memory, no indicator math changes)."
   },
   "manual_intervention": {
     "daily_drawdown_shield_enabled": true,

@@ -20,6 +20,7 @@ from trading.trading_loop import (
     BLOCKED_SPREAD_TO_ATR_CIRCUIT_BREAKER,
     STAGE1_GBP_RISK_CAP,
     GateResult,
+    TickContext,
     TradingLoop,
     signal_gate_explanation,
 )
@@ -72,12 +73,27 @@ def _make_loop(**overrides) -> TradingLoop:
     config.adaptive_max_trade_size = 5.0
     config.currency_code = "GBP"
     config.max_daily_loss_gbp = 200.0
+    config.signal_threshold = 85
+    config.trading_hours_enabled = False
+    config.trading_session_whitelist = []
+    config.enforce_environment_fitness_filter = True
+    config.default_stop_distance_points = 40.0
+    config.reward_multiple = 2.0
+    config.as_dict.return_value = {
+        "instruments": {},
+        "trading_session_whitelist": [],
+        "enforce_top3_rotation_filter": False,
+    }
     config.get = MagicMock(
         side_effect=lambda key, default=None: {
             "ig_point_value_gbp": 1.0,
             "risk_cap_gbp": None,
             "enforce_top3_rotation_filter": False,
             "spread_to_atr_circuit_breaker_max": 0.30,
+            "scalping_framework": {"enabled": False},
+            "USE_ML_SIGNAL": False,
+            "protective_learning": {},
+            "demo_soak_mode": {"enabled": False},
         }.get(key, default)
     )
 
@@ -153,7 +169,16 @@ def _make_loop(**overrides) -> TradingLoop:
         "tick_interval_sec": 0.05,
     }
     kwargs.update(overrides)
-    return TradingLoop(**kwargs)
+    loop = TradingLoop(**kwargs)
+    # run_once() reloads disk config via get_config(); keep the test mock isolated.
+    _orig_run_tick_core = loop._run_tick_core
+
+    def _run_tick_core_isolated() -> TickContext | None:
+        with patch("system.config_loader.get_config", return_value=loop._config):
+            return _orig_run_tick_core()
+
+    loop._run_tick_core = _run_tick_core_isolated
+    return loop
 
 
 class SignalGateExplanationTests(unittest.TestCase):

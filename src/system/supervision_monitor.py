@@ -75,6 +75,19 @@ def evaluate_supervision_drift(*, port: int = 8080) -> dict[str, Any]:
         if len(duplicate) > 1:
             issues.append(f"duplicate_main_py_processes:{len(duplicate)}")
 
+        try:
+            from system.shutdown_cleanup import supervision_utility_permission_issues
+
+            blocked = supervision_utility_permission_issues()
+            if blocked:
+                issues.append(
+                    "supervision_scripts_not_executable:"
+                    + ",".join(blocked[:5])
+                    + ("…" if len(blocked) > 5 else "")
+                )
+        except Exception:
+            pass
+
     except Exception as e:
         issues.append(f"supervision_eval_error:{type(e).__name__}")
 
@@ -108,12 +121,28 @@ def _duplicate_main_pids() -> list[int]:
 
 def attempt_supervision_repair() -> tuple[bool, str]:
     """Best-effort reload of launchd supervision when plists are installed."""
+    notes: list[str] = []
+    try:
+        from system.shutdown_cleanup import ensure_supervision_utilities_executable
+
+        util_ok, repaired = ensure_supervision_utilities_executable()
+        if repaired:
+            notes.append("chmod +x " + ", ".join(repaired[:3]))
+        if not util_ok:
+            notes.append("supervision utilities still not executable")
+    except Exception as e:
+        notes.append(f"chmod repair skipped: {type(e).__name__}")
     try:
         from system.overnight_supervision import ensure_launchd_supervision_loaded
 
-        return ensure_launchd_supervision_loaded()
+        ok, detail = ensure_launchd_supervision_loaded()
+        if ok:
+            notes.append(detail)
+            return True, "; ".join(notes) if notes else detail
+        notes.append(detail)
     except Exception as e:
-        return False, f"repair failed: {type(e).__name__}: {e}"
+        notes.append(f"repair failed: {type(e).__name__}: {e}")
+    return False, "; ".join(notes) if notes else "repair failed"
 
 
 def run_supervision_monitor_tick(*, repair: bool = True) -> dict[str, Any]:

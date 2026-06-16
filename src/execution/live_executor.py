@@ -137,6 +137,27 @@ class LiveExecutor:
         if cfg.dry_run:
             return self._execute_dry_run(signal, execution_params, trade_manager)
 
+        gate_overlay = signal.gate_execution_params
+        if isinstance(gate_overlay, dict):
+            for key in (
+                "qmm_horizon",
+                "qmm_trailing_distance_points",
+                "qmm_trailing_trigger_points",
+                "qmm_breakeven_trigger_points",
+                "qmm_news_flow_sensitive",
+                "qmm_horizon_confidence",
+                "qmm_horizon_notes",
+            ):
+                if gate_overlay.get(key) is not None:
+                    execution_params[key] = gate_overlay.get(key)
+            horizon = str(gate_overlay.get("qmm_horizon") or "")
+            if horizon:
+                log_engine(
+                    f"QMM horizon={horizon} epic={signal.epic} "
+                    f"trail={gate_overlay.get('qmm_trailing_distance_points')} "
+                    f"news_sensitive={gate_overlay.get('qmm_news_flow_sensitive')}"
+                )
+
         if has_pending(signal.epic):
             from execution.pending_order_reconcile import (
                 is_unresolved_overdue,

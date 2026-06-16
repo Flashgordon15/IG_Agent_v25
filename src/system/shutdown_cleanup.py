@@ -6,13 +6,31 @@ import json
 import os
 import signal
 import socket
+import stat
 import subprocess
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 from system.engine_log import log_engine
-from system.paths import data_dir
+from system.paths import data_dir, find_python_executable, project_root
+
+# Supervision / post-exit utilities — must stay executable for launchd + verify spawn.
+_SUPERVISION_UTILITY_REL_PATHS: tuple[str, ...] = (
+    "scripts/watchdog.sh",
+    "scripts/install_launchd.sh",
+    "scripts/ensure_overnight_ready.sh",
+    "scripts/emergency_stop.sh",
+    "scripts/confirm_stopped.py",
+    "scripts/confirm_started.py",
+    "scripts/supervision_check.py",
+    "scripts/shutdown_verify_server.py",
+    "scripts/watchdog_launchd.py",
+    "scripts/safe_to_leave.py",
+    "scripts/loop_monitor_tick.sh",
+    "scripts/overnight_watch.sh",
+)
 
 _cleanup_done = False
 _MANUAL_STOP_FILE = data_dir() / "state" / "manual_stop.json"
@@ -300,12 +318,52 @@ def _list_main_py_pids() -> list[int]:
     return pids
 
 
-def _port_bound(port: int = 8080) -> bool:
+def _port_bound(port: int = 8080, *, timeout_sec: float = 1.0) -> bool:
+    """True when something accepts TCP connections on loopback (agent API up)."""
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(max(0.2, float(timeout_sec)))
             return s.connect_ex(("127.0.0.1", port)) == 0
     except Exception:
         return False
+
+
+def supervision_utility_paths() -> list[Path]:
+    root = project_root()
+    return [root / rel for rel in _SUPERVISION_UTILITY_REL_PATHS]
+
+
+def supervision_utility_permission_issues() -> list[str]:
+    """Return relative paths that exist but are not executable."""
+    issues: list[str] = []
+    for path in supervision_utility_paths():
+        if not path.is_file():
+            continue
+        if not os.access(path, os.X_OK):
+            issues.append(path.relative_to(project_root()).as_posix())
+    return issues
+
+
+def ensure_supervision_utilities_executable() -> tuple[bool, list[str]]:
+    """
+    chmod +x on supervision helpers so macOS launchd / spawn do not block them.
+    Returns (all_ok, repaired_relative_paths).
+    """
+    repaired: list[str] = []
+    for path in supervision_utility_paths():
+        if not path.is_file():
+            continue
+        rel = path.relative_to(project_root()).as_posix()
+        if os.access(path, os.X_OK):
+            continue
+        try:
+            mode = path.stat().st_mode
+            path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+            repaired.append(rel)
+        except OSError:
+            pass
+    remaining = supervision_utility_permission_issues()
+    return (len(remaining) == 0, repaired)
 
 
 def _instance_lock_holder_pid() -> int | None:
@@ -534,15 +592,13 @@ def post_cleanup_shutdown_checks(*, exclude_pid: int) -> list[dict[str, object]]
 
 def spawn_post_shutdown_verifier(parent_pid: int) -> None:
     """Detached process waits for agent exit then serves verify JSON on :8081."""
-    import sys
-
-    from system.paths import project_root
-
     root = project_root()
     script = root / "scripts" / "shutdown_verify_server.py"
     if not script.is_file():
         log_engine("shutdown verify: script missing — skipped")
         return
+    ensure_supervision_utilities_executable()
+    py = find_python_executable()
     try:
         log_path = data_dir() / "logs" / "shutdown_verify_spawn.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -554,7 +610,7 @@ def spawn_post_shutdown_verifier(parent_pid: int) -> None:
         err_fh = err_log.open("a", encoding="utf-8")
         subprocess.Popen(
             [
-                sys.executable,
+                py,
                 str(script),
                 "--parent-pid",
                 str(parent_pid),
@@ -562,6 +618,7 @@ def spawn_post_shutdown_verifier(parent_pid: int) -> None:
             cwd=str(root),
             env={
                 **dict(os.environ),
+                "IG_AGENT_ROOT": str(root),
                 "PYTHONPATH": str(root / "src"),
             },
             start_new_session=True,

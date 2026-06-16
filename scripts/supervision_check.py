@@ -38,6 +38,16 @@ def main() -> int:
     summary = overnight_supervision_summary()
     repairs_attempted: list[str] = []
     if args.repair:
+        from system.shutdown_cleanup import ensure_supervision_utilities_executable
+
+        util_ok, util_repaired = ensure_supervision_utilities_executable()
+        if util_repaired:
+            repairs_attempted.append(
+                "chmod +x " + ", ".join(util_repaired[:4])
+                + (" …" if len(util_repaired) > 4 else "")
+            )
+        elif not util_ok:
+            repairs_attempted.append("supervision utilities still not executable")
         if not drift.get("ok"):
             _ok, repair_detail = attempt_supervision_repair()
             repairs_attempted.append(repair_detail)

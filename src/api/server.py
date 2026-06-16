@@ -376,6 +376,13 @@ def create_app(
 
         if os.environ.get("IG_AGENT_PYTEST") == "1":
             await mount_done.wait()
+        else:
+            try:
+                from system.manual_kill_monitor import start_manual_kill_monitor
+
+                start_manual_kill_monitor()
+            except Exception:
+                pass
 
         try:
             yield

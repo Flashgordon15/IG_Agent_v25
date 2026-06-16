@@ -19,12 +19,17 @@ export function resolveRestrictionDiagnostics(payload) {
   const hydration = payload.system_state?.hydration || {};
   const config = payload.config || {};
   const maxOpen =
-    hydration.max_open_positions ?? config.max_open_positions ?? null;
+    hydration.max_open_positions ??
+    config.max_open_positions ??
+    // /state has top-level max_open_positions even when /api/health enrichment is not warmed.
+    payload.max_open_positions ??
+    null;
   const rotationFilter =
     config.enforce_top3_rotation_filter ??
     payload.system_state?.config?.enforce_top3_rotation_filter;
 
-  const sizingRestricted = Number(maxOpen) === 0;
+  // Treat "missing" as unknown (do not lock UI into POS 0/0 by default).
+  const sizingRestricted = maxOpen !== null && Number(maxOpen) === 0;
   const rotationFilterEngaged = rotationFilter === true;
   const active = sizingRestricted || rotationFilterEngaged;
 

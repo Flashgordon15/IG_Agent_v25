@@ -19,20 +19,29 @@ sys.path.insert(0, str(ROOT / "src"))
 
 VERIFY_PORT = 8081
 VERIFY_PATH = "/shutdown-verify"
-LOG_FILE = ROOT / "src" / "data" / "logs" / "shutdown_verify.log"
-STATE_FILE = ROOT / "src" / "data" / "state" / "last_shutdown_verify.json"
+
+
+def _log_paths() -> tuple[Path, Path]:
+    from system.paths import data_dir, logs_dir
+
+    return (
+        logs_dir() / "shutdown_verify.log",
+        data_dir() / "state" / "last_shutdown_verify.json",
+    )
 
 
 def _log(msg: str) -> None:
-    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    log_file, _ = _log_paths()
+    log_file.parent.mkdir(parents=True, exist_ok=True)
     line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} | {msg}\n"
-    with LOG_FILE.open("a", encoding="utf-8") as fh:
+    with log_file.open("a", encoding="utf-8") as fh:
         fh.write(line)
 
 
 def _write_state(payload: dict) -> None:
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(payload), encoding="utf-8")
+    _, state_file = _log_paths()
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    state_file.write_text(json.dumps(payload), encoding="utf-8")
 
 
 def _free_listen_port(port: int) -> None:
@@ -73,6 +82,10 @@ def main() -> int:
     )
     parser.add_argument("--parent-pid", type=int, required=True)
     args = parser.parse_args()
+
+    from system.shutdown_cleanup import ensure_supervision_utilities_executable
+
+    ensure_supervision_utilities_executable()
 
     payload: dict = {
         "ok": False,
@@ -127,7 +140,13 @@ def main() -> int:
     with lock:
         payload["status"] = "checking"
 
-    from system.shutdown_cleanup import agent_fully_stopped, stopped_verification_checks
+    from system.shutdown_cleanup import (
+        agent_fully_stopped,
+        repair_stale_watchdog_after_stop,
+        stopped_verification_checks,
+        _list_main_py_pids,
+        _port_bound,
+    )
 
     def _supervision_fields() -> dict:
         from system.overnight_supervision import overnight_supervision_summary
@@ -150,28 +169,43 @@ def main() -> int:
     ok = False
     issues: list[str] = ["verification timeout"]
     watchdog_repaired = False
-    for attempt in range(60):
+
+    def _try_watchdog_repair(current_issues: list[str]) -> bool:
+        nonlocal ok, issues, watchdog_repaired
+        stale_watchdog = any(
+            i in current_issues
+            for i in ("watchdog.sh still running", "watchdog.pid present")
+        )
+        if not stale_watchdog or watchdog_repaired:
+            return False
+        repaired, detail = repair_stale_watchdog_after_stop()
+        watchdog_repaired = True
+        _log(f"watchdog repair: ok={repaired} ({detail})")
+        if not repaired:
+            return False
+        ok, issues = agent_fully_stopped()
+        return ok
+
+    # Closed :8080 with no agent process — expected after dashboard Stop.
+    if not _port_bound() and not _list_main_py_pids():
         ok, issues = agent_fully_stopped()
         if ok:
-            _log(f"fully stopped confirmed on attempt {attempt + 1}")
-            break
-        stale_watchdog = any(
-            i in issues for i in ("watchdog.sh still running", "watchdog.pid present")
-        )
-        if stale_watchdog and not watchdog_repaired:
-            from system.shutdown_cleanup import repair_stale_watchdog_after_stop
+            _log("fully stopped — port 8080 closed, no main.py")
+        elif _try_watchdog_repair(issues):
+            _log("fully stopped after fast-path watchdog repair")
 
-            repaired, detail = repair_stale_watchdog_after_stop()
-            watchdog_repaired = True
-            _log(f"watchdog repair: ok={repaired} ({detail})")
-            if repaired:
-                ok, issues = agent_fully_stopped()
-                if ok:
-                    _log("fully stopped after watchdog repair")
-                    break
-        time.sleep(0.25)
-    else:
-        _log(f"verify failed: {', '.join(issues)}")
+    if not ok:
+        for attempt in range(60):
+            ok, issues = agent_fully_stopped()
+            if ok:
+                _log(f"fully stopped confirmed on attempt {attempt + 1}")
+                break
+            if _try_watchdog_repair(issues):
+                _log("fully stopped after watchdog repair")
+                break
+            time.sleep(0.25)
+        else:
+            _log(f"verify failed: {', '.join(issues)}")
 
     with lock:
         payload.update(

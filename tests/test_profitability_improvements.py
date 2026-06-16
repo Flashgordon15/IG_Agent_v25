@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 import sys
 import tempfile
 import unittest
@@ -16,6 +17,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from analyse_replay import _row_label_3, _stats_for_rows  # noqa: E402
 
 from execution.correlation_guard import MAX_NEW_PER_DIRECTION  # noqa: E402
+from data.models import Quote  # noqa: E402
 from trading.points_engine import HEALTHY_CUMULATIVE_MIN, PointsEngine  # noqa: E402
 
 
@@ -111,7 +113,8 @@ class TestMlMinRecordsGate(unittest.TestCase):
             patch("trading.trading_loop.log_engine") as mock_log,
         ):
             mock_store_cls.return_value.record_count.return_value = 11
-            gate = loop._gate_signal_confidence()
+            quote = Quote(datetime(2026, 6, 15, 10, 0), 100.0, 100.5)
+            gate = loop._gate_signal_confidence(quote)
 
         self.assertTrue(gate.passed)
         mock_log.assert_any_call("[INTERIM SCORER] active")

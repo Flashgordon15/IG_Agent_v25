@@ -74,6 +74,17 @@ def normalize_gate_execution_params(
     for optional in ("risk_band", "risk_cap_gbp", "sizing_confidence"):
         if raw.get(optional) is not None:
             out[optional] = raw.get(optional)
+    for optional in (
+        "qmm_horizon",
+        "qmm_trailing_distance_points",
+        "qmm_trailing_trigger_points",
+        "qmm_breakeven_trigger_points",
+        "qmm_news_flow_sensitive",
+        "qmm_horizon_confidence",
+        "qmm_horizon_notes",
+    ):
+        if raw.get(optional) is not None:
+            out[optional] = raw.get(optional)
     return out
 
 
@@ -138,7 +149,19 @@ def freeze_gate_execution_params(
         risk_cap_gbp=normalized.get("risk_cap_gbp"),
         sizing_confidence=normalized.get("sizing_confidence"),
     )
-    return frozen.to_dict()
+    out = frozen.to_dict()
+    for optional in (
+        "qmm_horizon",
+        "qmm_trailing_distance_points",
+        "qmm_trailing_trigger_points",
+        "qmm_breakeven_trigger_points",
+        "qmm_news_flow_sensitive",
+        "qmm_horizon_confidence",
+        "qmm_horizon_notes",
+    ):
+        if normalized.get(optional) is not None:
+            out[optional] = normalized.get(optional)
+    return out
 
 
 @dataclass

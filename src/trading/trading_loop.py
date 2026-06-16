@@ -1073,6 +1073,14 @@ class TradingLoop:
         """Approved sizing from risk_validation — single source for order submission."""
         from execution.types import freeze_gate_execution_params
 
+        live_state_vector: dict[str, Any] = {}
+        for g in gates:
+            if g.name == "signal_confidence" and isinstance(g.value, dict):
+                raw_vec = g.value.get("live_state_vector")
+                if isinstance(raw_vec, dict):
+                    live_state_vector = raw_vec
+                break
+
         for g in gates:
             if g.name != "risk_validation" or not g.passed:
                 continue
@@ -1098,6 +1106,17 @@ class TradingLoop:
                 "risk_cap_gbp": v.get("risk_cap_gbp"),
                 "sizing_confidence": v.get("sizing_confidence"),
             }
+            try:
+                from execution.adaptive_horizon import classify_execution_horizon
+
+                plan = classify_execution_horizon(
+                    live_state_vector,
+                    stop_points=stop_pts,
+                    cfg=self._config,
+                )
+                raw.update(plan.to_execution_overlay())
+            except Exception:
+                pass
             return freeze_gate_execution_params(raw)
         return None
 
@@ -1193,6 +1212,26 @@ class TradingLoop:
     def _evaluate_gates_core(
         self, quote: Quote, *, gate_us: dict[str, float] | None = None
     ) -> list[GateResult]:
+        try:
+            from system.manual_kill_monitor import is_master_kill_block_active
+
+            if is_master_kill_block_active():
+                return self._hard_block_all_gates(
+                    "MASTER_KILL_SWITCH_ACTIVE",
+                    primary_gate="broker_feed",
+                )
+        except Exception:
+            pass
+
+        try:
+            from system.qmm_process_supervisor import process_entry_blocked
+
+            blocked, reason = process_entry_blocked()
+            if blocked:
+                return self._hard_block_all_gates(reason, primary_gate="broker_feed")
+        except Exception:
+            pass
+
         breaker = self.entry_circuit_breaker()
         if breaker:
             return self._hard_block_all_gates(breaker, primary_gate="broker_feed")
@@ -1264,21 +1303,40 @@ class TradingLoop:
             spread_to_atr_ratio = current_spread / current_atr
             spread_atr_max = self._spread_to_atr_circuit_max()
             if spread_to_atr_ratio > spread_atr_max:
+                from system.qmm_process_supervisor import set_process_entry_block
+
+                detail = BLOCKED_SPREAD_TO_ATR_CIRCUIT_BREAKER
+                self.set_entry_circuit_breaker(detail)
+                set_process_entry_block(detail)
                 log_engine(
                     f"CIRCUIT_BREAKER_ACTIVE | epic={self._epic} "
                     f"spread/atr={spread_to_atr_ratio:.2f} "
                     f"(>{spread_atr_max:.2f}) - Locking entry gates."
                 )
-                return [
-                    GateResult(
-                        name="risk_validation",
-                        passed=False,
-                        detail=BLOCKED_SPREAD_TO_ATR_CIRCUIT_BREAKER,
-                    )
-                ]
+                return self._hard_block_all_gates(
+                    detail, primary_gate="risk_validation"
+                )
 
+        # Gate 11 (ml_veto) can emit a sizing multiplier that Gate 7
+        # (risk_validation) must apply on the same tick. We therefore evaluate
+        # signal_confidence + ml_veto before risk_validation.
         results: list[GateResult] = []
-        for name in GATE_NAMES:
+        self._ml_sizing_multiplier = 1.0
+        gate_order = (
+            "session_open",
+            "session_blackout",
+            "cold_start_gap",
+            "environment_fitness",
+            "points_state",
+            "correlation_ok",
+            "signal_confidence",
+            "ml_veto",
+            "risk_validation",
+            "expectancy_ok",
+            "calendar_ok",
+            "execution",
+        )
+        for name in gate_order:
             import time as _time
 
             _g0 = _time.perf_counter()
@@ -1302,7 +1360,7 @@ class TradingLoop:
                 elif name == "calendar_ok":
                     results.append(self._gate_calendar_ok())
                 elif name == "signal_confidence":
-                    results.append(self._gate_signal_confidence())
+                    results.append(self._gate_signal_confidence(quote))
                 elif name == "ml_veto":
                     results.append(self._gate_ml_veto())
                 elif name == "execution":
@@ -1999,6 +2057,15 @@ class TradingLoop:
                 f"correlation_matrix sizing skipped epic={self._epic}: "
                 f"{type(e).__name__}: {e}"
             )
+
+        # Gate 11 ml_veto risk scaling (marginal probabilities → downscale
+        # sizing instead of hard-blocking the entry path).
+        try:
+            ml_mult = float(getattr(self, "_ml_sizing_multiplier", 1.0) or 1.0)
+        except Exception:
+            ml_mult = 1.0
+        if ml_mult != 1.0:
+            size_mult *= ml_mult
         risk_band_label = ""
         risk_band_note = ""
         effective_size = max(
@@ -2133,6 +2200,7 @@ class TradingLoop:
                 "size_clipped_to_risk_cap": size_was_clipped,
                 "ig_min_deal_size": round(ig_min_size, 3),
                 "size_multiplier": round(size_mult, 3),
+                "ml_sizing_multiplier": round(ml_mult, 3),
                 "correlation_density": int(corr_density),
                 "correlation_size_multiplier": round(float(corr_mult), 3),
                 "correlation_detail": corr_detail,
@@ -2224,7 +2292,7 @@ class TradingLoop:
             detail=detail,
         )
 
-    def _gate_signal_confidence(self) -> GateResult:
+    def _gate_signal_confidence(self, quote: Quote) -> GateResult:
         sig = self._get_gate_signal()
         threshold = float(self._points.trade_confidence_threshold(self._config))
         try:
@@ -2238,6 +2306,68 @@ class TradingLoop:
             )
         except Exception:
             pass
+
+        # ------------------------------------------------------------
+        # Gate 10: dynamic confidence floor (volatility-aware)
+        # ------------------------------------------------------------
+        live_state_vector: dict[str, Any] = {}
+        try:
+            snap = sig.snapshot or {}
+            last = snap.get("last") or {}
+            _atr = float(last.get("atr", 0) or 0)
+            _stop = max(1.0, float(self._config.stop_distance_points))
+            atr_multiplier = _atr / _stop if _stop > 0 else 0.0
+
+            session_score = 0.0
+            nominal_state: str | None = None
+            try:
+                pts_snap = self._points.snapshot()
+                session_score = float(getattr(pts_snap, "session_score", 0.0) or 0.0)
+                nominal_state = str(getattr(pts_snap, "nominal_state", None) or "")
+                if not nominal_state:
+                    nominal_state = self._points.get_state()
+            except Exception:
+                nominal_state = self._points.get_state()
+
+            from ml.interim_scorer import extract_live_state_vector
+
+            live_state_vector = extract_live_state_vector(
+                self._market,
+                quote,
+                {
+                    "session_score": session_score,
+                    "nominal_state": nominal_state,
+                    "atr_multiplier": atr_multiplier,
+                },
+            )
+
+            prot = self._config.get("protective_learning") or {}
+            session_score_floor = float(prot.get("session_score_floor") or -30.0)
+            min_threshold = float(prot.get("signal_confidence_floor_min") or 10.0)
+            high_vol_atr_mult = float(prot.get("high_vol_atr_multiplier") or 0.25)
+            relax_strength = float(
+                prot.get("volatility_threshold_relax_strength") or 0.95
+            )
+
+            quote_age_s = float(live_state_vector.get("quote_age_s") or 0.0)
+            age_factor = 1.0
+            if quote_age_s > 10.0:
+                age_factor = max(0.2, 10.0 / quote_age_s)
+
+            atr_mult = float(live_state_vector.get("atr_multiplier") or 0.0)
+            atr_norm = 0.0
+            if high_vol_atr_mult > 0:
+                atr_norm = min(1.0, max(0.0, atr_mult / high_vol_atr_mult))
+
+            session_score_val = float(live_state_vector.get("session_score") or 0.0)
+            session_factor = 1.0 if session_score_val >= session_score_floor else 0.5
+
+            relax = atr_norm * age_factor * session_factor * relax_strength
+            # Lower threshold aggressively in high-volatility regimes.
+            threshold = max(min_threshold, threshold * (1.0 - relax))
+        except Exception:
+            pass
+
         conf = float(sig.adjusted_confidence)
         rules_conf = conf
         ml_prob: float | None = None
@@ -2405,11 +2535,15 @@ class TradingLoop:
                 "points_state": self._points.get_state(),
                 "block_reason": block_reason,
                 "setup": sig.setup_key,
+                "live_state_vector": live_state_vector,
             },
             detail=detail,
         )
 
     def _gate_ml_veto(self) -> GateResult:
+        # Gate 11 can set a sizing multiplier that Gate 7 must apply on the
+        # same tick (ml_veto risk scaling → risk_validation sizing).
+        self._ml_sizing_multiplier = 1.0
         try:
             from system.gate_relaxation import soak_ml_veto_bypassed
 
@@ -2493,19 +2627,52 @@ class TradingLoop:
             if epic
             else float(cfg.get("min_probability") or 0.58)
         )
-        passed = float(ml_prob) >= min_p
+
+        ml_prob_f = float(ml_prob)
+        min_p_f = float(min_p)
+
+        # Risk-scaling gate:
+        # - hard veto when model confidence is clearly below threshold
+        # - otherwise pass the gate but downscale sizing to reduce exposure
+        marginal_delta = float(cfg.get("marginal_prob_band") or 0.06)
+        min_sizing_multiplier = float(cfg.get("min_sizing_multiplier") or 0.25)
+
+        passed = True
+        sizing_multiplier = 1.0
+        marginal_scaled = False
+        if ml_prob_f >= min_p_f:
+            passed = True
+            sizing_multiplier = 1.0
+        elif ml_prob_f >= (min_p_f - marginal_delta):
+            passed = True
+            marginal_scaled = True
+            if marginal_delta > 0:
+                t = (ml_prob_f - (min_p_f - marginal_delta)) / marginal_delta
+            else:
+                t = 1.0
+            t = max(0.0, min(1.0, float(t)))
+            sizing_multiplier = min_sizing_multiplier + t * (1.0 - min_sizing_multiplier)
+        else:
+            passed = False
+            sizing_multiplier = min_sizing_multiplier
+
+        self._ml_sizing_multiplier = float(sizing_multiplier)
         return GateResult(
             name="ml_veto",
             passed=passed,
             value={
-                "ml_probability": ml_prob,
-                "min_probability": min_p,
+                "ml_probability": ml_prob_f,
+                "min_probability": min_p_f,
                 "source": ml_source,
+                "sizing_multiplier": float(sizing_multiplier),
+                "marginal_scaled": bool(marginal_scaled),
             },
             detail=(
-                f"{ml_source} prob {ml_prob:.3f} ≥ {min_p:.3f}"
-                if passed
-                else f"{ml_source} prob {ml_prob:.3f} < {min_p:.3f} (veto)"
+                f"{ml_source} prob {ml_prob_f:.3f} ≥ {min_p_f:.3f}"
+                if ml_prob_f >= min_p_f
+                else f"{ml_source} prob {ml_prob_f:.3f} marginal < {min_p_f:.3f} — scaling ×{sizing_multiplier:.2f}"
+                if marginal_scaled
+                else f"{ml_source} prob {ml_prob_f:.3f} < {min_p_f:.3f} (veto)"
             ),
         )
 

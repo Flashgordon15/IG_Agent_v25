@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import pandas as pd
@@ -24,6 +24,107 @@ class InterimScore:
     volatility: float
     recent_performance: float
     notes: str
+
+
+def extract_live_state_vector(
+    market: str,
+    quote: Any,
+    points_state: Any,
+) -> dict[str, float | str | None]:
+    """
+    Lightweight, non-blocking in-RAM feature extraction.
+
+    Returns a small dict describing live conditions that gates can use
+    (spread / quote age / ATR multiplier / session score context).
+
+    Rule: this function must not touch disk or SQLite in the hot path.
+    """
+
+    # --- Spread (bid/ask) ---
+    spread = 0.0
+    try:
+        if hasattr(quote, "spread"):
+            spread = float(getattr(quote, "spread") or 0.0)
+        else:
+            bid = float(getattr(quote, "bid", 0.0) or 0.0)
+            offer = float(getattr(quote, "offer", 0.0) or 0.0)
+            spread = max(0.0, offer - bid)
+    except Exception:
+        spread = 0.0
+
+    # --- Quote age ---
+    quote_age_s = 0.0
+    try:
+        q_time = getattr(quote, "time", None)
+        if q_time is None and isinstance(quote, dict):
+            q_time = quote.get("time")
+        if isinstance(q_time, datetime):
+            qt = q_time
+            if qt.tzinfo is None:
+                qt = qt.replace(tzinfo=timezone.utc)
+            quote_age_s = max(0.0, (datetime.now(timezone.utc) - qt).total_seconds())
+    except Exception:
+        quote_age_s = 0.0
+
+    # --- ATR multiplier (dimensionless) ---
+    # Convention: callers pass atr_multiplier / atr_ratio via points_state dict.
+    atr_multiplier = 0.0
+    try:
+        if isinstance(points_state, dict):
+            atr_multiplier = float(
+                points_state.get("atr_multiplier")
+                or points_state.get("atr_ratio")
+                or points_state.get("atr_mult")
+                or 0.0
+            )
+        else:
+            atr_multiplier = float(
+                getattr(points_state, "atr_multiplier", None)
+                or getattr(points_state, "atr_ratio", None)
+                or getattr(points_state, "atr_mult", None)
+                or 0.0
+            )
+    except Exception:
+        atr_multiplier = 0.0
+
+    # --- Active session score context ---
+    session_score = 0.0
+    nominal_state: str | None = None
+    try:
+        if isinstance(points_state, dict):
+            session_score = float(
+                points_state.get("session_score")
+                or points_state.get("cumulative")
+                or 0.0
+            )
+            nominal_state = (
+                points_state.get("nominal_state")
+                or points_state.get("points_state")
+                or points_state.get("state")
+            )
+        else:
+            session_score = float(
+                getattr(points_state, "session_score", None)
+                or getattr(points_state, "cumulative", None)
+                or 0.0
+            )
+            nominal_state = (
+                getattr(points_state, "nominal_state", None)
+                or getattr(points_state, "points_state", None)
+                or getattr(points_state, "state", None)
+            )
+    except Exception:
+        session_score = 0.0
+        nominal_state = None
+
+    return {
+        "market": str(market or ""),
+        "spread": float(spread),
+        "quote_age_s": float(quote_age_s),
+        "atr_multiplier": float(atr_multiplier),
+        "session_score": float(session_score),
+        "session_nominal_state": str(nominal_state) if nominal_state else None,
+    }
 
 
 def _weights(cfg: Config) -> dict[str, float]:

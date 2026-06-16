@@ -52,6 +52,23 @@ LOCK_FILE="${ROOT}/src/data/.ig_agent_v29.lock"
 mkdir -p "${ROOT}/src/data/logs"
 mkdir -p "${LAUNCH_AGENTS}"
 
+echo "Ensuring supervision utilities are executable..."
+chmod +x "${ROOT}/scripts/"*.sh 2>/dev/null || true
+for _util in \
+  confirm_stopped.py \
+  confirm_started.py \
+  supervision_check.py \
+  shutdown_verify_server.py \
+  watchdog_launchd.py \
+  safe_to_leave.py \
+  pre_flight_check.py \
+  lifecycle_e2e.py
+do
+  if [ -f "${ROOT}/scripts/${_util}" ]; then
+    chmod +x "${ROOT}/scripts/${_util}" 2>/dev/null || true
+  fi
+done
+
 PY=""
 for candidate in \
   "${ROOT}/.venv/bin/python3" \
@@ -68,6 +85,14 @@ if [ -z "${PY}" ]; then
   echo "ERROR: no python3 executable found for launchd plists" >&2
   exit 1
 fi
+
+IG_AGENT_ROOT="${ROOT}" PYTHONPATH="${ROOT}/src" "${PY}" -c "
+from system.shutdown_cleanup import ensure_supervision_utilities_executable
+ok, repaired = ensure_supervision_utilities_executable()
+print('supervision_utilities_ok=' + ('yes' if ok else 'no'))
+if repaired:
+    print('chmod_repaired=' + ','.join(repaired))
+" 2>/dev/null || true
 
 launchctl_label() {
   basename "$1" .plist

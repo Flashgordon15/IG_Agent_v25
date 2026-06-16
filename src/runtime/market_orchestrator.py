@@ -420,6 +420,7 @@ class MarketOrchestrator:
         feed_offline = self._apply_feed_circuit_breakers()
 
         ranked_assets: list[tuple[str, float]] = []
+        qmm_candidates: list[tuple[str, TradingLoop, float, float]] = []
         for loop in self._loops:
             epic = str(getattr(loop, "_epic", "") or "")
             if not epic or loop._env is None:
@@ -431,12 +432,26 @@ class MarketOrchestrator:
             if not self._strategy_session_eligible(epic):
                 continue
             try:
-                rank_score = self._rotation_rank_score(epic, loop)
+                trend = self._trend_cleanliness(loop)
+                spread_cost = self._relative_spread_cost(epic, loop)
+                rank_score = max(trend / spread_cost, _ROTATION_RANK_FLOOR)
             except Exception:
                 continue
             ranked_assets.append((epic, rank_score))
+            qmm_candidates.append((epic, loop, trend, spread_cost))
 
-        ranked_assets.sort(key=lambda item: item[1], reverse=True)
+        try:
+            from trading.qmm_asset_selector import rank_qmm_epics
+
+            if qmm_candidates:
+                ranked_assets = rank_qmm_epics(qmm_candidates)
+            else:
+                ranked_assets.sort(key=lambda item: item[1], reverse=True)
+        except Exception as e:
+            from system.engine_log import log_engine
+
+            log_engine(f"QMM rank fallback to legacy rotation: {type(e).__name__}: {e}")
+            ranked_assets.sort(key=lambda item: item[1], reverse=True)
 
         cfg = self._config.as_dict() if hasattr(self._config, "as_dict") else {}
         base_slots = int(cfg.get("rotation_base_slots") or TOP_ROTATION_SLOTS)
@@ -580,13 +595,26 @@ class MarketOrchestrator:
         """Detect and respawn individual trading loops that stopped due to deadlock."""
         import time
 
+        from system.engine_log import log_engine
+
         check_interval = 20.0
+        rotation_interval = 60.0
+        last_rotation_mono = 0.0
         respawn_cooldown: dict[str, float] = {}
         zombie_alert_sent = False
 
         while not self._stop.wait(check_interval):
             if not self._running:
                 break
+            now_mono = time.monotonic()
+            if now_mono - last_rotation_mono >= rotation_interval:
+                try:
+                    self.refresh_active_epics()
+                    last_rotation_mono = now_mono
+                except Exception as e:
+                    log_engine(
+                        f"QMM rotation refresh failed: {type(e).__name__}: {e}"
+                    )
             any_running = any(loop.is_running() for loop in self._loops)
             if self._running and self._loops and not any_running:
                 if not zombie_alert_sent:
