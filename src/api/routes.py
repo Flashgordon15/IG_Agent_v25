@@ -93,12 +93,16 @@ def get_startup_status() -> dict[str, Any]:
 
     boot_metrics = get_boot_metrics()
     system_state = get_system_state().snapshot()
-    return {
-        "boot_metrics": boot_metrics,
-        "system_state": system_state,
-        "ready": bool(system_state.get("ready")),
-        "background_verify": system_state.get("background_verify") or {},
-    }
+    from api.restriction_diagnostics import enrich_restrictions_payload
+
+    return enrich_restrictions_payload(
+        {
+            "boot_metrics": boot_metrics,
+            "system_state": system_state,
+            "ready": bool(system_state.get("ready")),
+            "background_verify": system_state.get("background_verify") or {},
+        }
+    )
 
 
 @router.get("/state")

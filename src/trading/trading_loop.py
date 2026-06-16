@@ -593,6 +593,12 @@ class TradingLoop:
 
         self._tick_count += 1
         self._portfolio_reserved_risk_gbp = 0.0
+        try:
+            from system.config_loader import get_config
+
+            self._config = get_config()
+        except Exception:
+            pass
         self._reset_gate_signal_cache()
         try:
             from system.market_data_hub import get_market_data_hub

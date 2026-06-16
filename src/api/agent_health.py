@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from api.agent_control import get_trading_loop, is_paused, is_trading_running
+from api.restriction_diagnostics import enrich_restrictions_payload
 from system.engine_log import log_engine
 from system.gate_activity import last_gate_check_by_epic, seconds_since_last_gate_eval
 from system.paths import data_dir, logs_dir
@@ -362,7 +363,7 @@ def _apply_supervision_init_timeout(status: dict[str, Any]) -> dict[str, Any]:
                 }
             )
             out["boot_metrics"] = boot
-            return out
+            return enrich_restrictions_payload(out)
     except Exception:
         pass
     quotes_live = _quotes_live_for_init(out)
@@ -431,7 +432,7 @@ def _apply_supervision_init_timeout(status: dict[str, Any]) -> dict[str, Any]:
                 "[INIT] Forced clear after timeout — prices confirmed live"
             )
 
-    return out
+    return enrich_restrictions_payload(out)
 
 
 def reset_init_timeout_state_for_tests() -> None:

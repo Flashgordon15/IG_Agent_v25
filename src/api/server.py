@@ -65,13 +65,17 @@ def _register_bootstrap_routes(app: FastAPI) -> None:
             phases = list(get_status().get("phases") or [])
         except Exception:
             pass
-        return {
-            "boot_metrics": boot_metrics,
-            "system_state": system_state,
-            "ready": bool(system_state.get("ready")),
-            "background_verify": system_state.get("background_verify") or {},
-            "phases": phases,
-        }
+        from api.restriction_diagnostics import enrich_restrictions_payload
+
+        return enrich_restrictions_payload(
+            {
+                "boot_metrics": boot_metrics,
+                "system_state": system_state,
+                "ready": bool(system_state.get("ready")),
+                "background_verify": system_state.get("background_verify") or {},
+                "phases": phases,
+            }
+        )
 
     @app.get("/api/ui/status", include_in_schema=False)
     def bootstrap_ui_status() -> dict[str, Any]:

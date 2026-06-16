@@ -91,6 +91,89 @@ const V291_BACKGROUND_WORKERS = [
   },
 ];
 
+function V291InMemoryExecutionLayer() {
+  const lazyRoutes = [
+    "main.py — lazy Gate1 imports; AgentRuntime defers heavy wiring",
+    "server_deferred.py — API router mounted post-bind (sub-second :8080)",
+    "boot/gate*_runner.py — sequential Gatekeeper pipeline off event loop",
+    "post_ready_services.py — AlertDispatcher + background workers after READY",
+  ];
+  const ttlCaches = [
+    "daily_loss_policy — 2s RLock TTL gate cache",
+    "setup_registry — 30s registry read cache",
+    "snapshot_store — 60s slow-enrich merge TTL",
+    "edge_analysis — 60s API response cache",
+    "shadow_analytics — 60s metrics rollup cache",
+    "demo_readiness — 300s readiness snapshot cache",
+  ];
+  const workerIsolation = [
+    "OrderConfirmWorker — deep-copied params; SUBMITTED returns before IG REST",
+    "Failure path — try/except Exception → release_allocation() + audit bus",
+    "AlertDispatcherWorker — bounded queue; per-job exception shield",
+    "PointsPersistWorker — 5s flush cycle; per-engine try/except on disk I/O",
+  ];
+
+  return (
+    <section className="rounded-lg border border-warning/35 bg-gradient-to-br from-warning/10 via-bg to-card/30 p-3">
+      <div className="mb-3 flex items-start gap-2">
+        <Zap className="mt-0.5 h-4 w-4 shrink-0 text-warning" aria-hidden />
+        <div>
+          <h3 className="text-[12px] font-bold uppercase tracking-wide text-warning">
+            v29.1 Low-Latency In-Memory Execution Layer
+          </h3>
+          <p className="mt-1 text-[10px] leading-relaxed text-muted">
+            Thread-safe TTL memory caches · lazy module routing · non-blocking broker
+            confirm isolation. Technical log — {APP_VERSION_LABEL} production stack.
+          </p>
+        </div>
+      </div>
+
+      <div className="mb-2 rounded-md border border-border/70 bg-bg/50 p-2.5">
+        <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-foreground">
+          Lazy-loaded module import routing
+        </p>
+        <ul className="space-y-1 text-[10px] text-muted">
+          {lazyRoutes.map((line) => (
+            <li key={line} className="font-mono leading-snug text-foreground/90">
+              {line}
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      <div className="mb-2 rounded-md border border-border/70 bg-bg/50 p-2.5">
+        <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-foreground">
+          Thread-safe TTL database memory caches
+        </p>
+        <ul className="space-y-1 text-[10px] text-muted">
+          {ttlCaches.map((line) => (
+            <li key={line} className="leading-snug">
+              <span className="text-warning">▸</span> {line}
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      <div className="rounded-md border border-accent/25 bg-accent/5 p-2.5">
+        <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-accent">
+          OrderConfirmWorker transaction isolation
+        </p>
+        <ul className="space-y-1 text-[10px] text-muted">
+          {workerIsolation.map((line) => (
+            <li key={line} className="leading-snug">
+              {line}
+            </li>
+          ))}
+        </ul>
+        <p className="mt-2 text-[9px] leading-snug text-muted">
+          Tick thread never blocks on POST /positions/otc; portfolio gate reservations
+          roll back on worker failure without stopping per-epic polling loops.
+        </p>
+      </div>
+    </section>
+  );
+}
+
 function V291ArchitectureCanvas() {
   return (
     <section className="rounded-lg border border-accent/35 bg-gradient-to-br from-accent/10 via-bg to-card/40 p-3 shadow-inner">
@@ -338,6 +421,8 @@ export default function RoadmapProgressModal({ open, onClose }) {
           />
 
           <V291ArchitectureCanvas />
+
+          <V291InMemoryExecutionLayer />
 
           {error ? (
             <p className="rounded-md border border-border bg-card/50 px-3 py-2 text-[11px] text-muted">

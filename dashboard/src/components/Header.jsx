@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { fmtPrice } from "../utils/fmtPrice.js";
 import { APP_VERSION_LABEL, resolveAppAiHealth, resolveInitBannerText } from "../utils/roadmapTelemetry.js";
+import { STANDBY_MESSAGE } from "../utils/restrictionDiagnostics.js";
 import { RoadmapProgressButton } from "./RoadmapProgressModal.jsx";
 import { DailyDigestButton } from "./DailyDigestModal.jsx";
 import MarketStatusTimer, { buildMarketStatusTimerProps } from "./MarketStatusTimer.jsx";
@@ -275,6 +276,7 @@ export default function Header({
   quotesFreshCount,
   initLiveSec,
   overnightSupervision,
+  systemStandbyActive = false,
 }) {
   const [safeLeaveModal, setSafeLeaveModal] = useState(null);
 
@@ -353,6 +355,16 @@ export default function Header({
         >
           {agent.label}
         </span>
+
+        {systemStandbyActive ? (
+          <span
+            className="inline-flex shrink-0 max-w-[min(100%,28rem)] items-center rounded-md border border-warning/50 bg-warning/15 px-2 py-1 text-[10px] font-semibold leading-snug text-warning"
+            role="status"
+            title="Passive configuration restrictions are suppressing live entries"
+          >
+            {STANDBY_MESSAGE}
+          </span>
+        ) : null}
 
         {/* Divider */}
         <span className="hidden sm:block h-5 w-px bg-border shrink-0" aria-hidden />

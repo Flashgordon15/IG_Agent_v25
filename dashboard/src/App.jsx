@@ -11,6 +11,7 @@ import {
   loadStopSupervision,
 } from "./utils/supervision.js";
 import { resolveSessionStyle } from "./utils/roadmapTelemetry.js";
+import { isSystemStandbyRestricted } from "./utils/restrictionDiagnostics.js";
 import LivePanel from "./components/LivePanel.jsx";
 import TradesPanel from "./components/TradesPanel.jsx";
 import PointsPanel from "./components/PointsPanel.jsx";
@@ -297,6 +298,7 @@ export default function App() {
   const [digestAutoOpened, setDigestAutoOpened] = useState(false);
   const [digestDay, setDigestDay] = useState(null);
   const [healthOverlay, setHealthOverlay] = useState(null);
+  const [startupOverlay, setStartupOverlay] = useState(null);
   const healthFailRef = useRef(0);
   const prevStateRef = useRef(null);
   const soundRef = useRef(null);
@@ -385,8 +387,19 @@ export default function App() {
       watchdog_active: healthOverlay.watchdog_active ?? state.watchdog_active,
       agent_pid: healthOverlay.agent_pid ?? state.agent_pid,
       health_ts: healthOverlay.ts ?? state.health_ts,
+      config: healthOverlay.config ?? startupOverlay?.config ?? state.config,
     };
-  }, [state, healthOverlay]);
+  }, [state, healthOverlay, startupOverlay]);
+
+  const systemStandbyActive = useMemo(() => {
+    const healthRestricted = isSystemStandbyRestricted(healthOverlay);
+    const startupRestricted = isSystemStandbyRestricted(startupOverlay);
+    const mergedRestricted = isSystemStandbyRestricted({
+      system_state: mergedState?.system_state,
+      config: mergedState?.config,
+    });
+    return healthRestricted || startupRestricted || mergedRestricted;
+  }, [healthOverlay, startupOverlay, mergedState]);
 
   const viewState = useMemo(
     () => resolveMarketView(mergedState, selectedEpic),
@@ -545,6 +558,31 @@ export default function App() {
     };
     checkHealth();
     const id = window.setInterval(checkHealth, 5000);
+    return () => window.clearInterval(id);
+  }, [launchStage]);
+
+  // Startup restriction diagnostics — complements /api/health overlay
+  useEffect(() => {
+    if (launchStage === "auth" || launchStage === "boot" || launchStage === "release") return;
+    const pollStartup = async () => {
+      try {
+        const res = await fetch("/api/startup/status", {
+          method: "GET",
+          credentials: "include",
+          headers: authHeaders(),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data && typeof data === "object") {
+            setStartupOverlay(data);
+          }
+        }
+      } catch {
+        /* ignore */
+      }
+    };
+    pollStartup();
+    const id = window.setInterval(pollStartup, 5000);
     return () => window.clearInterval(id);
   }, [launchStage]);
 
@@ -881,6 +919,7 @@ export default function App() {
     envScorerFallbackActive: Boolean(
       mergedState?.env_scorer_fallback_active ?? mergedState?.health?.env_scorer_fallback_active,
     ),
+    systemStandbyActive,
   };
 
   // Agent stopped screen (with post-shutdown verification)

@@ -26,9 +26,18 @@
   "spread_to_atr_circuit_breaker_max": 0.3,
   "enforce_rr_floor_filter": true,
   "enforce_1h_ema_filter": true,
-  "enforce_top3_rotation_filter": true,
+  "enforce_top3_rotation_filter": false,
   "max_open_positions": 5,
-  "max_positions_per_epic": 2,
+  "max_positions_per_epic": 3,
+  "_live_ops_note": "2026-06-13 — sizing headroom restored; rotation filter off; london_morning enabled for US indices",
+  "trading_hours_enabled": true,
+  "trading_session_whitelist": [
+    "asia_early",
+    "london_morning",
+    "london_us_overlap",
+    "us_afternoon",
+    "late"
+  ],
   "correlation_guard": {
     "max_concurrent_us_index_shorts": 2,
     "max_open_positions_global": 5
@@ -110,7 +119,7 @@
     "warning_confidence_cap": 85,
     "warning_use_instrument_threshold": true,
     "relax_all_epics": true,
-    "disable_rotation_filter": false,
+    "disable_rotation_filter": true,
     "bypass_ml_veto": false,
     "spread_to_atr_circuit_max": 0.35,
     "require_points_healthy": true
@@ -136,6 +145,7 @@
       "reward_multiple": 3.0,
       "spread_to_atr_max": 0.45,
       "trading_session_whitelist": [
+        "london_morning",
         "london_us_overlap",
         "us_afternoon",
         "late"
@@ -147,6 +157,7 @@
       "risk_cap_gbp": 200,
       "spread_to_atr_max": 0.45,
       "trading_session_whitelist": [
+        "london_morning",
         "london_us_overlap",
         "us_afternoon",
         "late"
