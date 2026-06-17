@@ -60,6 +60,7 @@ class IGRestClient:
         self._account_balance: float | None = None
         self._account_profit_loss: float | None = None
         self._account_available: float | None = None
+        self._last_accounts_raw_payload: dict[str, Any] | None = None
         self._last_rest_ok_at: float = 0.0
         self._last_rest_ok_path: str = ""
         self._last_account_refresh_ts: float = 0.0
@@ -693,6 +694,10 @@ class IGRestClient:
             "available": self._account_available,
         }
 
+    def get_last_accounts_raw_payload(self) -> dict[str, Any] | None:
+        """Last GET /accounts JSON body — for drawdown debug logging."""
+        return dict(self._last_accounts_raw_payload) if self._last_accounts_raw_payload else None
+
     def maybe_refresh_account_summary(
         self, *, min_interval: float = 60.0
     ) -> dict[str, float | None]:
@@ -726,28 +731,23 @@ class IGRestClient:
         r = self.request("GET", "/accounts", headers=self._auth_headers("1"))
         if r.status_code != 200:
             return self.get_cached_account_summary()
-        for acc in r.json().get("accounts", []):
+        body = r.json()
+        self._last_accounts_raw_payload = body if isinstance(body, dict) else {"raw": body}
+        from system.balance_pnl_decimal import decimal_to_float, money_decimal
+
+        for acc in body.get("accounts", []):
             if str(acc.get("accountId")) != self.account_id:
                 continue
             bal = acc.get("balance") or {}
-            try:
-                self._account_balance = (
-                    float(bal.get("balance"))
-                    if bal.get("balance") is not None
-                    else self._account_balance
-                )
-                self._account_profit_loss = (
-                    float(bal.get("profitLoss"))
-                    if bal.get("profitLoss") is not None
-                    else self._account_profit_loss
-                )
-                self._account_available = (
-                    float(bal.get("available"))
-                    if bal.get("available") is not None
-                    else self._account_available
-                )
-            except (TypeError, ValueError):
-                pass
+            balance_d = money_decimal(bal.get("balance"), field="accounts.balance")
+            upl_d = money_decimal(bal.get("profitLoss"), field="accounts.profitLoss")
+            avail_d = money_decimal(bal.get("available"), field="accounts.available")
+            if balance_d is not None:
+                self._account_balance = decimal_to_float(balance_d)
+            if upl_d is not None:
+                self._account_profit_loss = decimal_to_float(upl_d)
+            if avail_d is not None:
+                self._account_available = decimal_to_float(avail_d)
             break
         self._last_account_refresh_ts = time.time()
         return self.get_cached_account_summary()
@@ -814,6 +814,33 @@ class IGRestClient:
         )
         return []
 
+    def fetch_transaction_history(
+        self,
+        hours: float = 24.0,
+        *,
+        transaction_type: str = "ALL_DEAL",
+        page_size: int = 500,
+    ) -> list[dict[str, Any]]:
+        """
+        Closed-deal ledger for the account — convenience wrapper over
+        ``GET /history/transactions/{transactionType}/{fromDate}/{toDate}``.
+
+        ``hours`` selects the lookback window; path dates are dd-mm-yyyy with
+        enough calendar span to cover the requested period (IG path is day-granular).
+        """
+        from datetime import datetime, timedelta
+
+        lookback_h = max(1.0, float(hours))
+        end = datetime.now()
+        days_back = max(1, int((lookback_h + 23.0) // 24.0))
+        start = end - timedelta(days=days_back)
+        return self.fetch_transactions(
+            start.strftime("%d-%m-%Y"),
+            end.strftime("%d-%m-%Y"),
+            transaction_type=transaction_type,
+            page_size=page_size,
+        )
+
     def fetch_account_activity(
         self,
         from_date: str,
@@ -856,14 +883,22 @@ class IGRestClient:
                 f"Accounts request failed: HTTP {r.status_code}",
                 status_code=r.status_code,
             )
-        accounts = r.json().get("accounts", [])
+        body = r.json()
+        self._last_accounts_raw_payload = body if isinstance(body, dict) else {"accounts": body}
+        accounts = body.get("accounts", []) if isinstance(body, dict) else []
+        from system.balance_pnl_decimal import decimal_to_float, money_decimal
+
         for acc in accounts:
             if str(acc.get("accountId")) == self.account_id:
-                bal = acc.get("balance", {}).get("available")
-                return float(bal) if bal is not None else 0.0
+                bal = acc.get("balance", {}) or {}
+                balance_d = money_decimal(bal.get("balance"), field="fetch.balance")
+                if balance_d is not None:
+                    return decimal_to_float(balance_d)
         if accounts:
-            bal = accounts[0].get("balance", {}).get("available")
-            return float(bal) if bal is not None else 0.0
+            bal = accounts[0].get("balance", {}) or {}
+            balance_d = money_decimal(bal.get("balance"), field="fetch.balance.fallback")
+            if balance_d is not None:
+                return decimal_to_float(balance_d)
         return 0.0
 
     def fetch_client_sentiment(self, epic: str) -> float:

@@ -86,6 +86,12 @@ class SignalEngine:
                 threshold = max(threshold, float(ml_floor))
         except Exception:
             pass
+        try:
+            from system.protective_learning import apply_temporary_test_confidence_floor
+
+            threshold = apply_temporary_test_confidence_floor(threshold)
+        except Exception:
+            pass
         return threshold
 
     def _resolve_market_key(self, market: str) -> str:
@@ -369,7 +375,9 @@ class SignalEngine:
         from trading.strictness_resolver import resolve_strictness
 
         _strict = resolve_strictness(cfg, signal_engine=self, market=market)
-        rsi_buy_max = float(_strict.rsi_buy_max)
+        from system.protective_learning import apply_temporary_test_rsi_buy_max
+
+        rsi_buy_max = apply_temporary_test_rsi_buy_max(float(_strict.rsi_buy_max))
         rsi_sell_min = float(_strict.rsi_sell_min)
         df = self.quote_df(market)
         c5 = self.candles(df, 5)
@@ -615,6 +623,16 @@ class SignalEngine:
             except Exception:
                 effective_rsi_max = rsi_buy_max
             rsi_block = ""
+            try:
+                from system.protective_learning import (
+                    log_temporary_test_rsi_relaxation_once,
+                    temporary_test_gate_active,
+                )
+
+                if temporary_test_gate_active() and candidate == "BUY":
+                    log_temporary_test_rsi_relaxation_once()
+            except Exception:
+                pass
             if candidate == "BUY" and effective_rsi_max > 0 and rsi_val > effective_rsi_max:
                 rsi_block = (
                     f"RSI overbought filter: {rsi_val:.1f} > max {effective_rsi_max:.0f}"

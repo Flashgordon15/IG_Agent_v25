@@ -12,7 +12,7 @@
     "signal_threshold_floor": 62,
     "fitness_min_floor": 55,
     "session_score_floor": -30.0,
-    "_note": "Phase 2 — raise entry bar while collecting agent-labelled trades; works with demo_soak relaxations reduced below."
+    "_note": "Profile B protective floor — 62% confidence minimum (production)"
   },
   "sentiment_guard": {
     "enabled": true,

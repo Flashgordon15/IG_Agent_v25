@@ -88,7 +88,7 @@ class TargetSeekingEngine:
         try:
             from system.drawdown_monitor import reset_session
 
-            reset_session(float(balance))
+            reset_session(float(balance), field="balance")
         except Exception:
             pass
 
@@ -112,7 +112,7 @@ class TargetSeekingEngine:
             try:
                 from system.drawdown_monitor import update
 
-                update(b)
+                update(b, field="balance")
             except Exception:
                 pass
             if self.session_start_balance is None:
@@ -163,27 +163,40 @@ class TargetSeekingEngine:
         return round(self.resolve_p_day_realised() + self.resolve_open_unrealized_gbp(), 2)
 
     def resolve_p_day_realised(self) -> float:
-        """Daily realised profit — learning store primary, REST session delta fallback."""
-        p_store = 0.0
+        """Daily realised profit — learning store primary (signed), session delta fallback."""
+        from decimal import Decimal, ROUND_HALF_UP
+
+        from system.balance_pnl_decimal import decimal_to_float, money_decimal
+
+        two = Decimal("0.01")
+        zero = Decimal("0")
+
+        p_store = zero
         if self._store is not None:
             try:
                 from system.daily_loss_policy import effective_daily_pnl
 
-                p_store = max(0.0, float(effective_daily_pnl(self._store)))
+                eff = money_decimal(effective_daily_pnl(self._store), field="effective_daily_pnl")
+                if eff is not None:
+                    p_store = eff
             except Exception:
-                p_store = 0.0
+                p_store = zero
 
-        p_balance = 0.0
+        p_balance = zero
         try:
-            from system.drawdown_monitor import snapshot
+            from system.drawdown_monitor import snapshot_decimal_debug
 
-            snap = snapshot()
-            session_pnl = float(snap.get("session_pnl_gbp") or 0.0)
-            p_balance = max(0.0, session_pnl)
+            snap = snapshot_decimal_debug()
+            if snap.get("last_balance_field_used") == "balance":
+                session_pnl = money_decimal(snap.get("session_pnl_decimal"), field="session_pnl")
+                if session_pnl is not None:
+                    p_balance = session_pnl
         except Exception:
-            p_balance = 0.0
+            p_balance = zero
 
-        return max(p_store, p_balance)
+        # Target compression uses realised gains only (non-negative); drawdown guard uses signed path.
+        combined = max(p_store, p_balance)
+        return decimal_to_float(combined.quantize(two, rounding=ROUND_HALF_UP))
 
     def _uk_today(self) -> str:
         return datetime.now(tz=_LONDON).date().isoformat()

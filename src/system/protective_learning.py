@@ -5,6 +5,17 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Any
 
+# Temporary test override — set False to restore production protective floor (62%).
+USE_TEMPORARY_TEST_GATE = False
+TEMPORARY_TEST_CONFIDENCE_FLOOR = 50.0
+_PRODUCTION_SIGNAL_THRESHOLD_FLOOR = 62.0
+_PRODUCTION_RSI_BUY_MAX = 85.0
+TEMPORARY_TEST_RSI_BUY_MAX = 98.0
+TEMPORARY_TEST_PROBE_RISK_CAP_GBP = 200.0
+
+_test_mode_logged = False
+_test_rsi_relaxation_logged = False
+_test_execution_bypass_logged = False
 
 @lru_cache(maxsize=1)
 def _block() -> dict[str, Any]:
@@ -28,11 +39,194 @@ def protective_learning_enabled() -> bool:
 def signal_threshold_floor() -> float | None:
     if not protective_learning_enabled():
         return None
+    if USE_TEMPORARY_TEST_GATE:
+        confidence_floor = TEMPORARY_TEST_CONFIDENCE_FLOOR
+    else:
+        try:
+            confidence_floor = float(
+                _block().get("signal_threshold_floor") or _PRODUCTION_SIGNAL_THRESHOLD_FLOOR
+            )
+        except (TypeError, ValueError):
+            confidence_floor = _PRODUCTION_SIGNAL_THRESHOLD_FLOOR
+    return confidence_floor if confidence_floor > 0 else None
+
+
+def apply_temporary_test_confidence_floor(threshold: float) -> float:
+    """Cap the live entry bar at 50% while temporary test mode is active."""
+    if USE_TEMPORARY_TEST_GATE:
+        return min(float(threshold), TEMPORARY_TEST_CONFIDENCE_FLOOR)
+    return float(threshold)
+
+
+def apply_temporary_test_rsi_buy_max(rsi_buy_max: float) -> float:
+    """Raise RSI overbought ceiling to 98 while temporary test gate is active."""
+    if USE_TEMPORARY_TEST_GATE:
+        return TEMPORARY_TEST_RSI_BUY_MAX
+    return float(rsi_buy_max)
+
+
+def log_temporary_test_rsi_relaxation_once() -> None:
+    """Log once per process when demo test mode relaxes the RSI overbought guard."""
+    global _test_rsi_relaxation_logged
+    if not USE_TEMPORARY_TEST_GATE or _test_rsi_relaxation_logged:
+        return
+    _test_rsi_relaxation_logged = True
     try:
-        v = float(_block().get("signal_threshold_floor") or 0)
-    except (TypeError, ValueError):
-        return None
-    return v if v > 0 else None
+        from system.engine_log import log_engine
+
+        log_engine(
+            "🧪 TEST MODE: Relaxing RSI overbought ceiling to 98 to force test trade verification."
+        )
+    except Exception:
+        pass
+
+
+def ensure_test_mode_rsi_relaxation_armed() -> None:
+    """Arm RSI relaxation for demo verification runs (no-op when test gate off)."""
+    if not USE_TEMPORARY_TEST_GATE:
+        return
+    log_temporary_test_rsi_relaxation_once()
+
+
+def log_temporary_test_execution_bypass_once() -> None:
+    """Log once per process when demo test mode lifts execution barriers."""
+    global _test_execution_bypass_logged
+    if not USE_TEMPORARY_TEST_GATE or _test_execution_bypass_logged:
+        return
+    _test_execution_bypass_logged = True
+    try:
+        from system.engine_log import log_engine
+
+        log_engine(
+            "🧪 TEST MODE: Bypassing consecutive loss circuit breaker and "
+            "expanding risk caps for test fill validation."
+        )
+    except Exception:
+        pass
+
+
+def apply_temporary_test_risk_cap_gbp(cap_gbp: float) -> float:
+    """Raise probe/full risk ceiling to £200 while temporary test gate is active."""
+    if USE_TEMPORARY_TEST_GATE:
+        return max(float(cap_gbp), TEMPORARY_TEST_PROBE_RISK_CAP_GBP)
+    return float(cap_gbp)
+
+
+def clear_circuit_breaker_for_test_run(store: Any | None = None) -> None:
+    """Force consecutive-loss count to zero and clear the 60-minute pause."""
+    if not USE_TEMPORARY_TEST_GATE:
+        return
+    if store is None:
+        try:
+            from data.learning_store import LearningStore
+
+            store = LearningStore()
+        except Exception:
+            store = None
+    if store is None:
+        return
+    try:
+        store.clear_circuit_breaker_state()
+    except Exception:
+        pass
+
+
+def ensure_test_mode_execution_bypass_armed(store: Any | None = None) -> None:
+    """Arm circuit-breaker bypass and expanded risk caps for demo test runs."""
+    if not USE_TEMPORARY_TEST_GATE:
+        return
+    log_temporary_test_execution_bypass_once()
+    clear_circuit_breaker_for_test_run(store)
+
+
+def temporary_test_gate_active() -> bool:
+    return USE_TEMPORARY_TEST_GATE
+
+
+def cockpit_controls_unlocked_for_test() -> bool:
+    """When True, Flight Deck operator controls bypass manual_stop / init locks."""
+    return USE_TEMPORARY_TEST_GATE
+
+
+def clear_operational_locks_for_test_run() -> None:
+    """Reset supervisor holds so cockpit toggles are clickable during test runs."""
+    if not USE_TEMPORARY_TEST_GATE:
+        return
+    try:
+        from system.shutdown_cleanup import clear_manual_stop
+
+        clear_manual_stop()
+    except Exception:
+        pass
+
+
+_test_mode_runtime_activated = False
+
+
+def activate_test_mode_runtime() -> None:
+    """One-shot test-run activation — unlock cockpit and arm scalping telemetry."""
+    global _test_mode_runtime_activated
+    if not USE_TEMPORARY_TEST_GATE:
+        return
+    clear_operational_locks_for_test_run()
+    ensure_test_mode_rsi_relaxation_armed()
+    ensure_test_mode_execution_bypass_armed()
+    if _test_mode_runtime_activated:
+        return
+    _test_mode_runtime_activated = True
+    try:
+        from system.engine_log import log_engine
+
+        log_engine(
+            "🧪 TEST MODE: cockpit unlocked, scalping engine ACTIVE, "
+            "tick-velocity override OFF."
+        )
+    except Exception:
+        pass
+
+
+def apply_test_mode_scalping_telemetry(
+    scalping: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Force ACTIVE scalping state and live tick counters (override off) for test runs."""
+    st = dict(scalping or {})
+    if not USE_TEMPORARY_TEST_GATE:
+        return st
+    if str(st.get("engine_state") or "STANDBY").upper() in ("", "STANDBY"):
+        st["engine_state"] = "ACTIVE"
+    tv = dict(st.get("tick_velocity") or {})
+    tv["override_active"] = False
+    st["tick_velocity"] = tv
+    st["test_mode_active"] = True
+    return st
+
+
+def build_test_mode_cockpit_controls() -> dict[str, Any]:
+    """Authoritative unlocked control payload for Flight Deck operator toggles."""
+    return {
+        "manual_stop": False,
+        "disabled": False,
+        "controls_locked": False,
+        "shadow_toggle_enabled": True,
+        "init_complete": True,
+        "test_mode_unlock": True,
+    }
+
+
+def log_temporary_test_gate_once() -> None:
+    """Emit a single engine.log line per process when test floor is active."""
+    global _test_mode_logged
+    if not USE_TEMPORARY_TEST_GATE or _test_mode_logged:
+        return
+    _test_mode_logged = True
+    try:
+        from system.engine_log import log_engine
+
+        log_engine(
+            "🧪 TEST MODE ACTIVE: Evaluating signal against temporary 50.0% floor."
+        )
+    except Exception:
+        pass
 
 
 def fitness_min_floor() -> float | None:

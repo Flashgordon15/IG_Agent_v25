@@ -27,13 +27,27 @@ def ticks_in_window(epic: str, *, window_sec: float = TICK_WINDOW_SEC) -> int:
     key = str(epic or "").strip()
     if not key or window_sec <= 0:
         return 0
+    ticks = 0
+    clf = None
     try:
         from intelligence.intelligence_worker import get_intelligence_worker
 
         clf = get_intelligence_worker().micro_model
-        return int(clf.ticks_in_window(key, float(window_sec), now=time.time()))
+        ticks = int(clf.ticks_in_window(key, float(window_sec), now=time.time()))
     except Exception:
-        return 0
+        ticks = 0
+    if ticks > 0:
+        return ticks
+    try:
+        from system.protective_learning import temporary_test_gate_active
+
+        if temporary_test_gate_active() and clf is not None:
+            total = int(clf.tick_count(key))
+            if total > 0:
+                return min(total, TICK_OVERRIDE_THRESHOLD - 1)
+    except Exception:
+        pass
+    return ticks
 
 
 def confidence_override_active(
@@ -41,6 +55,13 @@ def confidence_override_active(
     ticks_200ms: int,
     micro_confidence: float,
 ) -> bool:
+    try:
+        from system.protective_learning import temporary_test_gate_active
+
+        if temporary_test_gate_active():
+            return False
+    except Exception:
+        pass
     return int(ticks_200ms) >= TICK_OVERRIDE_THRESHOLD or _confidence_pct(
         micro_confidence
     ) >= CONFIDENCE_OVERRIDE_PCT

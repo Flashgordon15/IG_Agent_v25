@@ -593,6 +593,68 @@ body {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 10px;
+  gap: 12px;
+}
+
+.shadow-mode-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.shadow-mode-switch.locked {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.shadow-mode-switch input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.shadow-switch-slider {
+  position: relative;
+  width: 44px;
+  height: 24px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.35);
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+
+.shadow-switch-slider::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #e2e8f0;
+  transition: transform 0.2s ease, background 0.2s ease;
+}
+
+.shadow-mode-switch input:checked + .shadow-switch-slider {
+  background: rgba(168, 85, 247, 0.45);
+  border-color: rgba(168, 85, 247, 0.75);
+}
+
+.shadow-mode-switch input:checked + .shadow-switch-slider::after {
+  transform: translateX(20px);
+  background: #f5d0fe;
+}
+
+.shadow-mode-switch input:disabled + .shadow-switch-slider {
+  filter: grayscale(0.35);
+}
+
+.shadow-mode-switch input:focus-visible + .shadow-switch-slider {
+  outline: 2px solid rgba(168, 85, 247, 0.85);
+  outline-offset: 2px;
 }
 
 .shadow-title {
@@ -693,6 +755,15 @@ body {
   box-shadow: 0 0 12px rgba(34, 255, 136, 0.3);
 }
 
+.scalping-state.standby {
+  background: rgba(148, 163, 184, 0.12);
+  color: var(--text-muted);
+}
+
+.scalping-panel.standby .scalping-sub {
+  opacity: 0.6;
+}
+
 .scalping-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -742,6 +813,32 @@ body {
 }
 
 /* Card D — Positions */
+.pos-subpanel {
+  margin-bottom: 1.35rem;
+}
+
+.pos-subpanel:last-child {
+  margin-bottom: 0;
+}
+
+.pos-subpanel-title {
+  margin: 0 0 10px;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--purple-glow);
+}
+
+.pos-subpanel-history {
+  padding-top: 0.35rem;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.pos-table-history tbody tr:nth-child(even) {
+  background: rgba(15, 23, 42, 0.35);
+}
+
 .table-wrap {
   overflow-x: auto;
 }
@@ -773,6 +870,64 @@ body {
 
 .pos-table tbody tr:hover {
   background: rgba(168, 85, 247, 0.06);
+}
+
+.pos-side-badge {
+  display: inline-block;
+  min-width: 3rem;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-align: center;
+}
+
+.pos-side-badge.buy {
+  color: #4ade80;
+  border: 1px solid rgba(74, 222, 128, 0.45);
+  background: rgba(74, 222, 128, 0.08);
+}
+
+.pos-side-badge.sell {
+  color: #f87171;
+  border: 1px solid rgba(248, 113, 113, 0.45);
+  background: rgba(248, 113, 113, 0.08);
+}
+
+.pos-side-badge.neutral {
+  color: var(--text-muted);
+  border: 1px solid rgba(148, 163, 184, 0.35);
+}
+
+.pos-floating-pnl {
+  font-family: var(--font-mono);
+  font-weight: 700;
+}
+
+.pos-floating-pnl.pnl-profit {
+  color: #4ade80;
+}
+
+.pos-floating-pnl.pnl-loss {
+  color: #f87171;
+}
+
+.pos-floating-pnl.pnl-flat {
+  color: var(--text-muted);
+}
+
+.closure-reason {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.closure-reason.pnl-loss {
+  color: #f87171;
 }
 
 .empty-state {
@@ -939,6 +1094,12 @@ body {
   color: var(--amber);
   letter-spacing: 0.02em;
   animation: triage-reconnect-pulse 1.2s ease-in-out infinite;
+}
+
+.triage-nominal-empty .triage-reconnect-icon,
+.triage-nominal-empty .triage-reconnect-text {
+  animation: none;
+  color: var(--green, #4ade80);
 }
 
 @keyframes triage-reconnect-pulse {

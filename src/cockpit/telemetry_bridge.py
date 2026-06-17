@@ -84,8 +84,9 @@ def _scalping_telemetry_payload(
     try:
         from intelligence.time_decay import scalping_time_decay_telemetry
         from intelligence.velocity_filter import scalping_velocity_telemetry
+        from system.protective_learning import apply_test_mode_scalping_telemetry
 
-        return {
+        payload = {
             "engine_state": "ENGAGED" if position_map else "STANDBY",
             "primary_epic": str(primary_epic or "").strip(),
             "open_positions": len(position_map),
@@ -95,6 +96,7 @@ def _scalping_telemetry_payload(
                 micro_confidence=micro_confidence,
             ),
         }
+        return apply_test_mode_scalping_telemetry(payload)
     except Exception:
         return {}
 
@@ -398,6 +400,12 @@ def _collect_snapshot(epics: tuple[str, ...]) -> dict[str, Any]:
         from system.superjet_drawdown_guard import check_and_enforce_async
 
         drawdown_guard = check_and_enforce_async()
+        try:
+            from system.drawdown_monitor import snapshot_for_telemetry
+
+            drawdown_guard["monitor"] = snapshot_for_telemetry()
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -469,7 +477,7 @@ def _collect_snapshot(epics: tuple[str, ...]) -> dict[str, Any]:
     except Exception:
         pass
 
-    return {
+    payload = {
         "ts": time.time(),
         "gates": gates,
         "boot_phase": snap.get("phase") if isinstance(snap, dict) else "",
@@ -497,6 +505,15 @@ def _collect_snapshot(epics: tuple[str, ...]) -> dict[str, Any]:
         "shadow_trading": shadow_trading,
         "order_book_imbalance": order_book_imbalance,
     }
+    try:
+        from cockpit.avionics_markets import enrich_avionics_markets
+
+        payload = enrich_avionics_markets(payload)
+    except Exception as exc:
+        log_engine(
+            f"cockpit telemetry avionics enrich failed: {type(exc).__name__}: {exc}"
+        )
+    return payload
 
 
 def _liquidity_wave_snapshot() -> dict[str, Any]:

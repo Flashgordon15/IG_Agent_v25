@@ -361,6 +361,19 @@ class OrderValidator:
 
     def check_circuit_breaker(self) -> tuple[bool, str]:
         """Block new entries after max_consecutive_losses; auto-resume after pause at half size."""
+        try:
+            from system.protective_learning import (
+                clear_circuit_breaker_for_test_run,
+                log_temporary_test_execution_bypass_once,
+                temporary_test_gate_active,
+            )
+
+            if temporary_test_gate_active():
+                log_temporary_test_execution_bypass_once()
+                clear_circuit_breaker_for_test_run(self._store)
+                return True, ""
+        except Exception:
+            pass
         cfg = self._cfg
         max_losses = cfg.max_consecutive_losses
         if max_losses <= 0 or self._store is None:

@@ -38,15 +38,23 @@ def effective_risk_cap_gbp(
     """Match gate risk_validation cap logic (full cap vs probe band target)."""
     cap = resolve_risk_cap_gbp(cfg)
     if str(risk_band_label or "").lower() != "probe":
-        return cap
-    try:
-        from system.risk_bands import bands_enabled, probe_risk_target_gbp
+        result = cap
+    else:
+        try:
+            from system.risk_bands import bands_enabled, probe_risk_target_gbp
 
-        if bands_enabled():
-            return float(probe_risk_target_gbp(float(confidence)) * 1.05)
+            if bands_enabled():
+                result = float(probe_risk_target_gbp(float(confidence)) * 1.05)
+            else:
+                result = 80.0
+        except Exception:
+            result = 80.0
+    try:
+        from system.protective_learning import apply_temporary_test_risk_cap_gbp
+
+        return apply_temporary_test_risk_cap_gbp(result)
     except Exception:
-        pass
-    return 80.0
+        return result
 
 
 def check_risk_cap(

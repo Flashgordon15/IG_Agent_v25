@@ -18,6 +18,7 @@ from system.superjet_drawdown_guard import (
     telemetry_snapshot,
 )
 from system.supervisor_history import (
+    filter_superseded_triage_events,
     read_history_last_24h,
     record_supervisor_event,
     reset_supervisor_history_for_tests,
@@ -49,6 +50,31 @@ class SuperjetHudTests(unittest.TestCase):
         rows = read_history_last_24h()
         self.assertGreaterEqual(len(rows), 1)
         self.assertEqual(rows[-1]["event_type"], "port_flush")
+
+    def test_triage_filters_superseded_drawdown_breach_when_pnl_reset(self) -> None:
+        record_supervisor_event(
+            "drawdown_ceiling_breach",
+            detail="P&L -500.00 GBP",
+            source="superjet_drawdown_guard",
+        )
+        record_supervisor_event("port_flush", detail="ok")
+        rows = [
+            {"event_type": "drawdown_ceiling_breach", "detail": "P&L -500.00 GBP"},
+            {"event_type": "port_flush", "detail": "ok"},
+        ]
+        with patch(
+            "system.supervisor_history._historic_drawdown_breach_superseded",
+            return_value=(True, "effective_pnl_zero_monitor_nominal"),
+        ):
+            filtered = filter_superseded_triage_events(rows)
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered[0]["event_type"], "port_flush")
+        with patch(
+            "system.supervisor_history._historic_drawdown_breach_superseded",
+            return_value=(False, "superjet_active"),
+        ):
+            unfiltered = filter_superseded_triage_events(rows)
+        self.assertEqual(len(unfiltered), 2)
 
     def test_drawdown_guard_ceiling_constant(self) -> None:
         self.assertEqual(MAX_DAILY_DRAWDOWN_GBP, 500.0)

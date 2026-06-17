@@ -55,14 +55,10 @@ def reset_superjet_drawdown_guard_for_tests() -> None:
 
 def _resolve_daily_pnl_gbp() -> float:
     try:
-        from intelligence.target_engine import get_target_engine, target_engine_enabled
-        from system.config_loader import get_config
+        from system.balance_pnl_decimal import decimal_to_float, resolve_daily_pnl_gbp_decimal
 
-        if target_engine_enabled(get_config(reload=False)):
-            snap = get_target_engine().refresh()
-            realized = float(snap.get("realized_daily_pnl_gbp") or 0.0)
-            unrealized = float(snap.get("open_unrealized_gbp") or 0.0)
-            return realized + unrealized
+        total, _ctx = resolve_daily_pnl_gbp_decimal()
+        return decimal_to_float(total)
     except Exception:
         pass
     try:

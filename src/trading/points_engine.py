@@ -654,6 +654,12 @@ class PointsEngine:
                     threshold = max(threshold, floor)
             except Exception:
                 pass
+            try:
+                from system.protective_learning import apply_temporary_test_confidence_floor
+
+                threshold = apply_temporary_test_confidence_floor(threshold)
+            except Exception:
+                pass
             return threshold
         except Exception:
             return CONF_MARGINAL_MIN

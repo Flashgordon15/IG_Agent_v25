@@ -11,6 +11,239 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/static/styles.css" id="cockpit-css" />
+  <style>
+    .header-blueprint-tab {
+      font-family: var(--font-mono);
+      font-size: 0.62rem;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      padding: 8px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border-subtle);
+      background: rgba(15, 23, 42, 0.55);
+      color: var(--text-muted);
+      cursor: pointer;
+      transition: border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+    }
+    .header-blueprint-tab:hover {
+      color: var(--text-primary);
+      border-color: rgba(168, 85, 247, 0.45);
+    }
+    .header-blueprint-tab.active {
+      color: #e9d5ff;
+      border-color: rgba(168, 85, 247, 0.75);
+      box-shadow: 0 0 16px rgba(168, 85, 247, 0.25);
+      background: rgba(88, 28, 135, 0.22);
+    }
+    .card-blueprint-manifest {
+      margin-top: 16px;
+    }
+    .card-blueprint-manifest.hidden {
+      display: none;
+    }
+    .blueprint-manifest-content {
+      margin: 0;
+      padding: 18px 20px 22px;
+      max-height: min(68vh, 720px);
+      overflow: auto;
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      line-height: 1.55;
+      color: #cbd5e1;
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: rgba(2, 6, 23, 0.72);
+      border-top: 1px solid var(--border-subtle);
+    }
+    .blueprint-manifest-content .spec-h1 {
+      display: block;
+      margin: 0 0 12px;
+      font-size: 0.82rem;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      color: #e9d5ff;
+    }
+    .blueprint-manifest-content .spec-h2 {
+      display: block;
+      margin: 18px 0 8px;
+      font-size: 0.76rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      color: #c4b5fd;
+    }
+    .blueprint-manifest-content .spec-h3 {
+      display: block;
+      margin: 14px 0 6px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      color: #a5b4fc;
+    }
+    .blueprint-manifest-content .spec-meta {
+      color: #94a3b8;
+    }
+    .blueprint-manifest-content .spec-code {
+      display: block;
+      margin: 8px 0;
+      padding: 10px 12px;
+      border-left: 3px solid rgba(168, 85, 247, 0.55);
+      background: rgba(15, 23, 42, 0.65);
+      color: #e2e8f0;
+    }
+    .blueprint-manifest-content .spec-kv {
+      color: #86efac;
+    }
+    .asset-gauges {
+      margin-top: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .gauge-block {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .gauge-label-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .gauge-label {
+      font-family: var(--font-mono);
+      font-size: 0.54rem;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+    }
+    .gauge-value {
+      font-family: var(--font-mono);
+      font-size: 0.62rem;
+      font-weight: 700;
+      color: #e2e8f0;
+    }
+    .gauge-value.conf-above {
+      color: #4ade80;
+    }
+    .gauge-value.conf-below {
+      color: #f87171;
+    }
+    .gauge-value.rsi-hot {
+      color: #ff2244;
+      text-shadow: 0 0 10px rgba(255, 34, 68, 0.55);
+    }
+    .conf-gauge-track {
+      position: relative;
+      height: 8px;
+      border-radius: 999px;
+      background: rgba(15, 23, 42, 0.85);
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      overflow: visible;
+    }
+    .conf-gauge-fill {
+      height: 100%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, #f87171 0%, #fbbf24 55%, #4ade80 100%);
+      transition: width 0.35s ease;
+    }
+    .conf-gauge-threshold {
+      position: absolute;
+      top: -3px;
+      bottom: -3px;
+      width: 2px;
+      margin-left: -1px;
+      background: #f8fafc;
+      box-shadow: 0 0 6px rgba(248, 250, 252, 0.85);
+      pointer-events: none;
+      z-index: 2;
+    }
+    .rsi-heat-track {
+      position: relative;
+      height: 6px;
+      border-radius: 999px;
+      background: linear-gradient(
+        90deg,
+        #22c55e 0%,
+        #84cc16 25%,
+        #eab308 50%,
+        #f97316 75%,
+        #ef4444 100%
+      );
+      border: 1px solid rgba(148, 163, 184, 0.25);
+      transition: box-shadow 0.25s ease, filter 0.25s ease;
+    }
+    .rsi-heat-track.rsi-overbought {
+      filter: saturate(1.35) brightness(1.15);
+      box-shadow: 0 0 14px rgba(255, 34, 68, 0.75);
+      background: linear-gradient(
+        90deg,
+        #22c55e 0%,
+        #84cc16 20%,
+        #eab308 40%,
+        #f97316 60%,
+        #ff2244 82%,
+        #ff0033 100%
+      );
+    }
+    .rsi-heat-marker {
+      position: absolute;
+      top: 50%;
+      width: 3px;
+      height: 12px;
+      margin-left: -1.5px;
+      margin-top: -6px;
+      border-radius: 2px;
+      background: #f8fafc;
+      box-shadow: 0 0 8px rgba(255, 255, 255, 0.65);
+      transition: left 0.35s ease;
+      pointer-events: none;
+      z-index: 2;
+    }
+    .asset-strategy-meta {
+      margin-top: 10px;
+      padding-top: 8px;
+      border-top: 1px solid rgba(148, 163, 184, 0.15);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .strategy-meta-row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .strategy-meta-label {
+      flex: 0 0 auto;
+      font-family: var(--font-mono);
+      font-size: 0.52rem;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+    }
+    .strategy-meta-val {
+      flex: 1 1 auto;
+      text-align: right;
+      font-family: var(--font-mono);
+      font-size: 0.58rem;
+      font-weight: 600;
+      line-height: 1.35;
+      color: #cbd5e1;
+      word-break: break-word;
+    }
+    .strategy-meta-val.blocker-val.blocker-hot {
+      color: #f87171;
+    }
+    .strategy-meta-val.blocker-val.blocker-wait {
+      color: #fbbf24;
+    }
+    .strategy-meta-val.ai-weight-val.ai-nominal {
+      color: #86efac;
+    }
+    .strategy-meta-val.ai-weight-val.ai-adaptive {
+      color: #67e8f9;
+    }
+  </style>
   <script>
     window.__COCKPIT_BUILD__ = Date.now();
     document.getElementById("cockpit-css").href =
@@ -34,15 +267,25 @@
         <span class="brand-glyph">◈</span>
         <div>
           <h1>IG Agent Flight Deck</h1>
-          <p class="subtitle">v29.1 · 4-Gate Boot Pipeline · Prop Trading Cockpit</p>
+          <p class="subtitle">v29.1 · 5-Gate Boot Pipeline · Prop Trading Cockpit</p>
         </div>
       </div>
       <div class="status-cluster">
+        <button
+          id="blueprint-toggle"
+          type="button"
+          class="header-blueprint-tab"
+          aria-expanded="false"
+          aria-controls="system-blueprint-panel"
+          title="Toggle embedded system blueprint manifest"
+        >
+          🔍 SYSTEM BLUEPRINTS
+        </button>
         <span id="account-badge" class="account-badge" title="IG account from .env">ACCT —</span>
         <span id="ws-status" class="pill pill-warn">TELEMETRY …</span>
         <span id="log-ws-status" class="pill pill-warn">LOGS …</span>
         <span id="triage-ws-status" class="pill pill-warn">TRIAGE …</span>
-        <span id="clock" class="clock">--:--:-- BST</span>
+        <span id="clock" class="clock" aria-live="off">--:--:--</span>
       </div>
     </header>
 
@@ -65,7 +308,12 @@
           <h2>Avionics Telemetry HUD</h2>
           <span id="spread-forecast" class="forecast-badge">SPREAD FORECAST: —</span>
         </header>
-        <div id="asset-cards" class="asset-cards"></div>
+        <div
+          id="asset-cards"
+          class="asset-cards"
+          data-telemetry-scope="per-asset"
+          aria-label="Per-asset avionics gauges (GOLD, WALL_STREET, JAPAN_225, EUR_USD)"
+        ></div>
       </section>
 
       <!-- Card C: Mission + Scalping Telemetry -->
@@ -102,7 +350,16 @@
         <div id="shadow-trading-panel" class="shadow-trading-panel" aria-label="Shadow Trading Engine">
           <div class="shadow-panel-header">
             <span class="shadow-title">Autonomous Shadow Trading Engine</span>
-            <span id="shadow-mode-badge" class="shadow-mode-badge">OFF</span>
+            <label class="shadow-mode-switch" id="shadow-mode-switch" title="Toggle simulated shadow fills">
+              <input
+                type="checkbox"
+                id="shadow-mode-toggle"
+                role="switch"
+                aria-label="Autonomous Shadow Trading Engine"
+              />
+              <span class="shadow-switch-slider" aria-hidden="true"></span>
+              <span id="shadow-mode-badge" class="shadow-mode-badge">OFF</span>
+            </label>
           </div>
           <div class="shadow-pnl-grid">
             <div class="shadow-metric">
@@ -150,25 +407,69 @@
           <span class="card-label">Card D</span>
           <h2>Multi-Position Flight Grid</h2>
         </header>
-        <div class="table-wrap">
-          <table class="pos-table">
-            <thead>
-              <tr>
-                <th>Epic</th>
-                <th>Side</th>
-                <th>Entry</th>
-                <th>Market</th>
-                <th>Stop</th>
-                <th>Trail</th>
-                <th>Sync</th>
-              </tr>
-            </thead>
-            <tbody id="pos-body"></tbody>
-          </table>
-          <p id="pos-empty" class="empty-state">No active concurrent entries</p>
+
+        <div class="pos-subpanel" aria-label="Active Open Positions">
+          <h3 class="pos-subpanel-title">Active Open Positions</h3>
+          <div class="table-wrap">
+            <table class="pos-table">
+              <thead>
+                <tr>
+                  <th>Epic</th>
+                  <th>Side</th>
+                  <th>Size</th>
+                  <th>Entry</th>
+                  <th>Latest</th>
+                  <th>Stop</th>
+                  <th>Limit</th>
+                  <th>Float P&amp;L</th>
+                </tr>
+              </thead>
+              <tbody id="active-pos-body"></tbody>
+            </table>
+            <p id="active-pos-empty" class="empty-state">No active concurrent entries</p>
+          </div>
+        </div>
+
+        <div class="pos-subpanel pos-subpanel-history" aria-label="24 Hour Closed Transaction History">
+          <h3 class="pos-subpanel-title">24HR Closed Transaction History</h3>
+          <div class="table-wrap">
+            <table class="pos-table pos-table-history">
+              <thead>
+                <tr>
+                  <th>Epic</th>
+                  <th>Side</th>
+                  <th>Size</th>
+                  <th>Entry Price</th>
+                  <th>Exit Price</th>
+                  <th>Closure Reason</th>
+                  <th>Realized P&amp;L</th>
+                </tr>
+              </thead>
+              <tbody id="closed-trades-body"></tbody>
+            </table>
+            <p id="closed-trades-empty" class="empty-state">No closed transactions in the last 24 hours</p>
+          </div>
         </div>
       </section>
     </main>
+
+    <section
+      id="system-blueprint-panel"
+      class="card card-blueprint-manifest hidden"
+      aria-label="System Blueprint Manifest"
+      hidden
+    >
+      <header class="card-header">
+        <span class="card-label">Manifest</span>
+        <h2>System Blueprint Reference</h2>
+        <span id="blueprint-source-label" class="log-meta">README.md · 5-Gate spec · production parameters</span>
+      </header>
+      <pre
+        id="blueprint-manifest-content"
+        class="blueprint-manifest-content"
+        aria-live="polite"
+      >Loading blueprint manifest…</pre>
+    </section>
 
     <!-- Card F: Dual-tab Live HUD -->
     <section class="card card-flight-log" aria-label="System Avionics and Triage">

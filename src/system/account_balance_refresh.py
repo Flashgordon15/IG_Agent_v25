@@ -68,7 +68,8 @@ class AccountBalanceRefresher:
         if bal is not None:
             try:
                 from system.drawdown_monitor import update as _dd_update
-                _dd_update(float(bal))
+
+                _dd_update(bal, field="balance")
             except Exception:
                 pass
 

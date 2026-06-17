@@ -22,12 +22,119 @@ const ASSET_NAMES = {
   "CS.D.EURUSD.CFD.IP": "EUR/USD",
 };
 
+/** Localized avionics dictionary keys — one isolated metrics bucket per card. */
+const EPIC_ASSET_KEYS = {
+  "CS.D.CFPGOLD.CFP.IP": "GOLD",
+  "IX.D.DOW.IFM.IP": "WALL_STREET",
+  "IX.D.NIKKEI.IFM.IP": "JAPAN_225",
+  "CS.D.EURUSD.CFD.IP": "EUR_USD",
+};
+
+const ASSET_CARD_ORDER = ["GOLD", "WALL_STREET", "JAPAN_225", "EUR_USD"];
+
 const LOG_MAX_LINES = 120;
 const TRIAGE_MAX_LINES = 100;
 const SPARKLINE_LOOKBACK = 50;
 const STALE_FEED_SEC = 5.0;
+const PRODUCTION_CONFIDENCE_FLOOR = 62;
+const RSI_OVERBOUGHT_CEILING = 85;
+
+/** Root README.md — embedded verbatim for offline Flight Deck blueprint manifest. */
+const ROOT_README_MD = `# IG Agent v29.1
+
+Automated IG CFD trading agent — Python backend (FastAPI + multi-market trading loop) on localhost:8080, React dashboard in dashboard/.
+
+**Authoritative docs:**
+
+| Document | Purpose |
+|----------|---------|
+| IG_Agent_v29.1_COMPLETE_SPEC.md | Full operator + implementer specification |
+| docs/V29.1_ARCHITECTURE.md | Module map, data flow, diagrams |
+| IG_Agent_v25_COMPLETE_SPEC_v8.md | Historical v25.5 reference |
+| IG_Agent_v26_FRAMEWORK.md | Future multi-strategy vision |
+
+## Running (single command)
+
+\`\`\`bash
+# From repo root — trading + dashboard
+PYTHONPATH=src python3 src/main.py
+
+# Browser
+open http://localhost:8080
+
+# Rebuild dashboard after UI changes
+cd dashboard && npm run build
+\`\`\`
+
+**macOS:** use Desktop launcher IG Agent v29.0.app (runs same entry point).
+
+## Configuration
+
+- **Primary overlay:** config/config_v29.json (v29.1 protective learning, demo mode)
+- **Instrument matrix:** config/config_v25.json
+- Credentials: interactive at startup (not persisted to disk)
+
+## Quick health checks
+
+\`\`\`bash
+PYTHONPATH=src python3 scripts/learning_health_report.py
+PYTHONPATH=src python3 -m pytest tests/ -q
+\`\`\`
+
+Restart the agent after Python or config changes.`;
+
+const FIVE_GATE_BOOT_SPEC = `## 5-Gate Boot Pipeline (Production)
+
+Source: src/system/boot_coordinator.py · gate1_runner → gate5_runner
+
+| Gate | Phase | Pass criteria (summary) |
+|------|-------|-------------------------|
+| G1 | Environment & Preflight | Config load, demo guard, credentials path, API bind readiness (<2s) |
+| G2 | REST Authentication | IG session, account bind, rest_client committed to BootContext |
+| G3 | Streaming & Hub | Market data hub online (rest_poll or Lightstreamer per config) |
+| G4 | State Hydration | OHLC bootstrap, orchestrator build, dormant trading loops, position sync |
+| G5 | ACTIVE / READY | Atomic READY flip, unpause loops, post-ready services, deploy verify |
+
+Card A telemetry maps G1–G4 for cockpit visibility; G5 marks the agent ACTIVE for live tick processing.`;
+
+const PRODUCTION_PARAMETERS_SPEC = `## Production Parameters (v29.1)
+
+Config overlay: config/config_v29.json → config/config_v25.json
+
+### Deployment mode
+  operating_mode:         DEMO
+  demo_only_deployment:   true
+  allow_live_trading:     false
+  Profile:                B (learning_demo_mode)
+
+### Protective learning (strict production)
+  USE_TEMPORARY_TEST_GATE:  false
+  signal_threshold_floor:   62% confidence minimum
+  fitness_min_floor:        55
+  RSI overbought ceiling:   85
+  Circuit breaker:          5 consecutive losses → block new entries
+
+### Daily risk envelope
+  Soft pause:               £400 realised (learning_demo_mode)
+  Hard stop:                £2,000 effective daily loss cap
+  REST budget:              3 calls/min hard cap
+  Quote freshness:          Hub snapshot · ~45s max tick age
+  Order in-flight timeout:  30s
+
+### Entry gate stack (per-tick, seven gates)
+  1. session_open          2. cold_start_gap       3. environment_fitness
+  4. points_state          5. risk_validation      6. signal_confidence (≥62%)
+  7. execution             correlation · protect · no in-flight deadlock
+
+### Enabled markets (typical)
+  IX.D.NIKKEI.IFM.IP · IX.D.DOW.IFM.IP · IX.D.NASDAQ.IFM.IP
+  CS.D.CFPGOLD.CFP.IP · CS.D.EURUSD.CFD.IP · CS.D.GBPUSD.CFD.IP`;
+
+const BLUEPRINT_README_FETCH_PATH = "/static/README.md";
+
 const logBuffer = [];
 const triageBuffer = [];
+let lastTriageGeneration = null;
 const sparklineBuffers = new Map();
 const sparklineCanvases = new Map();
 
@@ -59,8 +166,190 @@ function fmtMoney(n) {
   return `£${v.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+function fmtSignedMoney(n) {
+  if (n == null || Number.isNaN(Number(n))) return "—";
+  const v = Number(n);
+  const formatted = fmtMoney(Math.abs(v));
+  if (v > 0) return `+${formatted}`;
+  if (v < 0) return `-${formatted}`;
+  return formatted;
+}
+
+function resolvePositionSide(row) {
+  if (!row || typeof row !== "object") return "—";
+  if (row.signed_size != null && Number(row.signed_size) < 0) return "SELL";
+  const size = Number(row.size ?? row.dealSize ?? 0);
+  if (size < 0) return "SELL";
+  const side = String(row.side || row.direction || "").trim().toUpperCase();
+  if (side === "SELL" || side === "SHORT") return "SELL";
+  if (size > 0 || side === "BUY") return "BUY";
+  return side || "—";
+}
+
+function resolveSignedSize(row) {
+  if (!row || typeof row !== "object") return 0;
+  if (row.signed_size != null && !Number.isNaN(Number(row.signed_size))) {
+    return Number(row.signed_size);
+  }
+  const size = Number(row.size ?? row.dealSize ?? 0);
+  const side = resolvePositionSide(row);
+  if (side === "SELL") {
+    return size < 0 ? size : -Math.abs(size);
+  }
+  return Math.abs(size);
+}
+
+function computeFloatingPnl(row) {
+  if (!row || typeof row !== "object") return null;
+  const broker =
+    row.floating_pnl_gbp ??
+    row.profitAndLoss ??
+    row.pnl_gbp ??
+    row.pnl_currency ??
+    row.upl;
+  if (broker != null && !Number.isNaN(Number(broker))) {
+    return Number(broker);
+  }
+  const entry = Number(row.entry ?? row.level ?? 0);
+  const latest = Number(
+    row.current ?? row.market ?? row.mkt ?? row.broker_mark ?? 0
+  );
+  const signedSize = resolveSignedSize(row);
+  if (!entry || !latest || !signedSize) return null;
+  return (entry - latest) * signedSize;
+}
+
 function epicLabel(epic) {
   return ASSET_NAMES[epic] || String(epic).slice(-18);
+}
+
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function formatBlueprintDocument(raw) {
+  const lines = String(raw || "").split("\n");
+  const out = [];
+  let inCode = false;
+  for (const line of lines) {
+    if (line.trim().startsWith("```")) {
+      inCode = !inCode;
+      if (inCode) {
+        out.push('<span class="spec-code">');
+      } else {
+        out.push("</span>");
+      }
+      continue;
+    }
+    if (inCode) {
+      out.push(escapeHtml(line));
+      continue;
+    }
+    if (line.startsWith("### ")) {
+      out.push(`<span class="spec-h3">${escapeHtml(line.slice(4))}</span>`);
+      continue;
+    }
+    if (line.startsWith("## ")) {
+      out.push(`<span class="spec-h2">${escapeHtml(line.slice(3))}</span>`);
+      continue;
+    }
+    if (line.startsWith("# ")) {
+      out.push(`<span class="spec-h1">${escapeHtml(line.slice(2))}</span>`);
+      continue;
+    }
+    if (line.startsWith("|") || line.startsWith("**Authoritative")) {
+      out.push(`<span class="spec-meta">${escapeHtml(line)}</span>`);
+      continue;
+    }
+    if (/^\s{2}[A-Za-z_]+:/.test(line)) {
+      out.push(`<span class="spec-kv">${escapeHtml(line)}</span>`);
+      continue;
+    }
+    out.push(escapeHtml(line));
+  }
+  return out.join("\n");
+}
+
+function buildBlueprintManifestText(readmeBody) {
+  return [
+    String(readmeBody || ROOT_README_MD).trim(),
+    "",
+    "════════════════════════════════════════════════════════════════════════",
+    FIVE_GATE_BOOT_SPEC.trim(),
+    "",
+    PRODUCTION_PARAMETERS_SPEC.trim(),
+  ].join("\n");
+}
+
+function buildBlueprintManifestLayout(content, sourceLabel) {
+  const el = $("blueprint-manifest-content");
+  const label = $("blueprint-source-label");
+  if (label) {
+    label.textContent = sourceLabel
+      ? `Source: ${sourceLabel}`
+      : "Source: README.md · embedded 5-Gate · production parameters";
+  }
+  if (!el) return;
+  el.innerHTML = formatBlueprintDocument(content);
+}
+
+async function loadBlueprintManifestContent() {
+  try {
+    const res = await fetch(`${BLUEPRINT_README_FETCH_PATH}?v=${BUILD_TS}`);
+    if (res.ok) {
+      const text = await res.text();
+      if (text && text.trim()) {
+        return {
+          content: buildBlueprintManifestText(text),
+          source: "README.md (cockpit-web/static)",
+        };
+      }
+    }
+  } catch (_) {
+    /* use embedded root README snapshot */
+  }
+  return {
+    content: buildBlueprintManifestText(ROOT_README_MD),
+    source: "embedded README.md + 5-Gate boot spec + production parameters",
+  };
+}
+
+let blueprintManifestLoaded = false;
+
+async function ensureBlueprintManifestRendered() {
+  if (blueprintManifestLoaded) return;
+  const el = $("blueprint-manifest-content");
+  if (!el) return;
+  el.textContent = "Loading blueprint manifest…";
+  const { content, source } = await loadBlueprintManifestContent();
+  buildBlueprintManifestLayout(content, source);
+  blueprintManifestLoaded = true;
+}
+
+function bindBlueprintToggle() {
+  const btn = $("blueprint-toggle");
+  const panel = $("system-blueprint-panel");
+  if (!btn || !panel) return;
+  btn.addEventListener("click", async () => {
+    const opening = panel.classList.contains("hidden");
+    if (opening) {
+      await ensureBlueprintManifestRendered();
+      panel.classList.remove("hidden");
+      panel.hidden = false;
+      btn.classList.add("active");
+      btn.setAttribute("aria-expanded", "true");
+      panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    } else {
+      panel.classList.add("hidden");
+      panel.hidden = true;
+      btn.classList.remove("active");
+      btn.setAttribute("aria-expanded", "false");
+    }
+  });
 }
 
 function gateClass(status) {
@@ -195,7 +484,231 @@ function renderMarketStatusPill(card, epic, marketStates) {
         : "Stream channel open — gathering live market ticks";
 }
 
-function renderAssets(spread, epics, marketStates) {
+function readLocalizedAssetBucket(payload, assetKey) {
+  if (!payload || !assetKey) return null;
+  const buckets = [
+    payload.avionics_assets,
+    payload.avionics_hud,
+    payload.hud_assets,
+    payload.asset_telemetry,
+    payload.hud_markets,
+  ];
+  for (const bucket of buckets) {
+    if (bucket && typeof bucket === "object" && bucket[assetKey]) {
+      const row = bucket[assetKey];
+      return row && typeof row === "object" ? row : null;
+    }
+  }
+  return null;
+}
+
+/** Per-instrument market slice — asset-key dict first (GOLD, WALL_STREET), never global fallbacks. */
+function readAssetMarketSlice(payload, assetKey, epic) {
+  const markets = payload?.markets;
+  if (markets && typeof markets === "object") {
+    const byAsset = markets[assetKey];
+    if (byAsset && typeof byAsset === "object") return byAsset;
+    if (epic && markets[epic] && typeof markets[epic] === "object") {
+      return markets[epic];
+    }
+  }
+  const localized = readLocalizedAssetBucket(payload, assetKey);
+  return localized && typeof localized === "object" ? localized : {};
+}
+
+function findPositionRowForEpic(payload, epic) {
+  const pmap = payload?.position_map;
+  if (!pmap || typeof pmap !== "object") return null;
+  for (const row of Object.values(pmap)) {
+    if (row && String(row.epic || "") === epic) return row;
+  }
+  return null;
+}
+
+function shortenBlockerReason(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return "";
+  return raw.length > 72 ? `${raw.slice(0, 69)}…` : raw;
+}
+
+function resolveStrategyBlocker(marketSlice) {
+  const slice = marketSlice && typeof marketSlice === "object" ? marketSlice : {};
+  const signal =
+    slice.signal && typeof slice.signal === "object" ? slice.signal : {};
+  const setup = String(signal.setup || slice.setup || "").trim().toUpperCase();
+  const direction = String(signal.direction || slice.direction || "WAIT")
+    .trim()
+    .toUpperCase();
+  const blockReason = shortenBlockerReason(
+    signal.block_reason || slice.block_reason || slice.blocker || ""
+  );
+  const eligibility =
+    slice.trade_eligibility ||
+    signal.countdown ||
+    slice.countdown ||
+    null;
+
+  if (blockReason) {
+    const head = setup ? `G5: ${direction || "WAIT"}` : "G5";
+    return `${head} — ${blockReason}`;
+  }
+  if (eligibility && typeof eligibility === "object") {
+    if (eligibility.display) return String(eligibility.display);
+    if (eligibility.label) return String(eligibility.label);
+  }
+  const health = slice.health && typeof slice.health === "object" ? slice.health : {};
+  const gates = Array.isArray(health.gates) ? health.gates : [];
+  const failed = gates.find((g) => g && g.pass === false);
+  if (failed) {
+    const gateName = String(failed.name || "gate").replace(/_/g, " ").toUpperCase();
+    const detail = shortenBlockerReason(failed.detail || "blocked");
+    return `${gateName}: ${detail}`;
+  }
+  if (setup && direction === "WAIT") {
+    return `G5: ${setup} — Awaiting candle close`;
+  }
+  if (direction && direction !== "WAIT") {
+    return `G5: ${direction} — monitoring`;
+  }
+  return "G5: CLEAR";
+}
+
+function resolveAiWeightLabel(marketSlice) {
+  const slice = marketSlice && typeof marketSlice === "object" ? marketSlice : {};
+  const signal =
+    slice.signal && typeof slice.signal === "object" ? slice.signal : {};
+  const points = slice.points && typeof slice.points === "object" ? slice.points : {};
+
+  let mult =
+    slice.ai_weight ??
+    slice.ml_sizing_multiplier ??
+    slice.ml_weight ??
+    slice.learning_weight ??
+    signal.ml_sizing_multiplier ??
+    signal.ai_weight;
+
+  if (mult == null) {
+    const gates = Array.isArray(slice.health?.gates)
+      ? slice.health.gates
+      : Array.isArray(slice.gates)
+        ? slice.gates
+        : [];
+    for (const g of gates) {
+      if (!g || typeof g !== "object") continue;
+      const val = g.value;
+      if (g.name === "risk_validation" && val && typeof val === "object") {
+        mult = val.ml_sizing_multiplier ?? mult;
+      }
+      if (g.name === "ml_veto" && val && typeof val === "object") {
+        mult = val.sizing_multiplier ?? mult;
+      }
+    }
+  }
+  if (mult == null && points.size_multiplier != null) {
+    mult = points.size_multiplier;
+  }
+
+  const weight = Number(mult ?? 1.0);
+  const safe = Number.isFinite(weight) ? weight : 1.0;
+  const delta = safe - 1.0;
+  if (Math.abs(delta) < 0.005) return "NOMINAL 1.00x";
+  const sign = delta >= 0 ? "+" : "";
+  return `ADAPTIVE ${sign}${delta.toFixed(2)}x`;
+}
+
+function resolveAvionicsMetrics(assetKey, epic, payload) {
+  const marketSlice = readAssetMarketSlice(payload, assetKey, epic);
+  const signal =
+    marketSlice.signal && typeof marketSlice.signal === "object"
+      ? marketSlice.signal
+      : {};
+  const posRow = findPositionRowForEpic(payload, epic);
+
+  let confidence =
+    marketSlice.confidence ??
+    marketSlice.signal_confidence ??
+    signal.confidence ??
+    signal.signal_confidence;
+  if (confidence == null && posRow) {
+    confidence = posRow.confidence ?? posRow.signal_confidence;
+  }
+
+  let rsi =
+    marketSlice.rsi ??
+    signal.rsi ??
+    (marketSlice.indicators && marketSlice.indicators.rsi);
+  if (rsi == null && posRow?.rsi != null) rsi = posRow.rsi;
+  if (rsi == null || Number.isNaN(Number(rsi))) rsi = 50;
+
+  return {
+    assetKey,
+    epic,
+    marketSlice,
+    confidence: Math.max(0, Math.min(100, Number(confidence ?? 0))),
+    rsi: Math.max(0, Math.min(100, Number(rsi))),
+    blocker: resolveStrategyBlocker(marketSlice),
+    aiWeight: resolveAiWeightLabel(marketSlice),
+  };
+}
+
+function renderEpicGauges(card, metrics) {
+  if (!card || !metrics) return;
+  const conf = Number(metrics.confidence ?? 0);
+  const rsi = Number(metrics.rsi ?? 50);
+  const confPct = Math.max(0, Math.min(100, conf));
+  const rsiPct = Math.max(0, Math.min(100, rsi));
+
+  const confVal = card.querySelector(".conf-val");
+  if (confVal) {
+    confVal.textContent = `${confPct.toFixed(1)}%`;
+    confVal.classList.toggle("conf-above", confPct >= PRODUCTION_CONFIDENCE_FLOOR);
+    confVal.classList.toggle("conf-below", confPct < PRODUCTION_CONFIDENCE_FLOOR);
+  }
+
+  const confFill = card.querySelector(".conf-gauge-fill");
+  if (confFill) confFill.style.width = `${confPct}%`;
+
+  const confThreshold = card.querySelector(".conf-gauge-threshold");
+  if (confThreshold) {
+    confThreshold.style.left = `${PRODUCTION_CONFIDENCE_FLOOR}%`;
+  }
+
+  const rsiVal = card.querySelector(".rsi-val");
+  if (rsiVal) {
+    rsiVal.textContent = rsiPct.toFixed(1);
+    rsiVal.classList.toggle("rsi-hot", rsiPct > RSI_OVERBOUGHT_CEILING);
+  }
+
+  const rsiTrack = card.querySelector(".rsi-heat-track");
+  if (rsiTrack) {
+    rsiTrack.classList.toggle("rsi-overbought", rsiPct > RSI_OVERBOUGHT_CEILING);
+  }
+
+  const rsiMarker = card.querySelector(".rsi-heat-marker");
+  if (rsiMarker) rsiMarker.style.left = `${rsiPct}%`;
+
+  const blockerEl = card.querySelector(".blocker-val");
+  if (blockerEl) {
+    const blocker = String(metrics.blocker || "G5: CLEAR");
+    blockerEl.textContent = blocker;
+    blockerEl.title = blocker;
+    blockerEl.classList.toggle("blocker-hot", /RSI|OVERBOUGHT|BLOCK|FAIL/i.test(blocker));
+    blockerEl.classList.toggle("blocker-wait", /WAIT|AWAIT|CANDLE/i.test(blocker));
+  }
+
+  const aiWeightEl = card.querySelector(".ai-weight-val");
+  if (aiWeightEl) {
+    const label = String(metrics.aiWeight || "NOMINAL 1.00x");
+    aiWeightEl.textContent = label;
+    aiWeightEl.classList.toggle("ai-adaptive", label.startsWith("ADAPTIVE"));
+    aiWeightEl.classList.toggle("ai-nominal", label.startsWith("NOMINAL"));
+  }
+}
+
+function renderAssets(payload) {
+  const spread = payload?.spread;
+  const epics = payload?.epics;
+  const marketStates = payload?.market_states_map;
   const container = $("asset-cards");
   if (!container) return;
   const keys = new Set([...Object.keys(spread || {}), ...Object.keys(epics || {})]);
@@ -212,6 +725,7 @@ function renderAssets(spread, epics, marketStates) {
   );
 
   for (const epic of sorted) {
+    const assetKey = EPIC_ASSET_KEYS[epic] || epic;
     const sp = (spread && spread[epic]) || {};
     const q = (epics && epics[epic]) || {};
     const spr = sp.spread != null ? sp.spread : q.spread;
@@ -222,10 +736,14 @@ function renderAssets(spread, epics, marketStates) {
     const ageS = Number(q.age_s ?? q.tick_age_s ?? 0);
     const stale = ageS > STALE_FEED_SEC;
 
-    let card = container.querySelector(`[data-epic="${epic}"]`);
+    let card =
+      container.querySelector(`#asset-card-${assetKey}`) ||
+      container.querySelector(`[data-asset-key="${assetKey}"]`);
     if (!card) {
       card = document.createElement("div");
       card.className = "asset-card";
+      card.id = `asset-card-${assetKey}`;
+      card.dataset.assetKey = assetKey;
       card.dataset.epic = epic;
       card.innerHTML = `
         <div class="asset-card-top">
@@ -240,6 +758,37 @@ function renderAssets(spread, epics, marketStates) {
         <div class="asset-meta">
           <span>Z <strong class="z-val">0</strong></span>
           <span>Throttle <strong class="th-val">0</strong></span>
+        </div>
+        <div class="asset-gauges" aria-label="Gating metrics">
+          <div class="gauge-block">
+            <div class="gauge-label-row">
+              <span class="gauge-label">CONFIDENCE</span>
+              <span class="gauge-value conf-val">0%</span>
+            </div>
+            <div class="conf-gauge-track" title="Production floor 62%">
+              <div class="conf-gauge-fill"></div>
+              <div class="conf-gauge-threshold" style="left: 62%"></div>
+            </div>
+          </div>
+          <div class="gauge-block">
+            <div class="gauge-label-row">
+              <span class="gauge-label">RSI</span>
+              <span class="gauge-value rsi-val">50</span>
+            </div>
+            <div class="rsi-heat-track" title="Overbought block above 85">
+              <div class="rsi-heat-marker" style="left: 50%"></div>
+            </div>
+          </div>
+        </div>
+        <div class="asset-strategy-meta" aria-label="Strategy blockers and ML weight">
+          <div class="strategy-meta-row">
+            <span class="strategy-meta-label">BLOCKER</span>
+            <span class="strategy-meta-val blocker-val">G5: CLEAR</span>
+          </div>
+          <div class="strategy-meta-row">
+            <span class="strategy-meta-label">AI WEIGHT</span>
+            <span class="strategy-meta-val ai-weight-val ai-nominal">NOMINAL 1.00x</span>
+          </div>
         </div>
       `;
       container.appendChild(card);
@@ -263,20 +812,38 @@ function renderAssets(spread, epics, marketStates) {
     if (thEl) thEl.textContent = Number(sp.throttle || 0).toFixed(2);
     renderMarketStatusPill(card, epic, marketStates);
     drawSparkline(sparklineCanvases.get(epic), epic);
+    const metrics = resolveAvionicsMetrics(assetKey, epic, payload);
+    renderEpicGauges(card, metrics);
   }
 
   container.querySelectorAll(".asset-card").forEach((card) => {
-    if (!sorted.includes(card.dataset.epic)) card.remove();
+    const epic = card.dataset.epic || "";
+    if (!sorted.includes(epic)) card.remove();
   });
 }
 
+function isCockpitTestMode(payload) {
+  if (!payload || typeof payload !== "object") return false;
+  const cc = payload.cockpit_controls || payload.shadow_trading?.controls || {};
+  return payload.test_mode_active === true || cc.test_mode_unlock === true;
+}
+
 function resolveScalpingTelemetry(payload) {
+  const testMode = isCockpitTestMode(payload);
   const direct = payload.scalping_telemetry;
   if (direct && typeof direct === "object") {
+    const tv = { ...(direct.tick_velocity || {}) };
+    if (testMode) {
+      tv.override_active = false;
+    }
+    let engineState = direct.engine_state || (testMode ? "ACTIVE" : "STANDBY");
+    if (testMode && String(engineState).toUpperCase() === "STANDBY") {
+      engineState = "ACTIVE";
+    }
     return {
       time_decay: direct.time_decay || {},
-      tick_velocity: direct.tick_velocity || {},
-      engine_state: direct.engine_state || "ACTIVE",
+      tick_velocity: tv,
+      engine_state: engineState,
     };
   }
 
@@ -301,7 +868,27 @@ function resolveScalpingTelemetry(payload) {
 
   const microConf = Number(payload.micro_confidence || 0);
   const ticks200 = Number(payload.orderbook_ticks_200ms || payload.tick_burst_count || 0);
-  const overrideActive = ticks200 >= 15 || microConf >= 90;
+  const overrideActive = testMode ? false : ticks200 >= 15 || microConf >= 90;
+
+  if (testMode) {
+    return {
+      time_decay: {
+        active: false,
+        stall_seconds: 0,
+        atr_compress_pct: 0,
+        interval_sec: 10,
+        step_pct: 15,
+      },
+      tick_velocity: {
+        ticks_200ms: ticks200,
+        override_active: false,
+        confidence_pct: microConf,
+        threshold_ticks: 15,
+        window_ms: 200,
+      },
+      engine_state: "ACTIVE",
+    };
+  }
 
   return {
     time_decay: {
@@ -328,9 +915,15 @@ function renderScalpingTelemetry(payload) {
   const tv = st.tick_velocity || {};
 
   const engineEl = $("scalping-engine-state");
+  const scalpingPanel = document.querySelector(".scalping-panel");
   if (engineEl) {
-    engineEl.textContent = st.engine_state || "STANDBY";
-    engineEl.className = `scalping-state ${st.engine_state === "ENGAGED" ? "engaged" : ""}`;
+    const state = String(st.engine_state || "STANDBY").toUpperCase();
+    engineEl.textContent = state;
+    const engaged = state === "ENGAGED" || state === "ACTIVE";
+    engineEl.className = `scalping-state ${engaged ? "engaged" : "standby"}`;
+    if (scalpingPanel) {
+      scalpingPanel.classList.toggle("standby", !engaged);
+    }
   }
 
   const tdStatus = $("time-decay-status");
@@ -356,7 +949,25 @@ function renderScalpingTelemetry(payload) {
 
 function renderShadowTrading(payload) {
   const st = payload.shadow_trading || {};
+  const controls = st.controls || payload.cockpit_controls || {};
+  const testMode = isCockpitTestMode(payload);
+  const disabled = testMode ? false : controls.disabled === true;
   const mode = String(st.mode || "OFF").toUpperCase();
+  const toggle = $("shadow-mode-toggle");
+  const switchWrap = $("shadow-mode-switch");
+  if (toggle) {
+    toggle.checked = mode === "SHADOW";
+    toggle.removeAttribute("disabled");
+    if (disabled) {
+      toggle.disabled = true;
+    }
+  }
+  if (switchWrap) {
+    switchWrap.classList.toggle("locked", disabled);
+    switchWrap.title = disabled
+      ? "Controls locked — manual stop or supervisor hold active"
+      : "Toggle simulated shadow fills (IG_AGENT_MODE)";
+  }
   const badge = $("shadow-mode-badge");
   if (badge) {
     badge.textContent = mode;
@@ -370,6 +981,36 @@ function renderShadowTrading(payload) {
   if (real) real.textContent = fmtMoney(st.realized_gbp || 0);
   if (total) total.textContent = fmtMoney(st.total_gbp || 0);
   if (openCount) openCount.textContent = String(st.open_count || 0);
+}
+
+async function bindShadowToggle() {
+  const toggle = $("shadow-mode-toggle");
+  if (!toggle || toggle.dataset.bound === "1") return;
+  toggle.dataset.bound = "1";
+  toggle.addEventListener("change", async () => {
+    if (toggle.disabled) {
+      toggle.checked = !toggle.checked;
+      return;
+    }
+    const wantOn = toggle.checked;
+    try {
+      const res = await fetch("/api/shadow/toggle", { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.ok === false) {
+        toggle.checked = !wantOn;
+        return;
+      }
+      const mode = String(data.mode || (wantOn ? "SHADOW" : "LIVE")).toUpperCase();
+      toggle.checked = mode === "SHADOW";
+      const badge = $("shadow-mode-badge");
+      if (badge) {
+        badge.textContent = mode === "SHADOW" ? "SHADOW" : "OFF";
+        badge.className = `shadow-mode-badge ${mode === "SHADOW" ? "active" : ""}`;
+      }
+    } catch (_) {
+      toggle.checked = !wantOn;
+    }
+  });
 }
 
 function renderMission(payload) {
@@ -448,46 +1089,137 @@ function fmtPriceForEpic(v, epic) {
   return Number(v).toFixed(5);
 }
 
-function renderPositions(payload) {
-  const body = $("pos-body");
-  const empty = $("pos-empty");
+function sideBadgeClass(side) {
+  if (side === "SELL") return "sell";
+  if (side === "BUY") return "buy";
+  return "neutral";
+}
+
+function pnlToneClass(value) {
+  if (value == null || Number.isNaN(Number(value))) return "";
+  const v = Number(value);
+  if (v < 0) return "pnl-loss";
+  if (v > 0) return "pnl-profit";
+  return "pnl-flat";
+}
+
+function resolveOpenPositionRows(payload) {
+  const pmap = payload?.position_map;
+  if (pmap && typeof pmap === "object") {
+    return Object.values(pmap).filter((row) => row && typeof row === "object");
+  }
+  if (Array.isArray(payload?.positions)) {
+    return payload.positions.filter((row) => row && typeof row === "object");
+  }
+  return [];
+}
+
+function resolveClosedTradeRows(payload) {
+  const keys = ["closed_trades_24h", "closed_trades", "closed_executions", "transaction_history"];
+  for (const key of keys) {
+    const raw = payload?.[key];
+    if (Array.isArray(raw) && raw.length) {
+      return raw.filter((row) => row && typeof row === "object");
+    }
+  }
+  return [];
+}
+
+function resolveClosureReason(row) {
+  const reason =
+    row?.closure_reason ??
+    row?.exit_reason ??
+    row?.close_reason ??
+    row?.result ??
+    row?.source;
+  if (reason == null || !String(reason).trim()) return "—";
+  return String(reason).replace(/_/g, " ").trim().toUpperCase();
+}
+
+function resolveRealizedPnl(row) {
+  const broker =
+    row?.realized_pnl_gbp ??
+    row?.pnl_gbp ??
+    row?.ig_pnl_currency ??
+    row?.pnl;
+  if (broker == null || Number.isNaN(Number(broker))) return null;
+  return Number(broker);
+}
+
+function formatPositionSize(row) {
+  const size = Math.abs(Number(row?.size ?? row?.dealSize ?? 0));
+  if (!size) return "—";
+  return Number.isInteger(size) ? String(size) : size.toFixed(2);
+}
+
+function renderActivePositions(payload) {
+  const body = $("active-pos-body");
+  const empty = $("active-pos-empty");
   if (!body) return;
   body.innerHTML = "";
-  const driftByDeal = (payload?.position_drift?.by_deal) || {};
-  const pmap = payload?.position_map;
-  const rows =
-    pmap && typeof pmap === "object"
-      ? Object.values(pmap)
-      : Array.isArray(payload?.positions)
-        ? payload.positions
-        : [];
+  const rows = resolveOpenPositionRows(payload);
   if (!rows.length) {
-    empty.classList.remove("hidden");
+    if (empty) empty.classList.remove("hidden");
     return;
   }
-  empty.classList.add("hidden");
+  if (empty) empty.classList.add("hidden");
   for (const row of rows) {
     const epic = row.epic || "";
-    const dealId = row.dealId || row.deal_id || "";
-    const drift =
-      Boolean(row.drift_detected) ||
-      Boolean(driftByDeal[dealId]?.drift_detected);
-    const driftPill = drift
-      ? `<span class="drift-pill" title="Local cache vs IG broker mismatch">⚠️ DRIFT DETECTED</span>`
-      : `<span class="sync-ok">OK</span>`;
+    const side = resolvePositionSide(row);
+    const sideClass = sideBadgeClass(side);
+    const floatingPnl = computeFloatingPnl(row);
+    const pnlClass = pnlToneClass(floatingPnl);
     const tr = document.createElement("tr");
-    if (drift) tr.classList.add("row-drift");
     tr.innerHTML = `
       <td>${epicLabel(epic)}</td>
-      <td>${row.side || "—"}</td>
-      <td>${fmtPriceForEpic(row.entry, epic)}</td>
-      <td>${fmtPriceForEpic(row.market || row.mkt || row.current, epic)}</td>
-      <td>${fmtPriceForEpic(row.stop, epic)}</td>
-      <td>${Number(row.trail_pts || 0).toFixed(1)}</td>
-      <td>${driftPill}</td>
+      <td><span class="pos-side-badge ${sideClass}">${side}</span></td>
+      <td>${formatPositionSize(row)}</td>
+      <td>${fmtPriceForEpic(row.entry ?? row.level, epic)}</td>
+      <td>${fmtPriceForEpic(row.current ?? row.market ?? row.mkt ?? row.broker_mark, epic)}</td>
+      <td>${fmtPriceForEpic(row.stop ?? row.stop_level, epic)}</td>
+      <td>${fmtPriceForEpic(row.target ?? row.limit ?? row.limit_level, epic)}</td>
+      <td class="pos-floating-pnl ${pnlClass}">${fmtSignedMoney(floatingPnl)}</td>
     `;
     body.appendChild(tr);
   }
+}
+
+function renderClosedTransactionHistory(payload) {
+  const body = $("closed-trades-body");
+  const empty = $("closed-trades-empty");
+  if (!body) return;
+  body.innerHTML = "";
+  const rows = resolveClosedTradeRows(payload);
+  if (!rows.length) {
+    if (empty) empty.classList.remove("hidden");
+    return;
+  }
+  if (empty) empty.classList.add("hidden");
+  for (const row of rows) {
+    const epic = row.epic || row.market || "";
+    const side = resolvePositionSide(row);
+    const sideClass = sideBadgeClass(side);
+    const realized = resolveRealizedPnl(row);
+    const pnlClass = pnlToneClass(realized);
+    const reason = resolveClosureReason(row);
+    const reasonClass = /LOSS|STOP|MANUAL|FLATTEN/i.test(reason) ? "pnl-loss" : "";
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${epicLabel(epic)}</td>
+      <td><span class="pos-side-badge ${sideClass}">${side}</span></td>
+      <td>${formatPositionSize(row)}</td>
+      <td>${fmtPriceForEpic(row.entry_price ?? row.entry, epic)}</td>
+      <td>${fmtPriceForEpic(row.exit_price ?? row.exit, epic)}</td>
+      <td class="closure-reason ${reasonClass}">${reason}</td>
+      <td class="pos-floating-pnl ${pnlClass}">${fmtSignedMoney(realized)}</td>
+    `;
+    body.appendChild(tr);
+  }
+}
+
+function renderPositions(payload) {
+  renderActivePositions(payload);
+  renderClosedTransactionHistory(payload);
 }
 
 function renderAccountBadge(payload) {
@@ -501,7 +1233,7 @@ function renderPayload(payload) {
   if (!payload || typeof payload !== "object") return;
   renderMasterVitalsBanner(payload);
   renderGates(payload.gates);
-  renderAssets(payload.spread, payload.epics, payload.market_states_map);
+  renderAssets(payload);
   renderSpreadForecast(payload.spread);
   renderMission(payload);
   renderShadowTrading(payload);
@@ -538,16 +1270,55 @@ function renderTriageReconnectFallback() {
   `;
 }
 
-function appendTriageEvents(events) {
+function renderTriageNominalEmpty() {
   const container = $("triage-log");
   if (!container) return;
+  container.innerHTML = `
+    <div class="triage-reconnect-fallback triage-nominal-empty" role="status" aria-live="polite">
+      <span class="triage-reconnect-icon" aria-hidden="true">✓</span>
+      <p class="triage-reconnect-text">24HR TRIAGE NOMINAL — ledger clear, feed live (0 events)</p>
+    </div>
+  `;
+  const counter = $("log-line-count");
+  if (counter) counter.textContent = "0 events";
+}
+
+function appendTriageEvents(events, frameMeta = {}) {
+  const container = $("triage-log");
+  if (!container) return;
+
+  const gen = frameMeta.triage_generation;
+  const forceReset =
+    frameMeta.reset_client_cache === true ||
+    frameMeta.full_sync === true ||
+    (gen != null && gen !== lastTriageGeneration);
+  const feedHealthy =
+    frameMeta.feed_healthy === true ||
+    frameMeta.ledger_initialized === true ||
+    frameMeta.feed_status === "NOMINAL" ||
+    frameMeta.feed_status === "INITIALIZED";
+
   if (!Array.isArray(events) || events.length === 0) {
-    renderTriageReconnectFallback();
+    if (forceReset) {
+      triageBuffer.length = 0;
+      if (gen != null) lastTriageGeneration = gen;
+    }
+    if (feedHealthy) {
+      renderTriageNominalEmpty();
+    } else {
+      renderTriageReconnectFallback();
+    }
     return;
   }
+
+  if (forceReset) {
+    triageBuffer.length = 0;
+    if (gen != null) lastTriageGeneration = gen;
+  }
+
   for (const ev of events) {
     const key = `${ev.iso || ev.ts}-${ev.event_type}`;
-    if (triageBuffer.some((x) => x._key === key)) continue;
+    if (!forceReset && triageBuffer.some((x) => x._key === key)) continue;
     triageBuffer.push({ ...ev, _key: key });
   }
   while (triageBuffer.length > TRIAGE_MAX_LINES) triageBuffer.shift();
@@ -628,17 +1399,32 @@ function appendLogLines(lines) {
   if (counter) counter.textContent = `${logBuffer.length} lines`;
 }
 
-function updateClock() {
-  const el = $("clock");
-  if (!el) return;
-  const now = new Date();
-  el.textContent =
-    now.toLocaleTimeString("en-GB", {
+function formatHeaderClock(now = new Date()) {
+  try {
+    return new Intl.DateTimeFormat(undefined, {
       hour: "2-digit",
       minute: "2-digit",
       second: "2-digit",
-      timeZone: "Europe/London",
-    }) + " BST";
+      hour12: false,
+      timeZoneName: "short",
+    }).format(now);
+  } catch (_) {
+    return now.toLocaleTimeString();
+  }
+}
+
+function updateClock() {
+  const el = $("clock");
+  if (!el) return;
+  el.textContent = formatHeaderClock(new Date());
+}
+
+let clockTickerId = null;
+
+function startHeaderClockTicker() {
+  updateClock();
+  if (clockTickerId != null) return;
+  clockTickerId = setInterval(updateClock, 1000);
 }
 
 function setPill(el, state, labels) {
@@ -778,18 +1564,28 @@ function connectTriageWebSocket() {
     });
     ws = new WebSocket(url);
 
-    ws.onopen = () =>
+    ws.onopen = () => {
+      triageBuffer.length = 0;
+      lastTriageGeneration = null;
       setPill(pill, "live", {
         live: "TRIAGE LIVE",
         dead: "TRIAGE DOWN",
         connecting: "TRIAGE …",
       });
+    };
 
     ws.onmessage = (ev) => {
       try {
         const data = JSON.parse(ev.data);
         if (data && data.type === "TRIAGE_FRAME" && Array.isArray(data.events)) {
-          appendTriageEvents(data.events);
+          appendTriageEvents(data.events, {
+            triage_generation: data.triage_generation,
+            reset_client_cache: data.reset_client_cache,
+            full_sync: data.full_sync,
+            feed_status: data.feed_status || data.status,
+            ledger_initialized: data.ledger_initialized === true,
+            feed_healthy: true,
+          });
         }
       } catch (_) {
         /* ignore */
@@ -833,9 +1629,13 @@ async function bindEmergency() {
 }
 
 function boot() {
-  updateClock();
-  setInterval(updateClock, 1000);
+  startHeaderClockTicker();
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) updateClock();
+  });
   bindLogTabs();
+  bindShadowToggle();
+  bindBlueprintToggle();
   connectTelemetryWebSocket();
   connectLogsWebSocket();
   connectTriageWebSocket();

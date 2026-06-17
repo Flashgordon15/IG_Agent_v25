@@ -334,6 +334,18 @@ class TradingLoop:
                 daemon=True,
             )
             self._watchdog_thread.start()
+        try:
+            from system.protective_learning import (
+                activate_test_mode_runtime,
+                ensure_test_mode_execution_bypass_armed,
+                ensure_test_mode_rsi_relaxation_armed,
+            )
+
+            activate_test_mode_runtime()
+            ensure_test_mode_rsi_relaxation_armed()
+            ensure_test_mode_execution_bypass_armed(self._store)
+        except Exception:
+            pass
         log_engine(f"trading_loop started epic={self._epic}")
 
     def stop(self) -> None:
@@ -678,6 +690,19 @@ class TradingLoop:
 
         self._tick_count += 1
         self._portfolio_reserved_risk_gbp = 0.0
+        try:
+            from system.protective_learning import temporary_test_gate_active
+
+            if temporary_test_gate_active():
+                from intelligence.intelligence_worker import get_intelligence_worker
+
+                get_intelligence_worker().enqueue_tick(
+                    self._epic,
+                    bid=float(quote.bid),
+                    offer=float(quote.offer),
+                )
+        except Exception:
+            pass
         try:
             from system.config_loader import get_config
 
@@ -2268,6 +2293,18 @@ class TradingLoop:
                 effective_risk_cap = float(probe_risk_target_gbp(sizing_conf) * 1.05)
             except Exception:
                 effective_risk_cap = 80.0
+        try:
+            from system.protective_learning import (
+                apply_temporary_test_risk_cap_gbp,
+                log_temporary_test_execution_bypass_once,
+                temporary_test_gate_active,
+            )
+
+            if temporary_test_gate_active():
+                log_temporary_test_execution_bypass_once()
+                effective_risk_cap = apply_temporary_test_risk_cap_gbp(effective_risk_cap)
+        except Exception:
+            pass
         risk_ok = risk_gbp <= effective_risk_cap
 
         portfolio_ok = True
@@ -2655,6 +2692,16 @@ class TradingLoop:
             )
             if vol_penalty_mult < 1.0:
                 conf = max(0.0, min(100.0, conf * vol_penalty_mult))
+        except Exception:
+            pass
+        try:
+            from system.protective_learning import (
+                apply_temporary_test_confidence_floor,
+                log_temporary_test_gate_once,
+            )
+
+            log_temporary_test_gate_once()
+            threshold = apply_temporary_test_confidence_floor(threshold)
         except Exception:
             pass
         passed = sig.signal in ("BUY", "SELL") and conf >= threshold

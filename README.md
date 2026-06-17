@@ -40,3 +40,17 @@ PYTHONPATH=src python3 -m pytest tests/ -q
 ```
 
 Restart the agent after Python or config changes.
+
+---
+
+## Version 29.1 Changelog Summary
+
+**June 2026 — Flight Deck & broker-sync hardening**
+
+1. **Decimal-safe balance parsing** — IG account summary and P&L paths coerce `Decimal` → `float` before JSON/WebSocket serialization; `sanitize_for_ws_json` guards all Flight Deck frames against NaN/inf leakage.
+
+2. **Split Active / Closed UI grid** — Card D separates open-position telemetry (floating P&L, side badges) from a dedicated 24h closed-transaction history table.
+
+3. **Broker-linked history hydration** — `IGRestClient.fetch_transaction_history()` pulls `/history/transactions`; `web_server` merges IG ledger rows with local session logs via `merge_closed_trades` and normalizes through `_normalize_closed_trade_row_for_ui`.
+
+4. **Isolated multi-market HUD gauges** — Card B reads per-asset slices (`GOLD`, `WALL_STREET`, `JAPAN_225`, `EUR_USD`) from `snapshot_store.get_tick().markets` via `cockpit.avionics_markets.enrich_avionics_markets`; confidence/RSI bars, BLOCKER, and AI WEIGHT labels are scoped per card container (no global `micro_confidence` bleed).
