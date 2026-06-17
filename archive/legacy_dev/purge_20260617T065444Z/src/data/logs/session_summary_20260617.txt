@@ -1,0 +1,15 @@
+IG Agent v29 — Session Summary
+Date: 2026-06-17
+Session: 00:43 — 00:55 BST
+─────────────────────────────────────
+Trades:      0 (0W / 0L)
+Win rate:    0.0%
+P&L:         £+0.00
+Points:      +0.0 pts
+Final state: HEALTHY
+─────────────────────────────────────
+Errors:      23
+ML records:  0
+Stream uptime: 100.0%
+Top block reason: RSI overbought filter: 88.7 > max 85
+─────────────────────────────────────

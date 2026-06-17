@@ -322,6 +322,15 @@ class ExecutionEngine:
                 if k in settings
             },
         )
+        try:
+            from trading.position_ladder import apply_broker_lot_contract
+
+            settings["size"] = apply_broker_lot_contract(
+                float(settings.get("size", self.config.trade_size)),
+                str(signal.epic or ""),
+            )
+        except Exception:
+            pass
         return settings
 
     def _gate_integrity_after_mutations(
@@ -408,11 +417,11 @@ class ExecutionEngine:
                 notes = "gate-approved size/stop from risk_validation"
             return {
                 **adaptive,
-                "size": size,
+                "size": apply_operational_size_floor(size, signal.epic),
                 "risk": stop_pts,
                 "limit": limit_pts,
                 "gate_sourced": True,
-                "gate_approved_size": size,
+                "gate_approved_size": apply_operational_size_floor(size, signal.epic),
                 "gate_approved_stop": stop_pts,
                 "risk_gbp_at_submit": round(risk_gbp, 2),
                 "risk_cap_gbp": cap_gbp,
@@ -437,6 +446,17 @@ class ExecutionEngine:
             float(settings.get("size", self.config.trade_size)),
             signal.epic,
         )
+        try:
+            from execution.rocket_trigger import weld_rocket_dispatch_params
+
+            settings = weld_rocket_dispatch_params(
+                settings,
+                epic=str(signal.epic or ""),
+                micro_confidence=float(signal.adjusted_confidence or 0.0),
+                config=self.config,
+            )
+        except Exception:
+            pass
         return settings
 
     def execute_trade(
@@ -473,7 +493,30 @@ class ExecutionEngine:
         if prevalidated:
             validation = ValidationResult(allowed=True)
         else:
-            validation = self.validate_only(signal)
+            rocket = False
+            snap = signal.snapshot if isinstance(getattr(signal, "snapshot", None), dict) else {}
+            if snap.get("rocket_trigger"):
+                rocket = True
+            else:
+                try:
+                    from execution.rocket_trigger import rocket_trigger_eligible
+
+                    rocket, reason = rocket_trigger_eligible(signal.epic)
+                    if rocket and snap is not None:
+                        snap["rocket_trigger"] = True
+                        snap["rocket_reason"] = reason
+                except Exception:
+                    rocket = False
+            if rocket:
+                validation = ValidationResult(allowed=True)
+                trace_execution(
+                    "EXECUTION",
+                    "ExecutionEngine.rocket_trigger",
+                    decision="fast_path",
+                    params={"epic": signal.epic, "reason": snap.get("rocket_reason", "")},
+                )
+            else:
+                validation = self.validate_only(signal)
         if not validation.allowed:
             reason = "; ".join(validation.reasons) or "Validation failed"
             bus = get_lifecycle_bus()
@@ -725,12 +768,46 @@ class ExecutionEngine:
                     messages=[reason],
                 )
 
+        from intelligence.integration import apply_intelligence_pre_dispatch
+
+        execution_params, intel_reject = apply_intelligence_pre_dispatch(
+            signal,
+            execution_params,
+            config=self.config,
+        )
+        if intel_reject:
+            bus = get_lifecycle_bus()
+            bus.emit(STAGE_RISK, STATUS_FAIL, intel_reject)
+            bus.finalize_rejected(intel_reject, stage=STAGE_RISK)
+            return ExecutionResult(
+                success=False,
+                action="REJECTED",
+                rejection_reason=intel_reject,
+                execution_params=execution_params,
+            )
+
         get_lifecycle_bus().emit(
             STAGE_EXECUTION_REQUEST,
             STATUS_OK,
             f"Routing {self.mode.value}",
             mode=self.mode.value,
         )
+
+        try:
+            from trading.shadow_executor import ShadowExecutor, shadow_mode_active
+
+            if shadow_mode_active():
+                trace_execution(
+                    "EXECUTION",
+                    "ShadowExecutor.execute",
+                    decision="SHADOW mode dual-route",
+                    next_fn="ShadowExecutor.execute",
+                    params={"epic": signal.epic},
+                )
+                update_demo_diagnostics(executor_selected="shadow_executor (SHADOW)")
+                return ShadowExecutor().execute(signal, execution_params)
+        except Exception as exc:
+            log_engine(f"shadow_executor route failed: {type(exc).__name__}: {exc}")
 
         if self.mode.uses_simulator():
             if self.mode == ExecutionMode.DEMO:

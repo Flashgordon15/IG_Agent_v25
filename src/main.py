@@ -216,6 +216,9 @@ def _pre_startup_kill_orphan_agents(*, wait_sec: float = 1.0) -> list[int]:
     """SIGTERM (then optional SIGKILL) stale src/main.py processes — never self."""
     if os.environ.get("IG_AGENT_PYTEST") == "1":
         return []
+    if os.environ.get("IG_AGENT_SKIP_ORPHAN_KILL", "").strip() in ("1", "true", "yes"):
+        _log_engine("pre-startup: orphan kill skipped (IG_AGENT_SKIP_ORPHAN_KILL=1)")
+        return []
     killed: list[int] = []
     try:
         result = subprocess.run(
@@ -453,6 +456,13 @@ def _force_cleanup_port(port: int = 8080) -> None:
 
 def run_preflight() -> int:
     """Steps 1–4. Returns exit code (0 = continue)."""
+    try:
+        from system.env_loader import prepare_boot_env
+
+        prepare_boot_env()
+    except Exception as e:
+        _log_engine(f"boot env prepare skipped: {type(e).__name__}: {e}")
+
     from system.app_identity import APP_DISPLAY_NAME
     from system.config_validator import emergency_stop_lock_present, validate_config
     from system.credentials_holder import bootstrap_credentials
@@ -537,12 +547,15 @@ class AgentRuntime:
         self._stream_client: Any | None = None
         self._shutting_down = False
         self._boot_context = boot_context
+        self._uvicorn_server: Any | None = None
 
     def shutdown(self, *, source: str = "runtime") -> None:
         if self._shutting_down:
             return
         self._shutting_down = True
         _log_engine(f"shutdown: graceful teardown (source={source})")
+        if self._uvicorn_server is not None:
+            self._uvicorn_server.should_exit = True
         self._stream_client = None
         from system.shutdown_cleanup import perform_shutdown_cleanup
 
@@ -592,7 +605,12 @@ class AgentRuntime:
             import uvicorn
 
             _log_engine(f"API server: binding on port {_API_PORT}")
-            uvicorn.run(app, host=_API_HOST, port=_API_PORT, log_level="info")
+            config = uvicorn.Config(
+                app, host=_API_HOST, port=_API_PORT, log_level="info"
+            )
+            server = uvicorn.Server(config)
+            self._uvicorn_server = server
+            server.run()
             return EXIT_OK
         finally:
             self.shutdown(source="normal")
@@ -611,11 +629,19 @@ def _install_signal_handlers(runtime: AgentRuntime) -> None:
             pass
 
 
+
 def main() -> None:
+    from system.env_loader import load_dotenv, prepare_boot_env
     from system.paths import project_root
     from system.system_state import stamp_process_boot_start
 
     os.environ.setdefault("IG_AGENT_ROOT", str(project_root()))
+    # Finder/GUI launches inherit stale shell IG_* keys — .env must win.
+    _from_launcher = os.environ.get("IG_AGENT_FROM_LAUNCHER") == "1" or (
+        os.environ.get("IG_AGENT_DESKTOP_LAUNCH") == "1"
+    )
+    load_dotenv(override=_from_launcher)
+    prepare_boot_env()
     stamp_process_boot_start()
 
     from system.app_identity import APP_DISPLAY_NAME, APP_VERSION_LABEL

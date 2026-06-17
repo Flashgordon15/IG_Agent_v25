@@ -603,10 +603,21 @@ class SignalEngine:
 
         if candidate in ("BUY", "SELL"):
             rsi_val = float(last["rsi"])
+            effective_rsi_max = rsi_buy_max
+            try:
+                from trading.entry_protection import resolve_epic_for_market
+                from intelligence.microstructure import effective_entry_rsi_ceiling
+
+                _epic = resolve_epic_for_market(market, cfg)
+                effective_rsi_max = effective_entry_rsi_ceiling(
+                    _epic, base_ceiling=rsi_buy_max
+                )
+            except Exception:
+                effective_rsi_max = rsi_buy_max
             rsi_block = ""
-            if candidate == "BUY" and rsi_buy_max > 0 and rsi_val > rsi_buy_max:
+            if candidate == "BUY" and effective_rsi_max > 0 and rsi_val > effective_rsi_max:
                 rsi_block = (
-                    f"RSI overbought filter: {rsi_val:.1f} > max {rsi_buy_max:.0f}"
+                    f"RSI overbought filter: {rsi_val:.1f} > max {effective_rsi_max:.0f}"
                 )
             elif candidate == "SELL" and rsi_sell_min > 0 and rsi_val < rsi_sell_min:
                 rsi_block = (

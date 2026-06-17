@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "cumulative": 4.01,
+  "cumulative_points": 4.01,
+  "state": "HEALTHY",
+  "session_score": 0.0,
+  "last_trade_score": 0.0,
+  "consecutive_losses": 0,
+  "signals_to_skip": 0,
+  "recovery_wins": 0,
+  "bootstrap_wins": 0,
+  "day_stopped": false,
+  "stop_latched": false,
+  "last_nominal": "HEALTHY",
+  "rapid_cooldown_until": 0.0,
+  "equity_lock_active": false,
+  "operator_reset_healthy": true
+}

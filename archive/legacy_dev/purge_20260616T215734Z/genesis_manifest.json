@@ -1,0 +1,23 @@
+{
+  "event": "DAY1_GENESIS_RESET",
+  "ts_utc": "2026-06-16T21:57:34.665472+00:00",
+  "archive_dir": "archive/legacy_dev/purge_20260616T215734Z",
+  "files_archived": [
+    "src/data/runtime_state.json",
+    "src/data/state/points_state.json"
+  ],
+  "metrics": {
+    "effective_daily_pnl_gbp": 0.0,
+    "drawdown_reset_balance": 10000.0,
+    "target_engine_p_day": 0.0,
+    "daily_loss_baseline": {
+      "refreshed": true,
+      "reason": "day1_genesis",
+      "version": "v29.1",
+      "baseline_pnl": -120.18,
+      "effective_loss_gbp": 0.0,
+      "reset_day": "2026-06-16",
+      "reset_at": "2026-06-16 22:57:34"
+    }
+  }
+}

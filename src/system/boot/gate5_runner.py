@@ -11,6 +11,7 @@ from typing import Any
 
 from system.boot.context import BootContext
 from system.engine_log import log_engine
+from system.env_loader import load_dotenv
 from system.system_state import (
     BootPhase,
     GateId,
@@ -55,6 +56,7 @@ def _spawn_background_deploy_verify(state: SystemState) -> None:
         try:
             from system.paths import project_root
 
+            load_dotenv()
             result = subprocess.run(
                 [
                     sys.executable,

@@ -1,0 +1,55 @@
+{
+  "daily_loss_cache": {
+    "hits": 263,
+    "misses": 81,
+    "hit_rate_pct": 76.5
+  },
+  "ml_rows_cache": {
+    "hits": 341,
+    "misses": 1,
+    "hit_rate_pct": 99.7
+  },
+  "tick_gate_eval": {
+    "count": 342,
+    "slow_count": 342,
+    "max_us": 1951440.5,
+    "slow_threshold_us": 50000.0,
+    "last_slow": {
+      "epic": "CS.D.GBPUSD.CFD.IP",
+      "total_us": 390407.5,
+      "total_ms": 390.41,
+      "slowest_gate": "session_open",
+      "slowest_gate_us": 210870.3,
+      "gate_us": {
+        "session_open": 210870.3,
+        "session_blackout": 5.1,
+        "cold_start_gap": 27155.4,
+        "environment_fitness": 5.4,
+        "points_state": 3530.1,
+        "correlation_ok": 3.3,
+        "signal_confidence": 14300.5,
+        "ml_veto": 6125.5,
+        "risk_validation": 16200.1,
+        "expectancy_ok": 660.7,
+        "calendar_ok": 43.7,
+        "execution": 9.3
+      },
+      "at": 1781624662.6745422
+    },
+    "per_gate_max_us": {
+      "session_open": 1682776.5,
+      "session_blackout": 3605.8,
+      "cold_start_gap": 220269.3,
+      "environment_fitness": 179.2,
+      "points_state": 34611.7,
+      "correlation_ok": 3279.9,
+      "signal_confidence": 154469.8,
+      "ml_veto": 112488.9,
+      "risk_validation": 73563.1,
+      "expectancy_ok": 11217.0,
+      "calendar_ok": 167.3,
+      "execution": 1212.4
+    }
+  },
+  "updated_at": 1781624662.674552
+}

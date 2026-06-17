@@ -1,0 +1,7 @@
+{
+  "ts": "2026-06-12T19:19:56.681Z",
+  "epic": "IX.D.DOW.IFM.IP",
+  "reason": "consecutive_unhealthy_ticks",
+  "positions_closed": 0,
+  "operational_safety_freeze": true
+}

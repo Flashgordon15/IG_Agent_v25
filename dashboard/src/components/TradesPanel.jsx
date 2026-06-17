@@ -1,5 +1,6 @@
 import React from "react";
 import { authHeaders } from "../api/client.js";
+import { fmtPrice as fmtPriceShared } from "../utils/fmtPrice.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -56,8 +57,20 @@ const VALID_RESULTS = new Set(["WIN", "LOSS", "PENDING", "BREAKEVEN"]);
 const LEGACY_FOREX_RE = /converted at 0\.7/i;
 
 function resolvePositions(state) {
+  const pmap = state?.position_map;
+  if (pmap && typeof pmap === "object" && Object.keys(pmap).length > 0) {
+    return Object.values(pmap);
+  }
   // Top-level positions (aggregated by backend from all market slices)
-  if (Array.isArray(state?.positions) && state.positions.length > 0) return state.positions;
+  if (Array.isArray(state?.positions) && state.positions.length > 0) {
+    const deduped = new Map();
+    for (const p of state.positions) {
+      const id = String(p?.deal_id || p?.dealId || "");
+      if (id) deduped.set(id, p);
+      else deduped.set(`row-${deduped.size}`, p);
+    }
+    return [...deduped.values()];
+  }
   if (Array.isArray(state?.active_trades) && state.active_trades.length > 0) return state.active_trades;
   // Fallback: aggregate from per-market slices in case backend hasn't enriched yet
   const markets = state?.markets;
@@ -142,9 +155,9 @@ function fmtTs(ts) {
   catch { return String(ts); }
 }
 
-function fmtPrice(v) {
+function fmtPrice(v, epic) {
   if (v == null || Number.isNaN(Number(v))) return "—";
-  return Number(v).toFixed(1);
+  return fmtPriceShared(v, epic);
 }
 
 function sideMeta(pos) {
@@ -197,7 +210,11 @@ function buildPerformanceSummary(closedTrades, positions) {
   const total  = wins + losses;
   const winRate = total > 0 ? Math.round((wins / total) * 100) : null;
   const totalPnl = settled.reduce((acc, t) => acc + (Number(t.pnl_gbp ?? t.pnl) || 0), 0);
-  const openPnl  = positions.reduce((acc, p) => acc + (Number(p.pnl_gbp ?? p.unrealised_pnl_gbp ?? p.upl) || 0), 0);
+  const openPnl = positions.reduce((acc, p) => {
+    const broker = p.pnl_gbp ?? p.broker_pnl_gbp;
+    if (broker != null) return acc + Number(broker);
+    return acc + (Number(p.profitAndLoss ?? p.unrealised_pnl_gbp ?? p.upl) || 0);
+  }, 0);
   return { wins, losses, total, winRate, totalPnl, openPnl };
 }
 
@@ -481,18 +498,19 @@ export default function TradesPanel({ state }) {
               ) : (
                 positions.map((pos, idx) => {
                   const { side, color: sideColor } = sideMeta(pos);
-                  const pnl = pos.pnl_gbp ?? pos.unrealised_pnl_gbp ?? pos.upl;
+                  const pnl = pos.pnl_gbp ?? pos.broker_pnl_gbp ?? pos.profitAndLoss ?? pos.unrealised_pnl_gbp ?? pos.upl;
                   const pnlNum = pnl != null ? Number(pnl) : null;
                   const stop = pos.stop ?? pos.stop_level;
                   const openMins = pos.open_mins ?? pos.open_minutes ?? pos.time_open_mins ?? pos.mins_open;
+                  const epic = pos.epic || pos.market || "";
                   return (
                     <tr key={positionKey(pos, idx)} className="border-b border-border/60 last:border-0 hover:bg-card/50 transition-colors">
-                      <td className="px-2 py-2 font-medium text-foreground">{pos.market || pos.epic || "—"}</td>
+                      <td className="px-2 py-2 font-medium text-foreground">{pos.market || epic || "—"}</td>
                       <td className={`px-2 py-2 font-bold ${sideColor}`}>{side || "—"}</td>
-                      <td className="px-2 py-2 font-mono tabular-nums">{fmtPrice(pos.entry ?? pos.entry_price ?? pos.level)}</td>
-                      <td className="px-2 py-2 font-mono tabular-nums">{fmtPrice(pos.current ?? pos.mark)}</td>
+                      <td className="px-2 py-2 font-mono tabular-nums">{fmtPrice(pos.entry ?? pos.entry_price ?? pos.level, epic)}</td>
+                      <td className="px-2 py-2 font-mono tabular-nums">{fmtPrice(pos.current ?? pos.mark, epic)}</td>
                       <td className={`px-2 py-2 font-mono tabular-nums font-semibold ${pnlColor(pnlNum)}`}>{fmtGbp(pnlNum)}</td>
-                      <td className="px-2 py-2 font-mono tabular-nums text-muted">{stop != null ? `${fmtPrice(stop)}${pos.trail_active ? " ↕" : ""}` : "—"}</td>
+                      <td className="px-2 py-2 font-mono tabular-nums text-muted">{stop != null ? `${fmtPrice(stop, epic)}${pos.trail_active ? " ↕" : ""}` : "—"}</td>
                       <td className="px-2 py-2 tabular-nums text-muted">{fmtBreakEven(pos)}</td>
                       <td className="px-2 py-2 tabular-nums text-muted">{openMins != null ? `${Math.round(Number(openMins))}m` : "—"}</td>
                       <td className="px-2 py-2"><ClosePositionButton dealId={pos.deal_id} epic={pos.epic || pos.market || ""} /></td>

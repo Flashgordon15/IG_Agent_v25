@@ -1,0 +1,7 @@
+{
+  "ts": "2026-06-14T07:35:23.806Z",
+  "epic": "IX.D.NASDAQ.IFM.IP",
+  "reason": "consecutive_unhealthy_ticks",
+  "positions_closed": 0,
+  "operational_safety_freeze": true
+}

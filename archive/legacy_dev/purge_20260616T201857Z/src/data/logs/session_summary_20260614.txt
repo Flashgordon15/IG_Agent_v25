@@ -1,0 +1,15 @@
+IG Agent v29 — Session Summary
+Date: 2026-06-14
+Session: — — 22:55 BST
+─────────────────────────────────────
+Trades:      0 (0W / 0L)
+Win rate:    0.0%
+P&L:         £+0.00
+Points:      +0.0 pts
+Final state: HEALTHY
+─────────────────────────────────────
+Errors:      0
+ML records:  14
+Stream uptime: 0.0%
+Top block reason: none
+─────────────────────────────────────

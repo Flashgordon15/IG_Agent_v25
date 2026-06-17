@@ -130,6 +130,17 @@ class Gate3Runner:
         wire_hub_quotes_to_dashboard(min_interval=0.25)
         wire_hub_quotes_to_position_protect(min_interval=0.05)
 
+        if cfg.get("intelligence_layer", {}).get("enabled"):
+            try:
+                from intelligence.intelligence_worker import wire_intelligence_to_hub
+
+                wire_intelligence_to_hub()
+                log_engine("Gate3: intelligence hub subscriber wired")
+            except Exception as exc:
+                log_engine(
+                    f"Gate3: intelligence hub wire skipped: {type(exc).__name__}: {exc}"
+                )
+
         client = start_market_stream(
             cfg,
             rest_client=rest,

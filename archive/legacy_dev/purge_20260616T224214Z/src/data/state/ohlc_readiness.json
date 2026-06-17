@@ -1,0 +1,26 @@
+{
+  "epics": {
+    "CS.D.CFPGOLD.CFP.IP": {
+      "market": "Spot Gold",
+      "bars_injected": 5000,
+      "ready": true
+    },
+    "CS.D.EURUSD.CFD.IP": {
+      "market": "EUR/USD",
+      "bars_injected": 5000,
+      "ready": true
+    },
+    "IX.D.DOW.IFM.IP": {
+      "market": "Wall Street",
+      "bars_injected": 4680,
+      "ready": true
+    },
+    "IX.D.NIKKEI.IFM.IP": {
+      "market": "Japan 225",
+      "bars_injected": 4054,
+      "ready": true
+    }
+  },
+  "not_ready": [],
+  "ready_count": 4
+}

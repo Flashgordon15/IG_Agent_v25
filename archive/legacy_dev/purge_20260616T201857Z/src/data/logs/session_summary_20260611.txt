@@ -1,0 +1,15 @@
+IG Agent v25 — Session Summary
+Date: 2026-06-11
+Session: 02:00 — 22:55 BST
+─────────────────────────────────────
+Trades:      24 (13W / 11L)
+Win rate:    54.2%
+P&L:         £-1744.18
+Points:      -4.0 pts
+Final state: CAUTION
+─────────────────────────────────────
+Errors:      115
+ML records:  14
+Stream uptime: 100.0%
+Top block reason: awaiting next closed 5m bar
+─────────────────────────────────────

@@ -15,6 +15,7 @@ from system.pnl_math import (
     realised_pnl_points,
     round_pnl_pts,
 )
+from system.price_precision import coerce_price_fields, parse_broker_price_optional
 
 FRESHNESS_SEC = 10.0
 _PRICE_STALE_LOGGED: set[str] = set()
@@ -58,6 +59,79 @@ def reset_price_stale_log_for_tests() -> None:
 def normalize_epic(epic: str) -> str:
     """Canonical IG epic string for slice keys and position rows."""
     return str(epic or "").strip()
+
+
+def extract_broker_profit_and_loss(row: dict[str, Any]) -> tuple[float | None, str]:
+    """Read IG ``profitAndLoss`` / UPL from a position row (currency-aware)."""
+    from system.ig_money import parse_ig_money
+
+    epic = str(row.get("epic") or "")
+    ccy = str(row.get("currency") or row.get("pnl_ccy") or "GBP").upper()
+    for key in (
+        "profitAndLoss",
+        "profit_and_loss",
+        "broker_upl",
+        "upl",
+        "pnl_currency",
+    ):
+        raw = row.get(key)
+        if raw is None or str(raw).strip() in ("", "—", "-"):
+            continue
+        if isinstance(raw, (int, float)):
+            return float(raw), ccy
+        parsed = parse_ig_money(raw)
+        if parsed is not None:
+            return float(parsed), ccy
+    return None, ccy
+
+
+def broker_pnl_is_authoritative(row: dict[str, Any]) -> bool:
+    """True when IG broker P&L is present and must not be replaced by local mocks."""
+    upl, _ = extract_broker_profit_and_loss(row)
+    return upl is not None
+
+
+def position_map_from_rows(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Deduplicate positions — ``position_map[dealId] = pos`` (last wins)."""
+    out: dict[str, dict[str, Any]] = {}
+    for raw in rows:
+        if not isinstance(raw, dict):
+            continue
+        row = dict(raw)
+        deal_id = str(row.get("deal_id") or row.get("dealId") or "").strip()
+        if not deal_id:
+            continue
+        if deal_id in out:
+            merged = dict(out[deal_id])
+            merged.update(row)
+            row = merged
+        out[deal_id] = row
+    return out
+
+
+def positions_list_from_map(position_map: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    return list(position_map.values())
+
+
+def attach_position_map(tick: dict[str, Any]) -> dict[str, Any]:
+    """Ensure tick carries a dealId-keyed ``position_map`` and deduped list."""
+    rows: list[dict[str, Any]] = []
+    existing = tick.get("position_map")
+    if isinstance(existing, dict):
+        rows.extend(v for v in existing.values() if isinstance(v, dict))
+    plist = tick.get("positions")
+    if isinstance(plist, list):
+        rows.extend(p for p in plist if isinstance(p, dict))
+    markets = tick.get("markets")
+    if isinstance(markets, dict):
+        for mslice in markets.values():
+            if isinstance(mslice, dict):
+                rows.extend(p for p in (mslice.get("positions") or []) if isinstance(p, dict))
+    position_map = position_map_from_rows(rows)
+    if position_map:
+        tick["position_map"] = position_map
+        tick["positions"] = positions_list_from_map(position_map)
+    return tick
 
 
 def epic_market_label(epic: str) -> str:
@@ -365,28 +439,58 @@ def normalize_sync_position(pos: dict[str, Any]) -> dict[str, Any]:
             pnl_gbp = None
     broker_mark = current
     flags = infer_protection_flags(pos)
-    return {
+    epic_str = str(pos.get("epic") or "")
+    entry_px = parse_broker_price_optional(
+        pos.get("entry") or pos.get("level"), epic=epic_str
+    )
+    current_px = parse_broker_price_optional(
+        current, epic=epic_str
+    )
+    stop_px = parse_broker_price_optional(stop, epic=epic_str) if stop is not None else None
+    target_px = (
+        parse_broker_price_optional(target, epic=epic_str) if target is not None else None
+    )
+    broker_upl, broker_ccy = extract_broker_profit_and_loss(pos)
+    if broker_upl is None and pnl_currency is not None:
+        try:
+            broker_upl = float(pnl_currency)
+            broker_ccy = currency
+        except (TypeError, ValueError):
+            broker_upl = None
+    if broker_upl is not None:
+        pnl_gbp = round(pnl_currency_amount_to_gbp(float(broker_upl), broker_ccy), 2)
+        pnl_currency = float(broker_upl)
+        currency = broker_ccy
+    return coerce_price_fields(
+        {
         "deal_id": pos.get("deal_id") or pos.get("dealId") or "",
+        "dealId": pos.get("dealId") or pos.get("deal_id") or "",
         "side": side,
-        "entry": entry,
-        "current": current,
-        "stop": stop,
-        "target": target,
+        "entry": entry_px if entry_px is not None else entry,
+        "current": current_px if current_px is not None else current,
+        "stop": stop_px if stop_px is not None else stop,
+        "target": target_px if target_px is not None else target,
         "pnl_currency": float(pnl_currency) if pnl_currency is not None else None,
         "pnl_gbp": pnl_gbp,
         "broker_pnl_gbp": pnl_gbp,
-        "broker_mark": broker_mark,
-        "broker_upl": float(pnl_currency) if pnl_currency is not None else None,
+        "broker_mark": current_px if current_px is not None else broker_mark,
+        "broker_upl": float(broker_upl) if broker_upl is not None else (
+            float(pnl_currency) if pnl_currency is not None else None
+        ),
+        "profitAndLoss": float(broker_upl) if broker_upl is not None else None,
         "pnl_pts": pos.get("pnl_pts"),
         "size": float(pos.get("size") or 0),
         "trail_active": flags["trail_active"],
         "breakeven_hit": flags["breakeven_hit"],
         "notes": pos.get("notes"),
         "open_mins": _compute_open_mins(pos),
-        "epic": epic,
+        "epic": epic_str,
         "point_value": point_value,
         "currency": currency,
-    }
+        "pnl_source": "ig_broker" if broker_upl is not None else "local",
+        },
+        epic=epic_str,
+    )
 
 
 def tick_has_open_positions_for_epic(tick: dict[str, Any], epic: str) -> bool:
@@ -519,6 +623,25 @@ def enrich_positions_with_quote(
         if not side or entry is None or size <= 0:
             out.append(row)
             continue
+
+        # True live P&L — preserve IG broker profitAndLoss; only refresh mark from stream.
+        if broker_pnl_is_authoritative(row):
+            broker_upl, broker_ccy = extract_broker_profit_and_loss(row)
+            mark = _mark_price(side, quote)
+            if mark and _quote_mark_trustworthy(entry, mark, epic_str):
+                row["current"] = parse_broker_price_optional(mark, epic=epic_str) or mark
+            row["pnl_currency"] = broker_upl
+            row["profitAndLoss"] = broker_upl
+            row["pnl_gbp"] = round(
+                pnl_currency_amount_to_gbp(float(broker_upl or 0.0), broker_ccy), 2
+            )
+            row["broker_pnl_gbp"] = row["pnl_gbp"]
+            row["broker_upl"] = broker_upl
+            row["pnl_source"] = "ig_broker"
+            row["price_stale"] = stale
+            out.append(coerce_price_fields(row, epic=epic_str))
+            continue
+
         mark, pts, gbp = unrealized_from_quote(
             side,
             entry,
@@ -609,21 +732,33 @@ def enrich_positions_with_quote(
 
 
 def sum_open_unrealized_gbp(tick: dict[str, Any]) -> float:
-    """Sum unrealized £ P&L from top-level and per-market position rows."""
+    """Sum unrealized £ P&L from dealId-deduped position_map / rows."""
     total = 0.0
     seen_deals: set[str] = set()
 
     def _add(pos: dict[str, Any]) -> None:
         nonlocal total
-        deal = str(pos.get("deal_id") or "")
+        deal = str(pos.get("deal_id") or pos.get("dealId") or "")
         if deal and deal in seen_deals:
             return
         if deal:
             seen_deals.add(deal)
+        if broker_pnl_is_authoritative(pos):
+            upl, ccy = extract_broker_profit_and_loss(pos)
+            if upl is not None:
+                total += pnl_currency_amount_to_gbp(float(upl), ccy)
+                return
         try:
             total += float(pos.get("pnl_gbp") or 0.0)
         except (TypeError, ValueError):
             pass
+
+    pmap = tick.get("position_map")
+    if isinstance(pmap, dict):
+        for pos in pmap.values():
+            if isinstance(pos, dict):
+                _add(pos)
+        return round(total, 2)
 
     positions = tick.get("positions")
     if isinstance(positions, list):
@@ -644,6 +779,7 @@ def sum_open_unrealized_gbp(tick: dict[str, Any]) -> float:
 
 def apply_display_daily_pnl(tick: dict[str, Any]) -> None:
     """Dashboard Today P&L = realized (closed) + open unrealized."""
+    attach_position_map(tick)
     realized_raw = tick.get("realized_daily_pnl_gbp")
     if realized_raw is None:
         daily_raw = tick.get("daily_pnl_gbp")

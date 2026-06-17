@@ -8,7 +8,7 @@
 | Spec version | **v29.1** (supersedes v29.0 overlay notes and operational v25 spec v8 as *live* reference) |
 | Config overlay | `config/config_v29.json` → extends `config_v25.json` |
 | Foundation | v25 chassis + v26 profitability overlay + v29 execution/scalping hardening |
-| Status | **SHIPPED** — `main` @ `a96aad0`+ |
+| Status | **SHIPPED** — `main` · Phase 2 (Flight Deck + Infinite Edge + Capital Harvesting) **June 2026** |
 | Architecture doc | `docs/V29.1_ARCHITECTURE.md` |
 | Legacy spec | `IG_Agent_v25_COMPLETE_SPEC_v8.md` (historical v25.5 detail) |
 | Strategic north-star | `IG_Agent_v26_FRAMEWORK.md` (future multi-strategy brain) |
@@ -250,6 +250,51 @@ Reports: agent vs IG-import trade counts, ML readiness (N/500), registry bans, p
 
 `resolve_stop_price()` converts configured `stop_distance_points` to price delta per epic.
 
+### 8.1 Institutional Capital Harvesting Contract — *"A win is a win"* (June 2026)
+
+**Modules:** `src/intelligence/alpha_trail.py`, `src/trading/alpha_trail.py` (facade), `src/intelligence/target_engine.py`
+
+Overrides ATR trailing with **non-negotiable** profit-protection floors. High-profit positions cannot drift back into losses.
+
+| Trigger | Condition | Stop action |
+|---------|-----------|-------------|
+| **Anti-Regret BE** | Floating profit ≥ **+15.0 pips** | Stop → **Entry + 1.5 pips** (commission-insulated) |
+| **2R Liquidity Lock** | Floating profit ≥ **2× initial risk (2R)** | Stop → **Entry + 1R** (locks initial risk value) |
+| **Parabolic Milestone Snap** | Daily P&L ≥ **75%** of £1,000 target (£750) | Clamp stop to lock **50%** of position float; **£500** daily cash floor |
+
+- Evaluation: `apply_capital_harvest_contract()` — pure math, no I/O on hot path
+- Logging: `CAPITAL_HARVEST [trigger]` → `engine.log` → Flight Deck **SYSTEM AVIONICS FLIGHT LOG**
+- Thread affinity: `capital_harvest_trail` role on Apple Silicon P-cores (`system/thread_affinity.py`)
+- Tests: `tests/test_intelligence_alpha_trail.py`
+
+### 8.2 Flight Deck Co-Pilot Tactical HUD (`:8787`)
+
+**Static UI:** `cockpit-web/` · **Backend:** `src/cockpit/`
+
+| Feature | Implementation |
+|---------|----------------|
+| Master Vitals Banner | `global_ai_status_key`: HEALTHY / DEGRADED / PEAK / EMERGENCY |
+| Card B market badges | `market_states_map`: LISTENING / LEARNING / TRADING per epic |
+| 24HR Triage fallback | Reconnecting placeholder when triage feed empty |
+| Telemetry bridge | `telemetry_bridge._collect_snapshot()` @ 2.5 Hz |
+| WebSockets | `/ws/telemetry`, `/ws/logs`, `/ws/triage` |
+
+Gate 4 launches Flight Deck after state hydration (`cockpit/launcher.py`).
+
+### 8.3 Infinite Edge Intelligence Plane (June 2026)
+
+| Module | Role |
+|--------|------|
+| `intelligence/macro_radar.py` | DXY + US 10Y proxy correlation; dynamic feature weights into microstructure |
+| `intelligence/microstructure.py` | Velocity ENGAGED disables RSI ≤85 ceiling; REST→live tick normalization |
+| `cockpit/telemetry_schema.py` | `OrderBookDepthPayload` + OBI ratio contract |
+| `intelligence/order_book_imbalance.py` | Level-2 imbalance math |
+| `trading/shadow_executor.py` | `IG_AGENT_MODE=SHADOW` → `shadow_ledger.jsonl` simulated fills |
+| `system/self_healing_supervisor.py` | Patch-branch gate + P-core thread spawn |
+| `system/thread_affinity.py` | `sched_setaffinity` (Linux) / QoS USER_INTERACTIVE (macOS) |
+
+**Stress gates:** `tests/stress/` (S1–S3) + `tests/test_infinite_edge_overhaul.py` + `tests/test_deployed_fixes.py` (67).
+
 ---
 
 ## 9. Web Dashboard (v29.1)
@@ -286,6 +331,21 @@ Reports: agent vs IG-import trade counts, ML readiness (N/500), registry bans, p
 
 Full list: `src/api/routes.py`
 
+### 9.4 Flight Deck (prop cockpit `:8787`)
+
+Separate from React dashboard — served by `cockpit/web_server.py`.
+
+| Panel | Content |
+|-------|---------|
+| Card A | 4-Gate boot checklist (G1–G4) |
+| Card B | Avionics HUD + sparklines + market status pills |
+| Card C | Mission progress + scalping telemetry + **shadow P&L panel** |
+| Card D | Multi-position grid + drift detection |
+| Live HUD | System avionics log + 24HR triage lookback |
+| Header | Master vitals banner (Eyes & Ears) |
+
+Desktop launcher: `launcher/IG Agent Flight Deck.app` · SSH tunnel: `ssh -L 8787:127.0.0.1:8787 chrisgordon@192.168.6.44`
+
 ---
 
 ## 10. Reliability & Supervision
@@ -297,7 +357,7 @@ Full list: `src/api/routes.py`
 | Manual stop | `manual_stop.json` — blocks watchdog |
 | Watchdog | launchd `com.igagent.v25.watchdog` |
 | Post-stop verify | `:8081` verifier |
-| Tests | **794+** pytest (`tests/`) |
+| Tests | **860+** pytest (`tests/` incl. stress + cockpit + infinite edge) |
 
 ---
 
@@ -310,6 +370,7 @@ Full list: `src/api/routes.py`
 | `src/data/learning_db.sqlite3` | Trades, setup stats |
 | `src/data/ml_training_store.jsonl` | ML training log |
 | `src/data/shadow_log.jsonl` | Shadow evaluations |
+| `src/data/shadow_ledger.jsonl` | Shadow mode simulated fills (`IG_AGENT_MODE=SHADOW`) |
 | `src/data/state/setup_registry.json` | BAN/PROBE/ACTIVE setups |
 | `src/data/state/dashboard_snapshot.json` | Cross-process tick |
 | `src/data/.ig_agent_v29.lock` | Single-instance lock |
@@ -341,8 +402,9 @@ PYTHONPATH=src python3 -m pytest tests/ -q
 
 ## 13. Version Control
 
-| Commit | Summary |
-|--------|---------|
+| Release | Summary |
+|---------|---------|
+| v29.1 Phase 2 (Jun 2026) | Flight Deck co-pilot HUD, Infinite Edge (macro/OBI/shadow), Capital Harvesting contract, stress framework S1–S3, broker 2-decimal lot weld |
 | `4c324d7` | v29.1 protective learning, live P&L, learning health dashboard |
 | `a96aad0` | ML pipeline import fixes, P&L drift, FX risk, shadow logging |
 
@@ -356,6 +418,8 @@ Tag releases against `APP_VERSION` in `src/system/app_identity.py` and changelog
 |----------|----------|
 | **This file** | Operators + implementers — **current truth** |
 | `docs/V29.1_ARCHITECTURE.md` | Engineers — modules, data flow, diagrams |
+| `docs/STRATEGIC_ENHANCEMENTS_ROADMAP.md` | Quant platform roadmap — shipped vs planned |
+| `docs/MAINTENANCE_LOG.md` | Stress gates, lockdown, re-deployment checklist |
 | `IG_Agent_v25_COMPLETE_SPEC_v8.md` | Historical v25.5 detail |
 | `IG_Agent_v26_FRAMEWORK.md` | Future multi-strategy / £50k vision |
 | `CLAUDE.md` | AI coding assistant entry point |

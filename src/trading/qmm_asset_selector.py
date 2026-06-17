@@ -122,6 +122,13 @@ def extract_qmm_epic_metrics(
     rank = (trend * pattern_boost * vol_boost * sent_boost) / spread_cost
     rank = max(rank, _RANK_FLOOR)
 
+    try:
+        from trading.asset_priority import fuse_qmm_rank_score
+
+        rank = fuse_qmm_rank_score(epic, rank)
+    except Exception:
+        pass
+
     return QmmEpicMetrics(
         epic=epic,
         atr_delta=round(atr_delta, 4),
@@ -162,6 +169,13 @@ def rank_qmm_epics(
         metrics = extract_qmm_epic_metrics(
             epic, loop, trend_cleanliness=trend, relative_spread_cost=spread_cost
         )
+        try:
+            from trading.asset_priority import is_priority_asset
+
+            if not is_priority_asset(epic):
+                metrics.rank_score *= 0.05
+        except Exception:
+            pass
         ranked.append((epic, metrics.rank_score))
 
     ranked.sort(key=lambda item: item[1], reverse=True)

@@ -501,6 +501,28 @@ def evaluate_trading_health(
     }
 
 
+def _resolve_ig_account_id() -> str:
+    try:
+        from system.env_loader import load_dotenv
+        import os
+
+        load_dotenv()
+        account = os.environ.get("IG_ACCOUNT_ID", "").strip()
+        if account:
+            return account
+    except Exception:
+        pass
+    try:
+        from system.credentials_loader import try_load_credentials
+
+        status = try_load_credentials()
+        if status.credentials is not None:
+            return str(status.credentials.ig_account_id or "")
+    except Exception:
+        pass
+    return ""
+
+
 def build_health_status() -> dict[str, Any]:
     gate_age = seconds_since_last_gate_eval()
     loops_running = is_trading_running()
@@ -593,6 +615,7 @@ def build_health_status() -> dict[str, Any]:
             "last_gate_check_age_sec": gate_age,
             "markets": _build_market_health(),
             "quote_fresh_by_epic": quote_fresh,
+            "ig_account_id": _resolve_ig_account_id(),
             **_overnight_health_fields(),
             **supervision_drift,
         }

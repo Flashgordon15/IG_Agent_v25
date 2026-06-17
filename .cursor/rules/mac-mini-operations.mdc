@@ -8,7 +8,10 @@ alwaysApply: true
 - Project: `/Users/chrisgordon/Projects/IG_Agent_v25`
 - MacBook agent: **stopped**; Mini is 24/7 host
 - Dashboard: `ssh -L 8080:127.0.0.1:8080 chrisgordon@192.168.6.44` → http://localhost:8080
+- Flight Deck web cockpit: http://127.0.0.1:8787/ (auto-opens after Gate 4)
+- Launch: `./flight_deck_launch.sh` (pre-flight → 45 tests → port cleanup → genesis → agent)
 - `streaming_transport`: **rest_poll** in config_v25.json (Lightstreamer fails on Mini)
 - Telegram tokens in `config/credentials/credentials.json`
 - Health: `curl -s http://127.0.0.1:8080/api/health`
+- **Night matrix 24/7 lockdown (PERMANENT):** Gold, Wall St, Nikkei, EUR/USD — legacy weekday blackout 20:00–06:00 BST **deleted**; only rollover lock **21:58–22:05 BST**
 - Full notes: `docs/MAC_MINI_HANDOFF.md`

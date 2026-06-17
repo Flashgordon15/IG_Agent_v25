@@ -1,0 +1,115 @@
+2026-06-16 21:19:00 | REST | IGRestClient.login | entered | decision=authentication success | next=- | params={"account_type": "DEMO", "account_id": "Z6BAH4", "base_url": "https://demo-api.ig.com/gateway/deal"}
+2026-06-16 21:19:09 | TICK | TradingLoop.process_tick | entered | decision=tick started | next=SignalEngine.evaluate | params={"market": "Japan 225", "epic": "IX.D.NIKKEI.IFM.IP", "bid": 65000.0, "offer": 65007.0}
+2026-06-16 21:19:09 | SIGNAL | SignalEngine.evaluate | entered | decision=entering | next=SignalEngine.evaluate | params={"market": "Japan 225"}
+2026-06-16 21:19:09 | SIGNAL | SignalEngine.evaluate | entered | decision=signal=BUY conf=92.0% | next=OrderValidator.validate | params={"signal": "BUY", "setup_key": "test|e2e", "notes": "e2e mock"}
+2026-06-16 21:19:09 | VALIDATION | OrderValidator.validate | entered | decision=entering (validate_only) | next=OrderValidator.validate | params={"direction": "BUY"}
+2026-06-16 21:19:09 | VALIDATION | OrderValidator.validate | entered | decision=allowed=True | next=ExecutionEngine.execute_trade | params={"reasons": [], "checks": {"e2e": true}}
+2026-06-16 21:19:09 | EXECUTION | ExecutionEngine.execute_trade | entered | decision=calling execute_trade | next=ExecutionEngine.execute_trade | params={"direction": "BUY", "epic": "IX.D.NIKKEI.IFM.IP"}
+2026-06-16 21:19:09 | EXECUTION | ExecutionEngine.execute_trade | entered | decision=result success=True action=SUBMITTED | next=LiveExecutor.execute | params={"rejection": null, "deal_reference": null}
+2026-06-16 21:19:11 | TICK | TradingLoop.process_tick | entered | decision=tick started | next=SignalEngine.evaluate | params={"market": "Japan 225", "epic": "IX.D.NIKKEI.IFM.IP", "bid": 65000.0, "offer": 65007.0}
+2026-06-16 21:19:11 | SIGNAL | SignalEngine.evaluate | entered | decision=entering | next=SignalEngine.evaluate | params={"market": "Japan 225"}
+2026-06-16 21:19:11 | SIGNAL | SignalEngine.evaluate | entered | decision=signal=BUY conf=92.0% | next=OrderValidator.validate | params={"signal": "BUY", "setup_key": "test|e2e", "notes": "e2e mock"}
+2026-06-16 21:19:11 | VALIDATION | OrderValidator.validate | entered | decision=entering (validate_only) | next=OrderValidator.validate | params={"direction": "BUY"}
+2026-06-16 21:19:11 | VALIDATION | OrderValidator.validate | entered | decision=allowed=True | next=ExecutionEngine.execute_trade | params={"reasons": [], "checks": {}}
+2026-06-16 21:19:11 | EXECUTION | TradingLoop.process_tick | entered | decision=SKIPPED execute_trade — auto_trade disabled | next=- | params={"auto_trade": false}
+2026-06-16 21:19:14 | MODE | ExecutionEngine.__init__ | entered | decision=executor=live_executor (DEMO) | next=- | params={"mode": "DEMO", "has_rest": true, "has_live": true}
+2026-06-16 21:19:14 | ORDER | LiveExecutor.execute | entered | decision=dry_run — order not sent to IG | next=- | params={"epic": "IX.D.NIKKEI.IFM.IP", "direction": "BUY"}
+2026-06-16 21:20:00 | STREAM | IGStreamingClient.subscribe_market | entered | decision=subscribed CS.D.CFPGOLD.CFP.IP | next=- | params={"epics": ["CS.D.CFPGOLD.CFP.IP"]}
+2026-06-16 21:20:00 | STREAM | IGStreamingClient.subscribe_market | entered | decision=subscribed IX.D.DOW.IFM.IP | next=- | params={"epics": ["CS.D.CFPGOLD.CFP.IP", "IX.D.DOW.IFM.IP"]}
+2026-06-16 21:20:00 | STREAM | IGStreamingClient.subscribe_market | entered | decision=subscribed CS.D.EURUSD.CFD.IP | next=- | params={"epics": ["CS.D.CFPGOLD.CFP.IP", "CS.D.EURUSD.CFD.IP", "IX.D.DOW.IFM.IP"]}
+2026-06-16 21:20:00 | STREAM | IGStreamingClient.subscribe_market | entered | decision=subscribed IX.D.NIKKEI.IFM.IP | next=- | params={"epics": ["CS.D.CFPGOLD.CFP.IP", "CS.D.EURUSD.CFD.IP", "IX.D.DOW.IFM.IP", "IX.D.NIKKEI.IFM.IP"]}
+2026-06-16 21:20:00 | STREAM | IGStreamingClient.connect | entered | decision=connecting | next=- | params={"account_type": "DEMO", "epics": ["CS.D.CFPGOLD.CFP.IP", "CS.D.EURUSD.CFD.IP", "IX.D.DOW.IFM.IP", "IX.D.NIKKEI.IFM.IP"]}
+2026-06-16 21:20:00 | STREAM | IGStreamingClient.connect | entered | decision=poll thread started — awaiting first tick | next=IGStreamingClient._poll_loop | params={}
+2026-06-16 21:20:00 | STREAM | IGStreamingClient._poll_loop | entered | decision=tick received | next=- | params={"epic": "CS.D.CFPGOLD.CFP.IP", "bid": 4332.64, "offer": 4333.14}
+2026-06-16 21:20:00 | STREAM | IGStreamingClient._poll_loop | entered | decision=streaming authentication success (REST poll transport) | next=IGStreamingClient._poll_loop | params={}
+2026-06-16 21:20:00 | STREAM | IGStreamingClient._poll_loop | entered | decision=tick received | next=- | params={"epic": "CS.D.EURUSD.CFD.IP", "bid": 1.16091, "offer": 1.16097}
+2026-06-16 21:20:00 | SYNC | IgPositionSync.start | entered | decision=background loop started | next=- | params={}
+2026-06-16 21:20:00 | MODE | ExecutionEngine.__init__ | entered | decision=executor=live_executor (DEMO) | next=- | params={"mode": "DEMO", "has_rest": true, "has_live": true}
+2026-06-16 21:20:00 | MODE | ExecutionEngine.__init__ | entered | decision=executor=live_executor (DEMO) | next=- | params={"mode": "DEMO", "has_rest": true, "has_live": true}
+2026-06-16 21:20:00 | MODE | ExecutionEngine.__init__ | entered | decision=executor=live_executor (DEMO) | next=- | params={"mode": "DEMO", "has_rest": true, "has_live": true}
+2026-06-16 21:20:00 | MODE | ExecutionEngine.__init__ | entered | decision=executor=live_executor (DEMO) | next=- | params={"mode": "DEMO", "has_rest": true, "has_live": true}
+2026-06-16 21:20:00 | STREAM | IGStreamingClient._poll_loop | entered | decision=tick received | next=- | params={"epic": "IX.D.DOW.IFM.IP", "bid": 51969.9, "offer": 51974.7}
+2026-06-16 21:20:02 | STREAM | IGStreamingClient._poll_loop | entered | decision=tick received | next=- | params={"epic": "IX.D.NIKKEI.IFM.IP", "bid": 69019.9, "offer": 69026.9}
+2026-06-16 21:20:17 | SYNC | IgPositionSync.sync_once | entered | decision=ok open=0 changed=False | next=- | params={"by_epic": {}, "upl": 0.0}
+2026-06-16 21:21:17 | SYNC | IgPositionSync.sync_once | entered | decision=ok open=0 changed=False | next=- | params={"by_epic": {}, "upl": 0.0}
+2026-06-16 21:22:32 | STREAM | IGStreamingClient._poll_loop | entered | decision=tick received | next=- | params={"epic": "CS.D.CFPGOLD.CFP.IP", "bid": 4332.64, "offer": 4333.14}
+2026-06-16 21:22:32 | STREAM | IGStreamingClient._poll_loop | entered | decision=tick received | next=- | params={"epic": "CS.D.EURUSD.CFD.IP", "bid": 1.16091, "offer": 1.16097}
+2026-06-16 21:22:32 | STREAM | IGStreamingClient._poll_loop | entered | decision=tick received | next=- | params={"epic": "IX.D.DOW.IFM.IP", "bid": 51969.9, "offer": 51974.7}
+2026-06-16 21:22:32 | STREAM | IGStreamingClient._poll_loop | entered | decision=tick received | next=- | params={"epic": "IX.D.NIKKEI.IFM.IP", "bid": 69019.9, "offer": 69026.9}
+2026-06-16 21:22:42 | MODE | ExecutionEngine.__init__ | entered | decision=executor=live_executor (DEMO) | next=- | params={"mode": "DEMO", "has_rest": true, "has_live": true}
+2026-06-16 21:22:42 | ORDER | LiveExecutor.execute | entered | decision=dry_run — order not sent to IG | next=- | params={"epic": "IX.D.NIKKEI.IFM.IP", "direction": "BUY"}
+2026-06-16 21:22:45 | SYNC | IgPositionSync.sync_once | entered | decision=ok open=0 changed=False | next=- | params={"by_epic": {}, "upl": 0.0}
+2026-06-16 21:23:45 | SYNC | IgPositionSync.sync_once | entered | decision=ok open=0 changed=False | next=- | params={"by_epic": {}, "upl": 0.0}
+2026-06-16 21:24:46 | SYNC | IgPositionSync.sync_once | entered | decision=ok open=0 changed=False | next=- | params={"by_epic": {}, "upl": 0.0}
+2026-06-16 21:25:02 | STREAM | IGStreamingClient._poll_loop | entered | decision=tick received | next=- | params={"epic": "CS.D.CFPGOLD.CFP.IP", "bid": 4332.64, "offer": 4333.14}
+2026-06-16 21:25:02 | STREAM | IGStreamingClient._poll_loop | entered | decision=tick received | next=- | params={"epic": "CS.D.EURUSD.CFD.IP", "bid": 1.16091, "offer": 1.16097}
+2026-06-16 21:25:02 | STREAM | IGStreamingClient._poll_loop | entered | decision=tick received | next=- | params={"epic": "IX.D.DOW.IFM.IP", "bid": 51969.9, "offer": 51974.7}
+2026-06-16 21:25:02 | STREAM | IGStreamingClient._poll_loop | entered | decision=tick received | next=- | params={"epic": "IX.D.NIKKEI.IFM.IP", "bid": 69019.9, "offer": 69026.9}
+2026-06-16 21:25:37 | ORDER | LiveExecutor.execute | entered | decision=REJECTED: Order confirmation in progress for IX.D.NIKKEI.IFM.IP — entry briefly paused | next=- | params={}
+2026-06-16 21:25:39 | ORDER | LiveExecutor.execute | entered | decision=async submit | next=LiveExecutor._order_worker | params={"mode": "DEMO", "epic": "IX.D.NIKKEI.IFM.IP", "direction": "BUY"}
+2026-06-16 21:25:39 | ORDER | LiveExecutor.execute | entered | decision=REJECTED: Entry already in flight for IX.D.NIKKEI.IFM.IP — skipped duplicate | next=- | params={}
+2026-06-16 21:26:01 | SYNC | IgPositionSync.sync_once | entered | decision=ok open=0 changed=False | next=- | params={"by_epic": {}, "upl": 0.0}
+2026-06-16 21:27:31 | SYNC | IgPositionSync.sync_once | entered | decision=ok open=0 changed=False | next=- | params={"by_epic": {}, "upl": 0.0}
+2026-06-16 21:27:33 | STREAM | IGStreamingClient._poll_loop | entered | decision=tick received | next=- | params={"epic": "CS.D.CFPGOLD.CFP.IP", "bid": 4332.64, "offer": 4333.14}
+2026-06-16 21:27:33 | STREAM | IGStreamingClient._poll_loop | entered | decision=tick received | next=- | params={"epic": "CS.D.EURUSD.CFD.IP", "bid": 1.16091, "offer": 1.16097}
+2026-06-16 21:27:33 | STREAM | IGStreamingClient._poll_loop | entered | decision=tick received | next=- | params={"epic": "IX.D.DOW.IFM.IP", "bid": 51969.9, "offer": 51974.7}
+2026-06-16 21:27:33 | STREAM | IGStreamingClient._poll_loop | entered | decision=tick received | next=- | params={"epic": "IX.D.NIKKEI.IFM.IP", "bid": 69019.9, "offer": 69026.9}
+2026-06-16 21:29:01 | SYNC | IgPositionSync.sync_once | entered | decision=ok open=0 changed=False | next=- | params={"by_epic": {}, "upl": 0.0}
+2026-06-16 21:30:03 | STREAM | IGStreamingClient._poll_loop | entered | decision=tick received | next=- | params={"epic": "CS.D.CFPGOLD.CFP.IP", "bid": 4332.64, "offer": 4333.14}
+2026-06-16 21:30:03 | STREAM | IGStreamingClient._poll_loop | entered | decision=tick received | next=- | params={"epic": "CS.D.EURUSD.CFD.IP", "bid": 1.16091, "offer": 1.16097}
+2026-06-16 21:30:03 | STREAM | IGStreamingClient._poll_loop | entered | decision=tick received | next=- | params={"epic": "IX.D.DOW.IFM.IP", "bid": 51969.9, "offer": 51974.7}
+2026-06-16 21:30:03 | STREAM | IGStreamingClient._poll_loop | entered | decision=tick received | next=- | params={"epic": "IX.D.NIKKEI.IFM.IP", "bid": 69019.9, "offer": 69026.9}
+2026-06-16 21:30:05 | ORDER | LiveExecutor.execute | entered | decision=async submit | next=LiveExecutor._order_worker | params={"mode": "DEMO", "epic": "IX.D.NIKKEI.IFM.IP", "direction": "BUY"}
+2026-06-16 21:30:05 | ORDER | LiveExecutor._execute_order_blocking | entered | decision=entered | next=IGRestClient.place_market_order | params={"mode": "DEMO", "client_type": "DEMO", "endpoint": "https://demo-api.ig.com", "account_id": "ACC", "epic": "IX.D.NIKKEI.IFM.IP", "direction": "BUY"}
+2026-06-16 21:30:07 | ORDER | LiveExecutor.execute | entered | decision=async submit | next=LiveExecutor._order_worker | params={"mode": "DEMO", "epic": "IX.D.NIKKEI.IFM.IP", "direction": "BUY"}
+2026-06-16 21:30:09 | ORDER | LiveExecutor.execute | entered | decision=async submit | next=LiveExecutor._order_worker | params={"mode": "DEMO", "epic": "IX.D.NIKKEI.IFM.IP", "direction": "BUY"}
+2026-06-16 21:30:12 | ORDER | LiveExecutor.execute | entered | decision=async submit | next=LiveExecutor._order_worker | params={"mode": "DEMO", "epic": "IX.D.NIKKEI.IFM.IP", "direction": "BUY"}
+2026-06-16 21:30:30 | SYNC | IgPositionSync.sync_once | entered | decision=ok open=0 changed=False | next=- | params={"by_epic": {}, "upl": 0.0}
+2026-06-16 21:31:31 | SYNC | IgPositionSync.sync_once | entered | decision=ok open=0 changed=False | next=- | params={"by_epic": {}, "upl": 0.0}
+2026-06-16 21:32:31 | SYNC | IgPositionSync.sync_once | entered | decision=ok open=0 changed=False | next=- | params={"by_epic": {}, "upl": 0.0}
+2026-06-16 21:32:34 | STREAM | IGStreamingClient._poll_loop | entered | decision=tick received | next=- | params={"epic": "CS.D.CFPGOLD.CFP.IP", "bid": 4332.64, "offer": 4333.14}
+2026-06-16 21:32:34 | STREAM | IGStreamingClient._poll_loop | entered | decision=tick received | next=- | params={"epic": "CS.D.EURUSD.CFD.IP", "bid": 1.16091, "offer": 1.16097}
+2026-06-16 21:32:34 | STREAM | IGStreamingClient._poll_loop | entered | decision=tick received | next=- | params={"epic": "IX.D.DOW.IFM.IP", "bid": 51969.9, "offer": 51974.7}
+2026-06-16 21:32:34 | STREAM | IGStreamingClient._poll_loop | entered | decision=tick received | next=- | params={"epic": "IX.D.NIKKEI.IFM.IP", "bid": 69019.9, "offer": 69026.9}
+2026-06-16 21:33:26 | ORDER | LiveExecutor.execute | entered | decision=async submit | next=LiveExecutor._order_worker | params={"mode": "DEMO", "epic": "IX.D.NIKKEI.IFM.IP", "direction": "BUY"}
+2026-06-16 21:33:28 | ORDER | LiveExecutor.execute | entered | decision=async submit | next=LiveExecutor._order_worker | params={"mode": "DEMO", "epic": "IX.D.NIKKEI.IFM.IP", "direction": "BUY"}
+2026-06-16 21:33:31 | SYNC | IgPositionSync.sync_once | entered | decision=ok open=0 changed=False | next=- | params={"by_epic": {}, "upl": 0.0}
+2026-06-16 21:35:05 | STREAM | IGStreamingClient._poll_loop | entered | decision=tick received | next=- | params={"epic": "CS.D.CFPGOLD.CFP.IP", "bid": 4332.64, "offer": 4333.14}
+2026-06-16 21:35:05 | STREAM | IGStreamingClient._poll_loop | entered | decision=tick received | next=- | params={"epic": "CS.D.EURUSD.CFD.IP", "bid": 1.16091, "offer": 1.16097}
+2026-06-16 21:35:05 | STREAM | IGStreamingClient._poll_loop | entered | decision=tick received | next=- | params={"epic": "IX.D.DOW.IFM.IP", "bid": 51969.9, "offer": 51974.7}
+2026-06-16 21:35:05 | STREAM | IGStreamingClient._poll_loop | entered | decision=tick received | next=- | params={"epic": "IX.D.NIKKEI.IFM.IP", "bid": 69019.9, "offer": 69026.9}
+2026-06-16 21:35:31 | SYNC | IgPositionSync.sync_once | entered | decision=ok open=0 changed=False | next=- | params={"by_epic": {}, "upl": 0.0}
+2026-06-16 21:36:31 | SYNC | IgPositionSync.sync_once | entered | decision=ok open=0 changed=False | next=- | params={"by_epic": {}, "upl": 0.0}
+2026-06-16 21:37:21 | REST | IGRestClient.login | entered | decision=authentication success | next=- | params={"account_type": "DEMO", "account_id": "Z6BAH4", "base_url": "https://demo-api.ig.com/gateway/deal"}
+2026-06-16 21:37:44 | ORDER | LiveExecutor._execute_order_blocking | entered | decision=entered | next=IGRestClient.place_market_order | params={"mode": "DEMO", "client_type": "DEMO", "endpoint": "", "account_id": "MOCK-ACCOUNT", "epic": "IX.D.NIKKEI.IFM.IP", "direction": "BUY"}
+2026-06-16 21:37:44 | REST | execution_protect.submit_atomic_entry | entered | decision=calling IG (attempt 1/5) | next=execution_protect.submit_atomic_entry | params={"epic": "IX.D.NIKKEI.IFM.IP", "direction": "BUY", "size": 0.1, "stopDistance": 30.0, "limitDistance": 90.0, "currencyCode": "USD"}
+2026-06-16 21:37:44 | REST | scalping.submit_atomic_limit_entry | entered | decision=POST limit at touch | next=- | params={"epic": "IX.D.NIKKEI.IFM.IP", "direction": "BUY", "level": 30002.0, "size": 0.1, "stopDistance": 30.0, "limitDistance": 90.0}
+2026-06-16 21:37:44 | REST | execution_protect.submit_atomic_entry | entered | decision=IG response received (attempt 1) | next=IGRestClient.confirm_deal | params={"dealReference": "MOCK-0SDE6ZZP2R"}
+2026-06-16 21:37:44 | REST | IGRestClient.confirm_deal | entered | decision=accepted=True rejected=False status=None | next=- | params={"reason": "", "deal_id": "D0SDE6ZZP2R"}
+2026-06-16 21:37:48 | MODE | ExecutionEngine.__init__ | entered | decision=executor=live_executor (DEMO) | next=- | params={"mode": "DEMO", "has_rest": true, "has_live": true}
+2026-06-16 21:37:48 | VALIDATION | OrderValidator.validate | entered | decision=entering | next=- | params={"direction": "BUY", "epic": "IX.D.NIKKEI.IFM.IP"}
+2026-06-16 21:37:48 | VALIDATION | OrderValidator.validate | entered | decision=allowed=False | next=- | params={"reasons": ["Spread filter: spread 8.00 >= 1.5x MA(20)=3.00 (cap 4.50)"]}
+2026-06-16 21:37:50 | MODE | ExecutionEngine.__init__ | entered | decision=executor=live_executor (DEMO) | next=- | params={"mode": "DEMO", "has_rest": true, "has_live": true}
+2026-06-16 21:37:50 | VALIDATION | OrderValidator.validate | entered | decision=entering | next=- | params={"direction": "BUY", "epic": "IX.D.NIKKEI.IFM.IP"}
+2026-06-16 21:37:50 | VALIDATION | OrderValidator.validate | entered | decision=allowed=True | next=- | params={"reasons": []}
+2026-06-16 21:37:52 | REST | IGRestClient.login | entered | decision=authentication success | next=- | params={"account_type": "DEMO", "account_id": "Z6BAH4", "base_url": "https://demo-api.ig.com/gateway/deal"}
+2026-06-16 21:38:24 | REST | IGRestClient.login | entered | decision=authentication success | next=- | params={"account_type": "DEMO", "account_id": "Z6BAH4", "base_url": "https://demo-api.ig.com/gateway/deal"}
+2026-06-16 21:38:28 | REST | IGRestClient.login | entered | decision=authentication success | next=- | params={"account_type": "DEMO", "account_id": "Z6BAH4", "base_url": "https://demo-api.ig.com/gateway/deal"}
+2026-06-16 21:38:37 | STREAM | IGStreamingClient.subscribe_market | entered | decision=subscribed CS.D.CFPGOLD.CFP.IP | next=- | params={"epics": ["CS.D.CFPGOLD.CFP.IP"]}
+2026-06-16 21:38:37 | STREAM | IGStreamingClient.subscribe_market | entered | decision=subscribed IX.D.DOW.IFM.IP | next=- | params={"epics": ["IX.D.DOW.IFM.IP", "CS.D.CFPGOLD.CFP.IP"]}
+2026-06-16 21:38:37 | STREAM | IGStreamingClient.subscribe_market | entered | decision=subscribed CS.D.EURUSD.CFD.IP | next=- | params={"epics": ["IX.D.DOW.IFM.IP", "CS.D.EURUSD.CFD.IP", "CS.D.CFPGOLD.CFP.IP"]}
+2026-06-16 21:38:37 | STREAM | IGStreamingClient.subscribe_market | entered | decision=subscribed IX.D.NIKKEI.IFM.IP | next=- | params={"epics": ["IX.D.DOW.IFM.IP", "CS.D.EURUSD.CFD.IP", "CS.D.CFPGOLD.CFP.IP", "IX.D.NIKKEI.IFM.IP"]}
+2026-06-16 21:38:37 | STREAM | IGStreamingClient.connect | entered | decision=connecting | next=- | params={"account_type": "DEMO", "epics": ["IX.D.DOW.IFM.IP", "CS.D.EURUSD.CFD.IP", "CS.D.CFPGOLD.CFP.IP", "IX.D.NIKKEI.IFM.IP"]}
+2026-06-16 21:38:37 | STREAM | IGStreamingClient.connect | entered | decision=poll thread started — awaiting first tick | next=IGStreamingClient._poll_loop | params={}
+2026-06-16 21:38:37 | STREAM | IGStreamingClient._poll_loop | entered | decision=tick received | next=- | params={"epic": "IX.D.DOW.IFM.IP", "bid": 51975.3, "offer": 51980.1}
+2026-06-16 21:38:37 | STREAM | IGStreamingClient._poll_loop | entered | decision=streaming authentication success (REST poll transport) | next=IGStreamingClient._poll_loop | params={}
+2026-06-16 21:38:37 | STREAM | IGStreamingClient._poll_loop | entered | decision=tick received | next=- | params={"epic": "CS.D.EURUSD.CFD.IP", "bid": 1.16074, "offer": 1.1608}
+2026-06-16 21:38:37 | SYNC | IgPositionSync.start | entered | decision=background loop started | next=- | params={}
+2026-06-16 21:38:37 | MODE | ExecutionEngine.__init__ | entered | decision=executor=live_executor (DEMO) | next=- | params={"mode": "DEMO", "has_rest": true, "has_live": true}
+2026-06-16 21:38:37 | MODE | ExecutionEngine.__init__ | entered | decision=executor=live_executor (DEMO) | next=- | params={"mode": "DEMO", "has_rest": true, "has_live": true}
+2026-06-16 21:38:37 | MODE | ExecutionEngine.__init__ | entered | decision=executor=live_executor (DEMO) | next=- | params={"mode": "DEMO", "has_rest": true, "has_live": true}
+2026-06-16 21:38:37 | MODE | ExecutionEngine.__init__ | entered | decision=executor=live_executor (DEMO) | next=- | params={"mode": "DEMO", "has_rest": true, "has_live": true}
+2026-06-16 21:38:37 | STREAM | IGStreamingClient._poll_loop | entered | decision=tick received | next=- | params={"epic": "CS.D.CFPGOLD.CFP.IP", "bid": 4333.07, "offer": 4333.37}
+2026-06-16 21:38:37 | STREAM | IGStreamingClient._poll_loop | entered | decision=tick received | next=- | params={"epic": "IX.D.NIKKEI.IFM.IP", "bid": 68997.5, "offer": 69004.5}
+2026-06-16 21:38:53 | SYNC | IgPositionSync.sync_once | entered | decision=ok open=0 changed=False | next=- | params={"by_epic": {}, "upl": 0.0}
+2026-06-16 21:39:07 | REST | IGRestClient.login | entered | decision=authentication success | next=- | params={"account_type": "DEMO", "account_id": "Z6BAH4", "base_url": "https://demo-api.ig.com/gateway/deal"}

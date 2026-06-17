@@ -1,0 +1,7 @@
+{
+  "ts": "2026-06-13T05:26:46.710Z",
+  "epic": "IX.D.NIKKEI.IFM.IP",
+  "reason": "consecutive_unhealthy_ticks",
+  "positions_closed": 0,
+  "operational_safety_freeze": true
+}

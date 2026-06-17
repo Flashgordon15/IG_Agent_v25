@@ -281,6 +281,7 @@ export default function Header({
   systemStandbyActive = false,
   rotationFilterEnabled = false,
   onToggleRotationFilter,
+  igAccountId,
 }) {
   const [safeLeaveModal, setSafeLeaveModal] = useState(null);
   const [rotationBusy, setRotationBusy] = useState(false);
@@ -402,8 +403,16 @@ export default function Header({
           🔄 Rotation Filter {rotationFilterEnabled ? "ON" : "OFF"}
         </button>
 
-        {/* Divider */}
         <span className="hidden sm:block h-5 w-px bg-border shrink-0" aria-hidden />
+
+        {igAccountId ? (
+          <span
+            className="inline-flex shrink-0 items-center rounded-md border border-border bg-card/80 px-2 py-1 font-mono text-[10px] text-muted"
+            title="IG account from .env IG_ACCOUNT_ID"
+          >
+            ACCT {igAccountId}
+          </span>
+        ) : null}
 
         {/* Stream / market status */}
         <div className={`inline-flex shrink-0 items-center gap-1.5 text-[11px] ${streamUi.text}`}>

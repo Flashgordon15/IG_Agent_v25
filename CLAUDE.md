@@ -8,8 +8,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 | Doc | Role |
 |-----|------|
-| **`IG_Agent_v29.1_COMPLETE_SPEC.md`** | **Current shipped spec** — gates, learning, P&L, config |
+| **`IG_Agent_v29.1_COMPLETE_SPEC.md`** | **Current shipped spec** — gates, learning, P&L, Flight Deck, capital harvesting |
 | **`docs/V29.1_ARCHITECTURE.md`** | Module map, snapshot flow, learning plane |
+| **`docs/STRATEGIC_ENHANCEMENTS_ROADMAP.md`** | Platform roadmap — shipped vs planned |
+| **`docs/MAINTENANCE_LOG.md`** | Stress gates S1–S3, lockdown, re-deployment |
 | `IG_Agent_v25_COMPLETE_SPEC_v8.md` | Historical v25.5 detail |
 | `IG_Agent_v26_FRAMEWORK.md` | Future multi-strategy / £50k vision (not separate agent yet) |
 | `docs/LIVE_PROMOTION_CHECKLIST.md` | Live funds gate |

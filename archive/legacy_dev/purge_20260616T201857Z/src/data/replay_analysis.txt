@@ -1,0 +1,87 @@
+=== JAPAN 225 SIGNAL REPLAY ANALYSIS ===
+Date range: 2026-04-01 to 2026-06-11
+Total bars: 4054
+Total signals (score>=50): 10360
+
+THRESHOLD ANALYSIS (3-bar forward):
+threshold  signals  win_rate  profit_factor
+50         8193      51.7%     1.07
+60         8193      51.7%     1.07
+70         6564      50.7%     1.03
+75         5857      51.6%     1.07
+80         3209      53.4%     1.14
+85         2245      52.8%     1.12
+90         1283      51.8%     1.08
+
+RSI SELL RANGE ANALYSIS:
+rsi_min  rsi_max  signals  win_rate
+20       45       3161      53.6%
+25       45       3028      53.7%
+30       45       2735      53.8%
+20       40       2001      55.0%
+
+SESSION WINDOW ANALYSIS:
+window        signals  win_rate  avg_score
+asia_early     2357      52.2%     79.6
+tokyo          0          0.0%      0.0
+london_open    1874      49.7%     79.0
+
+VOL REGIME ANALYSIS:
+regime   signals  win_rate
+low       1559      51.6%
+normal    3796      52.3%
+high      2838      51.3%
+unknown   0          0.0%
+
+RECOMMENDED CONFIG:
+  signal_threshold: 80  (best profit factor)
+  rsi_sell_min: 20      (best win rate)
+  rsi_sell_max: 40
+  rsi_buy_min: 58
+  rsi_buy_max: 85
+  Best session: asia_early
+
+=== REPLAY RUN 2026-06-16T06:15:05.857712+01:00 ===
+
+=== JAPAN 225 SIGNAL REPLAY ANALYSIS ===
+Date range: 2026-04-01 to 2026-06-11
+Total bars: 4054
+Total signals (score>=50): 10360
+
+THRESHOLD ANALYSIS (3-bar forward):
+threshold  signals  win_rate  profit_factor
+50         338       47.5%     0.90
+60         338       47.5%     0.90
+70         338       47.5%     0.90
+75         338       47.5%     0.90
+80         338       47.5%     0.90
+85         338       47.5%     0.90
+90         338       47.5%     0.90
+
+RSI SELL RANGE ANALYSIS:
+rsi_min  rsi_max  signals  win_rate
+20       45       156       46.7%
+25       45       118       53.7%
+30       45       55        70.6%
+20       40       156       46.7%
+
+SESSION WINDOW ANALYSIS:
+window        signals  win_rate  avg_score
+asia_early     121       56.8%     99.0
+tokyo          0          0.0%      0.0
+london_open    48         8.3%     99.0
+
+VOL REGIME ANALYSIS:
+regime   signals  win_rate
+low       57        35.7%
+normal    216       49.2%
+high      65        48.8%
+unknown   0          0.0%
+
+RECOMMENDED CONFIG:
+  signal_threshold: 50  (best profit factor)
+  rsi_sell_min: 30      (best win rate)
+  rsi_sell_max: 45
+  rsi_buy_min: 58
+  rsi_buy_max: 85
+  Best session: asia_early

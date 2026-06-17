@@ -1,0 +1,274 @@
+=== IG Agent Boot Performance Report ===
+monitor_started: 2026-06-16T15:36:02.493Z
+
+[2026-06-16T15:36:02.502Z] Gate 1 COMPLETE — 30665ms from G1 start
+[2026-06-16T15:36:02.502Z] Uvicorn port 8080 accepting connections — 30665ms from SystemState.started_at
+[2026-06-16T15:36:02.502Z] G1 COMPLETE → port bound: 0ms
+[2026-06-16T15:36:02.502Z] [PASS] Code Execution Speed: PASS (macOS Launch Latency: Included) — G1 COMPLETE→bind: 0ms
+[2026-06-16T15:36:02.502Z] Cold start G1→bind (wall clock, includes macOS launch): 30665ms
+[2026-06-16T15:36:33.881Z] Account hydration (Gate 2) COMPLETE — 30498ms since prior gate
+[2026-06-16T15:36:34.410Z] Streaming / Lightstreamer (Gate 3) COMPLETE — 31498ms since prior gate
+[2026-06-16T15:36:34.580Z] OHLC + dormant loops (Gate 4) COMPLETE — 31498ms since prior gate
+[2026-06-16T15:36:34.580Z] READY activation (Gate 5) COMPLETE — 0ms since prior gate
+[2026-06-16T15:36:34.580Z] SystemState READY — total boot 62743ms
+
+--- Boot Summary ---
+  transport: REST poll
+  heartbeat_ok: True
+  first_tick_epic: IX.D.NASDAQ.IFM.IP
+  ohlc: 6/6
+  loops: built=6 accepting_ticks=True
+
+
+--- Cache Hit Rates (agent process) ---
+  daily_loss_gate_status: hits=0 misses=0 hit_rate=None%
+  ml_clean_training_rows: hits=0 misses=0 hit_rate=None%
+  estimated pre-cache DB touches/min (6 epics): ~144
+  daily_loss SQLite queries (misses, cumulative): 0
+  ml row count queries (misses, cumulative): 0
+
+--- Tick Gate Evaluation ---
+  evaluations: 0
+  slow (>50ms): 0
+  max_us: 0.0
+
+
+--- Cache Hit Rates (agent process) ---
+  daily_loss_gate_status: hits=16 misses=5 hit_rate=76.2%
+  ml_clean_training_rows: hits=20 misses=1 hit_rate=95.2%
+  estimated pre-cache DB touches/min (6 epics): ~144
+  daily_loss SQLite queries (misses, cumulative): 5
+  ml row count queries (misses, cumulative): 1
+  daily_loss cache effective reduction vs naive tick polling: ~65% fewer queries observed
+
+--- Tick Gate Evaluation ---
+  evaluations: 21
+  slow (>50ms): 21
+  max_us: 1268975.7
+  last_slow: epic=CS.D.GBPUSD.CFD.IP 1268.98ms gate=session_open
+  per_gate_max_us (top 5): session_open=1055877.7, cold_start_gap=68280.9, signal_confidence=32699.2, risk_validation=12667.6, ml_veto=5566.1
+
+
+--- Cache Hit Rates (agent process) ---
+  daily_loss_gate_status: hits=35 misses=10 hit_rate=77.8%
+  ml_clean_training_rows: hits=44 misses=1 hit_rate=97.8%
+  estimated pre-cache DB touches/min (6 epics): ~144
+  daily_loss SQLite queries (misses, cumulative): 10
+  ml row count queries (misses, cumulative): 1
+  daily_loss cache effective reduction vs naive tick polling: ~31% fewer queries observed
+
+--- Tick Gate Evaluation ---
+  evaluations: 45
+  slow (>50ms): 45
+  max_us: 1268975.7
+  last_slow: epic=CS.D.GBPUSD.CFD.IP 674.27ms gate=session_open
+  per_gate_max_us (top 5): session_open=1055877.7, cold_start_gap=68280.9, signal_confidence=51461.7, risk_validation=32413.4, ml_veto=8075.4
+
+
+--- Cache Hit Rates (agent process) ---
+  daily_loss_gate_status: hits=50 misses=16 hit_rate=75.8%
+  ml_clean_training_rows: hits=64 misses=1 hit_rate=98.5%
+  estimated pre-cache DB touches/min (6 epics): ~144
+  daily_loss SQLite queries (misses, cumulative): 16
+  ml row count queries (misses, cumulative): 1
+  daily_loss cache effective reduction vs naive tick polling: ~0% fewer queries observed
+
+--- Tick Gate Evaluation ---
+  evaluations: 65
+  slow (>50ms): 65
+  max_us: 1890890.7
+  last_slow: epic=IX.D.NASDAQ.IFM.IP 247.53ms gate=session_open
+  per_gate_max_us (top 5): session_open=1611049.9, cold_start_gap=68280.9, signal_confidence=51461.7, risk_validation=36239.5, points_state=34611.7
+
+
+--- Cache Hit Rates (agent process) ---
+  daily_loss_gate_status: hits=67 misses=21 hit_rate=76.1%
+  ml_clean_training_rows: hits=86 misses=1 hit_rate=98.9%
+  estimated pre-cache DB touches/min (6 epics): ~144
+  daily_loss SQLite queries (misses, cumulative): 21
+  ml row count queries (misses, cumulative): 1
+  daily_loss cache effective reduction vs naive tick polling: ~0% fewer queries observed
+
+--- Tick Gate Evaluation ---
+  evaluations: 87
+  slow (>50ms): 87
+  max_us: 1890890.7
+  last_slow: epic=CS.D.GBPUSD.CFD.IP 638.17ms gate=session_open
+  per_gate_max_us (top 5): session_open=1611049.9, signal_confidence=154469.8, cold_start_gap=135132.8, risk_validation=37890.0, points_state=34611.7
+
+
+--- Cache Hit Rates (agent process) ---
+  daily_loss_gate_status: hits=87 misses=25 hit_rate=77.7%
+  ml_clean_training_rows: hits=110 misses=1 hit_rate=99.1%
+  estimated pre-cache DB touches/min (6 epics): ~144
+  daily_loss SQLite queries (misses, cumulative): 25
+  ml row count queries (misses, cumulative): 1
+  daily_loss cache effective reduction vs naive tick polling: ~0% fewer queries observed
+
+--- Tick Gate Evaluation ---
+  evaluations: 111
+  slow (>50ms): 111
+  max_us: 1890890.7
+  last_slow: epic=CS.D.GBPUSD.CFD.IP 620.66ms gate=session_open
+  per_gate_max_us (top 5): session_open=1611049.9, signal_confidence=154469.8, cold_start_gap=135132.8, risk_validation=38291.6, points_state=34611.7
+
+
+--- Cache Hit Rates (agent process) ---
+  daily_loss_gate_status: hits=99 misses=29 hit_rate=77.3%
+  ml_clean_training_rows: hits=125 misses=1 hit_rate=99.2%
+  estimated pre-cache DB touches/min (6 epics): ~144
+  daily_loss SQLite queries (misses, cumulative): 29
+  ml row count queries (misses, cumulative): 1
+  daily_loss cache effective reduction vs naive tick polling: ~0% fewer queries observed
+
+--- Tick Gate Evaluation ---
+  evaluations: 126
+  slow (>50ms): 126
+  max_us: 1890890.7
+  last_slow: epic=IX.D.NIKKEI.IFM.IP 178.19ms gate=session_open
+  per_gate_max_us (top 5): session_open=1611049.9, cold_start_gap=185296.0, signal_confidence=154469.8, risk_validation=73308.0, ml_veto=39547.9
+
+
+--- Cache Hit Rates (agent process) ---
+  daily_loss_gate_status: hits=116 misses=33 hit_rate=77.9%
+  ml_clean_training_rows: hits=146 misses=1 hit_rate=99.3%
+  estimated pre-cache DB touches/min (6 epics): ~144
+  daily_loss SQLite queries (misses, cumulative): 33
+  ml row count queries (misses, cumulative): 1
+  daily_loss cache effective reduction vs naive tick polling: ~0% fewer queries observed
+
+--- Tick Gate Evaluation ---
+  evaluations: 147
+  slow (>50ms): 147
+  max_us: 1890890.7
+  last_slow: epic=CS.D.EURUSD.CFD.IP 607.45ms gate=session_open
+  per_gate_max_us (top 5): session_open=1611049.9, cold_start_gap=185296.0, signal_confidence=154469.8, risk_validation=73308.0, ml_veto=39547.9
+
+
+--- Cache Hit Rates (agent process) ---
+  daily_loss_gate_status: hits=135 misses=38 hit_rate=78.0%
+  ml_clean_training_rows: hits=170 misses=1 hit_rate=99.4%
+  estimated pre-cache DB touches/min (6 epics): ~144
+  daily_loss SQLite queries (misses, cumulative): 38
+  ml row count queries (misses, cumulative): 1
+  daily_loss cache effective reduction vs naive tick polling: ~0% fewer queries observed
+
+--- Tick Gate Evaluation ---
+  evaluations: 171
+  slow (>50ms): 171
+  max_us: 1890890.7
+  last_slow: epic=CS.D.CFPGOLD.CFP.IP 595.12ms gate=session_open
+  per_gate_max_us (top 5): session_open=1611049.9, cold_start_gap=185296.0, signal_confidence=154469.8, ml_veto=112488.9, risk_validation=73308.0
+
+
+--- Cache Hit Rates (agent process) ---
+  daily_loss_gate_status: hits=151 misses=43 hit_rate=77.8%
+  ml_clean_training_rows: hits=191 misses=1 hit_rate=99.5%
+  estimated pre-cache DB touches/min (6 epics): ~144
+  daily_loss SQLite queries (misses, cumulative): 43
+  ml row count queries (misses, cumulative): 1
+  daily_loss cache effective reduction vs naive tick polling: ~0% fewer queries observed
+
+--- Tick Gate Evaluation ---
+  evaluations: 192
+  slow (>50ms): 192
+  max_us: 1890890.7
+  last_slow: epic=IX.D.NIKKEI.IFM.IP 246.43ms gate=session_open
+  per_gate_max_us (top 5): session_open=1611049.9, cold_start_gap=185296.0, signal_confidence=154469.8, ml_veto=112488.9, risk_validation=73563.1
+
+
+--- Cache Hit Rates (agent process) ---
+  daily_loss_gate_status: hits=167 misses=48 hit_rate=77.7%
+  ml_clean_training_rows: hits=212 misses=1 hit_rate=99.5%
+  estimated pre-cache DB touches/min (6 epics): ~144
+  daily_loss SQLite queries (misses, cumulative): 48
+  ml row count queries (misses, cumulative): 1
+  daily_loss cache effective reduction vs naive tick polling: ~0% fewer queries observed
+
+--- Tick Gate Evaluation ---
+  evaluations: 213
+  slow (>50ms): 213
+  max_us: 1890890.7
+  last_slow: epic=CS.D.CFPGOLD.CFP.IP 1377.59ms gate=session_open
+  per_gate_max_us (top 5): session_open=1611049.9, cold_start_gap=185296.0, signal_confidence=154469.8, ml_veto=112488.9, risk_validation=73563.1
+
+
+--- Cache Hit Rates (agent process) ---
+  daily_loss_gate_status: hits=187 misses=55 hit_rate=77.3%
+  ml_clean_training_rows: hits=239 misses=1 hit_rate=99.6%
+  estimated pre-cache DB touches/min (6 epics): ~144
+  daily_loss SQLite queries (misses, cumulative): 55
+  ml row count queries (misses, cumulative): 1
+  daily_loss cache effective reduction vs naive tick polling: ~0% fewer queries observed
+
+--- Tick Gate Evaluation ---
+  evaluations: 240
+  slow (>50ms): 240
+  max_us: 1890890.7
+  last_slow: epic=IX.D.NIKKEI.IFM.IP 174.13ms gate=session_open
+  per_gate_max_us (top 5): session_open=1611049.9, cold_start_gap=185296.0, signal_confidence=154469.8, ml_veto=112488.9, risk_validation=73563.1
+
+
+--- Cache Hit Rates (agent process) ---
+  daily_loss_gate_status: hits=200 misses=60 hit_rate=76.9%
+  ml_clean_training_rows: hits=257 misses=1 hit_rate=99.6%
+  estimated pre-cache DB touches/min (6 epics): ~144
+  daily_loss SQLite queries (misses, cumulative): 60
+  ml row count queries (misses, cumulative): 1
+  daily_loss cache effective reduction vs naive tick polling: ~0% fewer queries observed
+
+--- Tick Gate Evaluation ---
+  evaluations: 258
+  slow (>50ms): 258
+  max_us: 1951440.5
+  last_slow: epic=CS.D.GBPUSD.CFD.IP 370.8ms gate=session_open
+  per_gate_max_us (top 5): session_open=1682776.5, cold_start_gap=185296.0, signal_confidence=154469.8, ml_veto=112488.9, risk_validation=73563.1
+
+
+--- Cache Hit Rates (agent process) ---
+  daily_loss_gate_status: hits=220 misses=64 hit_rate=77.5%
+  ml_clean_training_rows: hits=281 misses=1 hit_rate=99.6%
+  estimated pre-cache DB touches/min (6 epics): ~144
+  daily_loss SQLite queries (misses, cumulative): 64
+  ml row count queries (misses, cumulative): 1
+  daily_loss cache effective reduction vs naive tick polling: ~0% fewer queries observed
+
+--- Tick Gate Evaluation ---
+  evaluations: 282
+  slow (>50ms): 282
+  max_us: 1951440.5
+  last_slow: epic=CS.D.GBPUSD.CFD.IP 821.96ms gate=session_open
+  per_gate_max_us (top 5): session_open=1682776.5, cold_start_gap=220269.3, signal_confidence=154469.8, ml_veto=112488.9, risk_validation=73563.1
+
+
+--- Cache Hit Rates (agent process) ---
+  daily_loss_gate_status: hits=233 misses=69 hit_rate=77.2%
+  ml_clean_training_rows: hits=299 misses=1 hit_rate=99.7%
+  estimated pre-cache DB touches/min (6 epics): ~144
+  daily_loss SQLite queries (misses, cumulative): 69
+  ml row count queries (misses, cumulative): 1
+  daily_loss cache effective reduction vs naive tick polling: ~0% fewer queries observed
+
+--- Tick Gate Evaluation ---
+  evaluations: 300
+  slow (>50ms): 300
+  max_us: 1951440.5
+  last_slow: epic=CS.D.EURUSD.CFD.IP 538.16ms gate=session_open
+  per_gate_max_us (top 5): session_open=1682776.5, cold_start_gap=220269.3, signal_confidence=154469.8, ml_veto=112488.9, risk_validation=73563.1
+
+
+--- Cache Hit Rates (agent process) ---
+  daily_loss_gate_status: hits=253 misses=77 hit_rate=76.7%
+  ml_clean_training_rows: hits=327 misses=1 hit_rate=99.7%
+  estimated pre-cache DB touches/min (6 epics): ~144
+  daily_loss SQLite queries (misses, cumulative): 77
+  ml row count queries (misses, cumulative): 1
+  daily_loss cache effective reduction vs naive tick polling: ~0% fewer queries observed
+
+--- Tick Gate Evaluation ---
+  evaluations: 328
+  slow (>50ms): 328
+  max_us: 1951440.5
+  last_slow: epic=CS.D.CFPGOLD.CFP.IP 574.77ms gate=session_open
+  per_gate_max_us (top 5): session_open=1682776.5, cold_start_gap=220269.3, signal_confidence=154469.8, ml_veto=112488.9, risk_validation=73563.1
+

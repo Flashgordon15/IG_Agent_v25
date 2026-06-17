@@ -41,7 +41,9 @@ from trading.gate_readiness import compute_trade_readiness, format_health_badge_
 from trading.open_position_view import (
     enrich_positions_with_quote,
     normalize_sync_position,
+    position_map_from_rows,
     positions_from_store_rows,
+    positions_list_from_map,
 )
 from trading.points_engine import PointsEngine
 from trading.price_trend import compute_price_trend_30m
@@ -1637,8 +1639,39 @@ class TradingLoop:
                     if wl:
                         sess = session_name()
                         if sess not in wl:
-                            open_now = False
-                            detail = f"Outside allowed trading session (current={sess})"
+                            bypass_whitelist = False
+                            try:
+                                from intelligence.premium_overnight import (
+                                    is_premium_overnight_epic,
+                                    night_matrix_session_allowed,
+                                )
+
+                                if is_premium_overnight_epic(
+                                    self._epic, self._config
+                                ):
+                                    allowed, block_reason = (
+                                        night_matrix_session_allowed(
+                                            self._epic,
+                                            config=self._config,
+                                            now=at,
+                                        )
+                                    )
+                                    if allowed:
+                                        bypass_whitelist = True
+                                        detail = (
+                                            "market open (premium overnight 24/7)"
+                                        )
+                                    elif block_reason:
+                                        open_now = False
+                                        detail = block_reason
+                            except Exception:
+                                pass
+                            if not bypass_whitelist and open_now:
+                                open_now = False
+                                detail = (
+                                    f"Outside allowed trading session "
+                                    f"(current={sess})"
+                                )
                 except Exception:
                     pass
         next_open_iso = ""
@@ -2470,6 +2503,27 @@ class TradingLoop:
             relax = atr_norm * age_factor * session_factor * relax_strength
             # Lower threshold aggressively in high-volatility regimes.
             threshold = max(min_threshold, threshold * (1.0 - relax))
+
+            try:
+                from intelligence.pipeline_bridge import get_intelligence_layer
+                from intelligence.premium_overnight import (
+                    overnight_signal_confidence_relief,
+                    premium_overnight_momentum_pass,
+                )
+
+                layer = get_intelligence_layer()
+                mi = layer.microstructure_verdict(str(getattr(self, "_epic", "") or ""))
+                if premium_overnight_momentum_pass(
+                    str(getattr(self, "_epic", "") or ""),
+                    str(mi.regime),
+                    float(mi.confidence),
+                    config=self._config,
+                ):
+                    relief = overnight_signal_confidence_relief(self._config)
+                    threshold = max(min_threshold, threshold - relief)
+                    live_state_vector["premium_overnight_relief_pts"] = relief
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -3417,6 +3471,7 @@ class TradingLoop:
                 "next_tier": self._points.get_next_tier(),
             },
             "positions": open_positions,
+            "position_map": position_map_from_rows(open_positions),
             "realized_daily_pnl_gbp": realized_daily_pnl,
             "daily_pnl_gbp": realized_daily_pnl,
             "balance_gbp": self._balance_gbp(),
@@ -3448,6 +3503,20 @@ class TradingLoop:
             payload["friday_flatten"] = {"active": False}
             payload["calendar_blackout"] = []
             payload["calendar_blackout_active"] = False
+        try:
+            from system.env_loader import load_dotenv
+            import os
+
+            load_dotenv()
+            payload["ig_account_id"] = os.environ.get("IG_ACCOUNT_ID", "").strip()
+        except Exception:
+            pass
+        try:
+            from trading.open_position_view import attach_position_map
+
+            attach_position_map(payload)
+        except Exception:
+            pass
         return payload
 
     def _price_trend_payload(self, quote_ts: datetime) -> dict[str, Any] | None:
@@ -3788,7 +3857,10 @@ class TradingLoop:
             except Exception:
                 pass
         return enrich_positions_with_quote(
-            raw, quote, point_value_gbp=point_value, epic=self._epic
+            positions_list_from_map(position_map_from_rows(raw)),
+            quote,
+            point_value_gbp=point_value,
+            epic=self._epic,
         )
 
 

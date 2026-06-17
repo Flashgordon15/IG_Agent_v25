@@ -1,0 +1,13 @@
+{
+  "epics": {
+    "CS.D.CRUDE.CFD.IP": {
+      "market": "US Oil WTI",
+      "bars_injected": 0,
+      "ready": false
+    }
+  },
+  "not_ready": [
+    "CS.D.CRUDE.CFD.IP"
+  ],
+  "ready_count": 0
+}

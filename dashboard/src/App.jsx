@@ -952,6 +952,11 @@ export default function App() {
         false,
     ),
     onToggleRotationFilter: handleToggleRotationFilter,
+    igAccountId:
+      mergedState?.ig_account_id ??
+      mergedState?.health?.ig_account_id ??
+      viewState?.ig_account_id ??
+      "",
   };
 
   // Agent stopped screen (with post-shutdown verification)

@@ -1,0 +1,9 @@
+{
+  "event": "DAY1_GENESIS_RESET",
+  "ts_utc": "2026-06-17T05:09:09.901719+00:00",
+  "archive_dir": "archive/legacy_dev/purge_20260617T050909Z",
+  "files_archived": [],
+  "metrics": {
+    "effective_daily_pnl_gbp": 0.0
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "generated_at": "2026-06-16T21:31:06Z",
+  "rolling_days": 14,
+  "enabled": false,
+  "setups": {
+    "BUY|bull|asia_early": {
+      "status": "ACTIVE",
+      "n": 222,
+      "wr": 0.991,
+      "e_gbp": 35.1,
+      "total_pnl_gbp": 7792.25
+    },
+    "IG_IMPORT": {
+      "status": "ACTIVE",
+      "n": 369,
+      "wr": 0.5637,
+      "e_gbp": 1.61,
+      "total_pnl_gbp": 594.89
+    },
+    "BUY|bull|asia_early|atrmid|rsimid|volnormal": {
+      "status": "INSUFFICIENT",
+      "n": 1,
+      "wr": 1.0,
+      "e_gbp": 1.0,
+      "total_pnl_gbp": 1.0
+    },
+    "BUY|bull|london_us_overlap|atr0-30|rsihigh|volhigh": {
+      "status": "INSUFFICIENT",
+      "n": 7,
+      "wr": 0.0,
+      "e_gbp": 0.0,
+      "total_pnl_gbp": 0.0
+    },
+    "BUY|bull|us_afternoon|atr0-30|rsihigh|volhigh": {
+      "status": "INSUFFICIENT",
+      "n": 13,
+      "wr": 0.0,
+      "e_gbp": -0.08,
+      "total_pnl_gbp": -1.0
+    }
+  },
+  "banned_keys": []
+}

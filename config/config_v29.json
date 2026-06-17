@@ -135,6 +135,70 @@
     "trend_trailing_atr_mult": 1.25,
     "_note": "QMM — dynamic multi-market selector + adaptive scalp/trend execution horizons (in-memory, no indicator math changes)."
   },
+  "intelligence_layer": {
+    "enabled": true,
+    "autopilot_scaling": {
+      "enabled": true,
+      "min_micro_confidence": 0.72,
+      "max_epic_bonus": 2,
+      "max_global_bonus": 3,
+      "max_throttle_for_scale": 0.35,
+      "require_clear_spread": true,
+      "_note": "Fluid multi-position scaling when microstructure regime is high-confidence and spread forecast is clear."
+    },
+    "cockpit": {
+      "enabled": true,
+      "auto_launch_after_gate4": true,
+      "telemetry_hz": 2.5,
+      "web_port": 8787,
+      "auto_open_browser": true,
+      "_note": "Premium web Flight Deck — local FastAPI + WebSocket at :8787, zero tkinter."
+    },
+    "target_engine": {
+      "enabled": true,
+      "target_daily_gbp": 1000.0,
+      "simulated_equity_gbp": 10000.0,
+      "_note": "Target-Seeking Alpha Engine — compress risk as P_day approaches £1k; capital preservation lock at target."
+    },
+    "liquidity_wave": {
+      "enabled": true,
+      "peak_autopilot_multiplier": 1.5,
+      "lull_confidence_floor": 0.85,
+      "tokyo_momentum_start": "01:00",
+      "tokyo_momentum_end": "04:00",
+      "tokyo_nikkei_micro_floor": 0.65,
+      "premium_defensive_micro_floor": 0.85,
+      "overnight_half_scale_multiplier": 0.50,
+      "overnight_half_scale_min_pct": 65,
+      "overnight_full_scale_min_pct": 85,
+      "_note": "UK session volume nodes — London/NY open + London close boost; 11:00-13:00 premium-only. Tokyo 01:00-04:00 Nikkei 65% micro floor; defensive epics stay 85%. Overnight 65-84% conf → 0.5x lot size."
+    }
+  },
+  "entry_protection": {
+    "session_blackout_enabled": true,
+    "legacy_weekday_blackout_superseded": true,
+    "_lockdown_note": "v29.1 PERMANENT: legacy weekday blackout 20:00-06:00 BST DELETED for night matrix. Only rollover lock 21:58-22:05 BST.",
+    "gold_weekday_blackout_start": "21:58",
+    "gold_weekday_blackout_end": "22:05",
+    "premium_overnight": {
+      "enabled": true,
+      "lockdown_permanent": true,
+      "disable_legacy_weekday_blackout": true,
+      "epics": [
+        "CS.D.CFPGOLD.CFP.IP",
+        "CS.D.EURUSD.CFD.IP",
+        "IX.D.NIKKEI.IFM.IP",
+        "IX.D.DOW.IFM.IP"
+      ],
+      "rollover_lock_start": "21:58",
+      "rollover_lock_end": "22:05",
+      "overnight_session_start": "22:00",
+      "overnight_session_end": "06:00",
+      "momentum_confidence_floor": 0.72,
+      "signal_confidence_relief_pts": 8.0,
+      "_note": "Night matrix 24/7 clearance — 7-min rollover lock only; premium microstructure gates apply."
+    }
+  },
   "manual_intervention": {
     "daily_drawdown_shield_enabled": true,
     "daily_drawdown_shield_gbp": 1000,
@@ -148,7 +212,8 @@
       "trading_session_whitelist": [
         "london_morning",
         "london_us_overlap",
-        "us_afternoon"
+        "us_afternoon",
+        "late"
       ]
     },
     "wall_street": {
@@ -163,25 +228,12 @@
       ]
     },
     "nasdaq_100": {
-      "enabled": true,
-      "reward_multiple": 3.0,
-      "risk_cap_gbp": 200,
-      "spread_to_atr_max": 0.45,
-      "trading_session_whitelist": [
-        "london_morning",
-        "london_us_overlap",
-        "us_afternoon",
-        "late"
-      ]
+      "enabled": false,
+      "_note": "Day 1 genesis — five-asset matrix only (see asset_priority.FIVE_ASSET_MATRIX)"
     },
     "gbp_usd": {
-      "enabled": true,
-      "reward_multiple": 3.0,
-      "trading_session_whitelist": [
-        "london_morning",
-        "london_us_overlap",
-        "us_afternoon"
-      ]
+      "enabled": false,
+      "_note": "Day 1 genesis — EUR/USD selected for FX micro-scalping slot"
     },
     "eur_usd": {
       "enabled": true,
@@ -189,14 +241,16 @@
       "trading_session_whitelist": [
         "london_morning",
         "london_us_overlap",
-        "us_afternoon"
+        "us_afternoon",
+        "late"
       ]
     },
     "japan_225": {
       "enabled": true,
       "reward_multiple": 3.0,
       "trading_session_whitelist": [
-        "asia_early"
+        "asia_early",
+        "late"
       ]
     },
     "us_oil": {
@@ -210,7 +264,7 @@
     },
     "germany_40": {
       "enabled": false,
-      "_note": "Keep off until IG account streams IX.D.DAX.IFM.IP — DEMO often rejects this epic"
+      "_note": "Night session — DAX cash closed; re-enable at London open when OHLC/stream available on DEMO"
     }
   }
 }

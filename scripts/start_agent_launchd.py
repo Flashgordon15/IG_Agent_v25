@@ -97,6 +97,7 @@ def main() -> int:
     os.environ["IG_AGENT_ROOT"] = str(root)
     os.environ.setdefault("IG_AGENT_FROM_LAUNCHER", "1")
     os.environ.setdefault("IG_AGENT_SKIP_DEPLOY_CHECK", "1")
+    os.environ.setdefault("IG_AGENT_SKIP_ORPHAN_KILL", "1")
     src_path = str(root / "src")
     existing = os.environ.get("PYTHONPATH", "")
     os.environ["PYTHONPATH"] = src_path if not existing else f"{src_path}:{existing}"

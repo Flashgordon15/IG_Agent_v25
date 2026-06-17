@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "generated_at": "2026-06-16T20:39:09Z",
+  "rolling_days": 14,
+  "enabled": true,
+  "setups": {
+    "BUY|bull|london_us_overlap|atr0-30|rsihigh|volhigh": {
+      "status": "BANNED",
+      "n": 5,
+      "wr": 0.4,
+      "e_gbp": -80.97,
+      "total_pnl_gbp": -404.86
+    },
+    "BUY|bull|us_afternoon|atr0-30|rsihigh|volhigh": {
+      "status": "INSUFFICIENT",
+      "n": 3,
+      "wr": 0.0,
+      "e_gbp": -140.18,
+      "total_pnl_gbp": -420.55
+    }
+  },
+  "banned_keys": [
+    "BUY|bull|london_us_overlap|atr0-30|rsihigh|volhigh"
+  ]
+}

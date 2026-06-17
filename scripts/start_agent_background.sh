@@ -43,7 +43,20 @@ fi
 export IG_AGENT_ROOT="${AGENT_DIR}"
 export IG_AGENT_FROM_LAUNCHER=1
 export IG_AGENT_SKIP_DEPLOY_CHECK=1
+export IG_AGENT_SKIP_ORPHAN_KILL=1
 export PYTHONPATH="${AGENT_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}"
+
+LAUNCH_ENV="${AGENT_DIR}/config/credentials/launch.env"
+if [[ -f "${LAUNCH_ENV}" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "${LAUNCH_ENV}"
+  set +a
+fi
+if [[ -n "${AGENT_LAUNCH_PASS:-}" ]]; then
+  export AGENT_LAUNCH_PASS
+  export ADMIN_PASSWORD="${ADMIN_PASSWORD:-${AGENT_LAUNCH_PASS}}"
+fi
 
 log "start_agent_background: python=${PY} caffeinate=${CAFF_ARGS[*]:-off}"
 

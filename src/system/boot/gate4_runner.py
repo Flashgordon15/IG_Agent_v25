@@ -89,6 +89,17 @@ class Gate4Runner:
 
         bootstrap_ohlc_parallel(rest, loops, on_loop_complete=_on_loop_complete)
 
+        if cfg.get("intelligence_layer", {}).get("enabled"):
+            try:
+                from intelligence.microstructure import bootstrap_microstructure_parallel
+
+                bootstrap_microstructure_parallel(rest, loops)
+                log_engine("Gate4: microstructure historical warmup complete")
+            except Exception as exc:
+                log_engine(
+                    f"Gate4: microstructure warmup skipped: {type(exc).__name__}: {exc}"
+                )
+
         from api.agent_control import register_trading_loop
 
         register_trading_loop(orch)
@@ -113,3 +124,37 @@ class Gate4Runner:
             f"Gate4: {total} dormant loop thread(s) registered "
             f"(paused_at_boot=True, accepting_ticks=False)"
         )
+
+        if cfg.get("intelligence_layer", {}).get("enabled"):
+            try:
+                from intelligence.target_engine import initialize_target_engine
+
+                store = None
+                if loops:
+                    store = getattr(loops[0], "_store", None)
+                initialize_target_engine(cfg, rest, store=store)
+                log_engine("Gate4: Target-Seeking Alpha Engine initialized")
+            except Exception as exc:
+                log_engine(
+                    f"Gate4: target engine init skipped: {type(exc).__name__}: {exc}"
+                )
+
+        cockpit_cfg = cfg.get("intelligence_layer", {}).get("cockpit", {})
+        if isinstance(cockpit_cfg, dict) and cockpit_cfg.get("enabled"):
+            try:
+                from cockpit.port_cleanup import clear_port_8080
+
+                cleared = clear_port_8080()
+                if cleared:
+                    log_engine(f"Gate4: cleared {len(cleared)} process(es) on :8080")
+            except Exception as exc:
+                log_engine(f"Gate4: port cleanup skipped: {type(exc).__name__}: {exc}")
+
+            try:
+                from cockpit.launcher import launch_flight_deck_after_gate4
+
+                launch_flight_deck_after_gate4(cfg)
+            except Exception as exc:
+                log_engine(
+                    f"Gate4: flight deck launch skipped: {type(exc).__name__}: {exc}"
+                )

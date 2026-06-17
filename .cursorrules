@@ -40,3 +40,11 @@ RefactoringDepth=Restrict structural edits to isolated fixes with test coverage.
 [Multi-Agent Delegation Roles]
 ArchitectAgent=Focus on snapshot/P&L data flow, learning plane boundaries, config merge chain (v29 -> v25).
 WorkerAgent=Focus on isolated patches, tests in tests/, dashboard dist rebuild after JSX changes.
+
+[Night Matrix 24/7 Lockdown — v29.1 PERMANENT]
+NightMatrixEpics=CS.D.CFPGOLD.CFP.IP (Gold), IX.D.DOW.IFM.IP (Wall St), IX.D.NIKKEI.IFM.IP (Japan 225), CS.D.EURUSD.CFD.IP (EUR/USD)
+LegacyBlackoutDeleted=weekday blackout 20:00-06:00 BST — NEVER reintroduce for night matrix
+RolloverLockOnly=21:58-22:05 BST institutional day-clear (7 minutes) — sole scheduled session block
+CodeAuthority=src/intelligence/premium_overnight.py + src/trading/entry_protection.py + config/config_v29.json entry_protection.premium_overnight
+ConfigLockdown=lockdown_permanent:true — reboot/refresh must not revert to 10-hour curfew
+FlightDeck=Web cockpit http://127.0.0.1:8787/ via flight_deck_launch.sh

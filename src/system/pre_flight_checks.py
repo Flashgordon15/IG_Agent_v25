@@ -433,11 +433,22 @@ def check_ohlc_cache_warm() -> PreFlightResult:
 
         cfg = get_config()
         registry = InstrumentRegistry(cfg.as_dict())
+        enabled = registry.get_enabled_with_ids()
         gaps: list[str] = []
-        for iid, inst in registry.get_enabled_with_ids():
+        checked = 0
+        skipped: list[str] = []
+        raw_instruments = cfg.as_dict().get("instruments") or {}
+        if isinstance(raw_instruments, dict):
+            for iid, inst in raw_instruments.items():
+                if isinstance(inst, dict) and not bool(inst.get("enabled")):
+                    skipped.append(str(iid))
+        for iid, inst in enabled:
+            if not bool(inst.get("enabled", True)):
+                continue
             epic = str(inst.get("epic") or "").strip()
             if not epic:
                 continue
+            checked += 1
             market = str(inst.get("name") or iid)
             bars = local_cache_bar_count(epic, market)
             if bars < MIN_CACHE_BARS_FOR_BOOTSTRAP:
@@ -449,11 +460,12 @@ def check_ohlc_cache_warm() -> PreFlightResult:
                 False,
                 reason="cold: " + ", ".join(gaps),
             )
+        skip_note = f", skipped disabled: {', '.join(skipped)}" if skipped else ""
         return PreFlightResult(
             "7.3",
             "OHLC local cache warm (≥100 bars per enabled market)",
             True,
-            reason=f"{len(registry.get_enabled_with_ids())} markets ok",
+            reason=f"{checked} markets ok{skip_note}",
         )
     except Exception as e:
         return PreFlightResult(

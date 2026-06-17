@@ -540,6 +540,14 @@ class LiveExecutor:
             executor_selected=f"live_executor ({'DEMO' if is_demo else 'LIVE'})",
         )
 
+        from execution.rocket_trigger import weld_rest_payload_map, weld_rocket_dispatch_params
+
+        execution_params = weld_rocket_dispatch_params(
+            execution_params,
+            epic=str(signal.epic or ""),
+            micro_confidence=float(signal.adjusted_confidence or 0.0),
+            config=cfg,
+        )
         size = float(execution_params.get("size", cfg.trade_size))
         stop_distance = float(execution_params.get("risk", cfg.stop_distance_points))
         limit_distance = float(execution_params.get("limit", cfg.limit_distance_points))
@@ -564,14 +572,18 @@ class LiveExecutor:
 
         import time as _time_exec
 
-        payload = {
-            "epic": signal.epic,
-            "direction": signal.direction,
-            "size": size,
-            "stopDistance": stop_distance,
-            "limitDistance": limit_distance,
-            "currencyCode": cfg.currency_code,
-        }
+        payload = weld_rest_payload_map(
+            {
+                "epic": signal.epic,
+                "direction": signal.direction,
+                "size": size,
+                "stopDistance": stop_distance,
+                "limitDistance": limit_distance,
+                "currencyCode": cfg.currency_code,
+            },
+            epic=str(signal.epic or ""),
+        )
+        size = float(payload["size"])
         update_demo_diagnostics(last_order_payload=payload)
 
         bus = get_lifecycle_bus()

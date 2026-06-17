@@ -1,5 +1,5 @@
 """
-Secure IG credentials loader — config/credentials/credentials.json only.
+Secure IG credentials loader — ``.env`` at project root + optional credentials.json.
 
 Never logs passwords or API keys.
 """
@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from system.env_loader import apply_env_to_credentials, env_credentials_complete, load_dotenv
 from system.paths import config_dir
 
 
@@ -100,20 +101,28 @@ def load_credentials(*, path: Path | None = None) -> Credentials:
 
 def try_load_credentials(*, path: Path | None = None) -> CredentialsStatus:
     """Load credentials without raising; suitable for UI startup checks."""
+    load_dotenv()
     p = path or CREDENTIALS_PATH
-    if not p.is_file():
+    raw: dict[str, Any] = {}
+    if p.is_file():
+        try:
+            parsed = json.loads(p.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            return CredentialsStatus(ok=False, error=f"Invalid JSON in credentials file: {e}")
+        if not isinstance(parsed, dict):
+            return CredentialsStatus(ok=False, error="Credentials file must be a JSON object")
+        raw = parsed
+    elif not env_credentials_complete():
         return CredentialsStatus(
             ok=False,
-            error=f"Credentials file not found: {p}",
+            error=(
+                f"Credentials file not found: {p} "
+                "and required .env keys are incomplete "
+                "(IG_USERNAME, IG_PASSWORD, IG_API_KEY, ACCOUNT_TYPE, IG_ACCOUNT_ID)"
+            ),
         )
-    try:
-        raw = json.loads(p.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as e:
-        return CredentialsStatus(ok=False, error=f"Invalid JSON in credentials file: {e}")
 
-    if not isinstance(raw, dict):
-        return CredentialsStatus(ok=False, error="Credentials file must be a JSON object")
-
+    raw = apply_env_to_credentials(raw)
     raw = _normalize_fields(raw)
     missing = [f for f in REQUIRED_FIELDS if not _non_empty(raw.get(f))]
     if missing:

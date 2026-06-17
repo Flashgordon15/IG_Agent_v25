@@ -223,6 +223,7 @@ class IgPositionSync:
             return None
 
     def _position_to_dict(self, p: SyncedPosition) -> dict[str, Any]:
+        from system.price_precision import parse_broker_price_optional
         from trading.open_position_view import (
             instrument_pnl_spec,
             pnl_currency_amount_to_gbp,
@@ -233,33 +234,41 @@ class IgPositionSync:
         point_value = float(spec["point_value"])
         pnl_gbp = round(pnl_currency_amount_to_gbp(float(p.upl), currency), 2)
         current = p.bid if p.direction == "BUY" else p.offer
+        epic = str(p.epic or "")
         return {
             "deal_id": p.deal_id,
-            "epic": p.epic,
+            "dealId": p.deal_id,
+            "epic": epic,
             "direction": p.direction,
             "side": p.direction,
-            "size": p.size,
-            "level": p.level,
-            "entry": p.level,
-            "upl": p.upl,
+            "size": float(p.size),
+            "level": parse_broker_price_optional(p.level, epic=epic) or float(p.level),
+            "entry": parse_broker_price_optional(p.level, epic=epic) or float(p.level),
+            "upl": float(p.upl),
+            "profitAndLoss": float(p.upl),
             "pnl_currency": float(p.upl),
             "pnl_gbp": pnl_gbp,
             "broker_pnl_gbp": pnl_gbp,
-            "broker_mark": current,
+            "broker_mark": parse_broker_price_optional(current, epic=epic) or current,
             "broker_upl": float(p.upl),
             "market_name": p.market_name,
             "deal_reference": p.deal_reference,
-            "stop_level": p.stop_level,
-            "limit_level": p.limit_level,
-            "stop": p.stop_level or None,
-            "target": p.limit_level or None,
-            "bid": p.bid,
-            "offer": p.offer,
-            "current": p.bid if p.direction == "BUY" else p.offer,
+            "stop_level": parse_broker_price_optional(p.stop_level, epic=epic)
+            or float(p.stop_level or 0),
+            "limit_level": parse_broker_price_optional(p.limit_level, epic=epic)
+            or float(p.limit_level or 0),
+            "stop": parse_broker_price_optional(p.stop_level, epic=epic) or p.stop_level or None,
+            "target": parse_broker_price_optional(p.limit_level, epic=epic)
+            or p.limit_level
+            or None,
+            "bid": parse_broker_price_optional(p.bid, epic=epic) or float(p.bid),
+            "offer": parse_broker_price_optional(p.offer, epic=epic) or float(p.offer),
+            "current": parse_broker_price_optional(current, epic=epic) or current,
             "currency": currency,
             "point_value": point_value,
             "open_mins": self._open_mins_for_deal(p.deal_id, p.created_at),
             "opened_at": p.created_at or None,
+            "pnl_source": "ig_broker",
         }
 
     def snapshot_dict(self) -> dict[str, Any]:
@@ -276,6 +285,9 @@ class IgPositionSync:
             "last_ig_event": s.last_ig_event,
             "last_closed_summary": s.last_closed_summary,
             "positions": [self._position_to_dict(p) for p in s.positions],
+            "position_map": {
+                p.deal_id: self._position_to_dict(p) for p in s.positions if p.deal_id
+            },
         }
 
     def _snapshot_confidence_pct(self) -> float | None:

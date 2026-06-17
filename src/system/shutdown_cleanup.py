@@ -219,6 +219,13 @@ def perform_shutdown_cleanup(
         log_engine(f"shutdown cleanup: stream/sync stop error (continuing): {e}")
 
     try:
+        from cockpit.launcher import stop_flight_deck
+
+        stop_flight_deck()
+    except Exception:
+        pass
+
+    try:
         from system.trading_health_monitor import stop_trading_health_monitor
 
         stop_trading_health_monitor()
@@ -396,7 +403,8 @@ def _fetch_api_health(timeout: float = 3.0) -> dict | None:
         return None
     try:
         with urllib.request.urlopen(
-            "http://127.0.0.1:8080/api/health", timeout=timeout
+            "http://127.0.0.1:8080/api/health",
+            timeout=min(float(timeout), 5.0),
         ) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             return data if isinstance(data, dict) else None

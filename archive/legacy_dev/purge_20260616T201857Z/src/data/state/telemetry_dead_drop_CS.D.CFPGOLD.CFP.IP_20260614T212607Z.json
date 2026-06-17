@@ -1,0 +1,7 @@
+{
+  "ts": "2026-06-14T21:26:07.930Z",
+  "epic": "CS.D.CFPGOLD.CFP.IP",
+  "reason": "consecutive_unhealthy_ticks",
+  "positions_closed": 0,
+  "operational_safety_freeze": true
+}

@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <title>IG Agent Flight Deck v29.1</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css" id="cockpit-css" />
+  <script>
+    window.__COCKPIT_BUILD__ = Date.now();
+    document.getElementById("cockpit-css").href =
+      "/static/styles.css?v=" + window.__COCKPIT_BUILD__;
+  </script>
+</head>
+<body>
+  <div class="cockpit-shell">
+    <div
+      id="master-vitals-banner"
+      class="master-vitals-banner vitals-healthy"
+      role="status"
+      aria-live="polite"
+      aria-label="Global system vitals"
+    >
+      🟢 All systems running correctly. E2E tests passing. AI is monitoring.
+    </div>
+
+    <header class="top-bar">
+      <div class="brand">
+        <span class="brand-glyph">◈</span>
+        <div>
+          <h1>IG Agent Flight Deck</h1>
+          <p class="subtitle">v29.1 · 4-Gate Boot Pipeline · Prop Trading Cockpit</p>
+        </div>
+      </div>
+      <div class="status-cluster">
+        <span id="account-badge" class="account-badge" title="IG account from .env">ACCT —</span>
+        <span id="ws-status" class="pill pill-warn">TELEMETRY …</span>
+        <span id="log-ws-status" class="pill pill-warn">LOGS …</span>
+        <span id="triage-ws-status" class="pill pill-warn">TRIAGE …</span>
+        <span id="clock" class="clock">--:--:-- BST</span>
+      </div>
+    </header>
+
+    <main class="grid-layout">
+      <!-- Card A: 4-Gate System (G1–G4 only) -->
+      <section class="card card-gates" aria-label="Four-Gate Boot Checklist">
+        <header class="card-header">
+          <span class="card-label">Card A</span>
+          <h2>4-Gate Boot Checklist</h2>
+          <span class="gate-pipeline-badge">G1 → G2 → G3 → G4</span>
+        </header>
+        <p class="gate-intro">Strict v29.1 gate map — Environment · REST Auth · Streaming · State Hydration</p>
+        <div id="gate-grid" class="gate-grid"></div>
+      </section>
+
+      <!-- Card B: Avionics HUD -->
+      <section class="card card-avionics" aria-label="Avionics Telemetry">
+        <header class="card-header">
+          <span class="card-label">Card B</span>
+          <h2>Avionics Telemetry HUD</h2>
+          <span id="spread-forecast" class="forecast-badge">SPREAD FORECAST: —</span>
+        </header>
+        <div id="asset-cards" class="asset-cards"></div>
+      </section>
+
+      <!-- Card C: Mission + Scalping Telemetry -->
+      <section class="card card-mission" aria-label="Mission Progress">
+        <header class="card-header">
+          <span class="card-label">Card C</span>
+          <h2>Flight Vector &amp; Mission Progress</h2>
+        </header>
+        <div class="mission-stats">
+          <div class="stat-block">
+            <span class="stat-label">Microstructure Regime</span>
+            <span id="micro-regime" class="stat-value neon-green">NEUTRAL</span>
+          </div>
+          <div class="stat-block">
+            <span class="stat-label">Autopilot Rating</span>
+            <span id="autopilot-rating" class="stat-value">—</span>
+          </div>
+          <div class="stat-block">
+            <span class="stat-label">Alpha Risk Factor</span>
+            <span id="risk-factor" class="stat-value purple">1.00</span>
+          </div>
+        </div>
+        <div class="progress-wrap">
+          <div class="progress-labels">
+            <span id="mission-label">Daily Mission Progress: 0%</span>
+            <span id="mission-amount">£0.00 / £1,000</span>
+          </div>
+          <div class="progress-track">
+            <div id="mission-bar" class="progress-fill"></div>
+          </div>
+        </div>
+        <div id="victory-banner" class="victory-banner hidden"></div>
+
+        <div id="shadow-trading-panel" class="shadow-trading-panel" aria-label="Shadow Trading Engine">
+          <div class="shadow-panel-header">
+            <span class="shadow-title">Autonomous Shadow Trading Engine</span>
+            <span id="shadow-mode-badge" class="shadow-mode-badge">OFF</span>
+          </div>
+          <div class="shadow-pnl-grid">
+            <div class="shadow-metric">
+              <span class="shadow-label">Floating P&amp;L</span>
+              <span id="shadow-unrealized" class="shadow-value">£0.00</span>
+            </div>
+            <div class="shadow-metric">
+              <span class="shadow-label">Realized P&amp;L</span>
+              <span id="shadow-realized" class="shadow-value">£0.00</span>
+            </div>
+            <div class="shadow-metric">
+              <span class="shadow-label">Total Shadow Risk</span>
+              <span id="shadow-total" class="shadow-value purple">£0.00</span>
+            </div>
+            <div class="shadow-metric">
+              <span class="shadow-label">Open Sim Positions</span>
+              <span id="shadow-open-count" class="shadow-value">0</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="scalping-panel" aria-label="Scalping Telemetry Engine">
+          <div class="scalping-panel-header">
+            <span class="scalping-title">Scalping Telemetry Engine</span>
+            <span id="scalping-engine-state" class="scalping-state">STANDBY</span>
+          </div>
+          <div class="scalping-grid">
+            <div class="scalping-metric">
+              <span class="scalping-label">Time-Decay Trail</span>
+              <span id="time-decay-status" class="scalping-value">—</span>
+              <span id="time-decay-detail" class="scalping-sub">ATR compress 0% · stall 0s</span>
+            </div>
+            <div class="scalping-metric">
+              <span class="scalping-label">Order-Book Tick Velocity</span>
+              <span id="tick-velocity-status" class="scalping-value">—</span>
+              <span id="tick-velocity-detail" class="scalping-sub">0 ticks / 200ms · override OFF</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Card D: Positions -->
+      <section class="card card-positions" aria-label="Multi-Position Tracker">
+        <header class="card-header">
+          <span class="card-label">Card D</span>
+          <h2>Multi-Position Flight Grid</h2>
+        </header>
+        <div class="table-wrap">
+          <table class="pos-table">
+            <thead>
+              <tr>
+                <th>Epic</th>
+                <th>Side</th>
+                <th>Entry</th>
+                <th>Market</th>
+                <th>Stop</th>
+                <th>Trail</th>
+                <th>Sync</th>
+              </tr>
+            </thead>
+            <tbody id="pos-body"></tbody>
+          </table>
+          <p id="pos-empty" class="empty-state">No active concurrent entries</p>
+        </div>
+      </section>
+    </main>
+
+    <!-- Card F: Dual-tab Live HUD -->
+    <section class="card card-flight-log" aria-label="System Avionics and Triage">
+      <header class="card-header flight-log-header">
+        <span class="card-label">Live HUD</span>
+        <div class="log-tab-bar" role="tablist">
+          <button id="tab-flight-log" type="button" class="log-tab active" role="tab" aria-selected="true">
+            SYSTEM AVIONICS FLIGHT LOG
+          </button>
+          <button id="tab-triage" type="button" class="log-tab" role="tab" aria-selected="false">
+            24HR TRIAGE LOOKBACK
+          </button>
+        </div>
+        <span id="log-line-count" class="log-meta">0 lines</span>
+      </header>
+      <div id="panel-flight-log" class="log-panel active" role="tabpanel">
+        <div id="flight-log" class="flight-log" role="log" aria-live="polite"></div>
+      </div>
+      <div id="panel-triage" class="log-panel" role="tabpanel" hidden>
+        <div id="triage-log" class="flight-log triage-log" role="log" aria-live="polite"></div>
+      </div>
+    </section>
+
+    <!-- Card E: Emergency -->
+    <footer class="card card-emergency">
+      <button id="emergency-btn" type="button" class="emergency-btn">
+        ⚠ EMERGENCY COCKPIT OVERRIDE / FLATTEN POSITIONS ⚠
+      </button>
+    </footer>
+  </div>
+  <script>
+    (function () {
+      var s = document.createElement("script");
+      s.src = "/static/app.js?v=" + (window.__COCKPIT_BUILD__ || Date.now());
+      s.defer = true;
+      document.body.appendChild(s);
+    })();
+  </script>
+</body>
+</html>

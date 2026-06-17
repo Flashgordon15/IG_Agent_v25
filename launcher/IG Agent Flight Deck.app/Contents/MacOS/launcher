@@ -1,0 +1,126 @@
+#!/bin/bash
+# IG Agent Flight Deck — headless desktop launcher (no Terminal window)
+set -euo pipefail
+
+ROOT="/Users/chrisgordon/Projects/IG_Agent_v25"
+LAUNCH="${ROOT}/flight_deck_launch.sh"
+LOG_DIR="${ROOT}/src/data/logs"
+LOG_FILE="${LOG_DIR}/desktop_flight_deck.log"
+COCKPIT_URL="http://127.0.0.1:8787/"
+DASHBOARD_URL="http://127.0.0.1:8080/"
+VENV_PY="${ROOT}/.venv/bin/python3"
+
+mkdir -p "${LOG_DIR}"
+
+notify() {
+  osascript -e "display notification \"$1\" with title \"IG Agent Flight Deck\"" 2>/dev/null || true
+}
+
+alert() {
+  osascript -e "display alert \"IG Agent Flight Deck\" message \"$1\" as warning" 2>/dev/null || true
+}
+
+if [[ ! -x "${LAUNCH}" ]]; then
+  alert "flight_deck_launch.sh not found or not executable."
+  exit 1
+fi
+
+if [[ ! -x "${VENV_PY}" ]]; then
+  alert "Python venv missing at ${ROOT}/.venv — run: python3 -m venv .venv && pip install -r requirements.txt"
+  exit 1
+fi
+
+# Finder/GUI launches use a minimal PATH — force venv + project env
+export PATH="${ROOT}/.venv/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export VIRTUAL_ENV="${ROOT}/.venv"
+export IG_AGENT_ROOT="${ROOT}"
+export PYTHONPATH="${ROOT}/src"
+export IG_AGENT_FROM_LAUNCHER=1
+export IG_AGENT_OPEN_COCKPIT=1
+export IG_AGENT_DESKTOP_LAUNCH=1
+export DAY1_GENESIS=1
+export PYTHONDONTWRITEBYTECODE=1
+export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
+
+LAUNCH_ENV="${ROOT}/config/credentials/launch.env"
+if [[ -f "${LAUNCH_ENV}" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "${LAUNCH_ENV}"
+  set +a
+fi
+if [[ -n "${AGENT_LAUNCH_PASS:-}" ]]; then
+  export AGENT_LAUNCH_PASS
+  export ADMIN_PASSWORD="${ADMIN_PASSWORD:-${AGENT_LAUNCH_PASS}}"
+fi
+
+{
+  echo "=== desktop launch $(date -u '+%Y-%m-%d %H:%M:%S UTC') ==="
+  echo "PATH=${PATH}"
+  echo "PY=$(${VENV_PY} -c 'import sys; print(sys.executable)')"
+} >>"${LOG_FILE}"
+
+agent_api_healthy() {
+  curl -sf --max-time 2 "${DASHBOARD_URL}health" >/dev/null 2>&1
+}
+
+cockpit_healthy() {
+  curl -sf --max-time 2 "${COCKPIT_URL}api/health" >/dev/null 2>&1
+}
+
+# Prevent duplicate launches — require live HTTP health, not just a stale PID
+if pgrep -f "${ROOT}/src/main.py" >/dev/null 2>&1; then
+  if agent_api_healthy; then
+    notify "Agent already running — opening dashboards."
+    open "${COCKPIT_URL}" 2>/dev/null || true
+    open "${DASHBOARD_URL}" 2>/dev/null || true
+    exit 0
+  fi
+  notify "Stale agent process detected — clearing and relaunching."
+  echo "Stale main.py PIDs: $(pgrep -f "${ROOT}/src/main.py" | tr '\n' ' ')" >>"${LOG_FILE}"
+  while read -r stale_pid; do
+    [[ -n "${stale_pid}" ]] && kill -TERM "${stale_pid}" 2>/dev/null || true
+  done < <(pgrep -f "${ROOT}/src/main.py" || true)
+  sleep 3
+  while read -r stale_pid; do
+    [[ -n "${stale_pid}" ]] && kill -0 "${stale_pid}" 2>/dev/null && kill -KILL "${stale_pid}" 2>/dev/null || true
+  done < <(pgrep -f "${ROOT}/src/main.py" || true)
+  rm -f "${ROOT}/src/data/.ig_agent_v29.lock"
+fi
+
+if command -v caffeinate >/dev/null 2>&1; then
+  nohup caffeinate -i -s /bin/bash "${LAUNCH}" >>"${LOG_FILE}" 2>&1 &
+else
+  nohup /bin/bash "${LAUNCH}" >>"${LOG_FILE}" 2>&1 &
+fi
+LAUNCH_PID=$!
+disown 2>/dev/null || true
+
+# Fail-fast watcher — alert if launch script dies within 3 minutes
+(
+  sleep 8
+  if ! kill -0 "${LAUNCH_PID}" 2>/dev/null; then
+    err="$(tail -8 "${LOG_FILE}" 2>/dev/null | tr '\n' ' ' | cut -c1-240)"
+    alert "Launch failed early. Check desktop_flight_deck.log — ${err:-unknown error}"
+    exit 0
+  fi
+  for _ in $(seq 1 90); do
+    if cockpit_healthy; then
+      open "${COCKPIT_URL}" 2>/dev/null || true
+      notify "Flight Deck cockpit is live."
+      break
+    fi
+    if ! kill -0 "${LAUNCH_PID}" 2>/dev/null && ! pgrep -f "${ROOT}/src/main.py" >/dev/null 2>&1; then
+      err="$(tail -8 "${LOG_FILE}" 2>/dev/null | tr '\n' ' ' | cut -c1-240)"
+      alert "Launch stopped before agent started. ${err:-See log.}"
+      break
+    fi
+    sleep 2
+  done
+  if agent_api_healthy; then
+    open "${DASHBOARD_URL}" 2>/dev/null || true
+  fi
+) &
+
+notify "Genesis launch started — Flight Deck opens when ready (~2 min)."
+exit 0

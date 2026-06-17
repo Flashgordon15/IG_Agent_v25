@@ -1,0 +1,7 @@
+{
+  "ts": "2026-06-15T09:25:21.073Z",
+  "epic": "CS.D.GBPUSD.CFD.IP",
+  "reason": "consecutive_unhealthy_ticks",
+  "positions_closed": 0,
+  "operational_safety_freeze": true
+}

@@ -17,8 +17,7 @@ def operational_size_floor(epic: str) -> float:
 
 
 def apply_operational_size_floor(size: float, epic: str) -> float:
-    """Raise size to the epic-class operational minimum when configured."""
-    floor = operational_size_floor(epic)
-    if floor <= 0:
-        return float(size)
-    return max(float(size), floor)
+    """Raise size to epic-class floor, then weld to IG two-decimal lot contract."""
+    from trading.position_ladder import apply_broker_lot_contract
+
+    return apply_broker_lot_contract(size, epic)

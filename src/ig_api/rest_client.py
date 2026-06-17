@@ -22,7 +22,8 @@ from system.rate_limit_manager import get_rate_limit_manager, parse_rate_limit_e
 class IGRestClient:
     """Synchronous IG REST client."""
 
-    TOKEN_MAX_AGE_SECONDS = 18000  # 5h — refresh before ~6h IG token expiry
+    TOKEN_MAX_AGE_SECONDS = 18000  # 5h — hard ceiling before IG token expiry
+    TOKEN_HEARTBEAT_REFRESH_SECONDS = 45 * 60  # silent refresh after 45 minutes
 
     def __init__(
         self,
@@ -158,15 +159,15 @@ class IGRestClient:
             self._session_refresh_in_progress = False
 
     def proactive_refresh_if_needed(self) -> bool:
-        """Refresh when token age exceeds TOKEN_MAX_AGE_SECONDS (before REST calls)."""
+        """Refresh when token age exceeds 45-minute heartbeat (before REST calls)."""
         if not self._auth.tokens or not self._auth.tokens.is_valid:
             return False
         age = self.token_age_seconds()
-        if age <= self.TOKEN_MAX_AGE_SECONDS:
+        if age <= self.TOKEN_HEARTBEAT_REFRESH_SECONDS:
             return False
-        hours = age / 3600.0
+        minutes = age / 60.0
         if self._refresh_session_tokens():
-            log_engine(f"IG session refreshed — tokens renewed after {hours:.1f}h")
+            log_engine(f"IG session refreshed — silent handshake after {minutes:.0f}m")
             return True
         return False
 
@@ -1840,6 +1841,12 @@ class IGRestClient:
 
         url = path if path.startswith("http") else f"{self._base}{path}"
         timeout = kwargs.pop("timeout", self.timeout_seconds)
+        try:
+            from system.network_bounds import clamp_read_timeout
+
+            timeout = clamp_read_timeout(method, timeout, default=self.timeout_seconds)
+        except Exception:
+            timeout = float(timeout or self.timeout_seconds)
         last_exc: Exception | None = None
 
         if auth_required and not self._session_path_protected(path):

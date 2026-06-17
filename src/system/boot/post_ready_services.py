@@ -123,9 +123,27 @@ def start_post_ready_services(context: BootContext) -> None:
     except Exception as e:
         log_engine(f"post-ready: alert dispatcher skipped: {type(e).__name__}: {e}")
 
+    if cfg is not None and cfg.get("intelligence_layer", {}).get("enabled"):
+        try:
+            from intelligence.intelligence_worker import start_intelligence_worker
+
+            start_intelligence_worker()
+            log_engine("post-ready: IntelligenceComputeWorker started")
+        except Exception as e:
+            log_engine(
+                f"post-ready: intelligence worker skipped: {type(e).__name__}: {e}"
+            )
+
     try:
         from system.telegram_notifier import send_critical_alert
 
         send_critical_alert("✅ Agent started — trading loops active")
     except Exception as e:
         log_engine(f"post-ready: telegram startup alert failed: {type(e).__name__}: {e}")
+
+    try:
+        from system.self_healing_supervisor import start_self_healing_supervisor
+
+        start_self_healing_supervisor()
+    except Exception as e:
+        log_engine(f"post-ready: self-healing supervisor skipped: {type(e).__name__}: {e}")

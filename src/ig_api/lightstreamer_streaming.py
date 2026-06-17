@@ -167,14 +167,30 @@ class IGLightstreamerStreamingClient:
         self._blank_tick_resubscribe_scheduled = False
         self._auto_reconnect = True
         self._set_state(ConnectionState.CONNECTING)
-        self._connect_thread = threading.Thread(
-            target=self._connect_worker,
-            daemon=True,
-            name="IGLightstreamerConnect",
-        )
-        self._connect_thread.start()
+        try:
+            from system.thread_affinity import spawn_priority_thread
+
+            self._connect_thread = spawn_priority_thread(
+                self._connect_worker,
+                name="IGLightstreamerConnect",
+                role="lightstreamer_connect",
+                daemon=True,
+            )
+        except Exception:
+            self._connect_thread = threading.Thread(
+                target=self._connect_worker,
+                daemon=True,
+                name="IGLightstreamerConnect",
+            )
+            self._connect_thread.start()
 
     def _connect_worker(self) -> None:
+        try:
+            from system.thread_affinity import pin_current_thread
+
+            pin_current_thread(role="lightstreamer_connect")
+        except Exception:
+            pass
         for attempt in range(1, _MAX_LS_RECONNECT + 1):
             if attempt > 1:
                 log_engine(f"Lightstreamer reconnect attempt {attempt} of {_MAX_LS_RECONNECT}")

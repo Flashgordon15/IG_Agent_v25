@@ -53,6 +53,63 @@ def _minutes_since_midnight(dt: datetime) -> int:
     return dt.hour * 60 + dt.minute
 
 
+def _in_same_day_window(dt: datetime, start: str, end: str) -> bool:
+    sh, sm = _parse_hhmm(start)
+    eh, em = _parse_hhmm(end)
+    start_m = sh * 60 + sm
+    end_m = eh * 60 + em
+    t = _minutes_since_midnight(dt)
+    return start_m <= t < end_m
+
+
+def _premium_overnight_session_block(
+    epic: str,
+    cfg: Config,
+    at: datetime,
+    rules: dict[str, str],
+) -> tuple[bool, str] | None:
+    """
+    v29.1 night-matrix lockdown: legacy weekday blackout DELETED.
+    Only rollover lock 21:58–22:05 BST + weekend settlement window apply.
+    """
+    try:
+        from intelligence.premium_overnight import (
+            is_night_matrix_epic,
+            night_matrix_session_allowed,
+            premium_overnight_enabled,
+        )
+    except Exception:
+        return None
+
+    if not is_night_matrix_epic(epic) or not premium_overnight_enabled(cfg):
+        return None
+
+    label = str(epic)
+    allowed, block_reason = night_matrix_session_allowed(epic, config=cfg, now=at)
+    if not allowed:
+        log_engine(
+            f"[SESSION BLOCK] {label} entry suppressed — institutional day-clear ({block_reason})"
+        )
+        return True, block_reason
+
+    weekend_block = _in_weekend_blackout(
+        at,
+        start=rules["weekend_start"],
+        end=rules["weekend_end"],
+    )
+    if weekend_block:
+        reason = f"weekend blackout {rules['weekend_start']}–{rules['weekend_end']} BST"
+        log_engine(
+            f"[SESSION BLOCK] {label} entry suppressed — outside trading window ({reason})"
+        )
+        return True, reason
+
+    log_engine(
+        f"[SESSION CHECK] {label} — BST {at.strftime('%H:%M')} night-matrix 24/7 ALLOWED"
+    )
+    return False, ""
+
+
 def _in_weekday_overnight_blackout(
     dt: datetime, *, start: str, end: str
 ) -> bool:
@@ -190,6 +247,18 @@ def check_session_blackout(
         return False, ""
     at = _london_now(now)
     label = str(market or epic)
+    premium = _premium_overnight_session_block(epic, cfg, at, rules)
+    if premium is not None:
+        blocked, reason = premium
+        dow = _DOW_LABEL[at.weekday()] if 0 <= at.weekday() < 7 else "?"
+        status = "BLOCKED" if blocked else "ALLOWED"
+        log_engine(
+            f"[SESSION CHECK] {label} — BST {at.strftime('%H:%M')} {dow} — {status}"
+        )
+        if blocked:
+            return True, reason
+        return False, ""
+
     weekday_block = _in_weekday_overnight_blackout(
         at,
         start=rules["weekday_start"],

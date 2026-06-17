@@ -74,6 +74,11 @@ class Gate1Runner:
         log_engine("Gate1: preflight complete — ready for API bind")
 
     def _execute(self) -> None:
+        from system.env_loader import load_dotenv, prepare_boot_env
+
+        load_dotenv()
+        prepare_boot_env()
+
         from system.app_identity import APP_DISPLAY_NAME
         from system.boot.preflight_helpers import (
             check_port_available,

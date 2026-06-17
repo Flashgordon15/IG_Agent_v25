@@ -478,11 +478,10 @@ def _tick_for_readers(tick: dict[str, Any]) -> dict[str, Any]:
         out["signal"] = dict(sig)
     enrich_signal_thresholds(out)
 
-    # Aggregate positions from all market slices into the top-level positions array
-    # so the dashboard TradesPanel always has a flat list to render.
+    # Aggregate positions from all market slices into dealId-deduped map + flat list.
     markets = out.get("markets")
     if isinstance(markets, dict):
-        from trading.open_position_view import epic_market_label, normalize_epic
+        from trading.open_position_view import attach_position_map, epic_market_label, normalize_epic
 
         all_positions: list[dict] = []
         for epic_key, mslice in markets.items():
@@ -510,6 +509,7 @@ def _tick_for_readers(tick: dict[str, Any]) -> dict[str, Any]:
                     all_positions.append(enriched)
         if all_positions:
             out["positions"] = all_positions
+    attach_position_map(out)
     apply_display_daily_pnl(out)
     _apply_slow_enrichments(out)
     return out

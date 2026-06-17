@@ -1,0 +1,33 @@
+{
+  "event": "DAY1_GENESIS_RESET",
+  "ts_utc": "2026-06-16T22:22:13.897820+00:00",
+  "archive_dir": "archive/legacy_dev/purge_20260616T222213Z",
+  "files_archived": [
+    "src/data/logs/demo_execution_trace.log",
+    "src/data/runtime_state.json",
+    "src/data/shadow_log.jsonl",
+    "src/data/state/dashboard_snapshot.json",
+    "src/data/state/last_shutdown_verify.json",
+    "src/data/state/ohlc_readiness.json",
+    "src/data/state/points_state.json",
+    "src/data/state/session_state_CS_D_CFPGOLD_CFP_IP.json",
+    "src/data/state/session_state_CS_D_EURUSD_CFD_IP.json",
+    "src/data/state/session_state_IX_D_DOW_IFM_IP.json",
+    "src/data/state/session_state_IX_D_NIKKEI_IFM_IP.json",
+    "src/data/state/setup_registry.json"
+  ],
+  "metrics": {
+    "effective_daily_pnl_gbp": 0.0,
+    "drawdown_reset_balance": 10000.0,
+    "target_engine_p_day": 0.0,
+    "daily_loss_baseline": {
+      "refreshed": true,
+      "reason": "day1_genesis",
+      "version": "v29.1",
+      "baseline_pnl": -120.18,
+      "effective_loss_gbp": 0.0,
+      "reset_day": "2026-06-16",
+      "reset_at": "2026-06-16 23:22:13"
+    }
+  }
+}
