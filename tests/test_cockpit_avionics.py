@@ -32,6 +32,11 @@ from intelligence.integration import apply_intelligence_pre_dispatch
 
 class CockpitAvionicsTests(unittest.TestCase):
     def setUp(self) -> None:
+        import cockpit.web_server as ws
+        import system.protective_learning as pl
+
+        ws._flight_deck_boot_seeded = False
+        pl._autonomous_engine_boot_armed = False
         try:
             from intelligence.target_engine import reset_target_engine_for_tests
 
@@ -40,6 +45,11 @@ class CockpitAvionicsTests(unittest.TestCase):
             pass
 
     def tearDown(self) -> None:
+        import cockpit.web_server as ws
+        import system.protective_learning as pl
+
+        ws._flight_deck_boot_seeded = False
+        pl._autonomous_engine_boot_armed = False
         stop_telemetry_bridge()
         reset_telemetry_bridge_for_tests()
         reset_flight_deck_for_tests()
@@ -222,6 +232,11 @@ class CockpitAvionicsTests(unittest.TestCase):
                 payload = ws.receive_json()
         self.assertIn("ts", payload)
         self.assertIn("gates", payload)
+        controls = payload.get("cockpit_controls") or {}
+        self.assertFalse(controls.get("manual_stop"))
+        self.assertFalse(controls.get("disabled"))
+        shadow = payload.get("shadow_trading") or {}
+        self.assertEqual(str(shadow.get("mode", "")).upper(), "SHADOW")
 
     def test_system_hot_reload_frame(self) -> None:
         from cockpit.web_server import _stop, broadcast_system_hot_reload, create_cockpit_app

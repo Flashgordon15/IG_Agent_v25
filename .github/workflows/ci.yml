@@ -36,6 +36,7 @@ jobs:
           PYTHONPATH: src
           IG_AGENT_PYTEST: "1"
           CI: "true"
+        # v29.1 Flight Deck avionics — localized GOLD/WALL_STREET/JAPAN_225/EUR_USD slices
         run: python -m pytest tests/ -q --tb=short
 
       - name: E2E validation (layers 1–3)

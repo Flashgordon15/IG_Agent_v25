@@ -99,16 +99,44 @@ class ScalpingTelemetryTests(unittest.TestCase):
             "gates": {"G1": {"status": "complete"}},
             "phase": "READY",
         }
+        snapshot_markets = {
+            "CS.D.CFPGOLD.CFP.IP": {
+                "epic": "CS.D.CFPGOLD.CFP.IP",
+                "signal": {"confidence": 70.0, "direction": "WAIT", "snapshot": {"rsi": "55.0"}},
+            },
+            "IX.D.DOW.IFM.IP": {"epic": "IX.D.DOW.IFM.IP", "signal": {"confidence": 65.0}},
+            "IX.D.NIKKEI.IFM.IP": {"epic": "IX.D.NIKKEI.IFM.IP", "signal": {"confidence": 63.0}},
+            "CS.D.EURUSD.CFD.IP": {
+                "epic": "CS.D.EURUSD.CFD.IP",
+                "signal": {"confidence": 68.0},
+                "bid": "1.08450",
+                "offer": "1.08462",
+            },
+        }
         with patch("system.system_state.get_system_state", return_value=fake_state):
             with patch("api.agent_control.get_trading_loop", return_value=None):
                 with patch("intelligence.velocity_filter.ticks_in_window", return_value=4):
-                    payload = _collect_snapshot(("IX.D.NASDAQ.IFM.IP",))
+                    with patch(
+                        "cockpit.avionics_markets._snapshot_markets_by_epic",
+                        return_value=snapshot_markets,
+                    ):
+                        payload = _collect_snapshot(
+                            (
+                                "CS.D.CFPGOLD.CFP.IP",
+                                "IX.D.DOW.IFM.IP",
+                                "IX.D.NIKKEI.IFM.IP",
+                                "CS.D.EURUSD.CFD.IP",
+                            )
+                        )
         self.assertIn("scalping_telemetry", payload)
         st = payload["scalping_telemetry"]
         self.assertEqual(st["engine_state"], "STANDBY")
         self.assertIn("time_decay", st)
         self.assertIn("tick_velocity", st)
         self.assertIn("compression_ratio", st["time_decay"])
+        assets = payload.get("avionics_assets") or {}
+        for key in ("GOLD", "WALL_STREET", "JAPAN_225", "EUR_USD"):
+            self.assertIn(key, assets, f"missing localized avionics key {key}")
 
 
 if __name__ == "__main__":

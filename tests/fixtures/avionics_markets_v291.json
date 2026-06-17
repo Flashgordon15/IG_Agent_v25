@@ -1,0 +1,30 @@
+{
+  "markets": {
+    "CS.D.CFPGOLD.CFP.IP": {
+      "epic": "CS.D.CFPGOLD.CFP.IP",
+      "bid": "2650.50",
+      "offer": "2650.80",
+      "signal": {
+        "confidence": "71.0",
+        "direction": "WAIT",
+        "snapshot": { "rsi": "62.5" }
+      }
+    },
+    "IX.D.DOW.IFM.IP": {
+      "epic": "IX.D.DOW.IFM.IP",
+      "signal": { "confidence": "68.0", "direction": "BUY" }
+    },
+    "IX.D.NIKKEI.IFM.IP": {
+      "epic": "IX.D.NIKKEI.IFM.IP",
+      "signal": { "confidence": "64.0", "direction": "WAIT" }
+    },
+    "CS.D.EURUSD.CFD.IP": {
+      "epic": "CS.D.EURUSD.CFD.IP",
+      "bid": "1.08450",
+      "offer": "1.08462",
+      "signal": { "confidence": "66.0", "direction": "SELL" }
+    }
+  },
+  "expected_asset_keys": ["GOLD", "WALL_STREET", "JAPAN_225", "EUR_USD"],
+  "expected_aliases": ["EURUSD", "EUR/USD"]
+}
