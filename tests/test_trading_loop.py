@@ -196,9 +196,26 @@ class SignalGateExplanationTests(unittest.TestCase):
             },
         )
         detail, reason = signal_gate_explanation(sig, 80.0)
-        self.assertIn("RSI overbought", detail)
+        self.assertIn("PASS", detail)
         self.assertIn("BUY", detail)
         self.assertIn("86", detail)
+        self.assertEqual(reason, "")
+
+    def test_rsi_block_when_below_override_floor(self) -> None:
+        sig = SignalResult(
+            signal="WAIT",
+            raw_confidence=35.0,
+            adjusted_confidence=35.0,
+            learning_delta=0.0,
+            setup_key="BUY|bull|atr0-30|rsihigh",
+            notes="blocked: RSI overbought filter: 72.0 > max 68",
+            snapshot={
+                "raw_signal": "BUY",
+                "rsi_block": "RSI overbought filter: 72.0 > max 68",
+            },
+        )
+        detail, reason = signal_gate_explanation(sig, 80.0)
+        self.assertIn("RSI overbought", detail)
         self.assertEqual(reason, "RSI overbought filter: 72.0 > max 68")
 
     def test_buy_below_threshold(self) -> None:

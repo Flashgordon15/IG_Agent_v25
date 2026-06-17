@@ -942,18 +942,33 @@ class IGRestClient:
                 f"/prices/{epic}/{resolution}/{num_points}",
                 headers=self._auth_headers("1"),
             )
-            if r.status_code != 200:
+        except IGAPIError as exc:
+            msg = str(exc).lower()
+            if (
+                "hard_rate_cap" in msg
+                or "rest deferred" in msg
+                or "rate_limit" in msg
+            ):
                 try:
-                    from trading.ohlc_bootstrap import (
-                        is_ig_historical_allowance_error,
-                        mark_historical_allowance_lockout,
-                    )
+                    from signals.signal_engine import mark_rest_rate_limit_local_fallback
 
-                    if is_ig_historical_allowance_error(r.status_code, r.text):
-                        mark_historical_allowance_lockout(source="fetch_price_history")
+                    mark_rest_rate_limit_local_fallback(epic=epic)
                 except Exception:
                     pass
-                return []
+            return []
+        if r.status_code != 200:
+            try:
+                from trading.ohlc_bootstrap import (
+                    is_ig_historical_allowance_error,
+                    mark_historical_allowance_lockout,
+                )
+
+                if is_ig_historical_allowance_error(r.status_code, r.text):
+                    mark_historical_allowance_lockout(source="fetch_price_history")
+            except Exception:
+                pass
+            return []
+        try:
             body = r.json()
             prices = body.get("prices") or body.get("allowance") or []
             if not isinstance(prices, list):

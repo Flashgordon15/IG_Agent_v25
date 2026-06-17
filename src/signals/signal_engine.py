@@ -4,7 +4,11 @@ Signal engine — EMA, RSI, momentum, confidence (config-driven).
 
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -24,6 +28,69 @@ from system.paths import data_dir
 
 H1_EMA_SOFT_PENALTY = 8.0
 H1_ML_PENALTY_WAIVER_PROB = 0.75
+HIGH_CONFIDENCE_OVERRIDE_THRESHOLD = 40.0
+REQUIRE_CLOSED_BAR_G5 = False
+_RSI_LOCAL_MIN_BARS = 15
+_MAX_MERGED_TICKS = 500
+_IG_SNAPSHOT_TIME = re.compile(
+    r"^(\d{4})[/-](\d{1,2})[/-](\d{1,2})[T:\s](\d{1,2}):(\d{2})(?::(\d{2}))?"
+)
+_rest_rate_limit_epics: set[str] = set()
+
+
+def mark_rest_rate_limit_local_fallback(*, epic: str = "", market: str = "") -> None:
+    """Flag epic/market for instant local RSI hydration when IG REST is deferred."""
+    key = str(epic or market or "").strip()
+    if key:
+        _rest_rate_limit_epics.add(key)
+    try:
+        from system.engine_log import log_engine
+
+        log_engine(
+            f"RSI hydrate: REST rate-limit — switching to local historical buffer "
+            f"for {key or 'market'}"
+        )
+    except Exception:
+        pass
+
+
+def _parse_historical_bar_time(raw: str) -> datetime:
+    s = str(raw or "").strip()
+    if not s:
+        return datetime.now()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        m = _IG_SNAPSHOT_TIME.match(s)
+        if not m:
+            return datetime.now()
+        y, mo, d, h, mi, sec = m.groups()
+        dt = datetime(int(y), int(mo), int(d), int(h), int(mi), int(sec or 0))
+    if dt.tzinfo is not None:
+        return dt.replace(tzinfo=None)
+    return dt
+
+
+def _historical_repository_paths(epic: str, market: str = "") -> list[Path]:
+    """src/data/historical first, then ohlc_cache JSONL for the same epic."""
+    from trading.ohlc_cache_paths import ohlc_cache_path
+
+    filename = ohlc_cache_path(epic, market=market).name
+    candidates = [
+        data_dir() / "historical" / filename,
+        data_dir() / "ohlc_cache" / filename,
+        ohlc_cache_path(epic, market=market),
+    ]
+    seen: set[str] = set()
+    out: list[Path] = []
+    for path in candidates:
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            out.append(path)
+    return out
 
 
 @dataclass
@@ -53,6 +120,10 @@ class SignalEngine:
         self.last_snapshot: dict[str, dict[str, Any]] = {}
         # Track last closed bar per market to avoid duplicate signals on same bar.
         self._last_signal_bar: dict[str, Any] = {}
+        # Per-market RSI exhaustion reversion monitor (armed when 5m RSI > 90).
+        self._exhaustion_monitor_armed: dict[str, bool] = {}
+        self._epic_for_market: dict[str, str] = {}
+        self._local_hydration_logged: set[str] = set()
 
     @property
     def config(self) -> Config:
@@ -127,7 +198,167 @@ class SignalEngine:
             return 0
         for key in keys:
             self._ohlc_seed[key] = ordered
+        epic_ref = str((aliases or [market] or [""])[0] or market).strip()
+        for key in keys:
+            if epic_ref:
+                self._epic_for_market[key] = epic_ref
         return len(ordered)
+
+    def _resolve_epic_for_market(self, market: str) -> str:
+        key = self._resolve_market_key(market)
+        if key in self._epic_for_market:
+            return self._epic_for_market[key]
+        if key in _rest_rate_limit_epics:
+            return key
+        return key
+
+    def _rsi_min_closed_bars(self, cfg: Config | None = None) -> int:
+        active = cfg or self._cfg
+        period = max(1, int(getattr(active, "rsi_period", 14) or 14))
+        return max(period + 3, _RSI_LOCAL_MIN_BARS // 2, 4)
+
+    def _rolling_seed_cap(self, cfg: Config | None = None) -> int:
+        return max(self._rsi_min_closed_bars(cfg) * 24, 200)
+
+    def hydrate_from_local_repository(
+        self,
+        market: str,
+        *,
+        epic: str = "",
+        min_bars: int | None = None,
+    ) -> int:
+        """
+        Seed RSI lookback from local JSONL (src/data/historical/) — no IG REST.
+        Decoupled from startup OHLC bootstrap and hard_rate_cap bursts.
+        """
+        cfg = self._cfg
+        epic_key = str(epic or self._resolve_epic_for_market(market) or market).strip()
+        need = int(min_bars if min_bars is not None else self._rsi_min_closed_bars(cfg))
+        need = max(need, _RSI_LOCAL_MIN_BARS)
+        quotes: list[Quote] = []
+        for path in _historical_repository_paths(epic_key, market=market):
+            if not path.is_file():
+                continue
+            try:
+                lines = [
+                    ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()
+                ]
+            except OSError:
+                continue
+            if not lines:
+                continue
+            tail = lines[-max(need * 3, _RSI_LOCAL_MIN_BARS) :]
+            for line in tail:
+                try:
+                    bar = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                high = float(bar.get("h") or bar.get("high") or 0)
+                low = float(bar.get("l") or bar.get("low") or 0)
+                close = float(bar.get("c") or bar.get("close") or 0)
+                if high <= 0 and low <= 0 and close <= 0:
+                    continue
+                if high <= 0:
+                    high = close or low
+                if low <= 0:
+                    low = close or high
+                if close <= 0:
+                    close = (high + low) / 2.0
+                spread = float(bar.get("spread") or 15.0)
+                bid = close - spread / 2.0
+                offer = close + spread / 2.0
+                quotes.append(
+                    Quote(
+                        time=_parse_historical_bar_time(
+                            bar.get("t") or bar.get("time") or ""
+                        ),
+                        bid=bid,
+                        offer=offer,
+                    )
+                )
+            if quotes:
+                break
+        if not quotes:
+            return 0
+        count = self.seed_ohlc_history(
+            market,
+            quotes,
+            aliases=[epic_key] if epic_key else None,
+        )
+        if count > 0:
+            log_key = self._resolve_market_key(market) or market
+            if log_key not in self._local_hydration_logged:
+                self._local_hydration_logged.add(log_key)
+                try:
+                    from system.engine_log import log_engine
+
+                    log_engine(
+                        f"RSI hydrate: injected {count} local closed bars for "
+                        f"{epic_key} (market={market}, no REST)"
+                    )
+                except Exception:
+                    pass
+        return count
+
+    def _ensure_rsi_hydrated(self, market: str) -> None:
+        """Top-up OHLC seed from local disk cache — never blocks on IG REST."""
+        cfg = self._cfg
+        min_bars = self._rsi_min_closed_bars(cfg)
+        if len(self.candles_for_market(market, 5)) >= min_bars:
+            return
+        epic = self._resolve_epic_for_market(market)
+        self.hydrate_from_local_repository(market, epic=epic, min_bars=min_bars)
+        if len(self.candles_for_market(market, 5)) >= min_bars:
+            return
+        if epic in _rest_rate_limit_epics or self.ohlc_seed_count(market) < min_bars:
+            self.hydrate_from_local_repository(market, epic=epic, min_bars=min_bars)
+
+    def add_quote(self, market: str, quote: Quote) -> None:
+        """Append streaming tick to live buffer only — seed stays bar-discrete."""
+        key = self._resolve_market_key(market)
+        self.quotes_by_market.setdefault(key, []).append(quote)
+        self.quotes_by_market[key] = self.quotes_by_market[key][
+            -self._cfg.max_live_quotes :
+        ]
+        self._ensure_rsi_hydrated(market)
+
+    def refresh_hud_indicators(self, market: str) -> None:
+        """
+        Lightweight RSI/ATR refresh for Card B telemetry.
+
+        Decoupled from full ``evaluate()`` / gate stack so HUD metrics stay live
+        while the 10s gate-evaluation time-lock is active.
+        """
+        self._ensure_rsi_hydrated(market)
+        try:
+            c5 = self.candles_for_market(market, 5)
+            if len(c5) < 2:
+                return
+            c5i = self.add_indicators(c5)
+            live_row = c5i.iloc[-1]
+            closed_row = c5i.iloc[-2] if len(c5i) >= 2 else live_row
+            rsi_live = float(live_row.get("rsi") or 0)
+            rsi_closed = float(closed_row.get("rsi") or 0)
+            rsi_val = rsi_live if rsi_live > 0 else rsi_closed
+            atr = float(live_row.get("atr") or closed_row.get("atr") or 0)
+            if rsi_val <= 0 and atr <= 0:
+                return
+            snap = dict(self.last_snapshot.get(market) or {})
+            last_row: dict[str, Any] = {}
+            prev = snap.get("last")
+            if isinstance(prev, dict):
+                last_row = dict(prev)
+            elif prev is not None and hasattr(prev, "get"):
+                last_row = {"rsi": prev.get("rsi"), "atr": prev.get("atr")}
+            if rsi_val > 0:
+                last_row["rsi"] = round(rsi_val, 2)
+            if atr > 0:
+                last_row["atr"] = round(atr, 2)
+            snap["last"] = last_row
+            snap["hud_rsi"] = last_row.get("rsi")
+            self.last_snapshot[market] = snap
+        except Exception:
+            pass
 
     def ohlc_seed_count(self, market: str) -> int:
         key = self._resolve_market_key(market)
@@ -137,17 +368,13 @@ class SignalEngine:
         key = self._resolve_market_key(market)
         seed = self._ohlc_seed.get(key, [])
         live = self.quotes_by_market.get(key, [])
-        if not seed:
-            return list(live)
-        if not live:
-            return list(seed)
-        return sorted(seed + live, key=lambda q: q.time)
+        combined = sorted(list(seed) + list(live), key=lambda q: q.time)
 
-    def add_quote(self, market: str, quote: Quote) -> None:
-        self.quotes_by_market.setdefault(market, []).append(quote)
-        self.quotes_by_market[market] = self.quotes_by_market[market][
-            -self._cfg.max_live_quotes :
-        ]
+        # Enforce structural thinning: if we have more than 500 ticks,
+        # sample down to prevent historical array skewing during indicator extraction
+        if len(combined) > _MAX_MERGED_TICKS:
+            return combined[-_MAX_MERGED_TICKS:]
+        return combined
 
     def quote_df(self, market: str) -> pd.DataFrame:
         key = self._resolve_market_key(market)
@@ -164,57 +391,155 @@ class SignalEngine:
             ]
         )
 
+    _CANDLE_COLUMNS: tuple[str, ...] = (
+        "time",
+        "open",
+        "high",
+        "low",
+        "close",
+        "price",
+        "bid",
+        "offer",
+        "spread",
+    )
+
+    def _empty_candles(self) -> pd.DataFrame:
+        return pd.DataFrame(columns=list(self._CANDLE_COLUMNS))
+
+    def _resample_ohlc_from_quotes(
+        self, raw_quotes: list[Quote], minutes: int
+    ) -> pd.DataFrame:
+        """Force raw tick quotes into true time-bucketed OHLC bars before indicators."""
+        if not raw_quotes:
+            return self._empty_candles()
+        times = pd.to_datetime([q.time for q in raw_quotes])
+        tick_df = pd.DataFrame(
+            {
+                "price": [q.mid for q in raw_quotes],
+                "bid": [q.bid for q in raw_quotes],
+                "offer": [q.offer for q in raw_quotes],
+                "spread": [q.spread for q in raw_quotes],
+            },
+            index=times,
+        )
+        tick_df = tick_df.sort_index()
+        if tick_df.index.has_duplicates:
+            tick_df = tick_df[~tick_df.index.duplicated(keep="last")]
+        rule = f"{minutes}min"
+        ohlc = tick_df["price"].resample(rule).ohlc().ffill()
+        ohlc["price"] = ohlc["close"]
+        ohlc = ohlc.dropna(subset=["close"])
+        if ohlc.empty:
+            return self._empty_candles()
+        bid = tick_df["bid"].resample(rule).last().reindex(ohlc.index)
+        offer = tick_df["offer"].resample(rule).last().reindex(ohlc.index)
+        spread = tick_df["spread"].resample(rule).last().reindex(ohlc.index)
+        result = ohlc.reset_index().rename(columns={"index": "time"})
+        result["bid"] = bid.to_numpy()
+        result["offer"] = offer.to_numpy()
+        result["spread"] = spread.to_numpy()
+        return result[list(self._CANDLE_COLUMNS)]
+
+    def candles_for_market(self, market: str, minutes: int) -> pd.DataFrame:
+        """Resample seed + live quotes for *market* into N-minute OHLC bars."""
+        return self._resample_ohlc_from_quotes(
+            self._quotes_for_market(market), minutes
+        )
+
     def candle_frames(
         self, market: str, *, quote_df: pd.DataFrame | None = None
     ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         """Return (quote_df, 5m, 15m, 60m candles) from seed + live quotes."""
         df = quote_df if quote_df is not None else self.quote_df(market)
-        return df, self.candles(df, 5), self.candles(df, 15), self.candles(df, 60)
+        raw = self._quotes_for_market(market)
+        return (
+            df,
+            self._resample_ohlc_from_quotes(raw, 5),
+            self._resample_ohlc_from_quotes(raw, 15),
+            self._resample_ohlc_from_quotes(raw, 60),
+        )
 
     def candles(self, df: pd.DataFrame, minutes: int) -> pd.DataFrame:
         if df.empty:
-            return pd.DataFrame(
-                columns=[
-                    "time",
-                    "open",
-                    "high",
-                    "low",
-                    "close",
-                    "price",
-                    "bid",
-                    "offer",
-                    "spread",
-                ]
-            )
-        # Vectorised bucket floor — avoids a Python-level apply() loop.
-        bucket = pd.to_datetime(df["time"]).dt.floor(f"{minutes}min")
-        grp = df.groupby(bucket, sort=True)
-        result = pd.DataFrame(
+            return self._empty_candles()
+        times = pd.to_datetime(df["time"])
+        tick_df = pd.DataFrame(
             {
-                "time": grp["time"].first(),
-                "open": grp["mid"].first(),
-                "high": grp["mid"].max(),
-                "low": grp["mid"].min(),
-                "close": grp["mid"].last(),
-                "price": grp["mid"].last(),
-                "bid": grp["bid"].last(),
-                "offer": grp["offer"].last(),
-                "spread": grp["spread"].last(),
-            }
+                "price": df["mid"].astype(float).to_numpy(),
+                "bid": df["bid"].astype(float).to_numpy(),
+                "offer": df["offer"].astype(float).to_numpy(),
+                "spread": df["spread"].astype(float).to_numpy(),
+            },
+            index=times,
         )
-        return result.reset_index(drop=True)
+        tick_df = tick_df.sort_index()
+        if tick_df.index.has_duplicates:
+            tick_df = tick_df[~tick_df.index.duplicated(keep="last")]
+        rule = f"{minutes}min"
+        ohlc = tick_df["price"].resample(rule).ohlc().ffill()
+        ohlc["price"] = ohlc["close"]
+        ohlc = ohlc.dropna(subset=["close"])
+        if ohlc.empty:
+            return self._empty_candles()
+        bid = tick_df["bid"].resample(rule).last().reindex(ohlc.index)
+        offer = tick_df["offer"].resample(rule).last().reindex(ohlc.index)
+        spread = tick_df["spread"].resample(rule).last().reindex(ohlc.index)
+        result = ohlc.reset_index().rename(columns={"index": "time"})
+        result["bid"] = bid.to_numpy()
+        result["offer"] = offer.to_numpy()
+        result["spread"] = spread.to_numpy()
+        return result[list(self._CANDLE_COLUMNS)]
 
     def add_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Apply EMA/RSI/ATR on pre-resampled OHLC bars.
+
+        Input *df* must already be time-bucketed via ``candles_for_market`` /
+        ``_resample_ohlc_from_quotes`` — no raw tick math here.
+        """
         cfg = self._cfg
+        if df.empty:
+            return df
         out = df.copy()
-        out["fast_ema"] = ema(out["price"], cfg.fast_ema)
-        out["slow_ema"] = ema(out["price"], cfg.slow_ema)
-        out["rsi"] = rsi(out["price"], cfg.rsi_period)
+        period = max(1, int(getattr(cfg, "rsi_period", 14) or 14))
+        min_bars = period + 1
+        if len(out) < min_bars:
+            out["rsi"] = 50.0
+            out["fast_ema"] = out["price"]
+            out["slow_ema"] = out["price"]
+        else:
+            out["fast_ema"] = ema(out["price"], cfg.fast_ema)
+            out["slow_ema"] = ema(out["price"], cfg.slow_ema)
+            out["rsi"] = rsi(out["price"], period)
+            out["rsi"] = out["rsi"].fillna(50.0)
         if all(c in out.columns for c in ("high", "low", "close")):
             out["atr"] = atr(out, cfg.atr_period)
         else:
             out["atr"] = 0.0
         return out
+
+    @staticmethod
+    def _signal_bar_indices(frame_len: int) -> tuple[int, int, int]:
+        """
+        Return (last, prev, prev2) iloc indices.
+
+        Live-open bar mode when ``REQUIRE_CLOSED_BAR_G5`` is False (Wall Street path).
+        """
+        if frame_len < 2:
+            return 0, 0, 0
+        if REQUIRE_CLOSED_BAR_G5:
+            if frame_len < 4:
+                return min(frame_len - 1, 1), max(0, frame_len - 2), max(0, frame_len - 3)
+            return -2, -3, -4
+        if frame_len < 3:
+            return -1, max(-frame_len, -2), max(-frame_len, -2)
+        return -1, -2, -3
+
+    @staticmethod
+    def _trend_bar_index(frame_len: int) -> int:
+        if frame_len < 2:
+            return 0
+        return -2 if REQUIRE_CLOSED_BAR_G5 else -1
 
     def setup_key(
         self,
@@ -282,6 +607,75 @@ class SignalEngine:
 
         return 0.0, f"learning neutral: winrate {wr:.0%}, avg {avg:.1f} pts"
 
+    def _evaluate_exhaustion_reversion(
+        self,
+        market: str,
+        *,
+        rsi_5m: float,
+    ) -> tuple[bool, float, dict[str, Any]]:
+        """Arm on 5m RSI extreme; fire SELL when 1m RSI rolls under 88 with bearish tick."""
+        from system.protective_learning import (
+            exhaustion_edge_score_boost,
+            exhaustion_reversion_enabled,
+            exhaustion_rsi_arm_threshold,
+            exhaustion_rsi_trigger_threshold,
+            log_exhaustion_reversion_trigger,
+        )
+
+        meta: dict[str, Any] = {
+            "exhaustion_monitor_armed": bool(
+                self._exhaustion_monitor_armed.get(market)
+            ),
+            "exhaustion_triggered": False,
+            "exhaustion_rsi_5m": round(float(rsi_5m), 2),
+        }
+        if not exhaustion_reversion_enabled():
+            return False, 0.0, meta
+
+        arm_th = exhaustion_rsi_arm_threshold()
+        trigger_th = exhaustion_rsi_trigger_threshold()
+        if float(rsi_5m) > arm_th:
+            self._exhaustion_monitor_armed[market] = True
+        elif float(rsi_5m) < trigger_th:
+            self._exhaustion_monitor_armed.pop(market, None)
+
+        meta["exhaustion_monitor_armed"] = bool(
+            self._exhaustion_monitor_armed.get(market)
+        )
+        if not self._exhaustion_monitor_armed.get(market):
+            return False, 0.0, meta
+
+        c1 = self.candles_for_market(market, 1)
+        if len(c1) < 2:
+            return False, 0.0, meta
+
+        c1i = self.add_indicators(c1)
+        bar_i, prev_i, _ = self._signal_bar_indices(len(c1i))
+        bar_1m = c1i.iloc[bar_i]
+        prev_1m = c1i.iloc[prev_i] if len(c1i) >= abs(prev_i) else None
+        rsi_1m = float(bar_1m.get("rsi", 50) or 50)
+        close_1m = float(bar_1m.get("close", bar_1m.get("price", 0)) or 0)
+        open_1m = float(bar_1m.get("open", close_1m) or close_1m)
+        bearish_tick = close_1m < open_1m
+        if prev_1m is not None:
+            prev_close = float(
+                prev_1m.get("close", prev_1m.get("price", 0)) or 0
+            )
+            bearish_tick = bearish_tick or close_1m < prev_close
+
+        meta["exhaustion_rsi_1m"] = round(rsi_1m, 2)
+        meta["exhaustion_bearish_tick"] = bool(bearish_tick)
+        if rsi_1m >= trigger_th or not bearish_tick:
+            return False, 0.0, meta
+
+        boost = exhaustion_edge_score_boost()
+        self._exhaustion_monitor_armed.pop(market, None)
+        meta["exhaustion_triggered"] = True
+        meta["exhaustion_monitor_armed"] = False
+        meta["exhaustion_edge_boost"] = boost
+        log_exhaustion_reversion_trigger()
+        return True, boost, meta
+
     def _append_shadow_log(
         self,
         market: str,
@@ -345,6 +739,35 @@ class SignalEngine:
         except Exception:
             pass
 
+    @staticmethod
+    def _peak_signal_score(
+        *,
+        adjusted: float,
+        raw_conf: float,
+        buy: float,
+        sell: float,
+    ) -> float:
+        return max(
+            float(adjusted),
+            float(raw_conf),
+            float(buy),
+            float(sell),
+        )
+
+    def _high_confidence_override_clear(
+        self,
+        *,
+        direction: str,
+        peak_score: float,
+        threshold: float,
+    ) -> bool:
+        """Bypass secondary WAIT rules when structural confidence clears the floor."""
+        if direction not in ("BUY", "SELL"):
+            return False
+        if peak_score < HIGH_CONFIDENCE_OVERRIDE_THRESHOLD:
+            return False
+        return peak_score >= float(threshold)
+
     def _log_evaluation_shadow(
         self,
         market: str,
@@ -372,6 +795,7 @@ class SignalEngine:
 
     def evaluate(self, market: str) -> SignalResult:
         cfg = self._cfg
+        self._ensure_rsi_hydrated(market)
         from trading.strictness_resolver import resolve_strictness
 
         _strict = resolve_strictness(cfg, signal_engine=self, market=market)
@@ -379,13 +803,19 @@ class SignalEngine:
 
         rsi_buy_max = apply_temporary_test_rsi_buy_max(float(_strict.rsi_buy_max))
         rsi_sell_min = float(_strict.rsi_sell_min)
-        df = self.quote_df(market)
-        c5 = self.candles(df, 5)
-        c15 = self.candles(df, 15)
-        c60 = self.candles(df, 60)
+        c5 = self.candles_for_market(market, 5)
+        c15 = self.candles_for_market(market, 15)
+        c60 = self.candles_for_market(market, 60)
 
         # Need at least 4 5m bars so we have 3 confirmed closed bars (iloc[-4..-2])
         # plus one currently-open bar (iloc[-1]) that is excluded from signal logic.
+        if len(c5) < 4 or len(c15) < 3:
+            epic = self._resolve_epic_for_market(market)
+            if epic in _rest_rate_limit_epics or self.ohlc_seed_count(market) < 4:
+                self.hydrate_from_local_repository(market, epic=epic)
+                c5 = self.candles_for_market(market, 5)
+                c15 = self.candles_for_market(market, 15)
+                c60 = self.candles_for_market(market, 60)
         if len(c5) < 4 or len(c15) < 3:
             self.last_snapshot[market] = {}
             empty = SignalResult(
@@ -405,14 +835,16 @@ class SignalEngine:
         c15i = self.add_indicators(c15)
         c60i = self.add_indicators(c60)
 
-        # Use confirmed closed bars only — iloc[-2] is the last fully closed 5m bar.
-        # iloc[-1] is the currently open bar and is intentionally excluded so that
-        # RSI/EMA values cannot shift before the bar closes (incomplete-candle bias).
-        last = c5i.iloc[-2]
-        prev = c5i.iloc[-3]
-        prev2 = c5i.iloc[-4]
-        trend15 = c15i.iloc[-2]
-        trend60 = c60i.iloc[-2] if len(c60i) >= 2 else None
+        last_i, prev_i, prev2_i = self._signal_bar_indices(len(c5i))
+        last = c5i.iloc[last_i]
+        prev = c5i.iloc[prev_i]
+        prev2 = c5i.iloc[prev2_i]
+        trend15 = c15i.iloc[self._trend_bar_index(len(c15i))]
+        trend60 = (
+            c60i.iloc[self._trend_bar_index(len(c60i))]
+            if len(c60i) >= 2
+            else None
+        )
         h1_bearish = trend60 is not None and float(trend60["fast_ema"]) < float(
             trend60["slow_ema"]
         )
@@ -425,7 +857,7 @@ class SignalEngine:
         # updated (even with the same timestamps) produces a fresh evaluation.
         close_px_key = round(float(last.get("close", last.get("price", 0))), 0)
         closed_bar_key = (market, str(last.get("time", last.name)), close_px_key)
-        if self._last_signal_bar.get(market) == closed_bar_key:
+        if REQUIRE_CLOSED_BAR_G5 and self._last_signal_bar.get(market) == closed_bar_key:
             snap = self.last_snapshot.get(market, {})
             raw = float(snap.get("raw_confidence", 0) or 0)
             adjusted = float(snap.get("adjusted_confidence", 0) or 0)
@@ -577,10 +1009,10 @@ class SignalEngine:
             + bear_momentum
         )
 
-        if vol_blocked:
+        if vol_blocked and max(buy, sell) < HIGH_CONFIDENCE_OVERRIDE_THRESHOLD:
             buy *= 0.5
             sell *= 0.5
-        elif current_regime == "high":
+        elif current_regime == "high" and max(buy, sell) < HIGH_CONFIDENCE_OVERRIDE_THRESHOLD:
             # Soft penalty in high vol — replay shows ~5pp lower WR vs normal regime.
             buy *= 0.9
             sell *= 0.9
@@ -591,10 +1023,22 @@ class SignalEngine:
             buy *= 0.50
             sell *= 0.50
 
+        exhaustion_triggered, exhaustion_boost, exhaustion_meta = (
+            self._evaluate_exhaustion_reversion(
+                market,
+                rsi_5m=float(last.get("rsi", 50) or 50),
+            )
+        )
+        if exhaustion_triggered:
+            sell = min(99.0, float(sell) + float(exhaustion_boost))
+
         raw_conf = max(buy, sell)
         raw_sig = "BUY" if buy > sell else "SELL" if sell > buy else "WAIT"
+        if exhaustion_triggered:
+            raw_sig = "SELL"
+            raw_conf = float(sell)
         threshold = self._effective_signal_threshold(cfg)
-        buy_ok = buy >= threshold
+        buy_ok = buy >= threshold and not exhaustion_triggered
         sell_ok = sell >= threshold
 
         signal = "WAIT"
@@ -602,7 +1046,9 @@ class SignalEngine:
         h1_penalty = 0.0
         h1_note = ""
         regime_note = ""
-        if buy_ok and sell_ok:
+        if exhaustion_triggered and sell_ok:
+            candidate = "SELL"
+        elif buy_ok and sell_ok:
             candidate = "BUY" if buy >= sell else "SELL"
         elif buy_ok:
             candidate = "BUY"
@@ -633,7 +1079,13 @@ class SignalEngine:
                     log_temporary_test_rsi_relaxation_once()
             except Exception:
                 pass
-            if candidate == "BUY" and effective_rsi_max > 0 and rsi_val > effective_rsi_max:
+            if (
+                exhaustion_triggered
+                and candidate == "SELL"
+            ):
+                # Bypass production 85 RSI long ceiling — structural exhaustion short.
+                rsi_block = ""
+            elif candidate == "BUY" and effective_rsi_max > 0 and rsi_val > effective_rsi_max:
                 rsi_block = (
                     f"RSI overbought filter: {rsi_val:.1f} > max {effective_rsi_max:.0f}"
                 )
@@ -641,6 +1093,18 @@ class SignalEngine:
                 rsi_block = (
                     f"RSI oversold filter: {rsi_val:.1f} < min {rsi_sell_min:.0f}"
                 )
+            peak_score = self._peak_signal_score(
+                adjusted=0.0,
+                raw_conf=float(raw_conf),
+                buy=float(buy),
+                sell=float(sell),
+            )
+            if rsi_block and self._high_confidence_override_clear(
+                direction=candidate,
+                peak_score=peak_score,
+                threshold=threshold,
+            ):
+                rsi_block = ""
             if rsi_block:
                 setup = self.setup_key(raw_sig, last, trend15, atr_series)
                 delta, learn_note = self.learning_adjustment(setup)
@@ -678,6 +1142,8 @@ class SignalEngine:
                 return result
 
             setup = self.setup_key(candidate, last, trend15, atr_series)
+            if exhaustion_triggered and candidate == "SELL":
+                setup = f"{setup}|exhaustion_reversion"
             side_score = buy if candidate == "BUY" else sell
             delta, learn_note = self.learning_adjustment(setup)
             adjusted = max(0, min(99, side_score + delta))
@@ -704,6 +1170,13 @@ class SignalEngine:
                 )
             except Exception:
                 ml_blocked, ml_block_reason = False, ""
+            if ml_blocked and self._high_confidence_override_clear(
+                direction=candidate,
+                peak_score=float(adjusted),
+                threshold=threshold,
+            ):
+                ml_blocked = False
+                ml_block_reason = ""
             if ml_blocked:
                 notes = (
                     f"raw={raw_sig}, buy_score={buy:.1f}, sell_score={sell:.1f}, "
@@ -783,6 +1256,7 @@ class SignalEngine:
             "h1_bullish": h1_bullish,
             "h1_penalty": h1_penalty,
             "regime_penalty": regime_penalty if candidate in ("BUY", "SELL") else 0.0,
+            **exhaustion_meta,
         }
         self.last_snapshot[market] = snapshot
 
@@ -790,14 +1264,34 @@ class SignalEngine:
             cfg.vol_regime_filter_enabled
             and current_regime == "low"
             and signal in ("BUY", "SELL")
+            and adjusted < HIGH_CONFIDENCE_OVERRIDE_THRESHOLD
         ):
             signal = "WAIT"
             notes = f"{notes} | {vol_block_reason}"
 
+        peak_score = self._peak_signal_score(
+            adjusted=float(adjusted),
+            raw_conf=float(raw_conf),
+            buy=float(buy),
+            sell=float(sell),
+        )
+        direction = candidate if candidate in ("BUY", "SELL") else raw_sig
+        if signal == "WAIT" and self._high_confidence_override_clear(
+            direction=str(direction),
+            peak_score=peak_score,
+            threshold=float(threshold),
+        ):
+            signal = str(direction)
+            adjusted = max(float(adjusted), peak_score)
+            notes = (
+                f"{notes} | high-confidence override "
+                f"({peak_score:.1f}% >= {HIGH_CONFIDENCE_OVERRIDE_THRESHOLD:.0f}%)"
+            )
+
         # Record bar key when an actionable signal fires so the next tick for the
         # SAME closed bar at the SAME price level is suppressed (avoids sending
         # duplicate orders between consecutive ticks within the same bar).
-        if signal in ("BUY", "SELL"):
+        if signal in ("BUY", "SELL") and REQUIRE_CLOSED_BAR_G5:
             self._last_signal_bar[market] = closed_bar_key
         elif signal == "WAIT":
             # Clear the bar lock when the signal drops to WAIT so a genuine new

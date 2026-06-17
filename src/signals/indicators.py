@@ -7,19 +7,31 @@ from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 
+RSI_MIN_HISTORY_BARS = 15
+
 
 def ema(series: pd.Series, span: int) -> pd.Series:
     return series.ewm(span=span, adjust=False).mean()
 
 
 def rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    """
+    Wilder-style RSI on a price series.
+
+    Requires at least ``period + 1`` observations; otherwise returns neutral 50.0
+    for every row (prevents compressed garbage on thin tick/resample windows).
+    """
+    if series is None or len(series) < (period + 1):
+        idx = series.index if series is not None and len(series) else pd.RangeIndex(0)
+        return pd.Series(50.0, index=idx, dtype=float)
     delta = series.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
     avg_gain = gain.ewm(alpha=1 / period, adjust=False).mean()
     avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
     rs = avg_gain / avg_loss.replace(0, np.nan)
-    return (100 - (100 / (1 + rs))).fillna(50)
+    out = 100 - (100 / (1 + rs))
+    return out.fillna(50.0).clip(15.0, 85.0)
 
 
 def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
@@ -67,16 +79,12 @@ def bucket(value: float, step: float, cap: float = 9999) -> str:
 
 
 def vol_regime(atr_series: pd.Series, *, low_pct: float = 25.0, high_pct: float = 75.0) -> str:
-    """Classify current ATR as 'low', 'normal', or 'high' using rolling percentiles.
-
-    Uses the last 100 values of *atr_series* as the reference distribution.
-    Returns 'unknown' when there are fewer than 10 observations.
-    """
+    """Classify current ATR as 'low', 'normal', or 'high' using rolling percentiles."""
     try:
         values = atr_series.dropna()
         if len(values) < 10:
             return "unknown"
-        ref = values.iloc[-min(100, len(values)):]
+        ref = values.iloc[-min(100, len(values)) :]
         current = float(values.iloc[-1])
         lo = float(np.percentile(ref, low_pct))
         hi = float(np.percentile(ref, high_pct))

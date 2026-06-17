@@ -13,6 +13,11 @@ _PRODUCTION_RSI_BUY_MAX = 85.0
 TEMPORARY_TEST_RSI_BUY_MAX = 98.0
 TEMPORARY_TEST_PROBE_RISK_CAP_GBP = 200.0
 
+# RSI Exhaustion Reversion — production extreme-market short trigger (test gate off).
+EXHAUSTION_RSI_ARM_THRESHOLD = 90.0
+EXHAUSTION_RSI_TRIGGER_THRESHOLD = 88.0
+EXHAUSTION_EDGE_SCORE_BOOST = 15.0
+
 _test_mode_logged = False
 _test_rsi_relaxation_logged = False
 _test_execution_bypass_logged = False
@@ -143,9 +148,83 @@ def temporary_test_gate_active() -> bool:
     return USE_TEMPORARY_TEST_GATE
 
 
+def exhaustion_reversion_enabled() -> bool:
+    """Arm exhaustion monitor only in production (not temporary test gate)."""
+    return not USE_TEMPORARY_TEST_GATE
+
+
+def exhaustion_rsi_arm_threshold() -> float:
+    return EXHAUSTION_RSI_ARM_THRESHOLD
+
+
+def exhaustion_rsi_trigger_threshold() -> float:
+    return EXHAUSTION_RSI_TRIGGER_THRESHOLD
+
+
+def exhaustion_edge_score_boost() -> float:
+    """+15 pts applied to sell score so structural reversals clear the 62% floor."""
+    return EXHAUSTION_EDGE_SCORE_BOOST
+
+
+def production_rsi_buy_max() -> float:
+    return _PRODUCTION_RSI_BUY_MAX
+
+
+def log_exhaustion_reversion_trigger() -> None:
+    """Emit when the 1m exhaustion reversion SELL path fires."""
+    try:
+        from system.engine_log import log_engine
+
+        log_engine(
+            "🎯 EXHAUSTION TRIGGER: Market extreme captured. "
+            "Reversion SELL signal dispatched to router."
+        )
+    except Exception:
+        pass
+
+
 def cockpit_controls_unlocked_for_test() -> bool:
     """When True, Flight Deck operator controls bypass manual_stop / init locks."""
     return USE_TEMPORARY_TEST_GATE
+
+
+_autonomous_engine_boot_armed = False
+
+
+def ensure_autonomous_engine_on_boot() -> None:
+    """One-shot boot: clear manual_stop and arm SHADOW so the autonomous toggle loads ON."""
+    global _autonomous_engine_boot_armed
+    if _autonomous_engine_boot_armed:
+        return
+    _autonomous_engine_boot_armed = True
+    try:
+        from system.shutdown_cleanup import clear_manual_stop
+
+        clear_manual_stop()
+    except Exception:
+        pass
+    if USE_TEMPORARY_TEST_GATE:
+        return
+    try:
+        import os
+
+        os.environ["IG_AGENT_MODE"] = "SHADOW"
+    except Exception:
+        pass
+
+
+def build_production_autonomous_boot_controls() -> dict[str, Any]:
+    """First Flight Deck frame — autonomous engine unlocked and ON (purple slider)."""
+    ensure_autonomous_engine_on_boot()
+    return {
+        "manual_stop": False,
+        "disabled": False,
+        "controls_locked": False,
+        "shadow_toggle_enabled": True,
+        "init_complete": True,
+        "test_mode_unlock": False,
+        "autonomous_engine_on": True,
+    }
 
 
 def clear_operational_locks_for_test_run() -> None:

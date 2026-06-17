@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from typing import Any, Literal
 
 from signals.indicators import floor_time
-from signals.signal_engine import SignalResult
+from signals.signal_engine import REQUIRE_CLOSED_BAR_G5, SignalResult
 from system.market_watch.calendar import get_market_status
 from trading.session_manager import COLD_START_BAR_MINUTES, COLD_START_BARS, SessionManager
 
@@ -219,7 +219,9 @@ def build_trade_eligibility(
         )
 
     if "duplicate suppressed" in notes_lower or (
-        block_reason and "next closed" in block_reason.lower()
+        REQUIRE_CLOSED_BAR_G5
+        and block_reason
+        and "next closed" in block_reason.lower()
     ):
         ref = quote_ts if quote_ts is not None else now
         rem = seconds_until_bar_close(ref)

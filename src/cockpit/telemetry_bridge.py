@@ -506,12 +506,12 @@ def _collect_snapshot(epics: tuple[str, ...]) -> dict[str, Any]:
         "order_book_imbalance": order_book_imbalance,
     }
     try:
-        from cockpit.avionics_markets import enrich_avionics_markets
+        from cockpit.avionics_markets import package_avionics_hud_broadcast
 
-        payload = enrich_avionics_markets(payload)
+        payload = package_avionics_hud_broadcast(payload)
     except Exception as exc:
         log_engine(
-            f"cockpit telemetry avionics enrich failed: {type(exc).__name__}: {exc}"
+            f"cockpit telemetry avionics package failed: {type(exc).__name__}: {exc}"
         )
     return payload
 

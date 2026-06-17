@@ -243,6 +243,13 @@
     .strategy-meta-val.ai-weight-val.ai-adaptive {
       color: #67e8f9;
     }
+    .stat-value.regime-neutral {
+      color: #a8a29e;
+      text-shadow: 0 0 8px rgba(168, 162, 158, 0.35);
+    }
+    .stat-value.regime-caution {
+      color: #fbbf24;
+    }
   </style>
   <script>
     window.__COCKPIT_BUILD__ = Date.now();
@@ -297,7 +304,10 @@
           <h2>4-Gate Boot Checklist</h2>
           <span class="gate-pipeline-badge">G1 → G2 → G3 → G4</span>
         </header>
-        <p class="gate-intro">Strict v29.1 gate map — Environment · REST Auth · Streaming · State Hydration</p>
+        <p class="gate-intro">
+          Strict v29.1 gate map — Environment · REST Auth · Streaming · State Hydration.
+          G2 complete: authenticated &amp; session bound · G3 complete: streaming live broker feed.
+        </p>
         <div id="gate-grid" class="gate-grid"></div>
       </section>
 
@@ -325,7 +335,7 @@
         <div class="mission-stats">
           <div class="stat-block">
             <span class="stat-label">Microstructure Regime</span>
-            <span id="micro-regime" class="stat-value neon-green">NEUTRAL</span>
+            <span id="micro-regime" class="stat-value regime-neutral">NEUTRAL</span>
           </div>
           <div class="stat-block">
             <span class="stat-label">Autopilot Rating</span>

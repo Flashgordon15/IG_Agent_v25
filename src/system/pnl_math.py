@@ -129,3 +129,56 @@ def close_from_ig_position(
     exit_px = exit_price_from_ig_close(side, entry, size, level=level, upl=upl)
     pnl = realised_pnl_points(side, entry, exit_px)
     return exit_px, pnl, classify_result(pnl)
+
+
+FX_PIP_SIZE_MAJORS = 0.0001
+
+
+def pip_value_gbp_per_unit(epic: str) -> float:
+    """GBP value of one IG pip for one unit of deal size (FX CFD majors)."""
+    per_pip_usd = fx_upl_per_ig_point(epic, 1.0)
+    if per_pip_usd is None:
+        return 1.0
+    try:
+        from trading.open_position_view import pnl_currency_amount_to_gbp
+
+        return float(pnl_currency_amount_to_gbp(float(per_pip_usd), "USD"))
+    except Exception:
+        return float(per_pip_usd)
+
+
+def floating_pnl_gbp_from_prices(
+    *,
+    epic: str,
+    side: str,
+    entry: float,
+    mark: float,
+    size: float,
+    spread_price: float = 0.0,
+) -> float | None:
+    """
+    FX-aware floating P&L in GBP.
+
+    FX majors: Gross P&L = (Exit - Entry) / 0.0001 × Size × Pip_Value_GBP
+    (SELL inverts via direction multiplier). Spread cost subtracted after scaling.
+    """
+    try:
+        entry_f = float(entry)
+        mark_f = float(mark)
+        size_f = abs(float(size))
+    except (TypeError, ValueError):
+        return None
+    if entry_f <= 0 or mark_f <= 0 or size_f <= 0:
+        return None
+
+    pip = pip_size_for_epic(epic)
+    if pip is not None and pip > 0:
+        direction = direction_multiplier(side)
+        gross_pips = direction * (mark_f - entry_f) / float(pip)
+        if spread_price > 0:
+            gross_pips -= float(spread_price) / float(pip)
+        pip_value_gbp = pip_value_gbp_per_unit(epic)
+        return round(gross_pips * size_f * pip_value_gbp, 2)
+
+    raw_pts = realised_pnl_points(side, entry_f, mark_f)
+    return round(float(raw_pts) * size_f, 2)

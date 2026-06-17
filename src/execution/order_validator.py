@@ -112,6 +112,11 @@ class OrderValidator:
         if not atr_ok:
             reasons.append(atr_msg)
 
+        struct_ok, struct_msg = self.check_structural_risk(signal)
+        checks["structural_risk"] = struct_ok
+        if not struct_ok:
+            reasons.append(struct_msg)
+
         conf_floor = (
             self._points.trade_confidence_threshold(cfg)
             if self._points is not None
@@ -342,6 +347,63 @@ class OrderValidator:
         if atr_val < min_atr:
             return False, f"ATR {atr_val:.1f} < min {min_atr:.1f}"
         return True, ""
+
+    def check_structural_risk(self, signal: TradeSignal) -> tuple[bool, str]:
+        """
+        Gate-sourced ATR protect exhaustion shorts use widened 2.5× ATR stops;
+        bypass static adaptive stop probe caps while confirming £ risk envelope.
+        """
+        gate = (
+            signal.gate_execution_params
+            if isinstance(signal.gate_execution_params, dict)
+            else {}
+        )
+        snap = signal.snapshot if isinstance(signal.snapshot, dict) else {}
+        stop_source = str((gate or {}).get("stop_source") or "")
+        from execution.economic_check import (
+            check_risk_cap,
+            is_exhaustion_reversion_sell,
+        )
+
+        is_exhaustion = is_exhaustion_reversion_sell(
+            snap,
+            setup_key=str(signal.setup_key or ""),
+            direction=str(signal.direction or ""),
+        )
+        atr_protect = stop_source == "atr_protect_exhaustion" or bool(
+            snap.get("atr_protect_active")
+        )
+        if not is_exhaustion and not atr_protect:
+            return True, ""
+
+        stop_pts = float((gate or {}).get("stop_points") or 0)
+        size = float((gate or {}).get("actual_size") or 0)
+        if stop_pts <= 0 or size <= 0:
+            return True, ""
+
+        conf = float(signal.adjusted_confidence or 0)
+        band = str((gate or {}).get("risk_band") or "")
+        ok, risk_gbp, cap_gbp = check_risk_cap(
+            size=size,
+            stop_pts=stop_pts,
+            cfg=self._cfg,
+            confidence=conf,
+            risk_band_label=band,
+        )
+        if ok:
+            return True, ""
+        approved = (gate or {}).get("risk_gbp")
+        if approved is not None and atr_protect:
+            try:
+                if abs(float(risk_gbp) - float(approved)) <= 0.05:
+                    return True, ""
+            except (TypeError, ValueError):
+                pass
+        return (
+            False,
+            f"ATR protect structural risk £{risk_gbp:.2f} exceeds £{cap_gbp:.0f} cap "
+            f"(static probe stop caps waived)",
+        )
 
     @staticmethod
     def _store_count_fallback(

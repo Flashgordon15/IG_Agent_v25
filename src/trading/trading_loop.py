@@ -25,7 +25,11 @@ from execution.spread_atr_circuit import (
 )
 from execution.trading_loop import TickOutcome
 from execution.trading_loop import TradingLoop as ExecutionTickLoop
-from signals.signal_engine import SignalResult
+from signals.signal_engine import (
+    HIGH_CONFIDENCE_OVERRIDE_THRESHOLD,
+    REQUIRE_CLOSED_BAR_G5,
+    SignalResult,
+)
 from system.config import Config
 from system.engine_log import log_engine
 from system.paths import project_root
@@ -56,7 +60,66 @@ STAGE1_GBP_RISK_CAP = 150.0
 SPREAD_NORMAL_MULTIPLIER = 2.5
 DAILY_LOSS_LIMIT_GBP = 200.0
 DEFAULT_TICK_INTERVAL_SEC = 5.0
+GATE_EVAL_COOLDOWN_SEC = 10.0
 FLATTEN_VERIFY_WAIT_SEC = 10.0
+
+
+def _resolve_gate_eval_cooldown_sec() -> float:
+    """Bounded gate-eval cooldown — safe default if config/state read fails."""
+    try:
+        from system.config_loader import get_config
+
+        raw = getattr(get_config(), "gate_eval_cooldown_sec", None)
+        if raw is None:
+            return GATE_EVAL_COOLDOWN_SEC
+        return max(1.0, min(60.0, float(raw)))
+    except Exception:
+        return GATE_EVAL_COOLDOWN_SEC
+
+
+def _peak_confidence_from_signal(sig: SignalResult, conf: float) -> float:
+    snap = sig.snapshot or {}
+    raw_conf = float(snap.get("raw_confidence") or 0)
+    try:
+        buy = float(snap.get("buy_score")) if snap.get("buy_score") is not None else 0.0
+    except (TypeError, ValueError):
+        buy = 0.0
+    try:
+        sell = float(snap.get("sell_score")) if snap.get("sell_score") is not None else 0.0
+    except (TypeError, ValueError):
+        sell = 0.0
+    return max(float(conf), raw_conf, buy, sell)
+
+
+def promote_high_confidence_signal(
+    sig: SignalResult, threshold: float
+) -> SignalResult:
+    """
+    Force dispatcher string to BUY/SELL when peak score clears override floor.
+
+    Resolves gate passed=True but execution still sees WAIT deadlock.
+    """
+    if sig.signal in ("BUY", "SELL"):
+        return sig
+    snap = sig.snapshot or {}
+    raw = str(snap.get("raw_signal") or "").strip()
+    if raw not in ("BUY", "SELL"):
+        return sig
+    peak = _peak_confidence_from_signal(sig, float(sig.adjusted_confidence))
+    if peak < HIGH_CONFIDENCE_OVERRIDE_THRESHOLD or peak < float(threshold):
+        return sig
+    promoted_snap = dict(snap)
+    promoted_snap["dispatch_promoted"] = True
+    promoted_snap["raw_signal"] = raw
+    return SignalResult(
+        signal=raw,
+        raw_confidence=float(sig.raw_confidence),
+        adjusted_confidence=max(float(sig.adjusted_confidence), peak),
+        learning_delta=float(sig.learning_delta),
+        setup_key=str(sig.setup_key),
+        notes=f"{sig.notes} | dispatch promoted ({peak:.1f}%)",
+        snapshot=promoted_snap,
+    )
 
 
 def signal_gate_explanation(sig: SignalResult, threshold: float) -> tuple[str, str]:
@@ -64,6 +127,15 @@ def signal_gate_explanation(sig: SignalResult, threshold: float) -> tuple[str, s
     conf = float(sig.adjusted_confidence)
     snap = sig.snapshot or {}
     raw = str(snap.get("raw_signal") or "").strip()
+    peak = _peak_confidence_from_signal(sig, conf)
+
+    if peak >= HIGH_CONFIDENCE_OVERRIDE_THRESHOLD and raw in ("BUY", "SELL"):
+        if peak >= float(threshold):
+            return (
+                f"PASS — {raw} {peak:.1f}% "
+                f"(high-confidence override >= {threshold:.1f}%)",
+                "",
+            )
 
     if sig.signal in ("BUY", "SELL"):
         if conf < threshold:
@@ -71,17 +143,17 @@ def signal_gate_explanation(sig: SignalResult, threshold: float) -> tuple[str, s
             return msg, msg
         return f"{sig.signal} {conf:.1f}% (>= {threshold:.1f}%)", ""
 
-    if snap.get("rsi_block"):
+    if snap.get("rsi_block") and peak < HIGH_CONFIDENCE_OVERRIDE_THRESHOLD:
         reason = str(snap["rsi_block"])
         lead = raw or "BUY/SELL"
         return f"WAIT — {reason} ({lead} score {conf:.1f}%)", reason
 
-    if "blocked:" in sig.notes:
+    if "blocked:" in sig.notes and peak < HIGH_CONFIDENCE_OVERRIDE_THRESHOLD:
         reason = sig.notes.split("blocked:", 1)[1].split(",", 1)[0].strip()
         return f"WAIT — {reason} ({conf:.1f}% score held)", reason
 
     notes_lower = (sig.notes or "").lower()
-    if "duplicate suppressed" in notes_lower:
+    if REQUIRE_CLOSED_BAR_G5 and "duplicate suppressed" in notes_lower:
         reason = "awaiting next closed 5m bar"
         return f"WAIT — {reason}", reason
     if "collecting live data" in notes_lower:
@@ -90,6 +162,8 @@ def signal_gate_explanation(sig: SignalResult, threshold: float) -> tuple[str, s
 
     for part in (sig.notes or "").split("|"):
         part = part.strip()
+        if peak >= HIGH_CONFIDENCE_OVERRIDE_THRESHOLD:
+            break
         if "BLOCKED:" in part or part.startswith("vol regime="):
             return f"WAIT — {part}", part
 
@@ -106,6 +180,12 @@ def signal_gate_explanation(sig: SignalResult, threshold: float) -> tuple[str, s
         return f"WAIT — {reason}", reason
 
     if raw in ("BUY", "SELL"):
+        if peak >= HIGH_CONFIDENCE_OVERRIDE_THRESHOLD and peak >= float(threshold):
+            return (
+                f"PASS — {raw} {peak:.1f}% "
+                f"(high-confidence override >= {threshold:.1f}%)",
+                "",
+            )
         reason = f"{raw} scored {conf:.1f}% but output is WAIT"
         return f"WAIT — {reason}", reason
 
@@ -250,6 +330,9 @@ class TradingLoop:
         self._last_ml_prob: float | None = None
         self._last_sig_direction: str = "WAIT"
         self._gate_signal_cache: SignalResult | None = None
+        self._last_gate_eval_time: float = 0.0
+        self._last_gate_eval_results: list[GateResult] | None = None
+        self._gate_eval_lock = threading.Lock()
         self._entry_circuit_breaker: str = ""
         self._portfolio_reserved_risk_gbp: float = 0.0
         self._tick_indicator_row: dict[str, Any] | None = None
@@ -315,6 +398,12 @@ class TradingLoop:
         return results
 
     def start(self) -> None:
+        try:
+            from system.protective_learning import ensure_autonomous_engine_on_boot
+
+            ensure_autonomous_engine_on_boot()
+        except Exception:
+            pass
         with self._lock:
             if self._running:
                 return
@@ -660,7 +749,14 @@ class TradingLoop:
     def _get_gate_signal(self) -> SignalResult:
         """Single signal evaluation per tick — reused across gate stack (§20 latency)."""
         if getattr(self, "_gate_signal_cache", None) is None:
-            self._gate_signal_cache = self._signal_engine.evaluate(self._market)
+            sig = self._signal_engine.evaluate(self._market)
+            try:
+                threshold = float(
+                    self._points.trade_confidence_threshold(self._config)
+                )
+            except Exception:
+                threshold = float(self._config.signal_threshold)
+            self._gate_signal_cache = promote_high_confidence_signal(sig, threshold)
         return self._gate_signal_cache
 
     def _run_tick_core(self) -> TickContext | None:
@@ -724,6 +820,10 @@ class TradingLoop:
             self._signal_engine.add_quote(self._market, quote)
         except Exception as e:
             log_engine(f"signal_engine.add_quote failed: {type(e).__name__}: {e}")
+        try:
+            self._refresh_hud_indicators()
+        except Exception as e:
+            log_engine(f"hud indicator refresh failed: {type(e).__name__}: {e}")
         try:
             self._session.on_tick(quote)
         except Exception as e:
@@ -1304,16 +1404,35 @@ class TradingLoop:
             gates.append(GateResult(name=name, passed=False, value=None, detail=reason))
         return gates
 
-    def _evaluate_gates(self, quote: Quote) -> list[GateResult]:
-        import time
+    def _refresh_hud_indicators(self) -> None:
+        """Priority RSI/ATR refresh for telemetry — runs every tick, outside gate cooldown."""
+        refresh = getattr(self._signal_engine, "refresh_hud_indicators", None)
+        if callable(refresh):
+            refresh(self._market)
 
+    def _evaluate_gates(self, quote: Quote) -> list[GateResult]:
         from ai.operational.profiler_hooks import probe_hot_path
 
-        gate_us: dict[str, float] = {}
-        t0 = time.perf_counter()
-        with probe_hot_path("probe_gate_evaluation", epic=self._epic):
-            results = self._evaluate_gates_core(quote, gate_us=gate_us)
-        total_us = (time.perf_counter() - t0) * 1_000_000.0
+        cooldown = _resolve_gate_eval_cooldown_sec()
+        with self._gate_eval_lock:
+            now = time.monotonic()
+            last_ts = self._last_gate_eval_time
+            cached = self._last_gate_eval_results
+            if (
+                cached is not None
+                and last_ts > 0.0
+                and (now - last_ts) < cooldown
+            ):
+                return list(cached)
+
+            gate_us: dict[str, float] = {}
+            t0 = time.perf_counter()
+            with probe_hot_path("probe_gate_evaluation", epic=self._epic):
+                results = self._evaluate_gates_core(quote, gate_us=gate_us)
+            total_us = (time.perf_counter() - t0) * 1_000_000.0
+            self._last_gate_eval_time = now
+            self._last_gate_eval_results = list(results)
+
         try:
             from system.diagnostics.perf_metrics import record_tick_gate_evaluation
 
@@ -2284,6 +2403,32 @@ class TradingLoop:
 
         actual_size = apply_operational_size_floor(actual_size, self._epic)
 
+        atr_pts = 0.0
+        last_row = snapshot.get("last")
+        if last_row is not None:
+            try:
+                atr_pts = float(
+                    last_row.get("atr", 0)
+                    if hasattr(last_row, "get")
+                    else last_row["atr"]
+                )
+            except (TypeError, ValueError, KeyError):
+                atr_pts = 0.0
+        from execution.economic_check import apply_atr_protect_envelope
+
+        stop, actual_size, atr_meta = apply_atr_protect_envelope(
+            stop_pts=stop,
+            size=actual_size,
+            atr_pts=atr_pts,
+            point_value_gbp=point_value,
+            snapshot=snapshot,
+            setup_key=str(sig_for_risk.setup_key or ""),
+            direction=str(sig_for_risk.signal or ""),
+            epic=self._epic,
+        )
+        if atr_meta.get("atr_protect_active"):
+            stop_source = "atr_protect_exhaustion"
+
         risk_gbp = stop * actual_size * point_value
         effective_risk_cap = float(risk_cap)
         if risk_band_label == "probe":
@@ -2389,6 +2534,12 @@ class TradingLoop:
                 "risk_band": risk_band_label,
                 "sizing_confidence": round(sizing_conf, 1),
                 "size_floor_applied": actual_size > effective_size,
+                "atr_protect_active": bool(atr_meta.get("atr_protect_active")),
+                **{
+                    k: v
+                    for k, v in atr_meta.items()
+                    if str(k).startswith("atr_protect_")
+                },
             },
             detail=detail,
         )
@@ -2706,7 +2857,19 @@ class TradingLoop:
             pass
         passed = sig.signal in ("BUY", "SELL") and conf >= threshold
         detail, block_reason = signal_gate_explanation(sig, threshold)
-        if vol_penalty_detail:
+        peak = _peak_confidence_from_signal(sig, conf)
+        raw_dir = str((sig.snapshot or {}).get("raw_signal") or sig.signal or "").strip()
+        if not passed and raw_dir in ("BUY", "SELL"):
+            if peak >= HIGH_CONFIDENCE_OVERRIDE_THRESHOLD and peak >= float(threshold):
+                passed = True
+                sig = promote_high_confidence_signal(sig, threshold)
+                if not detail.startswith("PASS"):
+                    detail = (
+                        f"PASS — {raw_dir} {peak:.1f}% "
+                        f"(high-confidence override >= {threshold:.1f}%)"
+                    )
+                    block_reason = ""
+        if vol_penalty_detail and peak < HIGH_CONFIDENCE_OVERRIDE_THRESHOLD:
             detail = f"{detail} | vol soft: {vol_penalty_detail}"
         pts_state = self._points.get_state()
         if pts_state == "WARNING" and threshold >= 90.0:

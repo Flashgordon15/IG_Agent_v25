@@ -33,11 +33,12 @@ _hot_reload_lock = threading.Lock()
 _log_tail_offset = 0
 _log_tail_lock = threading.Lock()
 
-_BROKER_CLOSED_CACHE_TTL_SEC = 90.0
+_BROKER_CLOSED_CACHE_TTL_SEC = 600.0
 _broker_closed_rows: list[dict[str, Any]] = []
 _broker_closed_fetched_at: float = 0.0
 _broker_closed_lock = threading.Lock()
 _broker_closed_bootstrapped = False
+_flight_deck_boot_seeded = False
 
 
 def _encode_ws_json(payload: Any) -> str:
@@ -126,14 +127,21 @@ def _build_cockpit_controls_payload() -> dict[str, Any]:
 
 def _enrich_telemetry_for_ui(payload: dict[str, Any]) -> dict[str, Any]:
     """Merge cockpit control state and test-mode scalping overrides for Flight Deck."""
+    global _flight_deck_boot_seeded
     from system.protective_learning import (
         apply_test_mode_scalping_telemetry,
+        build_production_autonomous_boot_controls,
         build_test_mode_cockpit_controls,
+        ensure_autonomous_engine_on_boot,
         temporary_test_gate_active,
     )
 
+    ensure_autonomous_engine_on_boot()
     if temporary_test_gate_active():
         controls = build_test_mode_cockpit_controls()
+    elif not _flight_deck_boot_seeded:
+        _flight_deck_boot_seeded = True
+        controls = build_production_autonomous_boot_controls()
     else:
         controls = _build_cockpit_controls_payload()
     out = dict(payload)
@@ -144,6 +152,8 @@ def _enrich_telemetry_for_ui(payload: dict[str, Any]) -> dict[str, Any]:
     shadow["controls"] = controls
     shadow["manual_stop"] = False if controls.get("test_mode_unlock") else controls["manual_stop"]
     shadow["disabled"] = False if controls.get("test_mode_unlock") else controls["disabled"]
+    if controls.get("autonomous_engine_on") and not shadow.get("disabled"):
+        shadow["mode"] = "SHADOW"
     shadow["shadow_toggle_enabled"] = controls["shadow_toggle_enabled"]
     out["shadow_trading"] = shadow
     out["scalping_telemetry"] = apply_test_mode_scalping_telemetry(
@@ -151,12 +161,12 @@ def _enrich_telemetry_for_ui(payload: dict[str, Any]) -> dict[str, Any]:
     )
     out = _normalize_positions_for_ui(out)
     try:
-        from cockpit.avionics_markets import enrich_avionics_markets
+        from cockpit.avionics_markets import package_avionics_hud_broadcast
 
-        out = enrich_avionics_markets(out)
+        out = package_avionics_hud_broadcast(out)
     except Exception as exc:
         log_engine(
-            f"Flight Deck avionics markets enrich skipped: {type(exc).__name__}: {exc}"
+            f"Flight Deck avionics HUD package skipped: {type(exc).__name__}: {exc}"
         )
     return _attach_closed_trades_for_ui(out)
 
@@ -221,7 +231,29 @@ def _normalize_position_row_for_ui(row: dict[str, Any]) -> dict[str, Any]:
             floating_pnl = None
 
     if floating_pnl is None and entry > 0 and latest > 0 and signed_size != 0:
-        floating_pnl = (entry - latest) * signed_size
+        try:
+            from system.pnl_math import floating_pnl_gbp_from_prices
+
+            epic = str(out.get("epic") or out.get("market") or "").strip()
+            spread_px = 0.0
+            try:
+                spread_px = float(out.get("spread") or 0)
+            except (TypeError, ValueError):
+                spread_px = 0.0
+            scaled = floating_pnl_gbp_from_prices(
+                epic=epic,
+                side=side,
+                entry=entry,
+                mark=latest,
+                size=abs(signed_size),
+                spread_price=spread_px,
+            )
+            if scaled is not None:
+                floating_pnl = scaled
+            else:
+                floating_pnl = (entry - latest) * signed_size
+        except Exception:
+            floating_pnl = (entry - latest) * signed_size
 
     if floating_pnl is not None:
         out["floating_pnl_gbp"] = round(float(floating_pnl), 2)
@@ -442,7 +474,7 @@ def _refresh_broker_closed_trades_cache(
     with _broker_closed_lock:
         if (
             not force
-            and _broker_closed_rows
+            and _broker_closed_bootstrapped
             and (now - _broker_closed_fetched_at) < _BROKER_CLOSED_CACHE_TTL_SEC
         ):
             return list(_broker_closed_rows)
@@ -478,11 +510,8 @@ def prepare_closed_trades_broker_cache_on_startup() -> None:
 
 
 def _get_broker_closed_trades_for_ui(*, hours: float = 24.0) -> list[dict[str, Any]]:
-    """First WebSocket enrich forces broker fetch; later frames reuse TTL cache."""
-    global _broker_closed_bootstrapped
-    with _broker_closed_lock:
-        force = not _broker_closed_bootstrapped
-    return _refresh_broker_closed_trades_cache(hours=hours, force=force)
+    """Reuse broker ledger cache for 10 minutes — avoids refresh spam on client reload."""
+    return _refresh_broker_closed_trades_cache(hours=hours, force=False)
 
 
 def _merge_closed_trades_for_ui(
@@ -733,11 +762,14 @@ def start_cockpit_web_server(*, port: int = DEFAULT_COCKPIT_PORT, hz: float = 2.
             return True
         _stop.clear()
         try:
-            from system.protective_learning import clear_operational_locks_for_test_run
+            from system.protective_learning import (
+                activate_test_mode_runtime,
+                clear_operational_locks_for_test_run,
+                ensure_autonomous_engine_on_boot,
+            )
 
+            ensure_autonomous_engine_on_boot()
             clear_operational_locks_for_test_run()
-            from system.protective_learning import activate_test_mode_runtime
-
             activate_test_mode_runtime()
         except Exception as exc:
             log_engine(

@@ -15,6 +15,12 @@ const GATE_LABELS = {
   G4: "Gate 4 · State Hydration",
 };
 
+/** Card A sub-labels when gates reach COMPLETE (avoids stale backend detail strings). */
+const GATE_DETAIL_WHEN_COMPLETE = {
+  G2: "authenticated & session bound",
+  G3: "streaming live broker feed",
+};
+
 const ASSET_NAMES = {
   "CS.D.CFPGOLD.CFP.IP": "Gold",
   "IX.D.DOW.IFM.IP": "Wall Street",
@@ -359,6 +365,19 @@ function gateClass(status) {
   return "pending";
 }
 
+function resolveGateDetail(gid, status, rawDetail) {
+  const s = String(status || "pending").toLowerCase();
+  const detail = String(rawDetail || "").trim();
+  if (s === "complete" || s === "running") {
+    const mapped = GATE_DETAIL_WHEN_COMPLETE[gid];
+    if (mapped) return mapped;
+  }
+  if (gid === "G2" && s === "complete" && /authenticat/i.test(detail)) {
+    return GATE_DETAIL_WHEN_COMPLETE.G2;
+  }
+  return detail;
+}
+
 function renderGates(gates) {
   const grid = $("gate-grid");
   if (!grid) return;
@@ -367,7 +386,7 @@ function renderGates(gates) {
     const label = GATE_LABELS[gid];
     const g = (gates && gates[gid]) || {};
     const status = String(g.status || "pending").toUpperCase();
-    const detail = String(g.detail || "").trim();
+    const detail = resolveGateDetail(gid, g.status, g.detail);
     const row = document.createElement("div");
     row.className = "gate-row";
     row.innerHTML = `
@@ -487,6 +506,7 @@ function renderMarketStatusPill(card, epic, marketStates) {
 function readLocalizedAssetBucket(payload, assetKey) {
   if (!payload || !assetKey) return null;
   const buckets = [
+    payload.avionics_hud,
     payload.avionics_assets,
     payload.avionics_hud,
     payload.hud_assets,
@@ -502,8 +522,23 @@ function readLocalizedAssetBucket(payload, assetKey) {
   return null;
 }
 
-/** Per-instrument market slice — asset-key dict first (GOLD, WALL_STREET), never global fallbacks. */
+/** Per-instrument market slice — explicit avionics_hud / avionics_assets only. */
 function readAssetMarketSlice(payload, assetKey, epic) {
+  if (!assetKey) return {};
+  const hud = payload?.avionics_hud;
+  if (hud && typeof hud === "object" && hud[assetKey]) {
+    const row = hud[assetKey];
+    return row && typeof row === "object" ? row : {};
+  }
+  const top = payload?.[assetKey];
+  if (top && typeof top === "object" && (top.confidence != null || top.rsi != null)) {
+    return top;
+  }
+  const avionics = payload?.avionics_assets;
+  if (avionics && typeof avionics === "object" && avionics[assetKey]) {
+    const row = avionics[assetKey];
+    return row && typeof row === "object" ? row : {};
+  }
   const markets = payload?.markets;
   if (markets && typeof markets === "object") {
     const byAsset = markets[assetKey];
@@ -514,6 +549,11 @@ function readAssetMarketSlice(payload, assetKey, epic) {
   }
   const localized = readLocalizedAssetBucket(payload, assetKey);
   return localized && typeof localized === "object" ? localized : {};
+}
+
+function getAssetCardEl(assetKey) {
+  if (!assetKey) return null;
+  return document.getElementById(`asset-card-${assetKey}`);
 }
 
 function findPositionRowForEpic(payload, epic) {
@@ -617,56 +657,107 @@ function resolveAiWeightLabel(marketSlice) {
 }
 
 function resolveAvionicsMetrics(assetKey, epic, payload) {
+  const localized = readLocalizedAssetBucket(payload, assetKey) || {};
   const marketSlice = readAssetMarketSlice(payload, assetKey, epic);
   const signal =
     marketSlice.signal && typeof marketSlice.signal === "object"
       ? marketSlice.signal
-      : {};
+      : localized.signal && typeof localized.signal === "object"
+        ? localized.signal
+        : {};
   const posRow = findPositionRowForEpic(payload, epic);
 
+  const snap =
+    signal.snapshot && typeof signal.snapshot === "object"
+      ? signal.snapshot
+      : marketSlice.snapshot && typeof marketSlice.snapshot === "object"
+        ? marketSlice.snapshot
+        : {};
+  const lastBar =
+    marketSlice.last && typeof marketSlice.last === "object"
+      ? marketSlice.last
+      : snap.last && typeof snap.last === "object"
+        ? snap.last
+        : {};
+
   let confidence =
+    localized.confidence ??
+    localized.signal_confidence ??
     marketSlice.confidence ??
     marketSlice.signal_confidence ??
     signal.confidence ??
-    signal.signal_confidence;
-  if (confidence == null && posRow) {
+    signal.signal_confidence ??
+    signal.adjusted_confidence;
+  if (
+    confidence == null &&
+    posRow &&
+    String(posRow.epic || "") === String(epic || "")
+  ) {
     confidence = posRow.confidence ?? posRow.signal_confidence;
   }
 
   let rsi =
+    localized.rsi ??
     marketSlice.rsi ??
     signal.rsi ??
+    snap.rsi ??
+    lastBar.rsi ??
     (marketSlice.indicators && marketSlice.indicators.rsi);
-  if (rsi == null && posRow?.rsi != null) rsi = posRow.rsi;
-  if (rsi == null || Number.isNaN(Number(rsi))) rsi = 50;
+  if (
+    rsi == null &&
+    posRow &&
+    String(posRow.epic || "") === String(epic || "") &&
+    posRow.rsi != null
+  ) {
+    rsi = posRow.rsi;
+  }
+
+  const hasRsi = rsi != null && !Number.isNaN(Number(rsi));
+  const hasConf = confidence != null && !Number.isNaN(Number(confidence));
 
   return {
     assetKey,
     epic,
     marketSlice,
-    confidence: Math.max(0, Math.min(100, Number(confidence ?? 0))),
-    rsi: Math.max(0, Math.min(100, Number(rsi))),
+    confidence: hasConf
+      ? Math.max(0, Math.min(100, Number(confidence)))
+      : null,
+    rsi: hasRsi ? Math.max(0, Math.min(100, Number(rsi))) : null,
     blocker: resolveStrategyBlocker(marketSlice),
     aiWeight: resolveAiWeightLabel(marketSlice),
   };
 }
 
-function renderEpicGauges(card, metrics) {
+function renderEpicGauges(assetKey, metrics) {
+  const card = getAssetCardEl(assetKey);
   if (!card || !metrics) return;
-  const conf = Number(metrics.confidence ?? 0);
-  const rsi = Number(metrics.rsi ?? 50);
-  const confPct = Math.max(0, Math.min(100, conf));
-  const rsiPct = Math.max(0, Math.min(100, rsi));
+  const conf = metrics.confidence;
+  const rsi = metrics.rsi;
+  const confPct =
+    conf == null || Number.isNaN(Number(conf))
+      ? null
+      : Math.max(0, Math.min(100, Number(conf)));
+  const rsiPct =
+    rsi == null || Number.isNaN(Number(rsi))
+      ? null
+      : Math.max(0, Math.min(100, Number(rsi)));
 
   const confVal = card.querySelector(".conf-val");
   if (confVal) {
-    confVal.textContent = `${confPct.toFixed(1)}%`;
-    confVal.classList.toggle("conf-above", confPct >= PRODUCTION_CONFIDENCE_FLOOR);
-    confVal.classList.toggle("conf-below", confPct < PRODUCTION_CONFIDENCE_FLOOR);
+    confVal.textContent =
+      confPct == null ? "—" : `${confPct.toFixed(1)}%`;
+    confVal.classList.toggle(
+      "conf-above",
+      confPct != null && confPct >= PRODUCTION_CONFIDENCE_FLOOR
+    );
+    confVal.classList.toggle(
+      "conf-below",
+      confPct != null && confPct < PRODUCTION_CONFIDENCE_FLOOR
+    );
   }
 
   const confFill = card.querySelector(".conf-gauge-fill");
-  if (confFill) confFill.style.width = `${confPct}%`;
+  if (confFill) confFill.style.width = confPct == null ? "0%" : `${confPct}%`;
 
   const confThreshold = card.querySelector(".conf-gauge-threshold");
   if (confThreshold) {
@@ -675,17 +766,25 @@ function renderEpicGauges(card, metrics) {
 
   const rsiVal = card.querySelector(".rsi-val");
   if (rsiVal) {
-    rsiVal.textContent = rsiPct.toFixed(1);
-    rsiVal.classList.toggle("rsi-hot", rsiPct > RSI_OVERBOUGHT_CEILING);
+    rsiVal.textContent = rsiPct == null ? "—" : rsiPct.toFixed(1);
+    rsiVal.classList.toggle(
+      "rsi-hot",
+      rsiPct != null && rsiPct > RSI_OVERBOUGHT_CEILING
+    );
   }
 
   const rsiTrack = card.querySelector(".rsi-heat-track");
   if (rsiTrack) {
-    rsiTrack.classList.toggle("rsi-overbought", rsiPct > RSI_OVERBOUGHT_CEILING);
+    rsiTrack.classList.toggle(
+      "rsi-overbought",
+      rsiPct != null && rsiPct > RSI_OVERBOUGHT_CEILING
+    );
   }
 
   const rsiMarker = card.querySelector(".rsi-heat-marker");
-  if (rsiMarker) rsiMarker.style.left = `${rsiPct}%`;
+  if (rsiMarker) {
+    rsiMarker.style.left = rsiPct == null ? "0%" : `${rsiPct}%`;
+  }
 
   const blockerEl = card.querySelector(".blocker-val");
   if (blockerEl) {
@@ -736,9 +835,12 @@ function renderAssets(payload) {
     const ageS = Number(q.age_s ?? q.tick_age_s ?? 0);
     const stale = ageS > STALE_FEED_SEC;
 
-    let card =
-      container.querySelector(`#asset-card-${assetKey}`) ||
-      container.querySelector(`[data-asset-key="${assetKey}"]`);
+    let card = getAssetCardEl(assetKey);
+    if (!card) {
+      card =
+        container.querySelector(`[data-asset-key="${assetKey}"]`) ||
+        container.querySelector(`[data-epic="${epic}"]`);
+    }
     if (!card) {
       card = document.createElement("div");
       card.className = "asset-card";
@@ -813,7 +915,7 @@ function renderAssets(payload) {
     renderMarketStatusPill(card, epic, marketStates);
     drawSparkline(sparklineCanvases.get(epic), epic);
     const metrics = resolveAvionicsMetrics(assetKey, epic, payload);
-    renderEpicGauges(card, metrics);
+    renderEpicGauges(assetKey, metrics);
   }
 
   container.querySelectorAll(".asset-card").forEach((card) => {
@@ -1021,7 +1123,21 @@ function renderMission(payload) {
   const factor = Number(mission.risk_compression_factor || 1);
   const preservation = Boolean(mission.capital_preservation);
 
-  $("micro-regime").textContent = `REGIME: ${payload.micro_regime || "NEUTRAL"}`;
+  const regimeEl = $("micro-regime");
+  if (regimeEl) {
+    const regime = String(payload.micro_regime || "NEUTRAL").trim().toUpperCase();
+    regimeEl.textContent = `REGIME: ${regime}`;
+    regimeEl.className = "stat-value";
+    if (regime === "NEUTRAL") {
+      regimeEl.classList.add("regime-neutral");
+    } else if (/BULL|MOMENTUM|UP|HIGH|ACTIVE/i.test(regime)) {
+      regimeEl.classList.add("neon-green");
+    } else if (/BEAR|DOWN|LOW|BLOCK/i.test(regime)) {
+      regimeEl.classList.add("regime-caution");
+    } else {
+      regimeEl.classList.add("regime-neutral");
+    }
+  }
   const sessionAp = payload.session_autopilot || {};
   const floorPct = sessionAp.session_micro_floor_pct;
   const rating = Math.round(Number(payload.autopilot_rating || 0));
@@ -1137,13 +1253,37 @@ function resolveClosureReason(row) {
 }
 
 function resolveRealizedPnl(row) {
-  const broker =
-    row?.realized_pnl_gbp ??
-    row?.pnl_gbp ??
-    row?.ig_pnl_currency ??
-    row?.pnl;
-  if (broker == null || Number.isNaN(Number(broker))) return null;
-  return Number(broker);
+  const side = resolvePositionSide(row);
+  const entry = Number(row?.entry_price ?? row?.entry ?? 0);
+  const exit = Number(row?.exit_price ?? row?.exit ?? 0);
+  const size = Math.abs(Number(row?.size ?? row?.dealSize ?? 1)) || 1;
+
+  let pnl = row?.realized_pnl_gbp ?? row?.pnl_gbp ?? row?.ig_pnl_currency ?? row?.pnl;
+  if (pnl != null && !Number.isNaN(Number(pnl))) {
+    pnl = Number(pnl);
+  } else {
+    pnl = null;
+  }
+
+  if (entry > 0 && exit > 0) {
+    const pointsMove = exit - entry;
+    const implied =
+      side === "SELL" ? (entry - exit) * size : pointsMove * size;
+    if (side === "BUY" && exit < entry) {
+      if (pnl == null || Number(pnl) >= 0) {
+        pnl = implied;
+      }
+    } else if (side === "SELL" && exit > entry) {
+      if (pnl == null || Number(pnl) >= 0) {
+        pnl = implied;
+      }
+    } else if (pnl == null) {
+      pnl = implied;
+    }
+  }
+
+  if (pnl == null || Number.isNaN(Number(pnl))) return null;
+  return Number(pnl);
 }
 
 function formatPositionSize(row) {
@@ -1202,7 +1342,12 @@ function renderClosedTransactionHistory(payload) {
     const realized = resolveRealizedPnl(row);
     const pnlClass = pnlToneClass(realized);
     const reason = resolveClosureReason(row);
-    const reasonClass = /LOSS|STOP|MANUAL|FLATTEN/i.test(reason) ? "pnl-loss" : "";
+    const reasonClass =
+      realized != null && Number(realized) < 0
+        ? "pnl-loss"
+        : /LOSS|STOP|MANUAL|FLATTEN/i.test(reason)
+          ? "pnl-loss"
+          : "";
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td>${epicLabel(epic)}</td>
@@ -1400,17 +1545,13 @@ function appendLogLines(lines) {
 }
 
 function formatHeaderClock(now = new Date()) {
-  try {
-    return new Intl.DateTimeFormat(undefined, {
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hour12: false,
-      timeZoneName: "short",
-    }).format(now);
-  } catch (_) {
-    return now.toLocaleTimeString();
-  }
+  const local = now instanceof Date ? now : new Date();
+  return local.toLocaleTimeString(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
 }
 
 function updateClock() {
