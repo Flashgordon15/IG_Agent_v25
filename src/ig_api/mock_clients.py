@@ -57,6 +57,11 @@ class MockIGRest:
         )
         self._positions: list[dict[str, Any]] = []
         self._logged_in = False
+        self._base = (
+            "https://demo-api.ig.com/gateway/deal"
+            if self.account_type == "DEMO"
+            else "https://api.ig.com/gateway/deal"
+        )
 
     @property
     def session(self) -> SessionTokens:
@@ -77,8 +82,45 @@ class MockIGRest:
         if not self._logged_in:
             self.login()
 
-    def fetch_market_snapshot(self, epic: str) -> dict[str, Any]:
-        return {"epic": epic, "bid": self._bid, "offer": self._offer}
+    def fetch_market_snapshot(self, epic: str, *, live: bool = False) -> dict[str, Any]:
+        _ = live
+        return {
+            "epic": epic,
+            "bid": self._bid,
+            "offer": self._offer,
+            "snapshot": {"bid": self._bid, "offer": self._offer},
+        }
+
+    def refresh_account_summary(self) -> dict[str, float | None]:
+        bal = float(self.mock.balance)
+        return {
+            "balance": bal,
+            "available": bal,
+            "profit_loss": 0.0,
+        }
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        headers: dict[str, str] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        _ = (method, path, headers, kwargs)
+
+        class _Resp:
+            status_code = 200
+
+            @staticmethod
+            def json() -> dict[str, Any]:
+                return {"workingOrders": []}
+
+        return _Resp()
+
+    def _auth_headers(self, version: str = "2") -> dict[str, str]:
+        _ = version
+        return {"X-SECURITY-TOKEN": "MOCK", "CST": "MOCK-CST"}
 
     def fetch_account_balance(self) -> float:
         return self.mock.balance

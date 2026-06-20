@@ -169,6 +169,13 @@ def get_market_status(
 
 
 def is_market_open(epic: str, *, at: datetime | None = None) -> bool:
+    try:
+        from system.agent_execution_mode import force_market_open_active
+
+        if force_market_open_active():
+            return True
+    except Exception:
+        pass
     status = get_market_status(epic, at=at)
     if status is None:
         return True

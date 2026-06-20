@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -137,7 +137,9 @@ def learning_status() -> dict[str, Any]:
         from system.config_loader import ConfigLoader
         from system.paths import config_dir
 
-        cfg = ConfigLoader(config_dir() / "config_v25.json").load_config()
+        from system.config_loader import load_active_config
+
+        cfg = load_active_config(validate=False)
         store = LearningStore(str(cfg.learning_db))
         if hasattr(store, "recent_confirmed_closed_trades"):
             confirmed = len(store.recent_confirmed_closed_trades(limit=500))
@@ -172,3 +174,55 @@ def run_replay_pipeline() -> dict[str, Any]:
         }
     rc = _run(scheduled=False)
     return {"ok": rc == 0, "returncode": rc}
+
+
+def _live_microstructure() -> dict[str, Any]:
+    """Live intelligence layer verdicts — memory-only reads."""
+    epics = (
+        "CS.D.CFPGOLD.CFP.IP",
+        "IX.D.DOW.IFM.IP",
+        "IX.D.NIKKEI.IFM.IP",
+        "CS.D.EURUSD.CFD.IP",
+    )
+    out: dict[str, Any] = {}
+    try:
+        from intelligence.pipeline_bridge import get_intelligence_layer
+
+        layer = get_intelligence_layer()
+        for epic in epics:
+            mi = layer.microstructure_verdict(epic)
+            sp = layer.spread_verdict(epic)
+            out[epic] = {
+                "regime": str(mi.regime),
+                "confidence": round(float(mi.confidence), 1),
+                "spread_z": round(float(sp.z_score), 2),
+                "blocked": bool(sp.blocked),
+                "throttle": round(float(sp.throttle_factor), 2),
+            }
+    except Exception:
+        pass
+    return out
+
+
+def intelligence_dashboard() -> dict[str, Any]:
+    """Unified intelligence tab payload — replay, shadow, learning, live plane."""
+    payload: dict[str, Any] = {
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "replay": replay_summary(),
+        "shadow": shadow_today(),
+        "learning": learning_status(),
+        "microstructure": _live_microstructure(),
+    }
+    try:
+        from apex.operational_transparency import build_funnel_snapshot
+
+        payload["funnel"] = build_funnel_snapshot()
+    except Exception:
+        payload["funnel"] = {}
+    try:
+        from system.learning_health import build_learning_health_report
+
+        payload["learning_health"] = build_learning_health_report(refresh_registry=False)
+    except Exception:
+        payload["learning_health"] = {}
+    return payload

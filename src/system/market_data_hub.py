@@ -32,13 +32,26 @@ class QuoteSnapshot:
     offer: float
     updated_at: float
     source: str = "ig"
+    quote_time: float | None = None
+
+    def _reference_epoch(self) -> float:
+        return float(self.quote_time if self.quote_time is not None else self.updated_at)
 
     def age_seconds(self) -> float:
-        return max(0.0, time.time() - self.updated_at)
+        ref = self._reference_epoch()
+        try:
+            from simulation.replay_clock import is_replay_active, now
+
+            if is_replay_active():
+                return max(0.0, now() - ref)
+        except Exception:
+            pass
+        return max(0.0, time.time() - ref)
 
     def to_quote(self) -> Quote:
+        ref = self._reference_epoch()
         return Quote(
-            time=datetime.fromtimestamp(self.updated_at), bid=self.bid, offer=self.offer
+            time=datetime.fromtimestamp(ref), bid=self.bid, offer=self.offer
         )
 
 
@@ -59,6 +72,19 @@ class MarketDataHub:
         self._spread_history_max = 200
 
     def attach_rest(self, rest_client: Any) -> None:
+        try:
+            from system.apex_runtime_mode import ApexRuntimeMode, get_apex_runtime_mode
+
+            if get_apex_runtime_mode() is ApexRuntimeMode.HARDENED_TESTBED:
+                from system.engine_log import log_engine
+
+                log_engine(
+                    "MarketDataHub: REST attach blocked — HARDENED_TESTBED uses "
+                    "loopback replay only"
+                )
+                return
+        except Exception:
+            pass
         with self._lock:
             self._rest = rest_client
 
@@ -190,13 +216,31 @@ class MarketDataHub:
         return True, spread_multiplier_ratio
 
     def publish(
-        self, epic: str, bid: float, offer: float, *, source: str = "stream"
-    ) -> QuoteSnapshot:
+        self,
+        epic: str,
+        bid: float,
+        offer: float,
+        *,
+        source: str = "stream",
+        quote_time: float | None = None,
+    ) -> QuoteSnapshot | None:
+        from system.market_integrity import should_publish_live_quote
+
+        epic_key = str(epic or "").strip()
+        if not should_publish_live_quote(epic_key, source=source):
+            self.invalidate(epic_key)
+            return None
         if bid > 0 and offer > 0:
-            self.exit_maintenance(epic)
-            self.record_spread(epic, offer - bid)
+            self.exit_maintenance(epic_key)
+            self.record_spread(epic_key, offer - bid)
+        epoch = float(quote_time if quote_time is not None else time.time())
         snap = QuoteSnapshot(
-            epic=epic, bid=bid, offer=offer, updated_at=time.time(), source=source
+            epic=epic_key,
+            bid=bid,
+            offer=offer,
+            updated_at=epoch,
+            quote_time=quote_time,
+            source=source,
         )
         with self._lock:
             self._quotes[epic] = snap
@@ -214,6 +258,34 @@ class MarketDataHub:
         self._emit_quote(snap)
         return snap
 
+    def publish_replay_tick(
+        self,
+        epic: str,
+        bid: float,
+        offer: float,
+        *,
+        quote_time: float,
+        source: str = "replay",
+    ) -> QuoteSnapshot | None:
+        """Ingest deterministic replay packet — virtual clock synced to *quote_time*."""
+        from simulation.replay_clock import set_replay_time
+
+        epoch = float(quote_time)
+        set_replay_time(epoch)
+        try:
+            from simulation.replay_telemetry import record_tick
+
+            record_tick(epic=epic_key)
+        except Exception:
+            pass
+        return self.publish(
+            epic,
+            bid,
+            offer,
+            source=source,
+            quote_time=epoch,
+        )
+
     def get_snapshot(self, epic: str) -> QuoteSnapshot | None:
         with self._lock:
             return self._quotes.get(epic)
@@ -224,9 +296,11 @@ class MarketDataHub:
 
     def invalidate(self, epic: str) -> None:
         """Drop cached quote timestamps for an epic (session transition reset)."""
+        epic_key = str(epic or "").strip()
         with self._lock:
-            self._quotes.pop(epic, None)
-            self._last_fetch_ts.pop(epic, None)
+            self._quotes.pop(epic_key, None)
+            self._last_fetch_ts.pop(epic_key, None)
+            self._spread_history.pop(epic_key, None)
 
     def is_fresh(self, epic: str, *, max_age: float = 10.0) -> bool:
         snap = self.get_snapshot(epic)

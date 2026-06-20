@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,7 @@ LONDON = ZoneInfo("Europe/London")
 DEFAULT_INTERVAL = "5m"
 DEFAULT_PERIOD = "60d"
 MIN_BARS_REQUIRED = 100
+YAHOO_NETWORK_TIMEOUT_SEC = 20.0
 
 # IG epic → (Yahoo symbol, display market name)
 EPIC_YAHOO_MAP: dict[str, tuple[str, str]] = {
@@ -57,6 +59,11 @@ def _price_decimals(yahoo_symbol: str) -> int:
     if sym.startswith("^"):
         return 1
     return 2
+
+
+def default_spread_for_yahoo_symbol(yahoo_symbol: str, close: float = 0.0) -> float:
+    """Public spread estimate for Yahoo reference bid/offer synthesis."""
+    return _default_spread(yahoo_symbol, close)
 
 
 def _default_spread(yahoo_symbol: str, close: float) -> float:
@@ -171,6 +178,22 @@ def _write_bars(path: Path, bars: list[dict[str, Any]]) -> None:
         os.fsync(handle.fileno())
 
 
+def count_cached_bars(epic: str, market: str = "") -> int:
+    """Count JSONL bars already on disk for an epic."""
+    try:
+        from trading.ohlc_bootstrap import local_cache_bar_count
+
+        return int(local_cache_bar_count(epic, market))
+    except Exception:
+        path = ohlc_cache_path(epic, market=market)
+        if not path.is_file():
+            return 0
+        try:
+            return sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
+        except OSError:
+            return 0
+
+
 def fetch_yahoo_ohlc(
     symbol: str,
     interval: str,
@@ -178,6 +201,7 @@ def fetch_yahoo_ohlc(
     output_path: Path | str,
     *,
     overwrite: bool = True,
+    network_timeout_sec: float = YAHOO_NETWORK_TIMEOUT_SEC,
 ) -> int:
     """
     Download Yahoo history, resample to 5m, validate, and write JSONL cache.
@@ -187,35 +211,56 @@ def fetch_yahoo_ohlc(
     import yfinance as yf
 
     out = Path(output_path)
-    log_engine(f"Yahoo OHLC fetch: symbol={symbol} interval={interval} period={period}")
-    ticker = yf.Ticker(symbol)
-    df = ticker.history(period=period, interval=interval, auto_adjust=False)
-    if df is None or df.empty:
-        raise RuntimeError(f"Yahoo returned no data for {symbol}")
 
-    bars = _bars_from_dataframe(df, symbol)
-    ok, reason = validate_bars(bars)
-    if not ok:
-        raise RuntimeError(f"Yahoo bar validation failed: {reason}")
+    def _download() -> int:
+        log_engine(f"Yahoo OHLC fetch: symbol={symbol} interval={interval} period={period}")
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(period=period, interval=interval, auto_adjust=False)
+        if df is None or df.empty:
+            raise RuntimeError(f"Yahoo returned no data for {symbol}")
 
-    if not overwrite and out.is_file():
-        existing: dict[str, dict[str, Any]] = {}
-        for line in out.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                try:
-                    row = json.loads(line)
-                    t = str(row.get("t") or "")
-                    if t:
-                        existing[t] = row
-                except json.JSONDecodeError:
-                    continue
-        for bar in bars:
-            existing[str(bar["t"])] = bar
-        bars = [existing[k] for k in sorted(existing)]
+        bars = _bars_from_dataframe(df, symbol)
+        ok, reason = validate_bars(bars)
+        if not ok:
+            raise RuntimeError(f"Yahoo bar validation failed: {reason}")
 
-    _write_bars(out, bars)
-    log_engine(f"Yahoo OHLC complete: {len(bars)} bars → {out}")
-    return len(bars)
+        if not overwrite and out.is_file():
+            existing: dict[str, dict[str, Any]] = {}
+            for line in out.read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    try:
+                        row = json.loads(line)
+                        t = str(row.get("t") or "")
+                        if t:
+                            existing[t] = row
+                    except json.JSONDecodeError:
+                        continue
+            for bar in bars:
+                existing[str(bar["t"])] = bar
+            bars = [existing[k] for k in sorted(existing)]
+
+        _write_bars(out, bars)
+        log_engine(f"Yahoo OHLC complete: {len(bars)} bars → {out}")
+        return len(bars)
+
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="yahoo-dl") as pool:
+        fut = pool.submit(_download)
+        try:
+            return int(fut.result(timeout=max(5.0, float(network_timeout_sec))))
+        except FuturesTimeoutError as exc:
+            cached = 0
+            if out.is_file():
+                cached = sum(
+                    1 for line in out.read_text(encoding="utf-8").splitlines() if line.strip()
+                )
+            if cached >= MIN_BARS_REQUIRED:
+                log_engine(
+                    f"Yahoo OHLC timeout for {symbol} — using existing cache ({cached} bars)"
+                )
+                return cached
+            raise TimeoutError(
+                f"Yahoo OHLC timeout after {network_timeout_sec:.0f}s for {symbol}"
+            ) from exc
 
 
 def fetch_yahoo_ohlc_for_epic(
@@ -224,21 +269,42 @@ def fetch_yahoo_ohlc_for_epic(
     *,
     interval: str = DEFAULT_INTERVAL,
     period: str = DEFAULT_PERIOD,
+    skip_network_if_cache_ready: bool = True,
+    min_bars: int = MIN_BARS_REQUIRED,
+    network_timeout_sec: float = YAHOO_NETWORK_TIMEOUT_SEC,
 ) -> int:
-    """Resolve epic → Yahoo symbol and cache path, then fetch."""
+    """Resolve epic → Yahoo symbol and cache path, then fetch (cache-first)."""
     key = str(epic or "").strip()
     mapping = EPIC_YAHOO_MAP.get(key)
     if mapping is None:
         raise ValueError(f"No Yahoo mapping for epic {epic!r}")
-    yahoo_symbol, _ = mapping
-    cache_path = ohlc_cache_path(key, market=market or mapping[1])
-    return fetch_yahoo_ohlc(
-        yahoo_symbol,
-        interval,
-        period,
-        cache_path,
-        overwrite=True,
-    )
+    yahoo_symbol, display_market = mapping
+    cache_market = market or display_market
+    cache_path = ohlc_cache_path(key, market=cache_market)
+    cached = count_cached_bars(key, cache_market)
+    if skip_network_if_cache_ready and cached >= min_bars:
+        log_engine(
+            f"Yahoo OHLC cache hit {key}: {cached} bars — skip network "
+            f"(min>={min_bars})"
+        )
+        return cached
+    try:
+        return fetch_yahoo_ohlc(
+            yahoo_symbol,
+            interval,
+            period,
+            cache_path,
+            overwrite=True,
+            network_timeout_sec=network_timeout_sec,
+        )
+    except Exception as exc:
+        if cached >= min_bars:
+            log_engine(
+                f"Yahoo OHLC network failed {key}, using cache ({cached} bars): "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return cached
+        raise
 
 
 def seed_default_instruments() -> dict[str, int]:

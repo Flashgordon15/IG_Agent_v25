@@ -13,7 +13,7 @@ async function getJson(path, options = {}) {
   }
 }
 
-/** Full tick snapshot (same schema as WebSocket) — not the flat /api/state summary. */
+/** Full tick snapshot (IPC / REST) — not the flat /api/state summary. */
 export function fetchState() {
   return getJson("/state");
 }
@@ -36,6 +36,10 @@ export function fetchShadowToday() {
 
 export function fetchLearningStatus() {
   return getJson("/api/learning/status");
+}
+
+export function fetchIntelligenceDashboard() {
+  return getJson("/api/intelligence/dashboard");
 }
 
 export function fetchV26Profit() {

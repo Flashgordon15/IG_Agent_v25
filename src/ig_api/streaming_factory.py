@@ -81,6 +81,22 @@ def create_streaming_client(
 
     transport: auto | rest_poll | lightstreamer (from config when None)
     """
+    try:
+        from system.apex_runtime_mode import ApexRuntimeMode, get_apex_runtime_mode
+
+        if get_apex_runtime_mode() is ApexRuntimeMode.HARDENED_TESTBED:
+            from ig_api.testbed_loopback_transport import TestbedLoopbackTransport
+
+            log_engine(
+                "Streaming transport=testbed_loopback — outbound network dropped "
+                "(HARDENED_TESTBED)"
+            )
+            return TestbedLoopbackTransport(poll_interval_seconds=poll_interval_seconds)
+    except Exception as exc:
+        log_engine(
+            f"Testbed loopback transport init failed: {type(exc).__name__}: {exc}"
+        )
+
     from system.config_loader import get_config
 
     requested = transport or get_config().streaming_transport

@@ -11,20 +11,19 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from data.models import Quote
 from signals.indicators import (
-    atr,
     bucket,
-    ema,
-    rsi,
     session_name,
     vol_regime,
 )
 from system.config import Config
 from system.config_loader import get_config
 from system.paths import data_dir
+from signals.feature_state import FEATURE_STATE_DIM, compile_current_feature_state
 
 H1_EMA_SOFT_PENALTY = 8.0
 H1_ML_PENALTY_WAIVER_PROB = 0.75
@@ -36,6 +35,50 @@ _IG_SNAPSHOT_TIME = re.compile(
     r"^(\d{4})[/-](\d{1,2})[/-](\d{1,2})[T:\s](\d{1,2}):(\d{2})(?::(\d{2}))?"
 )
 _rest_rate_limit_epics: set[str] = set()
+
+
+_FLOAT64 = np.float64
+
+
+def _indicator_row_at(df: pd.DataFrame, index: int) -> dict[str, Any]:
+    """
+    Extract one OHLC/indicator row via float64 column vectors (no .iloc).
+
+    Negative indices follow Python sequence rules relative to frame length.
+    """
+    n = len(df)
+    if n == 0:
+        return {}
+    i = int(index)
+    if i < 0:
+        i = n + i
+    i = max(0, min(i, n - 1))
+    row: dict[str, Any] = {}
+    for col in df.columns:
+        series = df[col]
+        if col in (
+            "rsi",
+            "atr",
+            "fast_ema",
+            "slow_ema",
+            "close",
+            "price",
+            "open",
+            "high",
+            "low",
+            "bid",
+            "offer",
+            "spread",
+            "mid",
+        ):
+            arr = np.asarray(series.to_numpy(dtype=_FLOAT64, copy=False))
+            if len(arr) > i and np.isfinite(arr[i]):
+                row[col] = float(arr[i])
+            else:
+                row[col] = 0.0
+        else:
+            row[col] = series.iat[i]
+    return row
 
 
 def mark_rest_rate_limit_local_fallback(*, epic: str = "", market: str = "") -> None:
@@ -335,8 +378,8 @@ class SignalEngine:
             if len(c5) < 2:
                 return
             c5i = self.add_indicators(c5)
-            live_row = c5i.iloc[-1]
-            closed_row = c5i.iloc[-2] if len(c5i) >= 2 else live_row
+            live_row = _indicator_row_at(c5i, -1)
+            closed_row = _indicator_row_at(c5i, -2) if len(c5i) >= 2 else live_row
             rsi_live = float(live_row.get("rsi") or 0)
             rsi_closed = float(closed_row.get("rsi") or 0)
             rsi_val = rsi_live if rsi_live > 0 else rsi_closed
@@ -507,15 +550,17 @@ class SignalEngine:
             out["rsi"] = 50.0
             out["fast_ema"] = out["price"]
             out["slow_ema"] = out["price"]
-        else:
-            out["fast_ema"] = ema(out["price"], cfg.fast_ema)
-            out["slow_ema"] = ema(out["price"], cfg.slow_ema)
-            out["rsi"] = rsi(out["price"], period)
-            out["rsi"] = out["rsi"].fillna(50.0)
-        if all(c in out.columns for c in ("high", "low", "close")):
-            out["atr"] = atr(out, cfg.atr_period)
-        else:
             out["atr"] = 0.0
+        else:
+            from signals.indicators import apply_indicators_frame
+
+            out = apply_indicators_frame(
+                out,
+                fast_span=int(cfg.fast_ema),
+                slow_span=int(cfg.slow_ema),
+                rsi_period=period,
+                atr_period=int(cfg.atr_period),
+            )
         return out
 
     @staticmethod
@@ -651,8 +696,8 @@ class SignalEngine:
 
         c1i = self.add_indicators(c1)
         bar_i, prev_i, _ = self._signal_bar_indices(len(c1i))
-        bar_1m = c1i.iloc[bar_i]
-        prev_1m = c1i.iloc[prev_i] if len(c1i) >= abs(prev_i) else None
+        bar_1m = _indicator_row_at(c1i, bar_i)
+        prev_1m = _indicator_row_at(c1i, prev_i) if len(c1i) >= abs(prev_i) else None
         rsi_1m = float(bar_1m.get("rsi", 50) or 50)
         close_1m = float(bar_1m.get("close", bar_1m.get("price", 0)) or 0)
         open_1m = float(bar_1m.get("open", close_1m) or close_1m)
@@ -768,6 +813,30 @@ class SignalEngine:
             return False
         return peak_score >= float(threshold)
 
+    def apply_dispatch_promotion(self, market: str, sig: SignalResult) -> SignalResult:
+        """
+        Sync promoted BUY/SELL from trading loop into engine snapshot state.
+
+        Prevents HUD / shadow consumers from reading stale WAIT after dispatch promotion.
+        """
+        direction = str(sig.signal or "").strip().upper()
+        if direction not in ("BUY", "SELL"):
+            return sig
+        key = self._resolve_market_key(market)
+        snap = dict(self.last_snapshot.get(key) or {})
+        inner = dict(sig.snapshot or {})
+        raw = str(inner.get("raw_signal") or direction).strip().upper()
+        snap["raw_signal"] = raw
+        snap["dispatch_signal"] = direction
+        snap["dispatch_promoted"] = True
+        snap["adjusted_confidence"] = float(sig.adjusted_confidence)
+        snap["raw_confidence"] = float(sig.raw_confidence)
+        for field in ("buy_score", "sell_score", "last", "hud_rsi"):
+            if field in inner:
+                snap[field] = inner[field]
+        self.last_snapshot[key] = snap
+        return sig
+
     def _log_evaluation_shadow(
         self,
         market: str,
@@ -836,12 +905,12 @@ class SignalEngine:
         c60i = self.add_indicators(c60)
 
         last_i, prev_i, prev2_i = self._signal_bar_indices(len(c5i))
-        last = c5i.iloc[last_i]
-        prev = c5i.iloc[prev_i]
-        prev2 = c5i.iloc[prev2_i]
-        trend15 = c15i.iloc[self._trend_bar_index(len(c15i))]
+        last = _indicator_row_at(c5i, last_i)
+        prev = _indicator_row_at(c5i, prev_i)
+        prev2 = _indicator_row_at(c5i, prev2_i)
+        trend15 = _indicator_row_at(c15i, self._trend_bar_index(len(c15i)))
         trend60 = (
-            c60i.iloc[self._trend_bar_index(len(c60i))]
+            _indicator_row_at(c60i, self._trend_bar_index(len(c60i)))
             if len(c60i) >= 2
             else None
         )
@@ -856,7 +925,7 @@ class SignalEngine:
         # Include the close price in the key so that re-evaluating after quotes are
         # updated (even with the same timestamps) produces a fresh evaluation.
         close_px_key = round(float(last.get("close", last.get("price", 0))), 0)
-        closed_bar_key = (market, str(last.get("time", last.name)), close_px_key)
+        closed_bar_key = (market, str(last.get("time", "")), close_px_key)
         if REQUIRE_CLOSED_BAR_G5 and self._last_signal_bar.get(market) == closed_bar_key:
             snap = self.last_snapshot.get(market, {})
             raw = float(snap.get("raw_confidence", 0) or 0)
@@ -928,9 +997,19 @@ class SignalEngine:
         except Exception:
             pass
 
-        atr_ok = (
-            cfg.min_atr_points <= 0 or float(last.get("atr", 0)) >= cfg.min_atr_points
-        )
+        atr_ok = True
+        try:
+            from system.agent_execution_mode import demo_operational_floors_active
+
+            min_atr = (
+                0.0
+                if demo_operational_floors_active()
+                else float(getattr(cfg, "min_atr_points", 0) or 0)
+            )
+        except Exception:
+            min_atr = float(getattr(cfg, "min_atr_points", 0) or 0)
+        if min_atr > 0:
+            atr_ok = float(last.get("atr", 0)) >= min_atr
 
         # Volatility regime — classify current ATR as low/normal/high for learning context.
         # The regime label is included in setup_key so the adaptive engine naturally

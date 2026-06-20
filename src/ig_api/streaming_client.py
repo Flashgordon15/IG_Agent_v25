@@ -4,10 +4,14 @@ IG price streaming — REST poll transport when Lightstreamer SDK is unavailable
 
 from __future__ import annotations
 
+import logging
+import os
+import socket
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 from typing import Any
 
@@ -25,6 +29,202 @@ from system.credentials_loader import Credentials
 from system.demo_execution_trace import trace_execution, update_demo_diagnostics
 from system.demo_rest_log import log_demo_rest
 from system.engine_log import log_engine
+
+_PING_INTERVAL_SEC = 3.0
+_PING_TIMEOUT_SEC = 2.0
+_network_stable = True
+_network_uptime_ok = 0
+_network_lock = threading.Lock()
+_sentinel_stop = threading.Event()
+_sentinel_thread: threading.Thread | None = None
+_rehandshake_lock = threading.Lock()
+_execution_halt_last_log_mono = 0.0
+_EXECUTION_HALT_LOG_INTERVAL_SEC = 30.0
+
+
+class _NetworkLogFormatter(logging.Formatter):
+    def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
+        ct = datetime.fromtimestamp(record.created)
+        return f"{ct.strftime('%Y-%m-%d %H:%M:%S')}.{int(record.msecs):03d}"
+
+
+def _network_log_path() -> Any:
+    from pathlib import Path
+
+    from system.paths import project_root
+
+    log_dir = project_root() / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return log_dir / "network_stability.log"
+
+
+def _network_stability_logger() -> logging.Logger:
+    logger = logging.getLogger("ig_agent.network_stability")
+    if getattr(logger, "_ig_agent_file_configured", False):
+        return logger
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    handler = logging.FileHandler(_network_log_path(), encoding="utf-8")
+    handler.setFormatter(
+        _NetworkLogFormatter("[%(asctime)s] %(message)s")
+    )
+    logger.addHandler(handler)
+    logger._ig_agent_file_configured = True  # type: ignore[attr-defined]
+    return logger
+
+
+def log_network_stability(message: str) -> None:
+    _network_stability_logger().info(message)
+
+
+def get_network_stable() -> bool:
+    with _network_lock:
+        return _network_stable
+
+
+def _set_network_stable(stable: bool) -> None:
+    global _network_stable
+    with _network_lock:
+        _network_stable = stable
+
+
+def log_execution_halt() -> None:
+    global _execution_halt_last_log_mono
+    now = time.monotonic()
+    if now - _execution_halt_last_log_mono < _EXECUTION_HALT_LOG_INTERVAL_SEC:
+        return
+    _execution_halt_last_log_mono = now
+    log_network_stability(
+        "[EXECUTION HALT] Core loop paused. Preventing trade initialization "
+        "during network blackout state."
+    )
+
+
+def _ig_ping_host() -> str:
+    try:
+        from system.credentials_holder import get_credentials_holder
+
+        creds = get_credentials_holder().credentials
+        if creds is not None and str(getattr(creds, "account_type", "") or "").upper() == "LIVE":
+            return "api.ig.com"
+    except Exception:
+        pass
+    return "demo-api.ig.com"
+
+
+def _ping_tcp(host: str, port: int = 443, *, timeout: float = _PING_TIMEOUT_SEC) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _ping_target(target: str) -> tuple[bool, str]:
+    if target == "cloudflare":
+        ok = _ping_tcp("1.1.1.1")
+        return ok, "1.1.1.1"
+    host = _ig_ping_host()
+    ok = _ping_tcp(host)
+    return ok, host
+
+
+def _perform_clean_stream_rehandshake() -> None:
+    if not _rehandshake_lock.acquire(blocking=False):
+        return
+    try:
+        from runtime.agent_bootstrap import start_market_stream, stop_market_stream
+        from system.config_loader import get_config
+        from system.credentials_holder import get_credentials_holder
+        from system.ig_rest_session import ensure_shared_authenticated
+
+        stop_market_stream()
+        creds = get_credentials_holder().credentials
+        if creds is None:
+            log_engine("network re-handshake skipped — no credentials")
+            return
+        rest = ensure_shared_authenticated(creds)
+        if hasattr(rest, "ensure_session"):
+            rest.ensure_session()
+        cfg = get_config()
+        start_market_stream(cfg, rest_client=rest, clear_stream_ready=True)
+        pid = os.getpid()
+        log_network_stability(
+            f"[RECONFIG COMPLETE] Stream tickers re-subscribed. PID active and tracking."
+        )
+        log_engine(f"network re-handshake complete pid={pid}")
+    except Exception as e:
+        log_engine(f"network re-handshake failed: {type(e).__name__}: {e}")
+        log_network_stability(
+            f"[RECONFIG FAILED] Stream re-handshake error: {type(e).__name__}: {e}"
+        )
+    finally:
+        _rehandshake_lock.release()
+
+
+def network_heartbeat_sentinel() -> None:
+    """Background loop — alternate Cloudflare + IG TCP reachability every 3s."""
+    global _network_uptime_ok
+    targets = ("cloudflare", "ig_api")
+    idx = 0
+    while not _sentinel_stop.is_set():
+        target = targets[idx % len(targets)]
+        idx += 1
+        ok, host = _ping_target(target)
+        if ok:
+            _network_uptime_ok += 1
+            if not get_network_stable():
+                _set_network_stable(True)
+                log_network_stability(
+                    "[CONNECTION RESTORED] Internet link recovered. "
+                    "Initializing clean socket re-handshake."
+                )
+                log_engine(f"network restored via ping host={host}")
+                _perform_clean_stream_rehandshake()
+        else:
+            if get_network_stable():
+                _set_network_stable(False)
+                log_network_stability(
+                    "[DISCONNECT DETECTED] Network ping failed. "
+                    "Status: ConnectionError."
+                )
+                log_engine(f"network disconnect detected ping host={host}")
+        _sentinel_stop.wait(_PING_INTERVAL_SEC)
+
+
+def ensure_network_heartbeat_sentinel_started() -> None:
+    global _sentinel_thread
+    if _sentinel_thread is not None and _sentinel_thread.is_alive():
+        return
+    _sentinel_stop.clear()
+    _sentinel_thread = threading.Thread(
+        target=network_heartbeat_sentinel,
+        name="network-heartbeat-sentinel",
+        daemon=True,
+    )
+    _sentinel_thread.start()
+    log_network_stability(
+        "[SENTINEL START] Network heartbeat monitor active "
+        f"(interval={_PING_INTERVAL_SEC:.0f}s, targets=1.1.1.1/IG)."
+    )
+    log_engine("network heartbeat sentinel started (3s Cloudflare/IG alternation)")
+
+
+def stop_network_heartbeat_sentinel() -> None:
+    global _sentinel_thread
+    _sentinel_stop.set()
+    t = _sentinel_thread
+    if t is not None and t.is_alive():
+        t.join(timeout=5.0)
+    _sentinel_thread = None
+
+
+def reset_network_stability_for_tests() -> None:
+    global _network_uptime_ok, _execution_halt_last_log_mono
+    stop_network_heartbeat_sentinel()
+    _set_network_stable(True)
+    _network_uptime_ok = 0
+    _execution_halt_last_log_mono = 0.0
 
 
 class ConnectionState(str, Enum):
@@ -143,6 +343,7 @@ class IGStreamingClient:
         )
         self._thread = threading.Thread(target=self._poll_loop, daemon=True, name="IGStreamPoll")
         self._thread.start()
+        ensure_network_heartbeat_sentinel_started()
         trace_execution(
             "STREAM",
             "IGStreamingClient.connect",

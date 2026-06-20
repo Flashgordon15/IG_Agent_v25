@@ -17,7 +17,15 @@ from system.gate_activity import last_gate_check_by_epic, seconds_since_last_gat
 from system.paths import data_dir, logs_dir
 
 _API_HOST = "127.0.0.1"
-_API_PORT = 8080
+
+
+def _resolve_api_port() -> int:
+    try:
+        from system.boot.preflight_helpers import resolve_api_port
+
+        return resolve_api_port()
+    except Exception:
+        return int(os.environ.get("IG_API_PORT", "8080"))
 _DEFAULT_QUOTE_MAX_AGE_SEC = 45.0
 _REST_POLL_QUOTE_MAX_AGE_FLOOR_SEC = 120.0
 _WATCHDOG_MARKER = "scripts/watchdog.sh"
@@ -50,7 +58,9 @@ def _health_pid_fields() -> dict[str, Any]:
     return {"agent_pid": _agent_pid()}
 
 
-def _port_bound(port: int = _API_PORT) -> bool:
+def _port_bound(port: int | None = None) -> bool:
+    if port is None:
+        port = _resolve_api_port()
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         return s.connect_ex((_API_HOST, port)) == 0

@@ -21,24 +21,24 @@ class Gate1RunnerTests(unittest.TestCase):
     def tearDown(self) -> None:
         SystemState.reset_singleton_for_tests()
 
+    @patch("system.boot.port_eviction.reclaim_and_wait", return_value=True)
     @patch("system.demo_guard.validate_demo_only_startup", return_value=(True, "demo ok"))
-    @patch("system.boot.gate1_runner.bootstrap_credentials")
-    @patch("system.boot.gate1_runner.acquire_instance_lock", return_value=(True, "ok"))
-    @patch("system.boot.gate1_runner.validate_config", return_value=(True, []))
-    @patch("system.boot.gate1_runner.emergency_stop_lock_present", return_value=False)
-    @patch("system.boot.gate1_runner.check_port_available", return_value=True)
-    @patch("system.boot.gate1_runner.load_raw_config_dict", return_value={"epic": "TEST"})
-    @patch("system.boot.gate1_runner.rotate_oversized_logs")
+    @patch("system.credentials_holder.bootstrap_credentials")
+    @patch("system.instance_lock.acquire_instance_lock", return_value=(True, "ok"))
+    @patch("system.config_validator.validate_config", return_value=(True, []))
+    @patch("system.config_validator.emergency_stop_lock_present", return_value=False)
+    @patch("system.boot.preflight_helpers.load_raw_config_dict", return_value={"epic": "TEST"})
+    @patch("system.boot.preflight_helpers.rotate_oversized_logs")
     def test_gate1_success_marks_complete(
         self,
         _rotate: MagicMock,
         _raw: MagicMock,
-        _port: MagicMock,
         _emerg: MagicMock,
         _valid: MagicMock,
         _lock: MagicMock,
         _cred: MagicMock,
         _demo: MagicMock,
+        _reclaim: MagicMock,
     ) -> None:
         ctx = BootContext()
         Gate1Runner(get_system_state(), ctx).run()
@@ -49,8 +49,8 @@ class Gate1RunnerTests(unittest.TestCase):
         self.assertIsNotNone(ctx.config)
         self.assertIsNotNone(ctx.raw_config)
 
-    @patch("system.boot.gate1_runner.emergency_stop_lock_present", return_value=True)
-    @patch("system.boot.gate1_runner.rotate_oversized_logs")
+    @patch("system.config_validator.emergency_stop_lock_present", return_value=True)
+    @patch("system.boot.preflight_helpers.rotate_oversized_logs")
     def test_gate1_emergency_lock_raises(self, _rotate: MagicMock, _emerg: MagicMock) -> None:
         with self.assertRaises(Gate1FatalError):
             Gate1Runner().run()
@@ -113,13 +113,15 @@ class Gate2RunnerTests(unittest.TestCase):
         self.assertIsNotNone(ctx.config)
 
     @patch("system.boot.gate2_runner.get_credentials_holder")
-    def test_gate2_missing_credentials_stalls_failed(self, holder_mock: MagicMock) -> None:
+    def test_gate2_missing_credentials_uses_mock_feed(self, holder_mock: MagicMock) -> None:
         holder_mock.return_value.credentials = None
-        Gate2Runner().run()
+        ctx = BootContext()
+        Gate2Runner(get_system_state(), ctx).run()
         snap = get_system_state().snapshot()
-        self.assertEqual(snap["phase"], BootPhase.FAILED)
-        self.assertEqual(snap["error_gate"], "G2")
-        self.assertIn("Credentials not loaded", snap["error"] or "")
+        self.assertNotEqual(snap.get("error_gate"), "G2")
+        self.assertTrue(snap["hydration"]["positions_synced"])
+        self.assertIsNotNone(ctx.rest_client)
+        self.assertTrue(ctx.account_verify.get("mock_feed"))
 
 
 class Gate3RunnerTests(unittest.TestCase):
@@ -131,6 +133,7 @@ class Gate3RunnerTests(unittest.TestCase):
     def tearDown(self) -> None:
         SystemState.reset_singleton_for_tests()
 
+    @patch("feeder.pricing_transport.reference_transport_is_yahoo", return_value=False)
     @patch("system.boot.gate3_runner._first_live_tick_epic", return_value="CS.D.EURUSD.CFD.IP")
     @patch("system.boot.gate3_runner._stream_heartbeat_ok", return_value=True)
     @patch("runtime.agent_bootstrap.start_market_stream")
@@ -145,6 +148,7 @@ class Gate3RunnerTests(unittest.TestCase):
         stream_mock: MagicMock,
         _hb: MagicMock,
         _tick: MagicMock,
+        _yahoo_flag: MagicMock,
     ) -> None:
         client = MagicMock()
         client.transport_label = "rest_poll"
@@ -170,6 +174,47 @@ class Gate3RunnerTests(unittest.TestCase):
         self.assertNotEqual(snap.get("error_gate"), "G3")
         self.assertTrue(snap["streaming"]["heartbeat_ok"])
         self.assertIs(ctx.stream_client, client)
+
+    @patch("feeder.yahoo_quote_poller.start_yahoo_quote_poller")
+    @patch("feeder.pricing_transport.reference_transport_is_yahoo", return_value=True)
+    @patch("system.boot.gate3_runner._first_live_tick_epic", return_value="CS.D.CFPGOLD.CFP.IP")
+    @patch("execution.position_protect_hub.wire_hub_quotes_to_position_protect")
+    @patch("api.snapshot_store.wire_hub_quotes_to_dashboard")
+    def test_gate3_yahoo_reference_confirmed(
+        self,
+        _dash: MagicMock,
+        _protect: MagicMock,
+        _tick: MagicMock,
+        _yahoo_flag: MagicMock,
+        poller_mock: MagicMock,
+    ) -> None:
+        poller = MagicMock()
+        poller.running = True
+        poller.stats.return_value = {"polls": 1, "published": 1, "errors": 0}
+        poller_mock.return_value = poller
+
+        cfg = MagicMock()
+        cfg.as_dict.return_value = {"instruments": {}}
+        cfg.epic = "CS.D.CFPGOLD.CFP.IP"
+        cfg.get.side_effect = lambda key, default=None: (
+            {"enabled": False} if key == "intelligence_layer" else default
+        )
+
+        ctx = BootContext()
+        ctx.config = cfg
+        ctx.rest_client = MagicMock()
+
+        with patch("trading.instrument_registry.InstrumentRegistry") as reg_mock:
+            reg_mock.return_value.get_enabled_with_ids.return_value = [
+                ("gold", {"epic": "CS.D.CFPGOLD.CFP.IP"}),
+            ]
+            Gate3Runner(get_system_state(), ctx, timeout_sec=1.0).run()
+
+        snap = get_system_state().snapshot()
+        self.assertNotEqual(snap.get("error_gate"), "G3")
+        self.assertEqual(snap["streaming"]["transport"], "yahoo")
+        self.assertTrue(snap["streaming"]["heartbeat_ok"])
+        self.assertIsNone(ctx.stream_client)
 
     def test_gate3_missing_rest_client_fails(self) -> None:
         ctx = BootContext()

@@ -1,0 +1,134 @@
+{
+  "name": "ig-agent-apex-monolith",
+  "version": "30.0.0",
+  "description": "IG Agent v30.0 Project Apex — native Electron shell with Python sidecar",
+  "private": true,
+  "main": "main.js",
+  "author": "IG Agent",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "apex:purge": "bash scripts/apex-purge-ports.sh",
+    "apex:shadow-purge": "bash scripts/apex-shadow-purge.sh",
+    "apex:build-lock": "bash scripts/apex-build-lock.sh",
+    "apex:dashboard:build": "cd dashboard && npm run build",
+    "apex:build-power": "bash scripts/apex-build-power-assertion.sh",
+    "apex:dev": "npm run apex:build-power && electron .",
+    "apex:start": "npm run apex:build-lock && npm run apex:build-power && npm run apex:dashboard:build && npm run apex:dev",
+    "apex:pack": "bash scripts/apex-pack.sh dir",
+    "apex:dist": "bash scripts/apex-pack.sh full",
+    "apex:release": "rimraf dist-apex build dashboard/dist && npm run build --prefix dashboard && bash scripts/apex-electron-dir-pack.sh"
+  },
+  "dependencies": {
+    "electron-log": "^5.2.0"
+  },
+  "devDependencies": {
+    "electron": "33.2.1",
+    "electron-builder": "25.1.8",
+    "rimraf": "^6.1.3"
+  },
+  "build": {
+    "electronVersion": "33.2.1",
+    "appId": "com.igagent.apex.monolith",
+    "productName": "IG Agent Apex",
+    "artifactName": "IG-Agent-Apex-${version}-${arch}.${ext}",
+    "directories": {
+      "output": "dist-apex",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "build/apex-shell.json",
+      "build/apex-splash.html",
+      "build/apex-bundle-missing.html",
+      "package.json",
+      "dashboard/dist/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "scripts/apex-purge-ports.sh",
+        "to": "scripts/apex-purge-ports.sh"
+      },
+      {
+        "from": "scripts/apex-build-power-assertion.sh",
+        "to": "scripts/apex-build-power-assertion.sh"
+      },
+      {
+        "from": "build/apex-shell.json",
+        "to": "build/apex-shell.json"
+      },
+      {
+        "from": ".venv",
+        "to": "agent/.venv",
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/*.pyc",
+          "!**/*.pyo"
+        ]
+      },
+      {
+        "from": "src",
+        "to": "agent/src",
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/*.pyc",
+          "!**/.ig_agent*.lock",
+          "!**/apex_ipc*.sock"
+        ]
+      },
+      {
+        "from": "config",
+        "to": "agent/config"
+      },
+      {
+        "from": "native/apex_power/no_nap",
+        "to": "agent/native/apex_power/no_nap"
+      },
+      {
+        "from": "requirements.txt",
+        "to": "agent/requirements.txt"
+      }
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "preload.js"
+    ],
+    "mac": {
+      "category": "public.app-category.finance",
+      "target": [
+        {
+          "target": "dir",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "darkModeSupport": true,
+      "minimumSystemVersion": "12.0"
+    },
+    "dmg": {
+      "backgroundColor": "#0a0e14",
+      "title": "IG Agent Apex v30"
+    }
+  }
+}

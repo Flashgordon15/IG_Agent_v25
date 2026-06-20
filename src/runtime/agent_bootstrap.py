@@ -4,6 +4,7 @@ Build orchestration trading loops and execution stack for v25 main entry.
 
 from __future__ import annotations
 
+import os
 from copy import deepcopy
 from typing import Any, Callable
 
@@ -353,7 +354,6 @@ def build_market_orchestrator(
     # Quick self-test — run deployed-fixes regression suite to catch stale code
     if not boot_mode:
         try:
-            import os
             import subprocess
             import sys
 
@@ -745,6 +745,16 @@ def start_market_stream(
         return None
 
     def on_price(update: Any) -> None:
+        ts = getattr(update, "timestamp", None)
+        if ts is not None:
+            hub.publish_replay_tick(
+                str(update.epic),
+                float(update.bid),
+                float(update.offer),
+                quote_time=float(ts),
+                source="stream",
+            )
+            return
         hub.publish(
             str(update.epic),
             float(update.bid),
@@ -756,6 +766,55 @@ def start_market_stream(
         client.on_price(on_price)
     for epic in epics:
         client.subscribe_market(epic)
+
+    replay_path = os.environ.get("IG_HISTORICAL_REPLAY", "").strip()
+    if replay_path:
+        try:
+            from pathlib import Path
+
+            from simulation.historical_replayer import start_background_replay
+
+            speed_raw = os.environ.get("IG_REPLAY_SPEED") or os.environ.get(
+                "IG_REPLAY_DILATION", "10"
+            )
+            start_background_replay(
+                Path(replay_path),
+                speed=float(speed_raw),
+                hub=hub,
+            )
+            log_engine(
+                f"HistoricalReplayer: background feed armed path={replay_path} "
+                f"speed={speed_raw}x"
+            )
+        except Exception as exc:
+            log_engine(
+                f"HistoricalReplayer: start failed {type(exc).__name__}: {exc}"
+            )
+
+    if os.environ.get("IG_OPTIMIZATION_AUTOSTART", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        try:
+            from pathlib import Path
+
+            from simulation.optimization_manager import OptimizationManager
+
+            speed_raw = os.environ.get("IG_REPLAY_SPEED", "100")
+            replay = Path(
+                replay_path or "src/simulation/data/production_5day_archive.jsonl"
+            )
+            mgr = OptimizationManager(
+                replay_path=replay,
+                speed=float(speed_raw),
+            )
+            mgr.start_background()
+            log_engine("OptimizationManager: autonomous calibration loop started")
+        except Exception as exc:
+            log_engine(
+                f"OptimizationManager autostart failed: {type(exc).__name__}: {exc}"
+            )
     try:
         client.connect()
     except Exception as e:

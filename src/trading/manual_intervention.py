@@ -103,7 +103,9 @@ def _resolve_cfg(cfg: Any | None = None) -> Any:
     from system.config_loader import ConfigLoader
     from system.paths import config_dir
 
-    return ConfigLoader(config_dir() / "config_v25.json").load_config()
+    from system.config_loader import load_active_config
+
+    return load_active_config(validate=False)
 
 
 def _clear_shield_breach(store: Any) -> None:

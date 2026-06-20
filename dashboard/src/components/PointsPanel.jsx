@@ -357,6 +357,7 @@ export default function PointsPanel({ state }) {
               "inline-flex items-center rounded-full border px-4 py-2 text-sm font-semibold uppercase tracking-wide sm:text-base",
               agent.banner,
               agent.flash ? "animate-pulse" : "",
+              agent.label === "CAUTION" ? "apex-caution-glow" : "",
             ].join(" ")}
           >
             {agent.label}

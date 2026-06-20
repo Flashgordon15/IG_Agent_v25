@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useState } from "react";
+import { normalizeHudError } from "../utils/hudErrors.js";
 
 function Card({ title, children, loading = false }) {
   return (
@@ -20,7 +21,7 @@ function statusColor(status) {
   return "text-muted";
 }
 
-export default function CertPanel() {
+function CertPanel() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -29,11 +30,11 @@ export default function CertPanel() {
     setLoading(true);
     setError("");
     try {
-      const r = await fetch("/api/v26/cert");
+      const r = await fetch("/api/v30/cert");
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       setData(await r.json());
     } catch (e) {
-      setError(e?.message || "Failed to load certification");
+      setError(normalizeHudError(e?.message || "Failed to load certification"));
       setData(null);
     } finally {
       setLoading(false);
@@ -48,17 +49,12 @@ export default function CertPanel() {
 
   const levels = Array.isArray(data?.levels) ? data.levels : [];
   const focus = Array.isArray(data?.learning_focus) ? data.learning_focus : [];
-  const forwardDaily = Array.isArray(data?.forward_daily) ? data.forward_daily : [];
-  const gateRelax = data?.gate_relaxation?.active || {};
-  const relaxRecs = Array.isArray(data?.gate_relaxation?.recommendations)
-    ? data.gate_relaxation.recommendations
-    : [];
 
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-col gap-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-[11px] text-muted">
-          v26 certification ladder — target {data?.target || "L5"} · milestone{" "}
+          v30.0 Machine Learning Certification Ladder — Target {data?.target || "L5"} · Milestone{" "}
           {data?.current_milestone || "M0"}
         </p>
         <button
@@ -72,8 +68,8 @@ export default function CertPanel() {
       </div>
 
       {error && (
-        <Card title="Unavailable">
-          <p className="text-[12px] text-danger">{error}</p>
+        <Card title="Sync status">
+          <p className="apex-hud-backfill">{error}</p>
         </Card>
       )}
 
@@ -101,65 +97,11 @@ export default function CertPanel() {
             ))}
           </div>
         ) : (
-          <p className="text-[12px] text-muted">Run v26_learning_pack.py to populate cert data.</p>
+          <p className="apex-hud-backfill">
+            MOCK BACKFILL CACHE: ACTIVE · STANDING BY FOR SUNDAY BELL
+          </p>
         )}
       </Card>
-
-      {forwardDaily.length > 0 && (
-        <Card title="L4 demo forward — daily P&L">
-          <div className="flex items-end gap-0.5 h-16">
-            {forwardDaily.map((d) => {
-              const pnl = Number(d.fill_pnl_gbp) || 0;
-              const h = Math.min(100, Math.max(4, Math.abs(pnl) * 2));
-              const pos = pnl >= 0;
-              return (
-                <div
-                  key={d.day}
-                  className="flex flex-1 flex-col items-center justify-end gap-0.5"
-                  title={`${d.day}: £${pnl.toFixed(0)} (${d.fill_closes || 0} fills)`}
-                >
-                  <div
-                    className={`w-full max-w-[14px] rounded-t ${pos ? "bg-success/70" : "bg-danger/70"}`}
-                    style={{ height: `${h}%` }}
-                  />
-                  <span className="text-[8px] text-muted tabular-nums">
-                    {String(d.day || "").slice(8)}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-          <p className="mt-2 text-[10px] text-muted">
-            Feeder fill_close P&L per UTC day (v25 demo execution)
-          </p>
-        </Card>
-      )}
-
-      {gateRelax.enabled && (
-        <Card title="Active gate relaxation">
-          <p className="text-[11px] text-muted">
-            Fitness floor {gateRelax.fitness_min}% on{" "}
-            {(gateRelax.epics || []).join(", ") || "—"}
-            {gateRelax.require_points_healthy ? " (points HEALTHY only)" : ""}
-          </p>
-          {gateRelax.note && (
-            <p className="mt-1 text-[10px] text-muted/80">{gateRelax.note}</p>
-          )}
-        </Card>
-      )}
-
-      {relaxRecs.length > 0 && (
-        <Card title="Relaxation recommendations">
-          <ul className="list-disc space-y-1 pl-4 text-[11px] text-muted">
-            {relaxRecs.slice(0, 4).map((r) => (
-              <li key={r.id || r.action}>
-                {r.safe ? "✓ " : "? "}
-                {r.action}
-              </li>
-            ))}
-          </ul>
-        </Card>
-      )}
 
       {focus.length > 0 && (
         <Card title="Learning focus">
@@ -170,6 +112,12 @@ export default function CertPanel() {
           </ul>
         </Card>
       )}
+
+      {data?.data_lake_root && (
+        <p className="text-[10px] text-muted">Data lake: {data.data_lake_root}</p>
+      )}
     </div>
   );
 }
+
+export default memo(CertPanel);

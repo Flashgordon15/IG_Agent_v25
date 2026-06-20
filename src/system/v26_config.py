@@ -10,7 +10,7 @@ from system.paths import project_root
 
 
 @lru_cache(maxsize=1)
-def load_v26_overlay() -> dict[str, Any]:
+def _load_v26_overlay_cached() -> dict[str, Any]:
     path = project_root() / "config" / "config_v26.json"
     if not path.is_file():
         return {}
@@ -21,8 +21,28 @@ def load_v26_overlay() -> dict[str, Any]:
         return {}
 
 
+_overlay_mtime: float = -1.0
+
+
+def load_v26_overlay() -> dict[str, Any]:
+    """v26 overlay with mtime-aware cache bust for live session overrides."""
+    global _overlay_mtime
+    path = project_root() / "config" / "config_v26.json"
+    try:
+        mtime = path.stat().st_mtime if path.is_file() else 0.0
+    except OSError:
+        mtime = 0.0
+    if mtime != _overlay_mtime:
+        _load_v26_overlay_cached.cache_clear()
+        get_effective_overlay.cache_clear()
+        _overlay_mtime = mtime
+    return _load_v26_overlay_cached()
+
+
 def reset_v26_overlay_cache_for_tests() -> None:
-    load_v26_overlay.cache_clear()
+    global _overlay_mtime
+    _overlay_mtime = -1.0
+    _load_v26_overlay_cached.cache_clear()
     get_effective_overlay.cache_clear()
 
 

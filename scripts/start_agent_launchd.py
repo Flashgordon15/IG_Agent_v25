@@ -62,8 +62,16 @@ def boot_grace_sleep_if_needed(*, grace_sec: float = _BOOT_GRACE_SEC) -> None:
     """
     Post-reboot grace: slow Wi-Fi / stale port bind can fail the first local check.
 
-    Sleeps once before exec so IG auth and uvicorn bind happen after the stack settles.
+    Reclaims stale :8080 listeners before sleeping so launchd handoff binds cleanly.
     """
+    try:
+        sys.path.insert(0, str(_agent_root() / "src"))
+        from system.boot.port_eviction import reclaim_and_wait
+
+        reclaim_and_wait(_API_PORT)
+    except Exception:
+        pass
+
     port_ok = check_port_available()
     net_ok = network_interfaces_ready()
     if port_ok and net_ok:

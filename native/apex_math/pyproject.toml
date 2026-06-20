@@ -1,0 +1,13 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "apex_math"
+version = "30.0.0"
+description = "IG Agent v30 native indicator kernels (PyO3)"
+requires-python = ">=3.12"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "apex_math"

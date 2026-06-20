@@ -86,7 +86,9 @@ def run_demo_routing_check() -> dict[str, Any]:
                 "detail": "IG DEMO routing (dry-run)",
             }
 
-        cfg = ConfigLoader(project_root() / "config" / "config_v25.json").load_config()
+        from system.config_loader import load_active_config
+
+        cfg = load_active_config(validate=False)
         rest = ensure_shared_authenticated(status.credentials)
         epic = cfg.epic
 

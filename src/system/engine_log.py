@@ -8,6 +8,7 @@ import threading
 import time
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from typing import Any
 
 from system.paths import logs_dir
@@ -33,9 +34,13 @@ def _engine_file_handler() -> RotatingFileHandler:
     global _file_handler
     if _file_handler is not None:
         return _file_handler
-    _LOG.parent.mkdir(parents=True, exist_ok=True)
+    log_path = _LOG
+    override = os.environ.get("IG_ENGINE_LOG_FILE", "").strip()
+    if override:
+        log_path = Path(override)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
     handler = RotatingFileHandler(
-        _LOG,
+        log_path,
         maxBytes=_ROTATE_BYTES,
         backupCount=_ROTATE_BACKUP,
         encoding="utf-8",
@@ -55,7 +60,9 @@ def _intermittent_settings() -> tuple[bool, float]:
         from system.config_loader import ConfigLoader
         from system.paths import project_root
 
-        cfg = ConfigLoader(project_root() / "config" / "config_v25.json").load_config()
+        from system.config_loader import load_active_config
+
+        cfg = load_active_config(validate=False)
         data = getattr(cfg, "_data", None) or {}
         if isinstance(data, dict):
             enabled = bool(data.get("engine_log_intermittent", True))

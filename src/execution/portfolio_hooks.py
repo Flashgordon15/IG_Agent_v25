@@ -140,6 +140,81 @@ def record_portfolio_entry_from_signal(
         )
 
 
+def reconcile_portfolio_orphan_reservations(
+    store: Any,
+    *,
+    cfg: Any | None = None,
+    open_position_count: int | None = None,
+) -> bool:
+    """
+    Rehydrate when in-memory concurrent risk exceeds open-trade exposure.
+
+    Gate-time reservations that were never released (or survived flatten) inflate
+    ``concurrent_risk_gbp`` without matching open positions — this clears that drift.
+    """
+    try:
+        from system.portfolio_envelope import (
+            portfolio_gate_enabled,
+            rehydrate,
+            snapshot,
+        )
+    except Exception:
+        return False
+
+    if not portfolio_gate_enabled():
+        return False
+
+    snap = snapshot()
+    concurrent = float(snap.get("concurrent_risk_gbp") or 0.0)
+    if concurrent <= 0:
+        return False
+
+    expected = 0.0
+    open_count = 0
+    try:
+        for row in store.active_trades():
+            if int(row["dry_run"] or 0):
+                continue
+            risk = risk_gbp_from_trade_row(row, cfg=cfg)
+            if risk <= 0:
+                continue
+            expected += risk
+            open_count += 1
+    except Exception as e:
+        log_engine(f"portfolio_orphan_reconcile: active_trades failed: {e}")
+        if open_position_count is not None and int(open_position_count) == 0:
+            rehydrate(concurrent_risk_gbp=0.0, daily_deployed_gbp=0.0)
+            _deal_risk_gbp.clear()
+            log_engine(
+                f"portfolio_orphan_reconcile: tracker flat, "
+                f"cleared stale concurrent £{concurrent:.0f}"
+            )
+            return True
+        return False
+
+    if open_position_count is not None:
+        open_count = max(open_count, int(open_position_count))
+
+    if open_count == 0 and concurrent > 0:
+        rehydrate(concurrent_risk_gbp=0.0, daily_deployed_gbp=0.0)
+        _deal_risk_gbp.clear()
+        log_engine(
+            f"portfolio_orphan_reconcile: 0 open trades, "
+            f"cleared stale concurrent £{concurrent:.0f}"
+        )
+        return True
+
+    if concurrent > expected + 1.0:
+        rehydrate_portfolio_from_store(store, cfg=cfg)
+        log_engine(
+            f"portfolio_orphan_reconcile: concurrent £{concurrent:.0f} "
+            f"> open exposure £{expected:.0f} — rehydrated from store"
+        )
+        return True
+
+    return False
+
+
 def rehydrate_portfolio_from_store(
     store: Any, *, cfg: Any | None = None
 ) -> dict[str, float]:

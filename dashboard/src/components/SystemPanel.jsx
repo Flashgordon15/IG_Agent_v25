@@ -390,7 +390,7 @@ export default function SystemPanel({ state, wsConnected, reconnecting }) {
               </span>
             </StatusRow>
 
-            <StatusRow label="WebSocket">
+            <StatusRow label="Tick Stream">
               <span className="inline-flex items-center gap-2">
                 <span
                   className={["h-2 w-2 shrink-0 rounded-full", wsMeta.dot].join(

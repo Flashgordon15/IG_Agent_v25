@@ -45,7 +45,9 @@ def _flatten_open_positions_nonblocking() -> None:
             rest = ensure_shared_authenticated(status.credentials)
             positions = rest.open_positions() if hasattr(rest, "open_positions") else []
             closed = 0
-            cfg = ConfigLoader(config_dir() / "config_v25.json").load_config()
+            from system.config_loader import load_active_config
+
+            cfg = load_active_config(validate=False)
             for item in positions or []:
                 pos = item.get("position") or {}
                 mkt = item.get("market") or {}
@@ -98,6 +100,19 @@ def _apply_loop_entry_blocks(active: bool) -> None:
 
 def _monitor_tick() -> None:
     global _last_seen_active
+    try:
+        from system.agent_execution_mode import demo_sandbox_unblock_active
+
+        if demo_sandbox_unblock_active():
+            if _last_seen_active:
+                from system.qmm_process_supervisor import clear_process_entry_block
+
+                clear_process_entry_block()
+                _apply_loop_entry_blocks(False)
+                _last_seen_active = False
+            return
+    except Exception:
+        pass
     active = is_master_kill_block_active()
     if active:
         set_process_entry_block(_MASTER_KILL_REASON)

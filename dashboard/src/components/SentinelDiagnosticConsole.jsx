@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { fetchJson } from "../api/client.js";
+import { resolveTargetPort } from "../config.js";
 
 function levelClass(line) {
   const t = String(line?.type || "");
@@ -10,14 +11,14 @@ function levelClass(line) {
   return "text-foreground";
 }
 
-function fmtLine(line) {
+function fmtLine(line, apiPort) {
   if (!line) return "—";
   const parts = [
     line.type,
     line.epic,
     line.unhealthy != null ? (line.unhealthy ? "UNHEALTHY" : "ok") : null,
     line.consecutive_unhealthy != null ? `streak=${line.consecutive_unhealthy}` : null,
-    line.port_open != null ? (line.port_open ? "port:8080↑" : "port:8080↓") : null,
+    line.port_open != null ? (line.port_open ? `port:${apiPort}↑` : `port:${apiPort}↓`) : null,
     line.pid_alive != null ? (line.pid_alive ? `pid:${line.agent_pid}↑` : `pid:${line.agent_pid}↓`) : null,
   ].filter(Boolean);
   return parts.join(" · ") || JSON.stringify(line);
@@ -35,6 +36,7 @@ export default function SentinelDiagnosticConsole() {
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
   const bottomRef = useRef(null);
+  const apiPort = resolveTargetPort();
 
   useEffect(() => {
     let cancelled = false;
@@ -74,7 +76,7 @@ export default function SentinelDiagnosticConsole() {
         <h2 className="label-caps">Sentinel diagnostics</h2>
         <div className="flex flex-wrap gap-2 text-[10px] font-mono uppercase tracking-wide">
           <span className={monitor.port_open ? "text-success" : "text-danger"}>
-            :8080 {monitor.port_open ? "UP" : "DOWN"}
+            :{apiPort} {monitor.port_open ? "UP" : "DOWN"}
           </span>
           <span className={monitor.pid_alive ? "text-success" : "text-warning"}>
             PID {monitor.agent_pid ?? "—"} {monitor.pid_alive ? "ALIVE" : "STALE"}
@@ -123,7 +125,7 @@ export default function SentinelDiagnosticConsole() {
         {lines.map((line, idx) => (
           <div key={line.ts || idx} className={`whitespace-pre-wrap break-all ${levelClass(line)}`}>
             <span className="text-muted/80">[{String(line.ts || "").slice(11, 19) || "—"}]</span>{" "}
-            {fmtLine(line)}
+            {fmtLine(line, apiPort)}
           </div>
         ))}
         <div ref={bottomRef} />

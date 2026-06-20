@@ -14,7 +14,23 @@ _LOG_ROTATE_MAX_BYTES = 20 * 1024 * 1024
 _LOG_KEEP_BACKUPS = 3
 # Never use "localhost" — macOS mDNS can stall connect() for tens of seconds.
 _LOOPBACK_IPV4 = "127.0.0.1"
-_API_PORT = 8080
+_DEFAULT_API_PORT = 8080
+
+
+def resolve_api_port() -> int:
+    """Profile-assigned API bind port (9090 shadow, 8080 production)."""
+    try:
+        from system.node_profile import get_node_profile
+
+        return int(get_node_profile().api_port)
+    except Exception:
+        import os
+
+        raw = os.environ.get("IG_API_PORT", str(_DEFAULT_API_PORT)).strip()
+        try:
+            return int(raw)
+        except ValueError:
+            return _DEFAULT_API_PORT
 
 
 def config_path() -> Path:
@@ -69,17 +85,33 @@ def rotate_oversized_logs() -> None:
             pass
 
 
-def check_port_available(port: int = _API_PORT) -> bool:
-    """Return True when 127.0.0.1:port is free to bind (no localhost DNS)."""
+def check_port_available(port: int | None = None) -> bool:
+    """Return True when 127.0.0.1:port is free to bind (no localhost DNS).
+
+    When *port* is omitted, uses the active node profile API port exclusively
+    (9090 shadow / 8080 production). Shadow never probes production :8080.
+    """
     import socket
 
+    bind_port = resolve_api_port() if port is None else port
     probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
-        probe.bind((_LOOPBACK_IPV4, port))
+        probe.bind((_LOOPBACK_IPV4, bind_port))
         return True
     except OSError:
         return False
+    finally:
+        probe.close()
+
+
+def production_port_in_use() -> bool:
+    """True when production :8080 is bound — informational only for shadow boot."""
+    import socket
+
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        return probe.connect_ex((_LOOPBACK_IPV4, 8080)) == 0
     finally:
         probe.close()
 

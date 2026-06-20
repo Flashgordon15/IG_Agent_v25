@@ -1,5 +1,5 @@
 """
-Load and validate configuration — v29 primary, v25/v24 legacy fallback.
+Load and validate configuration — v30 Apex primary, v29 overlay (no v25 on active path).
 """
 
 from __future__ import annotations
@@ -19,22 +19,42 @@ _config_lock = threading.RLock()
 _config_file_mtime: float = 0.0  # last known mtime of active config file
 
 V29_FILE = "config_v29.json"
-V25_FILE = "config_v25.json"
+V30_FILE = "config_v30.json"
 V24_FILE = "config_v24.json"
 LEGACY_V23_FILE = "legacy_v23/config_v23.json"
 
+# Legacy scaffolding — never loaded on the v30 active execution path.
+_LEGACY_EXTENDS = frozenset(
+    {
+        "config_v25.json",
+        V24_FILE,
+        LEGACY_V23_FILE,
+        "legacy_v22/config_v22_adaptive_autotrader.json",
+    }
+)
+
 
 def _primary_config_path() -> Path:
-    """Resolve config file: v29 → v25 → v24 → legacy v23 (first that exists)."""
+    """Resolve active config: v30 → v29 overlay (v25 merge chain blocked on v30 path)."""
     cd = config_dir()
-    for rel in (V29_FILE, V25_FILE, V24_FILE):
+    for rel in (V30_FILE, V29_FILE):
         p = cd / rel
         if p.exists():
             return p
     legacy = cd / LEGACY_V23_FILE
     if legacy.exists():
         return legacy
-    return cd / V25_FILE
+    return cd / V29_FILE
+
+
+def primary_config_path() -> Path:
+    """Public accessor for the active merged config file path."""
+    return _primary_config_path()
+
+
+def load_active_config(*, validate: bool = True) -> Config:
+    """Load fully merged config from the active profile path (no legacy hardcoding)."""
+    return ConfigLoader(_primary_config_path()).load_config(validate=validate)
 
 
 def _config_file_changed() -> bool:
@@ -73,6 +93,26 @@ def set_mode(mode: str) -> None:
     if m not in ("TEST", "DEMO", "LIVE"):
         raise ValueError(f"Invalid MODE: {mode}")
     _MODE = m
+
+
+def _enforce_v30_safety_locks(cfg: dict[str, Any]) -> None:
+    """v30 Apex — hard safety rails; real capital layers stay blocked."""
+    try:
+        from system.app_identity import APP_VERSION
+
+        if not str(APP_VERSION).startswith("30."):
+            return
+    except Exception:
+        return
+    apex_exec = cfg.get("apex_demo_execution")
+    if isinstance(apex_exec, dict):
+        if apex_exec.get("allow_live_trading_locked") is True:
+            cfg["allow_live_trading"] = False
+        if apex_exec.get("demo_only_deployment_locked") is True:
+            cfg["demo_only_deployment"] = True
+    else:
+        cfg["allow_live_trading"] = False
+        cfg["demo_only_deployment"] = True
 
 
 def _sync_operating_mode_from_credentials(cfg: dict[str, Any]) -> None:
@@ -255,6 +295,33 @@ def _apply_aliases(cfg: dict[str, Any]) -> dict[str, Any]:
     return cfg
 
 
+def _load_config_file(path: Path, *, _visited: frozenset[str] | None = None) -> dict[str, Any]:
+    """Recursively resolve ``$extends`` chain (v30 → v29; v25 only via v29 static extends)."""
+    visited = _visited or frozenset()
+    key = str(path.resolve())
+    if key in visited:
+        raise ValueError(f"Config extends cycle detected at {path}")
+    if not path.is_file():
+        raise FileNotFoundError(f"Config not found: {path}")
+    with open(path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+    extends = raw.get("$extends")
+    overlay = {
+        k: v
+        for k, v in raw.items()
+        if k not in ("$schema", "$extends", "_note")
+    }
+    if not extends:
+        return overlay
+    ext_path = config_dir() / str(extends)
+    if not ext_path.is_file():
+        raise FileNotFoundError(
+            f"Config extends missing: {extends} (from {path.name})"
+        )
+    base = _load_config_file(ext_path, _visited=visited | {key})
+    return _deep_merge(base, overlay)
+
+
 class ConfigLoader:
     def __init__(self, config_path: Path | str | None = None) -> None:
         if config_path:
@@ -270,6 +337,7 @@ class ConfigLoader:
         _sync_operating_mode_from_credentials(merged)
         self._resolve_paths(merged)
         self._apply_operating_mode(merged)
+        _enforce_v30_safety_locks(merged)
         if validate:
             errors = self.validate_schema(merged)
             if errors:
@@ -284,8 +352,10 @@ class ConfigLoader:
         return cfg.as_dict()
 
     def _load_merged_dict(self) -> dict[str, Any]:
+        # v30 active path: no v22 base scaffold — clean overlay chain only.
+        skip_v22_base = self._path.name == V30_FILE
         base: dict[str, Any] = {}
-        if self._v22_path.exists():
+        if not skip_v22_base and self._v22_path.exists():
             with open(self._v22_path, "r", encoding="utf-8") as f:
                 base = json.load(f)
         if not self._path.exists():
@@ -293,26 +363,23 @@ class ConfigLoader:
                 raise FileNotFoundError(f"Config not found: {self._path}")
             merged = base
         else:
-            with open(self._path, "r", encoding="utf-8") as f:
-                primary = json.load(f)
-            extends = primary.get("$extends")
-            if extends:
-                ext_path = config_dir() / str(extends)
-                if not ext_path.is_file():
-                    raise FileNotFoundError(
-                        f"Config extends missing: {extends} (from {self._path.name})"
-                    )
-                with open(ext_path, "r", encoding="utf-8") as ef:
-                    ext_data = json.load(ef)
-                merged = _deep_merge(base, ext_data)
-                merged = _deep_merge(merged, primary)
-            else:
-                merged = _deep_merge(base, primary)
-        # IG secrets: config/credentials/credentials.json via system.credentials_loader only
+            merged = _deep_merge(base, _load_config_file(self._path))
         if "operating_mode" not in merged:
             merged["operating_mode"] = (
                 "LIVE" if not merged.get("dry_run", True) else "TEST"
             )
+        try:
+            from system.apex_runtime_mode import ApexRuntimeMode, get_apex_runtime_mode
+
+            if get_apex_runtime_mode() is ApexRuntimeMode.HARDENED_TESTBED:
+                from system.testbed_firewall import testbed_root
+
+                overlay = testbed_root() / "analytics" / "optimization_overlay.json"
+                if overlay.is_file():
+                    with open(overlay, "r", encoding="utf-8") as fh:
+                        merged = _deep_merge(merged, json.load(fh))
+        except Exception:
+            pass
         return merged
 
     def _resolve_paths(self, cfg: dict[str, Any]) -> None:

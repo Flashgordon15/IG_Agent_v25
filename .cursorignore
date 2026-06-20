@@ -1,0 +1,10 @@
+node_modules/
+.venv/
+dist-apex/
+dashboard/dist/
+build/
+out/
+.webpack/
+*.app/
+*.db
+logs/

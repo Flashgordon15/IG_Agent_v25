@@ -107,7 +107,9 @@ def get_closed_trades(limit: int = 10) -> list[dict[str, Any]]:
         from system.config_loader import ConfigLoader
         from system.paths import config_dir
 
-        cfg = ConfigLoader(config_dir() / "config_v25.json").load_config()
+        from system.config_loader import load_active_config
+
+        cfg = load_active_config(validate=False)
         store = LearningStore(str(cfg.learning_db))
         want = max(1, int(limit))
         rows = store.recent_agent_closed_trades(limit=max(want * 4, 40))
@@ -133,7 +135,9 @@ def get_shadow_closed_trades(limit: int = 20) -> list[dict[str, Any]]:
         from system.config_loader import ConfigLoader
         from system.paths import config_dir
 
-        cfg = ConfigLoader(config_dir() / "config_v25.json").load_config()
+        from system.config_loader import load_active_config
+
+        cfg = load_active_config(validate=False)
         store = LearningStore(str(cfg.learning_db))
         want = max(1, int(limit))
         rows = store.recent_shadow_import_trades(limit=want)

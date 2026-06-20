@@ -225,6 +225,13 @@ def _build_slow_enrichment_blob(*, force: bool = False) -> dict[str, Any]:
         if _cached_position_sync_status is not None:
             blob["position_sync_status"] = _cached_position_sync_status
 
+    try:
+        from apex.operational_transparency import build_transparency_snapshot
+
+        blob["operational_transparency"] = build_transparency_snapshot(include_ml=True)
+    except Exception:
+        pass
+
     with _lock:
         _slow_enrich_blob = dict(blob)
         _slow_enrich_ts = now
@@ -242,6 +249,7 @@ def _apply_slow_enrichments(out: dict[str, Any]) -> None:
         "gate_relaxations",
         "effective_policy",
         "position_sync_status",
+        "operational_transparency",
     ):
         if not out.get(key) and key in blob:
             out[key] = blob[key]
@@ -297,10 +305,21 @@ def _merge_hub_quote_into_tick(
     stream_status: str = "LIVE",
 ) -> None:
     """Merge live hub bid/offer into dashboard tick (top-level and market slice)."""
+    from system.market_integrity import epic_market_open, stream_status_for_hub
+
     epic_key = str(epic or "").strip()
+    if not epic_market_open(epic_key):
+        return
+    if bid <= 0 or offer <= 0:
+        return
     spread = round(float(offer) - float(bid), 5)
     age = round(float(tick_age_s), 1) if tick_age_s is not None else 0.0
     ts = _iso_now()
+    if stream_status == "LIVE" and age > 0.5:
+        stream_status = stream_status_for_hub(
+            epic_key,
+            type("_S", (), {"age_seconds": lambda: age})(),
+        )
 
     markets = tick.get("markets")
     if isinstance(markets, dict):
@@ -315,7 +334,8 @@ def _merge_hub_quote_into_tick(
         slice_tick["tick_age_s"] = age
         slice_tick["stream_status"] = stream_status
         slice_tick["ts"] = ts
-        if slice_tick.get("market_state") == "OFFLINE":
+        prev_state = str(slice_tick.get("market_state") or "").upper()
+        if prev_state not in ("CLOSED", "MAINTENANCE", "OFFLINE"):
             slice_tick["market_state"] = "OPEN"
         next_markets[epic_key] = slice_tick
         tick["markets"] = next_markets
@@ -328,7 +348,8 @@ def _merge_hub_quote_into_tick(
         tick["tick_age_s"] = age
         tick["stream_status"] = stream_status
         tick["ts"] = ts
-        if tick.get("market_state") == "OFFLINE" and bid > 0:
+        prev_top = str(tick.get("market_state") or "").upper()
+        if prev_top not in ("CLOSED", "MAINTENANCE", "OFFLINE"):
             tick["market_state"] = "OPEN"
 
 
@@ -341,12 +362,18 @@ def force_position_view_refresh(
     stream_status: str = "LIVE",
 ) -> bool:
     """Immediate position P&L refresh — bypasses hub push throttle when positions are open."""
+    import copy
+
+    from system.market_integrity import epic_market_open
+
     epic_key = str(epic or "").strip()
     if not epic_key or bid <= 0 or offer <= 0:
         return False
+    if not epic_market_open(epic_key):
+        return False
 
     with _lock:
-        tick = dict(_cached)
+        tick = copy.deepcopy(_cached)
     if not tick_has_open_positions_for_epic(tick, epic_key):
         return False
 
@@ -382,6 +409,20 @@ def push_hub_quote_to_dashboard(
     stream_status: str = "LIVE",
 ) -> None:
     """Merge live hub bid/offer into the dashboard tick and push to WebSocket clients."""
+    from system.market_integrity import (
+        on_market_closed,
+        should_publish_live_quote,
+        stream_status_for_hub,
+    )
+
+    epic_key = str(epic or "").strip()
+    if not epic_key:
+        return
+    if not should_publish_live_quote(epic_key, source="hub_push"):
+        return
+    if bid <= 0 or offer <= 0:
+        return
+
     if force_position_view_refresh(
         epic,
         bid,
@@ -392,15 +433,16 @@ def push_hub_quote_to_dashboard(
         return
 
     global _last_hub_push_ts
-    if bid <= 0 or offer <= 0:
-        return
-    epic_key = str(epic or "").strip()
-    if not epic_key:
-        return
     now = time.time()
     if now - _last_hub_push_ts < _hub_push_min_interval:
         return
     _last_hub_push_ts = now
+
+    age = float(tick_age_s) if tick_age_s is not None else 0.0
+    stream_status = stream_status_for_hub(
+        epic_key,
+        type("_S", (), {"age_seconds": lambda: age})(),
+    )
 
     tick = _raw_tick_copy()
 
@@ -412,6 +454,31 @@ def push_hub_quote_to_dashboard(
         tick_age_s=tick_age_s,
         stream_status=stream_status,
     )
+    publish_tick(tick, notify=True)
+
+
+def apply_closed_market_slice(epic: str, *, reason: str = "market closed") -> None:
+    """Zero prices and mark CLOSED on one epic slice — IPC + HTTP subscribers."""
+    from system.market_integrity import closed_slice_fields
+
+    epic_key = str(epic or "").strip()
+    if not epic_key:
+        return
+    closed = closed_slice_fields(reason=reason)
+    with _lock:
+        tick = dict(_cached) if _cached else {}
+    markets = tick.get("markets")
+    if not isinstance(markets, dict):
+        markets = {}
+    slice_tick = dict(markets.get(epic_key) or {})
+    slice_tick["epic"] = epic_key
+    slice_tick.update(closed)
+    markets = {k: dict(v) if isinstance(v, dict) else v for k, v in markets.items()}
+    markets[epic_key] = slice_tick
+    tick["markets"] = markets
+    top_epic = str(tick.get("selected_epic") or tick.get("epic") or "")
+    if not top_epic or top_epic == epic_key:
+        tick.update(closed)
     publish_tick(tick, notify=True)
 
 
@@ -455,6 +522,27 @@ def wire_hub_quotes_to_dashboard(*, min_interval: float = 0.25) -> Callable[[], 
     return on_hub_quote(_on_hub)
 
 
+def set_boot_hydration(
+    positions: list[Any] | None,
+    orders: Any | None,
+) -> None:
+    """Gate 2 boot hydration stub — merged into dashboard snapshot."""
+    with _lock:
+        tick = dict(_cached)
+    hydration = dict(tick.get("hydration") or {})
+    hydration["boot_positions"] = list(positions or [])
+    if isinstance(orders, list):
+        hydration["boot_orders"] = {"workingOrders": orders}
+    elif isinstance(orders, dict):
+        hydration["boot_orders"] = orders
+    else:
+        hydration["boot_orders"] = {}
+    hydration["positions_synced"] = True
+    hydration["orders_synced"] = True
+    tick["hydration"] = hydration
+    publish_tick(tick, notify=True)
+
+
 def publish_tick(payload: dict[str, Any], *, notify: bool = True) -> dict[str, Any]:
     """Write snapshot and optionally notify in-process subscribers (tests)."""
     global _last_ws_broadcast_mtime
@@ -472,6 +560,8 @@ def publish_tick(payload: dict[str, Any], *, notify: bool = True) -> dict[str, A
 
 def _tick_for_readers(tick: dict[str, Any]) -> dict[str, Any]:
     """Copy + enrich so WebSocket/poll always expose threshold fields."""
+    from trading.open_position_view import attach_position_map, epic_market_label, normalize_epic
+
     out = dict(tick)
     sig = out.get("signal")
     if isinstance(sig, dict):
@@ -481,8 +571,6 @@ def _tick_for_readers(tick: dict[str, Any]) -> dict[str, Any]:
     # Aggregate positions from all market slices into dealId-deduped map + flat list.
     markets = out.get("markets")
     if isinstance(markets, dict):
-        from trading.open_position_view import attach_position_map, epic_market_label, normalize_epic
-
         all_positions: list[dict] = []
         for epic_key, mslice in markets.items():
             if not isinstance(mslice, dict):
@@ -512,6 +600,12 @@ def _tick_for_readers(tick: dict[str, Any]) -> dict[str, Any]:
     attach_position_map(out)
     apply_display_daily_pnl(out)
     _apply_slow_enrichments(out)
+    try:
+        from apex.operational_transparency import attach_to_tick
+
+        attach_to_tick(out, include_ml=not out.get("operational_transparency"))
+    except Exception:
+        pass
     return out
 
 

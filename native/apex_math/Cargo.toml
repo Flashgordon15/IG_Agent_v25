@@ -1,0 +1,18 @@
+[package]
+name = "apex_math"
+version = "30.0.0"
+edition = "2021"
+description = "IG Agent v30 Apex — PyO3 native indicator kernels (optional acceleration)"
+
+[lib]
+name = "apex_math"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"] }
+numpy = "0.22"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3

@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -26,8 +27,19 @@ class SnapshotHubPositionsTests(unittest.TestCase):
         set_snapshot_path_for_tests(Path(self.tmp.name) / "dashboard_snapshot.json")
         reset_snapshot_store_for_tests()
         set_snapshot_path_for_tests(Path(self.tmp.name) / "dashboard_snapshot.json")
+        self._market_open = patch(
+            "system.market_integrity.epic_market_open", return_value=True
+        )
+        self._market_open.start()
+        self._broker_auth = patch(
+            "trading.open_position_view.broker_pnl_is_authoritative",
+            return_value=False,
+        )
+        self._broker_auth.start()
 
     def tearDown(self) -> None:
+        self._broker_auth.stop()
+        self._market_open.stop()
         reset_snapshot_store_for_tests()
         self.tmp.cleanup()
 

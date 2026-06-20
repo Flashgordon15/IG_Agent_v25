@@ -256,6 +256,16 @@ def enrich_avionics_markets(payload: dict[str, Any]) -> dict[str, Any]:
                 signal = {**signal, "rsi": rsi}
                 row["signal"] = signal
         asset_markets[asset_key] = row
+        fitness_score = None
+        health_block = row.get("health")
+        if isinstance(health_block, dict):
+            for gate in health_block.get("gates") or []:
+                if not isinstance(gate, dict) or gate.get("name") != "environment_fitness":
+                    continue
+                val = gate.get("value")
+                if isinstance(val, dict) and val.get("score") is not None:
+                    fitness_score = val.get("score")
+                    break
         avionics_assets[asset_key] = {
             "asset_key": asset_key,
             "epic": epic,
@@ -267,6 +277,7 @@ def enrich_avionics_markets(payload: dict[str, Any]) -> dict[str, Any]:
             "rsi": rsi,
             "signal": signal,
             "health": row.get("health"),
+            "fitness": fitness_score,
             "points": row.get("points"),
             "trade_eligibility": row.get("trade_eligibility"),
         }
@@ -279,6 +290,14 @@ def enrich_avionics_markets(payload: dict[str, Any]) -> dict[str, Any]:
         out["hud_markets"] = asset_markets
     if avionics_assets:
         out["avionics_assets"] = avionics_assets
+    try:
+        from apex.avionics_story import snapshot_avionics_stories
+
+        stories = snapshot_avionics_stories(limit=36)
+        if stories:
+            out["avionics_stories"] = stories
+    except Exception:
+        pass
     return out
 
 

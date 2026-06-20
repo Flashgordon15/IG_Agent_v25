@@ -48,8 +48,23 @@ def _register_bootstrap_routes(app: FastAPI) -> None:
     @app.get("/health", include_in_schema=False)
     def bootstrap_health() -> dict[str, Any]:
         from system.app_identity import APP_VERSION_LABEL
+        from system.boot_metrics import get_boot_metrics
 
-        return {"status": "ok", "version": APP_VERSION_LABEL, "bootstrapping": True}
+        boot = get_boot_metrics()
+        stage = str(boot.get("stage") or "booting")
+        warming = stage == "warming" or bool(boot.get("warming"))
+        return {
+            "status": "warming" if warming else "ok",
+            "version": APP_VERSION_LABEL,
+            "bootstrapping": not bool(boot.get("ready")),
+            "ready": bool(boot.get("ready")),
+            "warming": warming,
+            "progress": int(boot.get("percent") or 0),
+        }
+
+    @app.get("/api/health", include_in_schema=False)
+    def bootstrap_api_health() -> dict[str, Any]:
+        return bootstrap_health()
 
     @app.get("/api/startup/status", include_in_schema=False)
     def bootstrap_startup_status() -> dict[str, Any]:
@@ -67,11 +82,15 @@ def _register_bootstrap_routes(app: FastAPI) -> None:
             pass
         from api.restriction_diagnostics import enrich_restrictions_payload
 
+        ready = bool(system_state.get("ready")) and bool(boot_metrics.get("ready"))
+        if str(boot_metrics.get("stage") or "") == "warming":
+            ready = False
+
         return enrich_restrictions_payload(
             {
                 "boot_metrics": boot_metrics,
                 "system_state": system_state,
-                "ready": bool(system_state.get("ready")),
+                "ready": ready,
                 "background_verify": system_state.get("background_verify") or {},
                 "phases": phases,
             }
@@ -245,6 +264,32 @@ def _mount_dashboard_static(app: FastAPI) -> None:
     app.state.dashboard_static_mounted = True
 
 
+def _cors_allow_origins() -> list[str]:
+    origins = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+        "http://localhost:9090",
+        "http://127.0.0.1:9090",
+        "http://localhost:9191",
+        "http://127.0.0.1:9191",
+    ]
+    try:
+        from system.node_profile import get_node_profile
+
+        profile = get_node_profile()
+        origins.extend(
+            [
+                profile.dashboard_url.rstrip("/"),
+                profile.cockpit_url.rstrip("/"),
+            ]
+        )
+    except Exception:
+        pass
+    return list(dict.fromkeys(origins))
+
+
 def _register_api_middleware(app: FastAPI) -> None:
     """Register auth/CORS at factory time — Starlette forbids add_middleware after start."""
     from fastapi.middleware.cors import CORSMiddleware
@@ -253,12 +298,7 @@ def _register_api_middleware(app: FastAPI) -> None:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[
-            "http://localhost:5173",
-            "http://127.0.0.1:5173",
-            "http://localhost:8080",
-            "http://127.0.0.1:8080",
-        ],
+        allow_origins=_cors_allow_origins(),
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -414,9 +454,11 @@ def create_app(
 def main() -> None:
     import uvicorn
 
+    from system.boot.preflight_helpers import resolve_api_port
+
     parser = argparse.ArgumentParser(description="IG Agent v25 FastAPI server")
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--port", type=int, default=resolve_api_port())
     args = parser.parse_args()
     uvicorn.run(
         "api.server:create_app",

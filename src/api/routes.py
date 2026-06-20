@@ -36,6 +36,7 @@ from api.dashboard_data import (
     run_system_tests,
 )
 from api.intelligence_data import (
+    intelligence_dashboard,
     learning_status,
     replay_summary,
     run_replay_pipeline,
@@ -52,23 +53,53 @@ HEARTBEAT_TIMEOUT_SEC = 600  # retained for reference; not used for shutdown
 _last_heartbeat: float = time.time()
 _heartbeat_lock = threading.Lock()
 
+from api.testbed_simulation import router as testbed_router
+
 router = APIRouter()
+router.include_router(testbed_router)
 
 
 @router.get("/health")
 def health() -> dict[str, Any]:
+    t0 = time.perf_counter()
     age = snapshot_age_s_fast()
-    return {
+    payload = {
         "ok": True,
         "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
         "api": "up",
         "snapshot_age_s": age,
     }
+    try:
+        from apex.system_monitor import record_health_ping
+
+        port = int(os.environ.get("IG_API_PORT", "9090"))
+        ms = (time.perf_counter() - t0) * 1000.0
+        record_health_ping(port=port, latency_ms=ms, ok=True)
+    except Exception:
+        pass
+    return payload
 
 
 @router.get("/api/health")
 async def api_health() -> dict[str, Any]:
     """Operational health — served from a background-refreshed cache (non-blocking)."""
+    from system.boot_metrics import get_boot_metrics
+
+    boot = get_boot_metrics()
+    if str(boot.get("stage") or "") == "warming" or boot.get("warming"):
+        warm = boot.get("warming") if isinstance(boot.get("warming"), dict) else {}
+        return {
+            "status": "warming",
+            "ok": True,
+            "ready": False,
+            "warming": True,
+            "progress": int(boot.get("percent") or warm.get("percent") or 0),
+            "bars_compiled": int(warm.get("bars_compiled") or 0),
+            "bars_target": int(warm.get("bars_target") or 256),
+            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+            "snapshot_age_s": snapshot_age_s_fast(),
+        }
+
     status = get_cached_health_status()
     return {
         **status,
@@ -95,11 +126,15 @@ def get_startup_status() -> dict[str, Any]:
     system_state = get_system_state().snapshot()
     from api.restriction_diagnostics import enrich_restrictions_payload
 
+    ready = bool(system_state.get("ready")) and bool(boot_metrics.get("ready"))
+    if str(boot_metrics.get("stage") or "") == "warming":
+        ready = False
+
     return enrich_restrictions_payload(
         {
             "boot_metrics": boot_metrics,
             "system_state": system_state,
-            "ready": bool(system_state.get("ready")),
+            "ready": ready,
             "background_verify": system_state.get("background_verify") or {},
         }
     )
@@ -325,6 +360,41 @@ def api_admin_risk_status() -> dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@router.post("/api/admin/flush-portfolio-risk")
+def api_admin_flush_portfolio_risk() -> dict[str, Any]:
+    """Reconcile in-memory portfolio risk against open trades (stale reservation recovery)."""
+    from data.learning_store import LearningStore
+    from execution.portfolio_hooks import rehydrate_portfolio_from_store
+    from system.config_loader import get_config
+    from system.engine_log import log_engine
+    from system.portfolio_envelope import rehydrate, snapshot
+
+    try:
+        before = snapshot()
+        cfg = get_config()
+        store = LearningStore(str(cfg.learning_db))
+        try:
+            rehydrate_portfolio_from_store(store, cfg=cfg)
+        except Exception:
+            rehydrate(concurrent_risk_gbp=0.0, daily_deployed_gbp=0.0)
+        after = snapshot()
+        log_engine(
+            "admin/flush-portfolio-risk: "
+            f"concurrent £{before.get('concurrent_risk_gbp', 0):.0f} → "
+            f"£{after.get('concurrent_risk_gbp', 0):.0f}"
+        )
+        return {
+            "ok": True,
+            "before": before,
+            "after": after,
+        }
+    except Exception as exc:
+        log_engine(
+            f"admin/flush-portfolio-risk failed: {type(exc).__name__}: {exc}"
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @router.get("/api/admin/export-shadow", response_model=None)
 def api_admin_export_shadow(download: bool = True) -> Response | dict[str, Any]:
     """
@@ -519,6 +589,30 @@ def api_v26_cert() -> dict[str, Any]:
     return build_cert_payload()
 
 
+@router.get("/api/v30/cert")
+def api_v30_cert() -> dict[str, Any]:
+    """v30 CERT tab — ML certification ladder from v30 data lake."""
+    from api.v30_cert import build_v30_cert_payload
+
+    return build_v30_cert_payload()
+
+
+@router.get("/api/trades/triage-ledger")
+def api_trades_triage_ledger(limit: int = 50) -> dict[str, Any]:
+    """Authoritative fill ledger from triage_v30.db."""
+    from api.triage_ledger import fetch_triage_ledger
+
+    return fetch_triage_ledger(limit=min(200, max(1, limit)))
+
+
+@router.get("/api/stats/triage")
+def api_stats_triage() -> dict[str, Any]:
+    """Rolling Sharpe, slippage, spread premium from triage_v30.db."""
+    from api.triage_ledger import fetch_triage_stats
+
+    return fetch_triage_stats()
+
+
 @router.get("/api/v27/sentinel/diagnostics")
 def api_v27_sentinel_diagnostics(limit: int = 80) -> dict[str, Any]:
     """v27 Autonomous Sentinel — terminal diagnostic stream payload."""
@@ -547,6 +641,12 @@ async def api_v27_sentinel_approve(request: Request) -> dict[str, Any]:
 @router.get("/api/learning/status")
 def api_learning_status() -> dict[str, Any]:
     return learning_status()
+
+
+@router.get("/api/intelligence/dashboard")
+def api_intelligence_dashboard() -> dict[str, Any]:
+    """Glass cockpit intelligence plane — replay, shadow, learning, live microstructure."""
+    return intelligence_dashboard()
 
 
 @router.post("/api/replay/run")
@@ -623,7 +723,9 @@ def api_flatten_all() -> JSONResponse:
         if not status.ok or status.credentials is None:
             raise RuntimeError(status.error or "credentials missing")
 
-        cfg = ConfigLoader(config_dir() / "config_v25.json").load_config()
+        from system.config_loader import load_active_config
+
+        cfg = load_active_config(validate=False)
         rest = ensure_shared_authenticated(status.credentials)
         positions = rest.open_positions()
         closed = []
@@ -651,6 +753,18 @@ def api_flatten_all() -> JSONResponse:
             except Exception as e:
                 errors.append(f"{deal_id}: {e}")
                 log_engine(f"flatten_all error {deal_id}: {e}")
+
+        try:
+            from data.learning_store import LearningStore
+            from execution.portfolio_hooks import rehydrate_portfolio_from_store
+
+            store = LearningStore(str(cfg.learning_db))
+            rehydrate_portfolio_from_store(store, cfg=cfg)
+            log_engine("flatten_all: portfolio envelope rehydrated from store")
+        except Exception as fe:
+            log_engine(
+                f"flatten_all: portfolio rehydrate failed (continuing): {fe}"
+            )
 
         notifier = get_telegram_notifier()
         if notifier and notifier.enabled:
@@ -687,7 +801,9 @@ def api_flatten_epic(epic: str) -> JSONResponse:
         if not status.ok or status.credentials is None:
             raise RuntimeError(status.error or "credentials missing")
 
-        cfg = ConfigLoader(config_dir() / "config_v25.json").load_config()
+        from system.config_loader import load_active_config
+
+        cfg = load_active_config(validate=False)
         rest = ensure_shared_authenticated(status.credentials)
         positions = rest.open_positions()
         closed = []
@@ -957,3 +1073,25 @@ def api_shutdown(background_tasks: BackgroundTasks) -> JSONResponse:
     except Exception as e:
         log_engine(f"shutdown failed: {type(e).__name__}: {e}")
         raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@router.get("/api/apex/system-monitor")
+def get_system_monitor() -> dict[str, Any]:
+    """Native operational telemetry console — 30-minute rolling log + funnel counters."""
+    try:
+        from apex.system_monitor import build_monitor_snapshot
+
+        return build_monitor_snapshot()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/api/apex/export-warmup-report")
+def post_export_warmup_report() -> dict[str, Any]:
+    """Export triage WAL performance track record to logs/warmup_report_latest.md."""
+    try:
+        from apex.system_monitor import export_warmup_report
+
+        return export_warmup_report()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc

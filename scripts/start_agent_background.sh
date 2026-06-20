@@ -61,6 +61,9 @@ fi
 log "start_agent_background: python=${PY} caffeinate=${CAFF_ARGS[*]:-off}"
 
 cd "${AGENT_DIR}"
+find . -name "*.pyc" -delete 2>/dev/null || true
+find . -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+
 if ((${#CAFF_ARGS[@]})); then
   exec "${CAFF_ARGS[@]}" "${PY}" src/main.py
 else

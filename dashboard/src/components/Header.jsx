@@ -162,10 +162,14 @@ function RoadmapAiStatusPills({
     trading_loops_running: tradingLoopsRunning,
   });
   const appInitializing = appAi.initializing;
+  const shadowDesktopNominal =
+    watchdogActive == null &&
+    appAi.driftOk == null &&
+    tradingLoopsRunning !== false;
   const appHealthy =
     !appInitializing &&
     appAi.driftOk !== false &&
-    (watchdogActive === true || appAi.driftOk === true);
+    (watchdogActive === true || appAi.driftOk === true || shadowDesktopNominal);
 
   let appClass =
     "border-border bg-card/60 text-muted";

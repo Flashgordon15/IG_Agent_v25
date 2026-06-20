@@ -53,6 +53,13 @@ def _first_live_tick_epic(epics: list[str]) -> str | None:
 
 def _open_market_epics(epics: list[str]) -> list[str]:
     try:
+        from system.agent_execution_mode import force_market_open_active
+
+        if force_market_open_active():
+            return list(epics)
+    except Exception:
+        pass
+    try:
         from system.market_watch.calendar import is_market_open
 
         return [e for e in epics if is_market_open(e)]
@@ -109,6 +116,7 @@ class Gate3Runner:
 
         from api.snapshot_store import wire_hub_quotes_to_dashboard
         from execution.position_protect_hub import wire_hub_quotes_to_position_protect
+        from feeder.pricing_transport import reference_transport_is_yahoo
         from ig_api.streaming_factory import resolve_streaming_transport
         from runtime.agent_bootstrap import start_market_stream
         from trading.instrument_registry import InstrumentRegistry
@@ -123,10 +131,6 @@ class Gate3Runner:
             epics = [str(cfg.epic)]
         self._context.epics = epics
 
-        transport_mode, _transport_reason = resolve_streaming_transport(
-            cfg.streaming_transport
-        )
-
         wire_hub_quotes_to_dashboard(min_interval=0.25)
         wire_hub_quotes_to_position_protect(min_interval=0.05)
 
@@ -140,6 +144,27 @@ class Gate3Runner:
                 log_engine(
                     f"Gate3: intelligence hub wire skipped: {type(exc).__name__}: {exc}"
                 )
+
+        if reference_transport_is_yahoo(cfg):
+            shadow_timeout = 45.0 if self._context.config else self._timeout_sec
+            try:
+                from system.node_profile import is_shadow_node
+
+                if is_shadow_node():
+                    shadow_timeout = min(self._timeout_sec, 45.0)
+            except Exception:
+                pass
+            prev = self._timeout_sec
+            self._timeout_sec = shadow_timeout
+            try:
+                self._execute_yahoo_reference(epics)
+            finally:
+                self._timeout_sec = prev
+            return
+
+        transport_mode, _transport_reason = resolve_streaming_transport(
+            cfg.streaming_transport
+        )
 
         client = start_market_stream(
             cfg,
@@ -235,4 +260,98 @@ class Gate3Runner:
         log_engine(
             f"Gate3: stream confirmed heartbeat_ok=True "
             f"first_tick={first_tick_epic or 'market_closed_exempt'}"
+        )
+
+    def _execute_yahoo_reference(self, epics: list[str]) -> None:
+        from feeder.pricing_transport import yahoo_poll_seconds
+        from feeder.yahoo_quote_poller import start_yahoo_quote_poller
+        from system.stream_ready import signal_stream_ready
+
+        cfg = self._context.config
+        poll_sec = yahoo_poll_seconds(cfg)
+        poller = start_yahoo_quote_poller(epics, poll_sec=poll_sec)
+        label = "yahoo"
+        log_engine(f"Gate3: Yahoo reference pricing poll={poll_sec:.1f}s epics={epics}")
+
+        self._state.update_state(
+            BootPhase.G3_STREAMING,
+            48,
+            "Yahoo Reference Pricing",
+            gates_dict=None,
+            streaming={"transport": label, "heartbeat_ok": False},
+        )
+
+        open_epics = _open_market_epics(epics)
+        market_closed_exempt = len(open_epics) == 0
+        deadline = time.monotonic() + self._timeout_sec
+        first_tick_epic: str | None = None
+        first_tick_at: str | None = None
+
+        while time.monotonic() < deadline:
+            tick_epic = _first_live_tick_epic(open_epics if open_epics else epics)
+            heartbeat_ok = poller.running and (tick_epic is not None or poller.stats()["polls"] > 0)
+
+            self._state.update_state(
+                BootPhase.G3_STREAMING,
+                52 if tick_epic else 48,
+                "Yahoo Reference Pricing",
+                gates_dict=None,
+                streaming={
+                    "transport": label,
+                    "heartbeat_ok": heartbeat_ok,
+                    "first_tick_epic": tick_epic,
+                    "first_tick_at": first_tick_at,
+                    "market_closed_exempt": market_closed_exempt,
+                },
+            )
+
+            if tick_epic is not None or market_closed_exempt:
+                first_tick_epic = tick_epic
+                first_tick_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                break
+
+            poller.poll_all()
+            time.sleep(_G3_POLL_SEC)
+        else:
+            tick_epic = _first_live_tick_epic(epics)
+            if tick_epic:
+                first_tick_epic = tick_epic
+                first_tick_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                log_engine(
+                    f"Gate3: Yahoo reference timeout — accepting hub tick epic={tick_epic}"
+                )
+            else:
+                raise TimeoutError(
+                    f"no Yahoo reference tick within {self._timeout_sec:.0f}s "
+                    f"(polls={poller.stats().get('polls', 0)})"
+                )
+
+        signal_stream_ready(source="gate3:yahoo")
+        self._context.stream_client = None
+
+        self._state.update_state(
+            BootPhase.G3_STREAMING,
+            60,
+            "Yahoo Reference Live",
+            gates_dict={
+                gid: (
+                    self._state.snapshot_model().gates[gid].to_dict()
+                    if gid != "G3"
+                    else {
+                        "status": GateStatus.RUNNING,
+                        "detail": "Yahoo reference pricing live",
+                    }
+                )
+                for gid in ("G1", "G2", "G3", "G4", "G5")
+            },
+            streaming={
+                "transport": label,
+                "heartbeat_ok": True,
+                "first_tick_epic": first_tick_epic,
+                "first_tick_at": first_tick_at,
+                "market_closed_exempt": market_closed_exempt,
+            },
+        )
+        log_engine(
+            f"Gate3: Yahoo reference confirmed first_tick={first_tick_epic or 'market_closed_exempt'}"
         )

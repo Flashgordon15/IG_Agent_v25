@@ -18,7 +18,7 @@ from execution.trailing_stop_engine import (
     stale_decay_compression_pct,
 )
 from system.config import Config
-from system.engine_log import log_engine
+from system.engine_log import log_engine, log_engine_intermittent
 from system.trade_lifecycle_bus import (
     STAGE_POSITION_TRACKING,
     STATUS_OK,
@@ -1767,12 +1767,18 @@ class TradeManager:
         if trail_stop is None:
             if profit >= trigger:
                 if side == "BUY" and (px - distance) < stop:
-                    log_engine(
-                        f"ERROR: Trail would move stop backwards — rejected. "
-                        f"current={stop} proposed={px - distance:.5f}"
+                    log_engine_intermittent(
+                        f"trail_backwards:{epic}",
+                        f"Trail stop: rejected backwards move (BUY). "
+                        f"current={stop} proposed={px - distance:.5f}",
+                        interval_sec=60.0,
                     )
                 elif side == "SELL" and (px + distance) > stop:
-                    log_engine("ERROR: Trail would move stop backwards — rejected.")
+                    log_engine_intermittent(
+                        f"trail_backwards:{epic}",
+                        "Trail stop: rejected backwards move (SELL).",
+                        interval_sec=60.0,
+                    )
             return msgs
         self.store.update_stop(
             trade_id,

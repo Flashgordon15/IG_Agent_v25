@@ -133,6 +133,28 @@ def stream_quote_poll_rest_active() -> bool:
         return _stream_quote_poll_depth > 0
 
 
+_execution_snapshot_depth = 0
+_execution_snapshot_lock = threading.RLock()
+
+
+@contextmanager
+def execution_snapshot_rest_window() -> Iterator[None]:
+    """Gate 7 IG execution preflight — must not lose to Yahoo poll hard cap."""
+    global _execution_snapshot_depth
+    with _execution_snapshot_lock:
+        _execution_snapshot_depth += 1
+    try:
+        yield
+    finally:
+        with _execution_snapshot_lock:
+            _execution_snapshot_depth = max(0, _execution_snapshot_depth - 1)
+
+
+def execution_snapshot_rest_active() -> bool:
+    with _execution_snapshot_lock:
+        return _execution_snapshot_depth > 0
+
+
 @contextmanager
 def e2e_diagnostics_rest_window() -> Iterator[None]:
     """
@@ -362,6 +384,7 @@ class RestApiBudget:
         # that confirm_deal can always complete regardless of budget saturation.
         _exempt_cap = (
             priority
+            or execution_snapshot_rest_active()
             or cat in ESSENTIAL_REST_CATEGORIES
             or e2e_diagnostics_rest_active()
             or (stream_quote_poll_rest_active() and cat == "market")
@@ -391,7 +414,9 @@ class RestApiBudget:
             self._total_calls += 1
             cat = categorize_rest_label(label)
             exempt_preemptive = (
-                ohlc_bootstrap_rest_active() or stream_quote_poll_rest_active()
+                ohlc_bootstrap_rest_active()
+                or stream_quote_poll_rest_active()
+                or execution_snapshot_rest_active()
             )
             self._recent.append(
                 RestCallRecord(now, label, cat, exempt_preemptive=exempt_preemptive)
@@ -437,6 +462,8 @@ class RestApiBudget:
         return count >= threshold
 
     def _raise_if_non_essential_paused(self, category: str, *, label: str = "") -> None:
+        if execution_snapshot_rest_active():
+            return
         if category in ESSENTIAL_REST_CATEGORIES:
             return
         if e2e_diagnostics_rest_active():

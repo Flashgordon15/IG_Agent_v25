@@ -473,6 +473,17 @@ class ExecutionEngine:
     def _execute_trade_body(
         self, signal: TradeSignal, *, prevalidated: bool = False
     ) -> ExecutionResult:
+        from execution.atomic_gateway import assert_execution_allowed
+
+        hold = assert_execution_allowed()
+        if hold:
+            return ExecutionResult(
+                success=False,
+                action="REJECTED",
+                rejection_reason=hold,
+                execution_params={},
+            )
+
         try:
             get_rate_limit_manager().check_rest_allowed()
         except RateLimitError as e:
@@ -794,6 +805,40 @@ class ExecutionEngine:
         )
 
         try:
+            from system.agent_execution_mode import (
+                demo_broker_execution_active,
+                shadow_execution_active,
+            )
+
+            if demo_broker_execution_active() and not shadow_execution_active():
+                if self._live is None:
+                    reason = "IG DEMO mode requires REST client (LiveExecutor)"
+                    update_demo_diagnostics(last_rejection=reason, executor_selected="none")
+                    return ExecutionResult(
+                        success=False,
+                        action="REJECTED",
+                        rejection_reason=reason,
+                        execution_params=execution_params,
+                    )
+                trace_execution(
+                    "EXECUTION",
+                    "LiveExecutor.execute",
+                    decision="IG DEMO direct REST — bypass SHADOW ledger",
+                    next_fn="LiveExecutor.execute→IGRestClient.place_market_order",
+                    params={"epic": signal.epic, "mode": "DEMO"},
+                )
+                update_demo_diagnostics(executor_selected="live_executor (IG DEMO REST)")
+                return self._live.execute(
+                    signal,
+                    execution_params,
+                    self._trade_manager,
+                    self._cooldown,
+                    mode=ExecutionMode.DEMO,
+                )
+        except Exception as exc:
+            log_engine(f"DEMO LiveExecutor route failed: {type(exc).__name__}: {exc}")
+
+        try:
             from trading.shadow_executor import ShadowExecutor, shadow_mode_active
 
             if shadow_mode_active():
@@ -808,6 +853,21 @@ class ExecutionEngine:
                 return ShadowExecutor().execute(signal, execution_params)
         except Exception as exc:
             log_engine(f"shadow_executor route failed: {type(exc).__name__}: {exc}")
+
+        try:
+            from system.agent_execution_mode import demo_broker_execution_active
+
+            if demo_broker_execution_active():
+                trace_execution(
+                    "EXECUTION",
+                    "LiveExecutor.execute",
+                    decision="IG DEMO broker channel",
+                    next_fn="LiveExecutor.execute",
+                    params={"epic": signal.epic, "mode": "DEMO"},
+                )
+                update_demo_diagnostics(executor_selected="live_executor (IG DEMO REST)")
+        except Exception:
+            pass
 
         if self.mode.uses_simulator():
             if self.mode == ExecutionMode.DEMO:

@@ -1,6 +1,9 @@
-import React from "react";
-import { authHeaders } from "../api/client.js";
+import React, { memo, useEffect, useRef, useState } from "react";
+import { authHeaders, api } from "../api/client.js";
+import { subscribeLedger } from "../api/apexIpc.js";
+import { normalizeHudError } from "../utils/hudErrors.js";
 import { fmtPrice as fmtPriceShared } from "../utils/fmtPrice.js";
+import useThrottledValue from "../hooks/useThrottledValue.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -336,11 +339,56 @@ function ClosePositionButton({ dealId, epic }) {
 // ---------------------------------------------------------------------------
 
 export default function TradesPanel({ state }) {
+  const throttledState = useThrottledValue(state, 100);
   const [showTestTrades, setShowTestTrades] = React.useState(false);
   const [showShadowHistory, setShowShadowHistory] = React.useState(false);
   const [learningHealth, setLearningHealth] = React.useState(null);
   const [shadowTrades, setShadowTrades] = React.useState([]);
   const [shadowCount, setShadowCount] = React.useState(0);
+  const [triageRows, setTriageRows] = React.useState([]);
+  const [triageError, setTriageError] = React.useState("");
+  const [flashRows, setFlashRows] = useState({});
+  const seenClosedRef = useRef(new Set());
+  const [testbedWinRate, setTestbedWinRate] = useState(null);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    const loadTriage = async () => {
+      try {
+        const data = await api.triageLedger(50);
+        if (!cancelled) {
+          setTriageRows(Array.isArray(data?.rows) ? data.rows : []);
+          setTriageError("");
+        }
+      } catch (e) {
+        if (!cancelled) setTriageError(normalizeHudError(e?.message));
+      }
+    };
+    loadTriage();
+    const id = window.setInterval(loadTriage, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, []);
+
+  React.useEffect(() => {
+    return subscribeLedger((packet) => {
+      if (!packet || typeof packet !== "object") return;
+      const lat = packet.latency_ms ?? packet.latencyMs;
+      setTriageRows((prev) => [
+        {
+          ts: packet.ts ?? Date.now() / 1000,
+          epic: String(packet.epic || "—"),
+          action: String(packet.action || packet.side || "FILL").toUpperCase(),
+          size: packet.size != null ? Math.trunc(Number(packet.size)) : 1,
+          entry: packet.entry ?? packet.entry_price ?? 0,
+          latency_ms: lat != null ? Number(lat) : null,
+        },
+        ...prev,
+      ].slice(0, 50));
+    });
+  }, []);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -380,7 +428,49 @@ export default function TradesPanel({ state }) {
     };
   }, [state?.system_status]);
 
-  if (!state) {
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const data = await api.testbedStatus();
+        if (!cancelled && data?.hardened_testbed) {
+          setTestbedWinRate(data.win_rate_pct ?? null);
+        } else if (!cancelled) {
+          setTestbedWinRate(null);
+        }
+      } catch {
+        if (!cancelled) setTestbedWinRate(null);
+      }
+    };
+    poll();
+    const id = window.setInterval(poll, 250);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, []);
+
+  useEffect(() => {
+    const closed = resolveClosedTrades(state);
+    for (const trade of closed) {
+      const key = tradeKey(trade, 0);
+      if (seenClosedRef.current.has(key)) continue;
+      seenClosedRef.current.add(key);
+      const result = String(trade.result ?? "").toUpperCase();
+      const pnl = Number(trade.pnl_gbp ?? trade.pnl ?? 0);
+      const flash = result === "WIN" || pnl > 0 ? "win" : "loss";
+      setFlashRows((prev) => ({ ...prev, [key]: flash }));
+      window.setTimeout(() => {
+        setFlashRows((prev) => {
+          const next = { ...prev };
+          delete next[key];
+          return next;
+        });
+      }, 1400);
+    }
+  }, [state?.closed_trades]);
+
+  if (!throttledState) {
     return (
       <div className="mx-auto max-w-5xl space-y-3 px-1">
         <div className="rounded-lg border border-border bg-card p-6 text-center text-muted">Waiting for state…</div>
@@ -388,28 +478,84 @@ export default function TradesPanel({ state }) {
     );
   }
 
-  const positions       = resolvePositions(state);
-  const allClosedTrades = resolveClosedTrades(state);
+  const positions       = resolvePositions(throttledState);
+  const allClosedTrades = resolveClosedTrades(throttledState);
   const agentTrades     = allClosedTrades.filter((t) => !isTestTrade(t));
   const closedTrades    = showTestTrades
     ? allClosedTrades
     : agentTrades;
   const agentTradeCount =
-    Number(state?.system_status?.agent_sourced?.trade_count ?? agentTrades.length);
+    Number(throttledState?.system_status?.agent_sourced?.trade_count ?? agentTrades.length);
   const historicalCount =
     shadowCount ||
-    Number(state?.system_status?.shadow_training_registry?.trade_count ?? 0);
+    Number(throttledState?.system_status?.shadow_training_registry?.trade_count ?? 0);
   const testTradeCount  = allClosedTrades.filter((t) => isTestTrade(t)).length;
   const dryRunCount     = allClosedTrades.filter((t) => isDryRunTrade(t)).length;
-  const syncMeta        = resolveTradeSyncMeta(state, closedTrades.length);
-  const mlRecords       = resolveMlTrainingCount(state, learningHealth);
+  const syncMeta        = resolveTradeSyncMeta(throttledState, closedTrades.length);
+  const mlRecords       = resolveMlTrainingCount(throttledState, learningHealth);
   const mlTarget        = Number(learningHealth?.ml?.training_records_required ?? 500);
 
   const { wins, losses, total, winRate, totalPnl, openPnl } = buildPerformanceSummary(closedTrades, positions);
   const marketBreakdown = buildMarketBreakdown(closedTrades);
 
+  const displayWinRate = testbedWinRate != null ? testbedWinRate : winRate;
+
   return (
     <div className="mx-auto max-w-5xl space-y-3 px-1 pb-4">
+
+      {testbedWinRate != null && (
+        <div className="testbed-live-winrate-card">
+          <span>Simulation Win Rate</span>
+          <strong>{displayWinRate}%</strong>
+          <div className="testbed-sim-winrate-bar testbed-sim-winrate-bar--lg">
+            <span
+              className="testbed-sim-winrate-fill"
+              style={{ width: `${Math.min(100, displayWinRate)}%` }}
+            />
+          </div>
+        </div>
+      )}
+
+      <Card title="Authoritative ledger (triage_v30.db)">
+        {triageError ? (
+          <p className="apex-hud-backfill">{triageError}</p>
+        ) : triageRows.length === 0 ? (
+          <p className="apex-hud-backfill">
+            MOCK BACKFILL CACHE: ACTIVE · STANDING BY FOR SUNDAY BELL
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-left text-[11px]">
+              <thead>
+                <tr>
+                  <th className="px-2 py-1">Timestamp</th>
+                  <th className="px-2 py-1">Epic</th>
+                  <th className="px-2 py-1">Action</th>
+                  <th className="px-2 py-1">Size</th>
+                  <th className="px-2 py-1">Entry</th>
+                  <th className="px-2 py-1">Latency</th>
+                </tr>
+              </thead>
+              <tbody>
+                {triageRows.map((row, i) => (
+                  <tr key={`${row.ts}-${row.epic}-${i}`} className="border-t border-border/60">
+                    <td className="px-2 py-1.5 tabular-nums text-foreground">
+                      {formatBstTime(row.ts)}
+                    </td>
+                    <td className="px-2 py-1.5 text-foreground">{row.epic}</td>
+                    <td className="px-2 py-1.5 hud-value-positive">{row.action}</td>
+                    <td className="px-2 py-1.5 tabular-nums">{row.size}</td>
+                    <td className="px-2 py-1.5 tabular-nums">{row.entry ?? "—"}</td>
+                    <td className="px-2 py-1.5 tabular-nums hud-value-warning">
+                      {row.latency_ms != null ? `${row.latency_ms}ms` : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
 
       <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border/80 bg-card/40 px-3 py-2 text-[11px]">
         <span className="font-semibold text-foreground">
@@ -429,7 +575,7 @@ export default function TradesPanel({ state }) {
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 sm:gap-3">
         <StatBox label="Closed P&L (all time)" value={total > 0 ? fmtGbp(totalPnl) : "—"} valueClassName={totalPnl >= 0 ? "text-success" : "text-danger"} />
         <StatBox label="Open P&L"   value={positions.length > 0 ? fmtGbp(openPnl) : "—"} valueClassName={openPnl >= 0 ? "text-success" : "text-danger"} />
-        <StatBox label="Win rate (all closed)" value={winRate != null ? `${winRate}%` : "—"} valueClassName={winRate != null && winRate >= 50 ? "text-success" : "text-warning"} />
+        <StatBox label="Win rate (all closed)" value={displayWinRate != null ? `${displayWinRate}%` : "—"} valueClassName={displayWinRate != null && displayWinRate >= 50 ? "text-success" : "text-warning"} />
         <StatBox label="Trades"     value={`${wins}W / ${losses}L`} valueClassName="text-foreground" />
       </div>
 
@@ -580,10 +726,17 @@ export default function TradesPanel({ state }) {
                   const time = trade.closed_at ?? trade.closed_time ?? trade.time ?? trade.ts ?? trade.timestamp;
                   const isTest = isTestTrade(trade);
                   const unconfirmed = !isTest && !hasIgDealRef(trade);
+                  const key = tradeKey(trade, idx);
+                  const flash = flashRows[key];
                   return (
                     <tr
-                      key={tradeKey(trade, idx)}
-                      className={["border-b border-border/60 last:border-0 hover:bg-card/50 transition-colors", isTest ? "opacity-60 italic" : ""].join(" ")}
+                      key={key}
+                      className={[
+                        "border-b border-border/60 last:border-0 hover:bg-card/50 transition-colors",
+                        isTest ? "opacity-60 italic" : "",
+                        flash === "win" ? "testbed-row-flash-win" : "",
+                        flash === "loss" ? "testbed-row-flash-loss" : "",
+                      ].join(" ")}
                     >
                       <td className="px-2 py-2 tabular-nums text-muted">{fmtTs(time)}</td>
                       <td className="px-2 py-2 font-medium text-foreground not-italic">

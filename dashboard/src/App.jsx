@@ -1,7 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { WS_URL } from "./config.js";
 import { fetchState, fetchSplash } from "./api.js";
-import { api, authHeaders, clearAuthSession } from "./api/client.js";
+import { API_BASE, DEFAULT_API_PORT, isShadowProfile, recoveryHealthUrl, resolveTargetPort } from "./config.js";
+import { api, authHeaders, storeAuthSession } from "./api/client.js";
+import { useSidecarPid } from "./hooks/useSidecarPid.js";
+import {
+  getTransportLabel,
+  isApexDesktopShell,
+  publishStreamStatus,
+  subscribeIpcStatus,
+  subscribeTicks,
+} from "./api/apexIpc.js";
 
 const HEARTBEAT_INTERVAL_MS = 25000; // ping every 25 s (server times out at 10 min)
 import Header from "./components/Header.jsx";
@@ -30,24 +38,81 @@ import DailyDigestModal, {
 } from "./components/DailyDigestModal.jsx";
 
 import StatsTab from "./tabs/StatsTab.jsx";
+import TestbedSimulationBanner from "./components/TestbedSimulationBanner.jsx";
+import MLInsightsPostMortemTab from "./tabs/MLInsightsPostMortemTab.jsx";
+import SystemMonitorTab from "./tabs/SystemMonitorTab.jsx";
+import ApexCockpitView from "./components/apex/ApexCockpitView.jsx";
 
-const TABS = [
+const BASE_TABS = [
   { id: "live", label: "LIVE" },
   { id: "trades", label: "TRADES" },
   { id: "points", label: "POINTS" },
   { id: "stats", label: "STATS" },
+  { id: "ml_insights", label: "ML INSIGHTS & POST-MORTEM" },
+  { id: "system_monitor", label: "📟 SYSTEM MONITOR" },
   { id: "intelligence", label: "INTELLIGENCE" },
   { id: "profit", label: "PROFIT" },
   { id: "cert", label: "CERT" },
   { id: "system", label: "SYSTEM" },
 ];
 
-const WS_BACKOFF_INITIAL_MS = 1000;
-const WS_BACKOFF_MAX_MS = 30000;
+const APEX_TAB = { id: "apex", label: "APEX AVIONICS" };
+
 const POLL_INTERVAL_MS = 5000;
+const TESTBED_POLL_INTERVAL_MS = 100;
 const VERIFY_POLL_TIMEOUT_MS = 90000;
 const DELIBERATE_STOP_KEY = "ig_agent_deliberate_stop_ts";
 const DELIBERATE_STOP_TTL_MS = 600_000; // 10 min — matches manual_stop max age
+
+/** Stage 2 / boot health probe — unified :9090 desktop monolith. */
+function agentApiUrl(path = "") {
+  const port = resolveTargetPort();
+  const suffix = path.startsWith("/") ? path : `/${path}`;
+  return `http://127.0.0.1:${port}${suffix}`;
+}
+
+async function checkAgentApi() {
+  const RECOVERY_URL = recoveryHealthUrl();
+  const res = await fetch(RECOVERY_URL, {
+    method: "GET",
+    credentials: "include",
+    headers: authHeaders(),
+    signal: AbortSignal.timeout(5000),
+  });
+  return res.ok;
+}
+
+/** Launch-when-down recovery — poll active profile API until health returns. */
+async function handleRecoveryLoop({ maxAttempts = 45, intervalMs = 2000 } = {}) {
+  const RECOVERY_URL = recoveryHealthUrl();
+  const port = resolveTargetPort();
+  if (typeof window !== "undefined" && window.apexIPC?.restartSidecar) {
+    try {
+      await window.apexIPC.restartSidecar();
+    } catch {
+      /* shell may be unavailable in browser dev mode */
+    }
+  }
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      const res = await fetch(RECOVERY_URL, {
+        method: "GET",
+        credentials: "include",
+        headers: authHeaders(),
+        signal: AbortSignal.timeout(5000),
+      });
+      if (res.ok) {
+        return { ok: true, port, attempt: attempt + 1 };
+      }
+    } catch {
+      /* retry */
+    }
+    if (attempt + 1 < maxAttempts) {
+      await new Promise((resolve) => window.setTimeout(resolve, intervalMs));
+    }
+  }
+  return { ok: false, port, attempt: maxAttempts };
+}
 
 function markDeliberateStop() {
   if (typeof window === "undefined") return;
@@ -92,7 +157,7 @@ async function fetchVerifyPayload(url) {
 
 async function probeAgentDown() {
   try {
-    const res = await fetch("/api/health", {
+    const res = await fetch(agentApiUrl("/api/health"), {
       signal: AbortSignal.timeout(2000),
       credentials: "include",
       headers: authHeaders(),
@@ -278,20 +343,25 @@ function createSoundEngine() {
 }
 
 export default function App() {
-  const [tab, setTab] = useState("live");
+  const apexShell = isApexDesktopShell();
+  const TABS = apexShell ? [APEX_TAB, ...BASE_TABS] : BASE_TABS;
+  const [tab, setTab] = useState(apexShell ? "apex" : "live");
   const [state, setState] = useState(null);
   const [wsConnected, setWsConnected] = useState(false);
   const [reconnecting, setReconnecting] = useState(true);
   const [selectedEpic, setSelectedEpic] = useState(null);
   const [splashData, setSplashData] = useState(null);
-  // auth → boot progress → release notes → dashboard
-  const [launchStage, setLaunchStage] = useState("auth");
+  // v30.0 Emergency Password Bypass — Secure Access gate disabled for local Apex shell
+  const [isAuthenticated, setIsAuthenticated] = useState(true);
+  // auth → boot progress → release notes → dashboard (auth stage skipped when isAuthenticated)
+  const [launchStage, setLaunchStage] = useState("boot");
   // "idle" | "confirming" | "stopping" | "verifying" | "stopped"
   const [shutdownState, setShutdownState] = useState("idle");
   const [shutdownVerification, setShutdownVerification] = useState(null);
   const [agentStillRunning, setAgentStillRunning] = useState(false);
   const [agentAlive, setAgentAlive] = useState(true);
   const [agentOfflineChecked, setAgentOfflineChecked] = useState(false);
+  const [recoveryBusy, setRecoveryBusy] = useState(false);
   const [strategyHelpOpen, setStrategyHelpOpen] = useState(false);
   const [roadmapOpen, setRoadmapOpen] = useState(false);
   const [digestOpen, setDigestOpen] = useState(false);
@@ -299,6 +369,7 @@ export default function App() {
   const [digestDay, setDigestDay] = useState(null);
   const [healthOverlay, setHealthOverlay] = useState(null);
   const [startupOverlay, setStartupOverlay] = useState(null);
+  const [testbedActive, setTestbedActive] = useState(false);
   const healthFailRef = useRef(0);
   const prevStateRef = useRef(null);
   const soundRef = useRef(null);
@@ -313,15 +384,33 @@ export default function App() {
     }
   }, []);
 
-  // Stage 1 auth first on every fresh navigation (desktop launcher adds ?launch=timestamp).
+  // v30.0 Emergency Password Bypass — seed session token; never reset to auth gate
   useEffect(() => {
-    clearAuthSession();
-    setLaunchStage("auth");
+    storeAuthSession("v30_unlocked_session_token");
+    setIsAuthenticated(true);
+    setLaunchStage("boot");
     const params = new URLSearchParams(window.location.search);
     if (params.has("launch")) {
       window.history.replaceState({}, "", window.location.pathname || "/");
     }
   }, []);
+
+  // Stage 2 — vector array warmup via IPC + /api/startup/status (shadow :9090 only).
+  useEffect(() => {
+    if (launchStage !== "boot") return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        await checkAgentApi();
+      } catch {
+        /* StartupSplash surfaces reachability + warming progress */
+      }
+      if (cancelled) return;
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [launchStage]);
 
   // Prefetch release-notes metadata when entering stage 3.
   useEffect(() => {
@@ -362,34 +451,44 @@ export default function App() {
   }, [state, selectedEpic]);
 
   const mergedState = useMemo(() => {
-    if (!state && !healthOverlay) return null;
-    if (!state) return healthOverlay;
-    if (!healthOverlay) return state;
+    const base = state && typeof state === "object" ? state : {};
+    const health = healthOverlay && typeof healthOverlay === "object" ? healthOverlay : {};
+    const startup = startupOverlay && typeof startupOverlay === "object" ? startupOverlay : {};
+    if (!Object.keys(base).length && !Object.keys(health).length && !Object.keys(startup).length) {
+      return null;
+    }
+    const boot_metrics = health.boot_metrics ?? startup.boot_metrics ?? base.boot_metrics;
+    const system_state = health.system_state ?? startup.system_state ?? base.system_state;
+    const initReady =
+      system_state?.ready === true ||
+      system_state?.phase_label === "ACTIVE" ||
+      boot_metrics?.ready === true ||
+      health.init_force_cleared === true ||
+      base.init_force_cleared === true;
     return {
-      ...state,
-      system_state: healthOverlay.system_state ?? state.system_state,
-      init_force_cleared:
-        healthOverlay.system_state?.ready === true ||
-        healthOverlay.boot_metrics?.ready === true ||
-        healthOverlay.init_force_cleared === true ||
-        state.system_state?.ready === true ||
-        state.init_force_cleared === true,
-      boot_metrics: healthOverlay.boot_metrics ?? state.boot_metrics,
-      system_status: healthOverlay.system_status ?? state.system_status,
-      init_live_sec: healthOverlay.init_live_sec ?? state.init_live_sec,
-      trading_healthy: healthOverlay.trading_healthy ?? state.trading_healthy,
-      quotes_fresh: healthOverlay.quotes_fresh ?? state.quotes_fresh,
-      quotes_fresh_count: healthOverlay.quotes_fresh_count ?? state.quotes_fresh_count,
+      ...base,
+      ...health,
+      system_state,
+      boot_metrics,
+      init_force_cleared: initReady,
+      system_status: health.system_status ?? startup.system_status ?? base.system_status,
+      init_live_sec: health.init_live_sec ?? startup.init_live_sec ?? base.init_live_sec,
+      trading_healthy: health.trading_healthy ?? startup.trading_healthy ?? base.trading_healthy,
+      quotes_fresh: health.quotes_fresh ?? startup.quotes_fresh ?? base.quotes_fresh,
+      quotes_fresh_count:
+        health.quotes_fresh_count ?? startup.quotes_fresh_count ?? base.quotes_fresh_count,
       trading_loops_running:
-        healthOverlay.trading_loops_running ?? state.trading_loops_running,
+        health.trading_loops_running ?? startup.trading_loops_running ?? base.trading_loops_running,
       supervision_drift_ok:
-        healthOverlay.supervision_drift_ok ?? state.supervision_drift_ok,
-      watchdog_active: healthOverlay.watchdog_active ?? state.watchdog_active,
-      agent_pid: healthOverlay.agent_pid ?? state.agent_pid,
-      health_ts: healthOverlay.ts ?? state.health_ts,
-      config: healthOverlay.config ?? startupOverlay?.config ?? state.config,
+        health.supervision_drift_ok ?? startup.supervision_drift_ok ?? base.supervision_drift_ok,
+      watchdog_active: health.watchdog_active ?? startup.watchdog_active ?? base.watchdog_active,
+      agent_pid: health.agent_pid ?? startup.agent_pid ?? base.agent_pid,
+      health_ts: health.ts ?? base.health_ts,
+      config: health.config ?? startup.config ?? base.config,
     };
   }, [state, healthOverlay, startupOverlay]);
+
+  const sidecarPid = useSidecarPid(mergedState?.agent_pid);
 
   const systemStandbyActive = useMemo(() => {
     const healthRestricted = isSystemStandbyRestricted(healthOverlay);
@@ -434,20 +533,27 @@ export default function App() {
 
   useEffect(() => {
     let mounted = true;
-    let ws = null;
-    let reconnectTimer = null;
     let pollTimer = null;
-    let backoffMs = WS_BACKOFF_INITIAL_MS;
+    let unsubTick = () => {};
+    let unsubStatus = () => {};
+    const transport = getTransportLabel();
 
     const poll = async () => {
       const data = await fetchState();
-      if (mounted) applyState(data);
+      if (!mounted) return;
+      if (data && typeof data === "object") {
+        applyState(data);
+        setWsConnected(true);
+        setReconnecting(false);
+        publishStreamStatus(true, transport);
+      }
     };
 
     const startPolling = () => {
       if (pollTimer) return;
       poll();
-      pollTimer = window.setInterval(poll, POLL_INTERVAL_MS);
+      const interval = testbedActive ? TESTBED_POLL_INTERVAL_MS : POLL_INTERVAL_MS;
+      pollTimer = window.setInterval(poll, interval);
     };
 
     const stopPolling = () => {
@@ -457,52 +563,46 @@ export default function App() {
       }
     };
 
-    const connect = () => {
+    setWsConnected(false);
+    setReconnecting(true);
+
+    unsubTick = subscribeTicks((payload) => {
       if (!mounted) return;
+      applyState(payload);
+      setWsConnected(true);
+      setReconnecting(false);
+      stopPolling();
+      publishStreamStatus(true, transport);
+    });
 
-      setWsConnected(false);
-      setReconnecting(true);
-      startPolling();
-
-      ws = new WebSocket(WS_URL);
-
-      ws.onopen = () => {
-        if (!mounted) return;
+    unsubStatus = subscribeIpcStatus((status) => {
+      if (!mounted) return;
+      const connected = Boolean(status?.connected);
+      if (connected) {
         setWsConnected(true);
         setReconnecting(false);
-        backoffMs = WS_BACKOFF_INITIAL_MS;
         stopPolling();
-      };
+        return;
+      }
+      setReconnecting(true);
+      // Desktop shell: always keep HTTP poll alive when UDS IPC is down
+      startPolling();
+    });
 
-      ws.onmessage = (event) => {
-        try {
-          applyState(JSON.parse(event.data));
-        } catch {
-          /* ignore malformed frames */
-        }
-      };
-
-      ws.onclose = () => {
-        if (!mounted) return;
-        setWsConnected(false);
-        setReconnecting(true);
-        startPolling();
-        reconnectTimer = window.setTimeout(connect, backoffMs);
-        backoffMs = Math.min(WS_BACKOFF_MAX_MS, backoffMs * 2);
-      };
-
-      ws.onerror = () => ws.close();
-    };
-
-    connect();
+    if (isApexDesktopShell()) {
+      startPolling();
+      publishStreamStatus(false, transport);
+    } else {
+      startPolling();
+    }
 
     return () => {
       mounted = false;
       stopPolling();
-      if (reconnectTimer) window.clearTimeout(reconnectTimer);
-      ws?.close();
+      unsubTick();
+      unsubStatus();
     };
-  }, [applyState]);
+  }, [applyState, testbedActive]);
 
   useEffect(() => {
     const resumeAudio = () => soundRef.current?.ensureContext();
@@ -544,7 +644,7 @@ export default function App() {
   // Heartbeat — dashboard liveness ping (auto-shutdown on disconnect is disabled)
   useEffect(() => {
     if (launchStage === "auth" || launchStage === "boot" || launchStage === "release") return;
-    const ping = () => fetch("/api/heartbeat", { method: "POST" }).catch(() => {});
+    const ping = () => fetch(agentApiUrl("/api/heartbeat"), { method: "POST" }).catch(() => {});
     ping(); // immediate first ping
     const id = window.setInterval(ping, HEARTBEAT_INTERVAL_MS);
     return () => window.clearInterval(id);
@@ -555,7 +655,7 @@ export default function App() {
     if (launchStage === "auth" || launchStage === "boot" || launchStage === "release") return;
     const checkHealth = async () => {
       try {
-        const res = await fetch("/api/health", {
+        const res = await fetch(agentApiUrl("/api/health"), {
           method: "GET",
           credentials: "include",
           headers: authHeaders(),
@@ -592,7 +692,7 @@ export default function App() {
     if (launchStage === "auth" || launchStage === "boot" || launchStage === "release") return;
     const pollStartup = async () => {
       try {
-        const res = await fetch("/api/startup/status", {
+        const res = await fetch(agentApiUrl("/api/startup/status"), {
           method: "GET",
           credentials: "include",
           headers: authHeaders(),
@@ -671,7 +771,7 @@ export default function App() {
           {
             label: "Agent API unreachable",
             ok: true,
-            detail: "port 8080 not responding — process exited",
+            detail: `port ${DEFAULT_API_PORT} not responding — process exited`,
           },
           {
             label: "Post-exit verifier",
@@ -701,7 +801,7 @@ export default function App() {
     const controller = new AbortController();
     const abortTimer = window.setTimeout(() => controller.abort(), 8000);
     try {
-      const res = await fetch("/api/shutdown", {
+      const res = await fetch(agentApiUrl("/api/shutdown"), {
         method: "POST",
         signal: controller.signal,
       });
@@ -751,7 +851,7 @@ export default function App() {
     let cancelled = false;
     const probe = async () => {
       try {
-        const res = await fetch("/api/health", {
+        const res = await fetch(agentApiUrl("/api/health"), {
       signal: AbortSignal.timeout(2000),
       credentials: "include",
       headers: authHeaders(),
@@ -936,7 +1036,7 @@ export default function App() {
     watchdogActive: mergedState?.watchdog_active,
     initForceCleared: mergedState?.init_force_cleared,
     bootMetrics: mergedState?.boot_metrics,
-    agentPid: mergedState?.agent_pid,
+    agentPid: sidecarPid ?? mergedState?.agent_pid,
     quotesFresh: mergedState?.quotes_fresh,
     quotesFreshCount: mergedState?.quotes_fresh_count,
     initLiveSec: mergedState?.init_live_sec,
@@ -1010,13 +1110,13 @@ export default function App() {
         </p>
         <p style={{ color: "#64748b", fontSize: "12px", margin: 0, textAlign: "center", maxWidth: "360px" }}>
           {agentStillRunning
-            ? "This tab shows a stale stop screen — the agent is still alive on port 8080. Click Stop Agent again or close this tab and use the desktop icon to stop properly."
+            ? `This tab shows a stale stop screen — the agent is still alive on port ${DEFAULT_API_PORT}. Click Stop Agent again or close this tab and use the desktop icon to stop properly.`
             : fullyVerified
               ? "All shutdown checks passed. Safe to close this tab or restart from the desktop icon."
               : agentStoppedVerify
                 ? "Trading agent is down. Supervision status below — manual stop blocks auto-restart ~10 min."
                 : agentDown
-                  ? "The agent is no longer responding on port 8080. Waiting for post-exit verification…"
+                  ? `The agent is no longer responding on port ${DEFAULT_API_PORT}. Waiting for post-exit verification…`
                   : "Verification did not fully pass. See checks below or use the desktop icon to stop the agent."}
         </p>
         <SupervisionBanner
@@ -1066,8 +1166,15 @@ export default function App() {
     );
   }
 
-  if (launchStage === "auth") {
-    return <AuthLogin onSuccess={() => setLaunchStage("boot")} />;
+  if (launchStage === "auth" && !isAuthenticated) {
+    return (
+      <AuthLogin
+        onSuccess={() => {
+          setIsAuthenticated(true);
+          setLaunchStage("boot");
+        }}
+      />
+    );
   }
 
   if (launchStage === "boot") {
@@ -1086,6 +1193,7 @@ export default function App() {
 
   // Agent down without a recent deliberate stop — calm offline screen (no alarm)
   if (shutdownState === "idle" && agentAlive === false && agentOfflineChecked) {
+    const recoveryPort = resolveTargetPort();
     return (
       <div style={{
         position: "fixed", inset: 0, background: "#0b0f19",
@@ -1109,8 +1217,35 @@ export default function App() {
           color: "#64748b", fontSize: "12px", margin: 0,
           textAlign: "center", maxWidth: "360px", lineHeight: 1.5,
         }}>
-          Close this tab and relaunch from the desktop icon.
+          Shadow sidecar on :{recoveryPort} is unreachable. Launch IG Agent Apex from the desktop
+          icon, or retry the recovery handshake below.
         </p>
+        <button
+          type="button"
+          disabled={recoveryBusy}
+          onClick={async () => {
+            setRecoveryBusy(true);
+            const result = await handleRecoveryLoop({ maxAttempts: 45, intervalMs: 2000 });
+            setRecoveryBusy(false);
+            if (result.ok) {
+              healthFailRef.current = 0;
+              setAgentAlive(true);
+              setAgentOfflineChecked(false);
+            }
+          }}
+          style={{
+            marginTop: "8px",
+            padding: "10px 18px",
+            borderRadius: "8px",
+            border: "1px solid #334155",
+            background: "#1e293b",
+            color: "#e2e8f0",
+            fontSize: "13px",
+            cursor: recoveryBusy ? "wait" : "pointer",
+          }}
+        >
+          {recoveryBusy ? "Recovering…" : "Launch when down — retry connection"}
+        </button>
       </div>
     );
   }
@@ -1120,6 +1255,8 @@ export default function App() {
       <Header {...headerProps} />
 
       <SupervisionBanner state={state} />
+
+      <TestbedSimulationBanner onActiveChange={setTestbedActive} />
 
       {/* Stop confirmation modal */}
       {(shutdownState === "confirming" || shutdownState === "stopping" || shutdownState === "verifying") && (
@@ -1231,14 +1368,17 @@ export default function App() {
       </nav>
 
       {!wsConnected && (
-        <div className="bg-warning/15 px-3 py-1.5 text-center text-[11px] text-warning sm:text-xs">
+        <div className="awaiting-socket bg-warning/15 px-3 py-1.5 text-center text-[11px] sm:text-xs">
           {reconnecting
-            ? "WebSocket disconnected — polling /api/state every 5s"
+            ? isApexDesktopShell()
+              ? "IPC disconnected — awaiting apex_ipc.sock"
+              : "Stream disconnected — polling /api/state every 5s"
             : "Connecting…"}
         </div>
       )}
 
       <main className="min-h-0 flex-1 overflow-y-auto px-2 py-3 sm:px-4 sm:py-4">
+        {tab === "apex" && <ApexCockpitView />}
         {tab === "live" && (
           <LivePanel
             state={viewState}
@@ -1251,7 +1391,9 @@ export default function App() {
         {tab === "trades" && <TradesPanel state={mergedState} />}
         {tab === "points" && <PointsPanel state={mergedState} />}
         {tab === "stats" && <StatsTab />}
-        {tab === "intelligence" && <IntelligencePanel state={mergedState} />}
+        {tab === "ml_insights" && <MLInsightsPostMortemTab />}
+        {tab === "system_monitor" && <SystemMonitorTab />}
+        {tab === "intelligence" && <IntelligencePanel />}
         {tab === "profit" && <ProfitPanel />}
         {tab === "cert" && <CertPanel />}
         {tab === "system" && (

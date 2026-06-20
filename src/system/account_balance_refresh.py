@@ -39,8 +39,12 @@ class AccountBalanceRefresher:
             self._last_refresh = now
         summary: dict[str, float | None] = {}
         try:
+            from system.broker_status_cache import poll_broker_account_state
+
             if hasattr(self._rest, "maybe_refresh_account_summary"):
-                summary = self._rest.maybe_refresh_account_summary(min_interval=0.0)
+                summary = poll_broker_account_state(
+                    self._rest, endpoint="account_summary", min_interval=0.0
+                )
             elif hasattr(self._rest, "fetch_account_balance"):
                 bal = float(self._rest.fetch_account_balance())
                 summary = {"balance": bal, "available": bal}

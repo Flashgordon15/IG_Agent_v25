@@ -9,11 +9,13 @@
   "_note": "v29.1 — DEMO-only deployment; Profile B integrity + daily loss baseline reset + £400 soft pause / £500 hard stop",
   "protective_learning": {
     "enabled": true,
-    "signal_threshold_floor": 62,
+    "signal_threshold_floor": 42,
     "fitness_min_floor": 55,
     "session_score_floor": -30.0,
-    "_note": "Profile B protective floor — 62% confidence minimum (production)"
+    "_note": "Risk Director evening override 2026-06-18 — floor 42% (clears 42-43% alpha band); revert after session"
   },
+  "adaptive_min_trade_size": 1,
+  "_index_sizing_note": "Risk Director 2026-06-18 — integer-lot floor 1 for DOW/Nikkei (prevents size 0 UNDER_MIN_LOT); FX/Gold unaffected at ≥1 effective size",
   "sentiment_guard": {
     "enabled": true,
     "crowded_long_pct": 70,
@@ -116,7 +118,7 @@
   },
   "demo_soak_mode": {
     "enabled": true,
-    "_note": "Profile B entry permissiveness — reduced for protective learning phase.",
+    "_note": "Profile B entry permissiveness — reduced for protective learning phase. Sector override 2026-06-18T00:20Z.",
     "fitness_min": 55,
     "warning_confidence_cap": 85,
     "warning_use_instrument_threshold": true,
@@ -194,9 +196,9 @@
       "rollover_lock_end": "22:05",
       "overnight_session_start": "22:00",
       "overnight_session_end": "06:00",
-      "momentum_confidence_floor": 0.72,
-      "signal_confidence_relief_pts": 8.0,
-      "_note": "Night matrix 24/7 clearance — 7-min rollover lock only; premium microstructure gates apply."
+      "momentum_confidence_floor": 0.35,
+      "signal_confidence_relief_pts": 25.0,
+      "_note": "Night matrix 24/7 clearance — 7-min rollover lock only; Risk Director 2026-06-18: +25pt relief when momentum microstructure fires."
     }
   },
   "manual_intervention": {
@@ -218,6 +220,8 @@
     },
     "wall_street": {
       "enabled": true,
+      "trade_size": 1,
+      "adaptive_min_trade_size": 1,
       "reward_multiple": 3.0,
       "spread_to_atr_max": 0.45,
       "trading_session_whitelist": [
@@ -247,6 +251,8 @@
     },
     "japan_225": {
       "enabled": true,
+      "trade_size": 1,
+      "adaptive_min_trade_size": 1,
       "reward_multiple": 3.0,
       "trading_session_whitelist": [
         "asia_early",

@@ -16,6 +16,11 @@ _acquired = False
 
 
 def lock_path() -> Path:
+    import os
+
+    override = os.environ.get("IG_INSTANCE_LOCK_FILE", "").strip()
+    if override:
+        return data_dir() / override
     return data_dir() / INSTANCE_LOCK_FILE
 
 

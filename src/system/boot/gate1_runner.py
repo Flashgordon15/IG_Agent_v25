@@ -9,7 +9,7 @@ from system.boot.exceptions import Gate1FatalError
 
 class Gate1Runner:
     """
-    Synchronous preflight executed before uvicorn binds :8080.
+    Synchronous preflight executed before uvicorn binds the profile API port.
 
     Ports ``main.run_preflight`` + log rotation + port check without heavy cleanup.
     Import trading/ML/DB stacks only inside ``_execute()``.
@@ -79,9 +79,31 @@ class Gate1Runner:
         load_dotenv()
         prepare_boot_env()
 
+        from system.agent_execution_mode import (
+            ensure_execution_plane_armed_on_boot,
+            force_market_open_active,
+        )
+        from system.engine_log import log_engine
+
+        ensure_execution_plane_armed_on_boot()
+        if force_market_open_active():
+            log_engine(
+                "Gate1: DEMO/session validation — market_open=True, "
+                "weekend blackout disabled (24/7 execution plane)"
+            )
+            try:
+                from feeder.mock_feed_engine import start_aggressive_momentum_wave
+
+                start_aggressive_momentum_wave()
+            except Exception as exc:
+                log_engine(
+                    f"Gate1: momentum wave synthesizer skipped: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+
+        from system.node_profile import apply_node_profile_to_environ
         from system.app_identity import APP_DISPLAY_NAME
         from system.boot.preflight_helpers import (
-            check_port_available,
             config_path,
             is_benign_startup_lock_failure,
             load_raw_config_dict,
@@ -95,12 +117,20 @@ class Gate1Runner:
             validate_config,
         )
         from system.credentials_holder import bootstrap_credentials
-        from system.engine_log import log_engine
         from system.instance_lock import acquire_instance_lock
         from system.paths import logs_dir
 
+        profile = apply_node_profile_to_environ()
+        api_port = profile.api_port
+
         logs_dir().mkdir(parents=True, exist_ok=True)
         rotate_oversized_logs()
+
+        if profile.is_shadow:
+            log_engine(
+                f"Gate1: shadow sandbox — binding :{api_port} only "
+                "(production :8080 bypassed)"
+            )
 
         if emergency_stop_lock_present():
             self._fail(
@@ -109,12 +139,25 @@ class Gate1Runner:
             )
             raise Gate1FatalError("emergency_stop.lock present", exit_code=self.EXIT_LOCK)
 
-        if not check_port_available():
-            self._fail(
-                f"{APP_DISPLAY_NAME}: port 8080 is already in use — stop the other process first.",
-                exit_code=self.EXIT_INSTANCE,
+        import os
+
+        desktop_fast_bind = os.environ.get("IG_APEX_DESKTOP", "").strip() == "1"
+        if desktop_fast_bind:
+            log_engine(
+                f"Gate1: Apex desktop fast-bind — :{api_port} already owned by uvicorn; "
+                "skipping port eviction probe"
             )
-            raise Gate1FatalError("port 8080 already in use", exit_code=self.EXIT_INSTANCE)
+        else:
+            from system.boot.port_eviction import reclaim_and_wait
+
+            if not reclaim_and_wait(api_port):
+                self._fail(
+                    f"{APP_DISPLAY_NAME}: port {api_port} is already in use — stop the other process first.",
+                    exit_code=self.EXIT_INSTANCE,
+                )
+                raise Gate1FatalError(
+                    f"port {api_port} already in use", exit_code=self.EXIT_INSTANCE
+                )
 
         try:
             raw = load_raw_config_dict()

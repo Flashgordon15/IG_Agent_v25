@@ -59,7 +59,9 @@ def _default_ig_close(deal_id: str) -> dict[str, Any]:
     if not status.ok or status.credentials is None:
         raise RuntimeError(status.error or "credentials missing — cannot close position")
 
-    cfg = ConfigLoader(config_dir() / "config_v25.json").load_config()
+    from system.config_loader import load_active_config
+
+    cfg = load_active_config(validate=False)
     rest = ensure_shared_authenticated(status.credentials)
     ccy = cfg.currency_code
 

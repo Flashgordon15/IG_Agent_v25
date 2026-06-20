@@ -37,6 +37,11 @@ _corrupt_warned: bool = False
 
 
 def _path() -> Path:
+    import os
+
+    env = os.environ.get("IG_RUNTIME_STATE_FILE", "").strip()
+    if env:
+        return Path(env)
     return _path_override or _DEFAULT_PATH
 
 

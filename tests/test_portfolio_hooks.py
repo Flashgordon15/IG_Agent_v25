@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from execution.portfolio_hooks import (
+    reconcile_portfolio_orphan_reservations,
     record_portfolio_entry_from_signal,
     record_portfolio_exit_for_deal,
     reset_portfolio_hooks_for_tests,
@@ -78,6 +79,19 @@ class PortfolioHooksTests(unittest.TestCase):
         }
         risk = risk_gbp_from_trade_row(row, cfg=cfg)
         self.assertAlmostEqual(risk, 22.5)
+
+    @patch("system.portfolio_envelope.portfolio_gate_enabled", return_value=True)
+    def test_orphan_reconcile_clears_stale_concurrent(self, _gate) -> None:
+        can_allocate(180.0, reserve=True)
+        self.assertAlmostEqual(snapshot()["concurrent_risk_gbp"], 180.0)
+        store = MagicMock()
+        store.active_trades.return_value = []
+        self.assertTrue(
+            reconcile_portfolio_orphan_reservations(
+                store, open_position_count=0
+            )
+        )
+        self.assertAlmostEqual(snapshot()["concurrent_risk_gbp"], 0.0)
 
 
 if __name__ == "__main__":

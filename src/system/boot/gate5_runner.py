@@ -129,6 +129,37 @@ class Gate5Runner:
             if not self._state.gate_complete(gate_id):
                 raise RuntimeError(f"{gate_id} not COMPLETE — cannot activate")
 
+        from apex.warmup_progress import is_warmup_active, wait_until_warmup_ready
+        from apex.array_warmup import _WARMUP_BOOT_DEADLINE_SEC
+
+        if is_warmup_active():
+            self._state.update_state(
+                BootPhase.WARMING,
+                self._state.snapshot_model().percent,
+                "Compiling Vector Arrays",
+                gates_dict=None,
+            )
+            log_engine("Gate5: awaiting array warmup (30s boot compile window)")
+            if not wait_until_warmup_ready(timeout=_WARMUP_BOOT_DEADLINE_SEC):
+                from apex.array_warmup import (
+                    _GATE5_CACHE_MIN_BARS,
+                    _loops_cache_sufficient,
+                )
+
+                orch = self._context.orchestrator
+                loops = list(getattr(orch, "loops", []) or []) if orch else []
+                if loops and _loops_cache_sufficient(
+                    loops, min_bars=_GATE5_CACHE_MIN_BARS
+                ):
+                    from apex.warmup_progress import mark_warmup_ready
+
+                    log_engine(
+                        "Gate5: 30s window elapsed — OHLC sufficient, forcing READY"
+                    )
+                    mark_warmup_ready()
+                elif not wait_until_warmup_ready(timeout=870.0):
+                    raise RuntimeError("Array warmup timed out after 900s")
+
         orch = self._context.orchestrator
         if orch is None:
             raise RuntimeError("Gate 5 requires orchestrator from Gate 4")
@@ -161,6 +192,19 @@ class Gate5Runner:
         _spawn_background_deploy_verify(self._state)
 
         self._state.set_ready(label="ACTIVE")
+        try:
+            from system.agent_execution_mode import ensure_demo_sandbox_execution_armed
+
+            ensure_demo_sandbox_execution_armed()
+        except Exception:
+            pass
+        try:
+            from execution.atomic_gateway import set_monitoring_mode
+
+            set_monitoring_mode(True)
+            log_engine("Gate5: IG monitoring radio silence armed post-READY")
+        except Exception:
+            pass
         try:
             from system.diagnostics.perf_metrics import start_disk_flush_after_ready
 

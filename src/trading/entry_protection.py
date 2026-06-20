@@ -97,6 +97,13 @@ def _premium_overnight_session_block(
         start=rules["weekend_start"],
         end=rules["weekend_end"],
     )
+    try:
+        from system.agent_execution_mode import demo_sandbox_unblock_active
+
+        if demo_sandbox_unblock_active():
+            weekend_block = False
+    except Exception:
+        pass
     if weekend_block:
         reason = f"weekend blackout {rules['weekend_start']}–{rules['weekend_end']} BST"
         log_engine(
@@ -240,6 +247,13 @@ def check_session_blackout(
     market: str | None = None,
 ) -> tuple[bool, str]:
     """Return (blocked, reason). blocked=True suppresses entry."""
+    try:
+        from system.agent_execution_mode import demo_sandbox_unblock_active
+
+        if demo_sandbox_unblock_active():
+            return False, ""
+    except Exception:
+        pass
     if not _enabled(cfg):
         return False, ""
     rules = _session_rules_for_epic(str(epic or "").strip(), cfg)

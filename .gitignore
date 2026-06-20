@@ -86,3 +86,33 @@ docs/morning/ROADMAP_*.md
 /username=*
 /[}]
 /.pytest_last.txt
+
+# Node / Electron / local build artifacts
+node_modules/
+logs/
+dist-apex/
+
+# Accidental pytest mock DB leakage at repo root
+<MagicMock*
+
+# Office / scratch documents (not source)
+*.docx
+~$*
+
+# Runtime calibration / shadow state (never commit)
+src/data/replay_scheduler_state.json
+src/data/runtime_state_shadow.json
+
+# Analytics / triage local SQLite (runtime only)
+src/analytics/*.db
+src/analytics/*.db-wal
+src/analytics/*.db-shm
+**/testbed_ledger.db
+**/testbed_state.json
+**/optimization_overlay.json
+**/optimization_history.jsonl
+**/optimization_state.json
+apex_opt_calibration/
+
+# Legacy dev purge snapshots (local only)
+archive/legacy_dev/purge_*/

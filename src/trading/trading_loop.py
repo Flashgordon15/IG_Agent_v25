@@ -8,6 +8,7 @@ for gate 7 only. No GUI imports. Trading continues if the FastAPI dashboard fail
 from __future__ import annotations
 
 import math
+import os
 import subprocess
 import threading
 import time
@@ -58,10 +59,47 @@ from trading.trade_eligibility import build_trade_eligibility
 
 STAGE1_GBP_RISK_CAP = 150.0
 SPREAD_NORMAL_MULTIPLIER = 2.5
+OOH_SPREAD_SCALE = 4.0
+OOH_SESSION_START_HOUR_BST = 21
+OOH_SESSION_END_HOUR_BST = 7
 DAILY_LOSS_LIMIT_GBP = 200.0
 DEFAULT_TICK_INTERVAL_SEC = 5.0
 GATE_EVAL_COOLDOWN_SEC = 10.0
+_SPOT_GOLD_EPIC = "CS.D.CFPGOLD.CFP.IP"
+_GBPUSD_FX_EPIC = "CS.D.GBPUSD.CFD.IP"
+_USD_GBP_RATE_FALLBACK = 0.78
 FLATTEN_VERIFY_WAIT_SEC = 10.0
+
+# Friday session-validation capture — IG DEMO dispatch at 42% (env: IG_SESSION_VALIDATION=1).
+SESSION_VALIDATION_CONFIDENCE_FLOOR = 42.0
+_session_validation_logged = False
+
+
+def session_validation_capture_active() -> bool:
+    from system.agent_execution_mode import demo_operational_floors_active
+
+    return demo_operational_floors_active()
+
+
+def _log_session_validation_floor_once() -> None:
+    global _session_validation_logged
+    if _session_validation_logged or not session_validation_capture_active():
+        return
+    _session_validation_logged = True
+    log_engine(
+        f"Session validation: confidence/fitness floors locked at "
+        f"{SESSION_VALIDATION_CONFIDENCE_FLOOR:.0f}% — IG DEMO LiveExecutor armed"
+    )
+
+
+def _epic_requires_usd_gbp_risk_conversion(epic: str) -> bool:
+    """Spot Gold and non-GBP IG index margin are USD-denominated at the broker."""
+    key = str(epic or "").upper()
+    if key == _SPOT_GOLD_EPIC or "CFPGOLD" in key:
+        return True
+    if key.startswith("IX.D.") and ".IFM." in key:
+        return True
+    return False
 
 
 def _resolve_gate_eval_cooldown_sec() -> float:
@@ -91,35 +129,113 @@ def _peak_confidence_from_signal(sig: SignalResult, conf: float) -> float:
     return max(float(conf), raw_conf, buy, sell)
 
 
+def _shield_integer_dispatch_size(
+    raw_size: float, *, min_lot: int = 1
+) -> tuple[int, bool]:
+    """Project Apex Monolith Core Execution Shield — int(size // 1) with safe defaults."""
+    calculated_size = 0.0
+    final_size = 0
+    under_min_lot = False
+    try:
+        from apex.hardening import floor_contract_size
+
+        calculated_size = float(raw_size or 0)
+        lot, under_min_lot = floor_contract_size(calculated_size, min_lot=min_lot)
+        final_size = int(lot // 1)
+    except Exception as exc:
+        log_engine(f"[CORE ERROR] Order dispatcher exception caught: {exc}")
+        return 0, True
+    return final_size, under_min_lot
+
+
 def promote_high_confidence_signal(
-    sig: SignalResult, threshold: float
+    sig: SignalResult, threshold: float, *, raw_size: float | None = None
 ) -> SignalResult:
     """
     Force dispatcher string to BUY/SELL when peak score clears override floor.
 
     Resolves gate passed=True but execution still sees WAIT deadlock.
+    When raw_size is supplied, applies int(size // 1) whole-lot annotation.
     """
-    if sig.signal in ("BUY", "SELL"):
+    import os
+    import sys
+
+    calculated_size = 0.0
+    final_size = 0
+    under_min_lot = False
+    win_probability = 0.0
+    model_verdict = "NEUTRAL"
+    promoted = sig
+    _ = os, sys  # containment — prevent UnboundLocalError from inner imports
+    try:
+        snap_in = sig.snapshot or {}
+        try:
+            win_probability = float(snap_in.get("win_probability") or 0.0)
+        except (TypeError, ValueError):
+            win_probability = 0.0
+        model_verdict = str(snap_in.get("model_verdict") or model_verdict)
+        if sig.signal in ("BUY", "SELL"):
+            promoted = sig
+        else:
+            snap = sig.snapshot or {}
+            raw = str(snap.get("raw_signal") or "").strip()
+            if raw not in ("BUY", "SELL"):
+                return sig
+            peak = _peak_confidence_from_signal(sig, float(sig.adjusted_confidence))
+            if peak < HIGH_CONFIDENCE_OVERRIDE_THRESHOLD or peak < float(threshold):
+                return sig
+            promoted_snap = dict(snap)
+            promoted_snap["dispatch_promoted"] = True
+            promoted_snap["raw_signal"] = raw
+            promoted = SignalResult(
+                signal=raw,
+                raw_confidence=float(sig.raw_confidence),
+                adjusted_confidence=max(float(sig.adjusted_confidence), peak),
+                learning_delta=float(sig.learning_delta),
+                setup_key=str(sig.setup_key),
+                notes=f"{sig.notes} | dispatch promoted ({peak:.1f}%)",
+                snapshot=promoted_snap,
+            )
+        if raw_size is not None:
+            calculated_size = float(raw_size or 0)
+            size_int, under_min = _shield_integer_dispatch_size(calculated_size)
+            final_size = int(size_int // 1)
+            under_min_lot = under_min
+            snap_out = dict(promoted.snapshot or {})
+            snap_out["dispatch_size_int"] = final_size
+            snap_out["under_min_lot"] = under_min_lot
+            snap_out["win_probability"] = win_probability
+            snap_out["model_verdict"] = model_verdict
+            promoted = SignalResult(
+                signal=promoted.signal,
+                raw_confidence=float(promoted.raw_confidence),
+                adjusted_confidence=float(promoted.adjusted_confidence),
+                learning_delta=float(promoted.learning_delta),
+                setup_key=str(promoted.setup_key),
+                notes=str(promoted.notes),
+                snapshot=snap_out,
+            )
+        try:
+            from system.agent_execution_mode import demo_broker_execution_active
+
+            if demo_broker_execution_active() and promoted.signal in ("BUY", "SELL"):
+                snap_demo = dict(promoted.snapshot or {})
+                snap_demo["demo_live_gateway_armed"] = True
+                promoted = SignalResult(
+                    signal=promoted.signal,
+                    raw_confidence=float(promoted.raw_confidence),
+                    adjusted_confidence=float(promoted.adjusted_confidence),
+                    learning_delta=float(promoted.learning_delta),
+                    setup_key=str(promoted.setup_key),
+                    notes=f"{promoted.notes} | DEMO→LiveExecutor.place_market_order",
+                    snapshot=snap_demo,
+                )
+        except Exception:
+            pass
+    except Exception as exc:
+        log_engine(f"[CORE ERROR] Order dispatcher exception caught: {exc}")
         return sig
-    snap = sig.snapshot or {}
-    raw = str(snap.get("raw_signal") or "").strip()
-    if raw not in ("BUY", "SELL"):
-        return sig
-    peak = _peak_confidence_from_signal(sig, float(sig.adjusted_confidence))
-    if peak < HIGH_CONFIDENCE_OVERRIDE_THRESHOLD or peak < float(threshold):
-        return sig
-    promoted_snap = dict(snap)
-    promoted_snap["dispatch_promoted"] = True
-    promoted_snap["raw_signal"] = raw
-    return SignalResult(
-        signal=raw,
-        raw_confidence=float(sig.raw_confidence),
-        adjusted_confidence=max(float(sig.adjusted_confidence), peak),
-        learning_delta=float(sig.learning_delta),
-        setup_key=str(sig.setup_key),
-        notes=f"{sig.notes} | dispatch promoted ({peak:.1f}%)",
-        snapshot=promoted_snap,
-    )
+    return promoted
 
 
 def signal_gate_explanation(sig: SignalResult, threshold: float) -> tuple[str, str]:
@@ -300,6 +416,16 @@ class TradingLoop:
         )
         self._on_flatten = on_flatten
         self._position_sync = position_sync
+        if clock is None:
+            try:
+                from system.apex_runtime_mode import ApexRuntimeMode, get_apex_runtime_mode
+
+                if get_apex_runtime_mode() is ApexRuntimeMode.HARDENED_TESTBED:
+                    from simulation.replay_clock import now_datetime
+
+                    clock = now_datetime
+            except Exception:
+                pass
         self._clock = clock or datetime.now
         self._publish_snapshots = bool(publish_snapshots)
         self._on_snapshot = on_snapshot
@@ -330,11 +456,14 @@ class TradingLoop:
         self._last_ml_prob: float | None = None
         self._last_sig_direction: str = "WAIT"
         self._gate_signal_cache: SignalResult | None = None
+        self._cached_signal: SignalResult | None = None
+        self._last_feature_payload: dict[str, Any] | None = None
+        self._last_probability_verdict: Any | None = None
         self._last_gate_eval_time: float = 0.0
         self._last_gate_eval_results: list[GateResult] | None = None
         self._gate_eval_lock = threading.Lock()
         self._entry_circuit_breaker: str = ""
-        self._portfolio_reserved_risk_gbp: float = 0.0
+        self.network_stable: bool = True
         self._tick_indicator_row: dict[str, Any] | None = None
         self._tick_live_state_vector: dict[str, Any] | None = None
         from runtime.market_orchestrator import ROTATION_GRACE_CYCLES
@@ -664,6 +793,137 @@ class TradingLoop:
 
     def _reset_gate_signal_cache(self) -> None:
         self._gate_signal_cache = None
+        self._cached_signal = None
+
+    def _trade_confidence_threshold(self) -> float:
+        _log_session_validation_floor_once()
+        if session_validation_capture_active():
+            return SESSION_VALIDATION_CONFIDENCE_FLOOR
+        try:
+            return float(self._points.trade_confidence_threshold(self._config))
+        except Exception:
+            return float(self._config.signal_threshold)
+
+    def _apply_operational_confidence_threshold(self, threshold: float) -> float:
+        """Merge protective-learning caps with session-validation floor."""
+        _log_session_validation_floor_once()
+        if session_validation_capture_active():
+            return SESSION_VALIDATION_CONFIDENCE_FLOOR
+        try:
+            from system.protective_learning import apply_temporary_test_confidence_floor
+
+            return apply_temporary_test_confidence_floor(float(threshold))
+        except Exception:
+            return float(threshold)
+
+    def _cache_promoted_signal(
+        self, sig: SignalResult, *, raw_size: float | None = None
+    ) -> SignalResult:
+        """Promote WAIT→BUY/SELL and persist to primary gate signal caches."""
+        promoted = promote_high_confidence_signal(
+            sig, self._trade_confidence_threshold(), raw_size=raw_size
+        )
+        if raw_size is not None:
+            snap = promoted.snapshot or {}
+            if snap.get("under_min_lot"):
+                from apex.hardening import under_min_lot_detail
+
+                log_engine(under_min_lot_detail(int(snap.get("dispatch_size_int") or 0)))
+        promoted = self._apply_micro_trend_promotion(promoted)
+        if promoted.signal in ("BUY", "SELL"):
+            try:
+                from apex.avionics_story import append_avionics_story
+
+                snap = promoted.snapshot or {}
+                size_int = snap.get("dispatch_size_int")
+                conf = float(promoted.adjusted_confidence)
+                msg = (
+                    f"PROMOTED: {self._market} {promoted.signal} at {conf:.1f}% — "
+                    f"int(size // 1)={size_int if size_int is not None else '?'} "
+                    f"→ LiveExecutor IG DEMO REST"
+                )
+                append_avionics_story(msg, kind="promoted", epic=self._epic)
+            except Exception:
+                pass
+        self._gate_signal_cache = promoted
+        self._cached_signal = promoted
+        try:
+            apply_fn = getattr(self._signal_engine, "apply_dispatch_promotion", None)
+            if callable(apply_fn):
+                apply_fn(self._market, promoted)
+        except Exception:
+            pass
+        return promoted
+
+    def _apply_micro_trend_promotion(self, sig: SignalResult) -> SignalResult:
+        """Worker B micro-trend RoC — instant promote when 42%/45% bands clear."""
+        try:
+            from apex.microkernel import get_microkernel
+            from signals.indicators import (
+                STRATEGY_THRESHOLD_HIGH_PCT,
+                STRATEGY_THRESHOLD_LOW_PCT,
+            )
+
+            mt = get_microkernel().micro_trend_for(self._epic)
+            if not mt.get("promote"):
+                return sig
+            score = float(mt.get("score_pct") or 0.0)
+            if score < STRATEGY_THRESHOLD_LOW_PCT:
+                return sig
+            raw_dir = str(mt.get("direction") or "").strip()
+            if raw_dir not in ("BUY", "SELL"):
+                return sig
+            snap = dict(sig.snapshot or {})
+            snap["micro_trend_score_pct"] = score
+            snap["micro_trend_promote"] = True
+            snap["micro_trend_tier"] = (
+                "high" if score >= STRATEGY_THRESHOLD_HIGH_PCT else "low"
+            )
+            if str(snap.get("raw_signal") or "").strip() not in ("BUY", "SELL"):
+                snap["raw_signal"] = raw_dir
+            threshold = self._trade_confidence_threshold()
+            peak = max(score, _peak_confidence_from_signal(sig, float(sig.adjusted_confidence)))
+            if peak >= STRATEGY_THRESHOLD_LOW_PCT:
+                return promote_high_confidence_signal(
+                    SignalResult(
+                        signal=sig.signal,
+                        raw_confidence=float(sig.raw_confidence),
+                        adjusted_confidence=max(float(sig.adjusted_confidence), peak),
+                        learning_delta=float(sig.learning_delta),
+                        setup_key=str(sig.setup_key),
+                        notes=f"{sig.notes} | micro-trend RoC {score:.1f}%",
+                        snapshot=snap,
+                    ),
+                    threshold,
+                )
+        except Exception:
+            pass
+        return sig
+
+    @staticmethod
+    def _replace_gate_result(
+        results: list[GateResult], replacement: GateResult
+    ) -> list[GateResult]:
+        for idx, gate in enumerate(results):
+            if gate.name == replacement.name:
+                updated = list(results)
+                updated[idx] = replacement
+                return updated
+        return list(results) + [replacement]
+
+    @staticmethod
+    def _out_of_hours_spread_scale(*, at: datetime | None = None) -> float:
+        """21:00–07:00 Europe/London — widen spread cap for post-close broker expansion."""
+        try:
+            from zoneinfo import ZoneInfo
+
+            now = at or datetime.now(ZoneInfo("Europe/London"))
+        except Exception:
+            now = at or datetime.now()
+        hour = int(now.hour)
+        if hour >= OOH_SESSION_START_HOUR_BST or hour < OOH_SESSION_END_HOUR_BST:
+            return OOH_SPREAD_SCALE
+        return 1.0
 
     def _reset_tick_memo(self) -> None:
         """Per-tick indicator / live_state_vector memo — gates 3 & 10."""
@@ -750,16 +1010,29 @@ class TradingLoop:
         """Single signal evaluation per tick — reused across gate stack (§20 latency)."""
         if getattr(self, "_gate_signal_cache", None) is None:
             sig = self._signal_engine.evaluate(self._market)
-            try:
-                threshold = float(
-                    self._points.trade_confidence_threshold(self._config)
-                )
-            except Exception:
-                threshold = float(self._config.signal_threshold)
-            self._gate_signal_cache = promote_high_confidence_signal(sig, threshold)
+            return self._cache_promoted_signal(sig)
         return self._gate_signal_cache
 
     def _run_tick_core(self) -> TickContext | None:
+        try:
+            from ig_api.streaming_client import get_network_stable, log_execution_halt
+
+            self.network_stable = get_network_stable()
+        except Exception:
+            self.network_stable = True
+        if not self.network_stable:
+            log_execution_halt()
+            ctx = TickContext(
+                quote=Quote(self._clock(), 0.0, 0.0),
+                wait_reason="network blackout",
+                all_passed=False,
+            )
+            ctx.gates = self._offline_gates("network blackout")
+            self._publish_snapshot(ctx)
+            with self._lock:
+                self._last_context = ctx
+            self._sentinel_on_tick()
+            return ctx
 
         quote = self._quote_source()
         if quote is None:
@@ -784,8 +1057,40 @@ class TradingLoop:
             self._sentinel_on_tick()
             return ctx
 
+        try:
+            from system.market_integrity import check_quote_integrity
+
+            integrity = check_quote_integrity(self._epic, quote)
+            if not integrity.allowed:
+                reason = integrity.reason or "DATA STALE"
+                if "STALE" in reason.upper() or integrity.stream_status == "STALE":
+                    try:
+                        from ig_api.streaming_client import log_execution_halt
+
+                        log_execution_halt()
+                    except Exception:
+                        pass
+                ctx = TickContext(
+                    quote=quote,
+                    wait_reason=reason,
+                    all_passed=False,
+                )
+                ctx.gates = self._offline_gates(reason)
+                self._publish_snapshot(ctx)
+                with self._lock:
+                    self._last_context = ctx
+                self._sentinel_on_tick()
+                return ctx
+        except Exception:
+            pass
+
         self._tick_count += 1
-        self._portfolio_reserved_risk_gbp = 0.0
+        try:
+            from apex.microkernel import get_microkernel
+
+            get_microkernel().on_tick_ingest(self._epic, quote)
+        except Exception:
+            pass
         try:
             from system.protective_learning import temporary_test_gate_active
 
@@ -835,7 +1140,44 @@ class TradingLoop:
         self._friday_flatten_if_needed()
         self._flatten_if_needed()
 
+        # Project Apex Monolith Core Circuit Breaker
+        try:
+            from apex import microkernel
+            from system.system_state import BootPhase, get_system_state
+
+            current_boot_phase = get_system_state().snapshot_model().phase
+            if (
+                not microkernel.is_warmup_complete()
+                or current_boot_phase == BootPhase.WARMING
+            ):
+                log_engine(
+                    f"HOLD: WARMING_CIRCUIT_BREAKER | epic={self._epic} "
+                    f"market={self._market} phase={current_boot_phase}"
+                )
+                ctx = TickContext(
+                    quote=quote,
+                    wait_reason="HOLD: WARMING_CIRCUIT_BREAKER",
+                    all_passed=False,
+                )
+                ctx.gates = self._offline_gates("HOLD: WARMING_CIRCUIT_BREAKER")
+                self._publish_snapshot(ctx)
+                with self._lock:
+                    self._last_context = ctx
+                self._sentinel_on_tick()
+                return ctx
+        except Exception:
+            pass
+
         gates = self._evaluate_gates(quote)
+        try:
+            from apex.operational_transparency import (
+                record_gate_rejection,
+                record_opportunity_scanned,
+            )
+
+            record_opportunity_scanned(epic=self._epic)
+        except Exception:
+            pass
         self._log_gate_check(quote, gates)
         self._emit_feeder_telemetry(quote, gates)
         try:
@@ -874,6 +1216,35 @@ class TradingLoop:
                 f"block={failed.name} conf={sig_conf:.1f} fitness={fitness:.0f} "
                 f"detail={(failed.detail or '')[:100]}"
             )
+            try:
+                from apex.operational_transparency import record_gate_rejection
+
+                record_gate_rejection(
+                    str(failed.name or ""),
+                    str(failed.detail or ""),
+                    epic=self._epic,
+                )
+            except Exception:
+                pass
+            try:
+                from apex.avionics_story import append_avionics_story
+
+                threshold = self._trade_confidence_threshold()
+                if failed.name == "signal_confidence":
+                    append_avionics_story(
+                        f"BLOCKED: {self._market} confidence {sig_conf:.1f}% "
+                        f"is under the {threshold:.1f}% entry ceiling",
+                        kind="blocked",
+                        epic=self._epic,
+                    )
+                else:
+                    append_avionics_story(
+                        f"BLOCKED: {failed.name} — {(failed.detail or '')[:120]}",
+                        kind="blocked",
+                        epic=self._epic,
+                    )
+            except Exception:
+                pass
 
         outcome: TickOutcome | None = None
         try:
@@ -899,55 +1270,77 @@ class TradingLoop:
                         confidence = 0.0
                     break
             trade_size = self._trade_size_from_gates(gates, confidence)
-            self._emit_feeder_order_intent(gates, confidence, trade_size)
-            log_engine(
-                f"ALL GATES PASSED — attempting trade "
-                f"market={self._market} epic={self._epic} "
-                f"confidence={confidence:.1f} size={trade_size}"
-            )
-            log_engine(
-                f"GATES PASS epic={self._epic} market={self._market} "
-                f"signal={sig_dir} fitness={int(round(fitness))}% "
-                f"allow_live_trading={self._config.allow_live_trading} "
-                f"dry_run={self._config.dry_run} "
-                f"auto_trade={self._execution_loop.auto_trade} "
-                "— invoking execution pipeline"
-            )
+            dispatch_size = 0
+            under_min_lot = False
             try:
-                gate_exec = self._gate_execution_params_from_gates(gates)
-                outcome = self._execution_loop.process_tick(
-                    self._market,
-                    self._epic,
-                    quote,
-                    prefetched_signal=prefetched,
-                    gate_execution_params=gate_exec,
-                )
-                self._log_execution_outcome(outcome)
-                exec_wait = self._execution_wait_reason(outcome)
-                if exec_wait:
-                    wait_reason = exec_wait
+                dispatch_size, under_min_lot = _shield_integer_dispatch_size(trade_size)
+                if under_min_lot:
+                    from apex.hardening import under_min_lot_detail
+
+                    log_engine(under_min_lot_detail(dispatch_size))
+                    wait_reason = "HOLD: UNDER_MIN_LOT"
                     all_passed = False
-                    self._mark_execution_gate_blocked(gates, exec_wait)
-                    log_engine(f"WAIT — {wait_reason}")
-            except Exception as e:
-                log_engine(f"gate 7 execution failed: {type(e).__name__}: {e}")
-                wait_reason = f"execution: {type(e).__name__}"
+                else:
+                    trade_size = float(dispatch_size)
+            except Exception as exc:
+                log_engine(f"[CORE ERROR] Order dispatcher exception caught: {exc}")
+                wait_reason = f"execution: {type(exc).__name__}"
                 all_passed = False
+            if all_passed:
+                self._emit_feeder_order_intent(gates, confidence, trade_size)
+                try:
+                    from feeder.execution_quote_preflight import refresh_ig_execution_snapshot
+
+                    snap_ok, snap_reason = refresh_ig_execution_snapshot(
+                        self._epic, self._config
+                    )
+                    if not snap_ok:
+                        wait_reason = snap_reason
+                        all_passed = False
+                        self._mark_execution_gate_blocked(gates, snap_reason)
+                        log_engine(f"WAIT — {wait_reason}")
+                except Exception as exc:
+                    log_engine(
+                        f"execution snapshot preflight skipped: {type(exc).__name__}: {exc}"
+                    )
+            if all_passed:
+                log_engine(
+                    f"ALL GATES PASSED — attempting trade "
+                    f"market={self._market} epic={self._epic} "
+                    f"confidence={confidence:.1f} size={trade_size}"
+                )
+                log_engine(
+                    f"GATES PASS epic={self._epic} market={self._market} "
+                    f"signal={sig_dir} fitness={int(round(fitness))}% "
+                    f"allow_live_trading={self._config.allow_live_trading} "
+                    f"dry_run={self._config.dry_run} "
+                    f"auto_trade={self._execution_loop.auto_trade} "
+                    "— invoking execution pipeline"
+                )
+                try:
+                    gate_exec = self._gate_execution_params_from_gates(gates)
+                    outcome = self._execution_loop.process_tick(
+                        self._market,
+                        self._epic,
+                        quote,
+                        prefetched_signal=prefetched,
+                        gate_execution_params=gate_exec,
+                    )
+                    self._log_execution_outcome(outcome)
+                    exec_wait = self._execution_wait_reason(outcome)
+                    if exec_wait:
+                        wait_reason = exec_wait
+                        all_passed = False
+                        self._mark_execution_gate_blocked(gates, exec_wait)
+                        log_engine(f"WAIT — {wait_reason}")
+                except Exception as e:
+                    log_engine(f"gate 7 execution failed: {type(e).__name__}: {e}")
+                    wait_reason = f"execution: {type(e).__name__}"
+                    all_passed = False
+            elif wait_reason == "HOLD: UNDER_MIN_LOT":
+                log_engine(f"WAIT — {wait_reason}")
         else:
             log_engine(f"WAIT — {wait_reason}")
-
-        if self._portfolio_reserved_risk_gbp > 0 and not self._execution_reserved_committed(
-            outcome
-        ):
-            try:
-                from system.portfolio_envelope import release_allocation
-
-                release_allocation(self._portfolio_reserved_risk_gbp)
-            except Exception as e:
-                log_engine(
-                    f"portfolio envelope release failed: {type(e).__name__}: {e}"
-                )
-        self._portfolio_reserved_risk_gbp = 0.0
 
         ctx = TickContext(
             quote=quote,
@@ -1266,18 +1659,6 @@ class TradingLoop:
             )
             break
 
-    def _execution_reserved_committed(self, outcome: Any | None) -> bool:
-        """True when a gate-time portfolio reservation should be kept."""
-        if outcome is None:
-            return False
-        execution = getattr(outcome, "execution", None)
-        if execution is None:
-            return False
-        if not bool(getattr(execution, "success", False)):
-            return False
-        action = str(getattr(execution, "action", "") or "")
-        return action in ("SUBMITTED", "EXECUTED", "DRY_RUN")
-
     def _gate_execution_params_from_gates(
         self, gates: list[GateResult]
     ) -> dict[str, Any] | None:
@@ -1311,8 +1692,17 @@ class TradingLoop:
                 continue
             if limit_pts <= 0:
                 limit_pts = stop_pts * float(self._config.reward_multiple)
+            try:
+                raw_size = float(v.get("final_size") or v.get("actual_size") or 0)
+            except (TypeError, ValueError):
+                raw_size = 0.0
+            size_int = int(raw_size // 1)
+            if size_int < 1:
+                continue
             raw = {
-                "actual_size": v.get("actual_size"),
+                "actual_size": float(size_int),
+                "size": float(size_int),
+                "final_size": size_int,
                 "stop_points": stop_pts,
                 "limit_points": limit_pts,
                 "stop_source": v.get("stop_source"),
@@ -1392,6 +1782,67 @@ class TradingLoop:
         rejection = str(getattr(execution, "rejection_reason", "") or "")
         if success or action == "SUBMITTED":
             log_engine(f"EXEC OK epic={self._epic} signal={direction} action={action}")
+            try:
+                from apex.operational_transparency import record_executed_trade
+
+                record_executed_trade(epic=self._epic, side=direction)
+            except Exception:
+                pass
+            try:
+                from trading.continuous_optimization_worker import (
+                    get_continuous_optimization_worker,
+                )
+
+                feat = getattr(self, "_last_feature_payload", None) or {}
+                vector = feat.get("vector")
+                verdict = getattr(self, "_last_probability_verdict", None)
+                win_p = float(getattr(verdict, "win_probability", 0.5) if verdict else 0.5)
+                model_v = str(getattr(verdict, "model_verdict", "") if verdict else "")
+                exec_obj = getattr(outcome, "execution", None)
+                deal_ref = (
+                    getattr(exec_obj, "deal_id", None)
+                    or getattr(exec_obj, "deal_reference", None)
+                    or f"{self._epic}-{time.time_ns()}"
+                )
+                if vector is not None:
+                    get_continuous_optimization_worker().record_execution(
+                        deal_ref=str(deal_ref),
+                        epic=str(self._epic),
+                        direction=direction,
+                        win_probability=win_p,
+                        feature_vector=vector,
+                        model_verdict=model_v,
+                    )
+            except Exception:
+                pass
+            try:
+                from apex.ipc_bridge import broadcast_ledger_event
+
+                exec_obj = getattr(outcome, "execution", None)
+                params = getattr(getattr(outcome, "trade_signal", None), "gate_execution_params", None) or {}
+                if not isinstance(params, dict):
+                    params = {}
+                broadcast_ledger_event(
+                    {
+                        "event": "broker_fill",
+                        "ts": time.time(),
+                        "epic": self._epic,
+                        "side": direction,
+                        "action": direction,
+                        "size": int(
+                            float(params.get("final_size") or params.get("actual_size") or 0)
+                            // 1
+                        ),
+                        "entry": float(params.get("entry") or params.get("level") or 0),
+                        "deal_id": getattr(exec_obj, "deal_id", None),
+                        "deal_reference": getattr(exec_obj, "deal_reference", None),
+                        "latency_ms": float(params.get("latency_ms") or 0),
+                        "mode": "DEMO",
+                        "source": "gate7_dispatch",
+                    }
+                )
+            except Exception:
+                pass
         else:
             log_engine(
                 f"EXEC REJECTED epic={self._epic} signal={direction} "
@@ -1414,6 +1865,10 @@ class TradingLoop:
         from ai.operational.profiler_hooks import probe_hot_path
 
         cooldown = _resolve_gate_eval_cooldown_sec()
+        used_cache = False
+        gate_us: dict[str, float] = {}
+        total_us = 0.0
+
         with self._gate_eval_lock:
             now = time.monotonic()
             last_ts = self._last_gate_eval_time
@@ -1423,33 +1878,57 @@ class TradingLoop:
                 and last_ts > 0.0
                 and (now - last_ts) < cooldown
             ):
-                return list(cached)
+                results = list(cached)
+                used_cache = True
+            else:
+                t0 = time.perf_counter()
+                with probe_hot_path("probe_gate_evaluation", epic=self._epic):
+                    results = self._evaluate_gates_core(quote, gate_us=gate_us)
+                total_us = (time.perf_counter() - t0) * 1_000_000.0
+                self._last_gate_eval_time = now
+                self._last_gate_eval_results = list(results)
 
-            gate_us: dict[str, float] = {}
-            t0 = time.perf_counter()
-            with probe_hot_path("probe_gate_evaluation", epic=self._epic):
-                results = self._evaluate_gates_core(quote, gate_us=gate_us)
-            total_us = (time.perf_counter() - t0) * 1_000_000.0
-            self._last_gate_eval_time = now
-            self._last_gate_eval_results = list(results)
+        # Risk/spread gate uses live bid/offer every tick — never cooldown-cached.
+        risk_gate = self._gate_risk_validation(quote)
+        results = self._replace_gate_result(results, risk_gate)
 
-        try:
-            from system.diagnostics.perf_metrics import record_tick_gate_evaluation
+        with self._gate_eval_lock:
+            if self._last_gate_eval_results is not None:
+                self._last_gate_eval_results = self._replace_gate_result(
+                    list(self._last_gate_eval_results), risk_gate
+                )
 
-            record_tick_gate_evaluation(
-                self._epic, total_us=total_us, gate_us=gate_us
-            )
-        except Exception:
-            pass
+        if not used_cache:
+            try:
+                from system.diagnostics.perf_metrics import record_tick_gate_evaluation
+
+                record_tick_gate_evaluation(
+                    self._epic, total_us=total_us, gate_us=gate_us
+                )
+            except Exception:
+                pass
         return results
 
     def _evaluate_gates_core(
         self, quote: Quote, *, gate_us: dict[str, float] | None = None
     ) -> list[GateResult]:
         try:
+            from system.agent_execution_mode import (
+                demo_sandbox_unblock_active,
+                ensure_demo_sandbox_execution_armed,
+            )
+
+            if demo_sandbox_unblock_active():
+                ensure_demo_sandbox_execution_armed()
+                self.clear_entry_circuit_breaker()
+        except Exception:
+            pass
+
+        try:
+            from system.agent_execution_mode import demo_sandbox_unblock_active
             from system.manual_kill_monitor import is_master_kill_block_active
 
-            if is_master_kill_block_active():
+            if not demo_sandbox_unblock_active() and is_master_kill_block_active():
                 return self._hard_block_all_gates(
                     "MASTER_KILL_SWITCH_ACTIVE",
                     primary_gate="broker_feed",
@@ -1458,15 +1937,25 @@ class TradingLoop:
             pass
 
         try:
+            from system.agent_execution_mode import demo_sandbox_unblock_active
             from system.qmm_process_supervisor import process_entry_blocked
 
             blocked, reason = process_entry_blocked()
-            if blocked:
+            if blocked and not demo_sandbox_unblock_active():
                 return self._hard_block_all_gates(reason, primary_gate="broker_feed")
         except Exception:
             pass
 
         breaker = self.entry_circuit_breaker()
+        try:
+            from system.agent_execution_mode import demo_sandbox_unblock_active
+
+            if breaker and demo_sandbox_unblock_active():
+                if breaker == "MASTER_KILL_SWITCH_ACTIVE" or "Circuit breaker" in breaker:
+                    self.clear_entry_circuit_breaker()
+                    breaker = ""
+        except Exception:
+            pass
         if breaker:
             return self._hard_block_all_gates(breaker, primary_gate="broker_feed")
 
@@ -1536,6 +2025,13 @@ class TradingLoop:
         if current_atr > 0.0 and current_spread > 0.0:
             spread_to_atr_ratio = current_spread / current_atr
             spread_atr_max = self._spread_to_atr_circuit_max()
+            try:
+                from system.agent_execution_mode import demo_sandbox_unblock_active
+
+                if demo_sandbox_unblock_active():
+                    spread_atr_max = max(spread_atr_max, 999.0)
+            except Exception:
+                pass
             if spread_to_atr_ratio > spread_atr_max:
                 from system.qmm_process_supervisor import set_process_entry_block
 
@@ -1712,6 +2208,18 @@ class TradingLoop:
         )
 
     def _gate_session_open(self) -> GateResult:
+        try:
+            from system.agent_execution_mode import demo_sandbox_unblock_active
+
+            if demo_sandbox_unblock_active():
+                return GateResult(
+                    name="session_open",
+                    passed=True,
+                    value={"open": True, "demo_forced": True},
+                    detail="DEMO sandbox — market forced open",
+                )
+        except Exception:
+            pass
         from system.market_data_hub import get_market_data_hub
         from system.market_watch.market_status_updater import (
             cached_market_open,
@@ -1857,6 +2365,18 @@ class TradingLoop:
         )
 
     def _gate_session_blackout(self) -> GateResult:
+        try:
+            from system.agent_execution_mode import demo_sandbox_unblock_active
+
+            if demo_sandbox_unblock_active():
+                return GateResult(
+                    name="session_blackout",
+                    passed=True,
+                    value={"blocked": False, "demo_forced": True},
+                    detail="DEMO sandbox — weekend blackout bypassed",
+                )
+        except Exception:
+            pass
         from trading.entry_protection import check_session_blackout
 
         blocked, reason = check_session_blackout(
@@ -1971,6 +2491,8 @@ class TradingLoop:
             )
         except Exception:
             pass
+        if session_validation_capture_active():
+            return min(float(fitness_min), SESSION_VALIDATION_CONFIDENCE_FLOOR)
         return float(fitness_min)
 
     def _gate_environment_fitness(self, quote: Quote) -> GateResult:
@@ -2141,6 +2663,13 @@ class TradingLoop:
         )
 
     def _maybe_refresh_account_balance(self) -> None:
+        try:
+            from trading.points_engine import hub_equity_blind_override_active
+
+            if hub_equity_blind_override_active():
+                return
+        except Exception:
+            pass
         client = self._rest_client()
         if client is None:
             return
@@ -2251,8 +2780,25 @@ class TradingLoop:
         return stop, stop_source
 
     def _gate_risk_validation(self, quote: Quote) -> GateResult:
+        from apex.hardening import floor_contract_size
+        from execution.atomic_gateway import (
+            locked_per_asset_cap_gbp,
+            locked_portfolio_ceiling_gbp,
+            locked_session_equity_gbp,
+        )
+
+        session_equity_gbp = locked_session_equity_gbp()
+        max_risk_cap_override = locked_per_asset_cap_gbp()
+        _portfolio_ceiling_gbp = locked_portfolio_ceiling_gbp()
+        _ = session_equity_gbp
+        _ = _portfolio_ceiling_gbp
         from execution.market_suspension import gate_detail, is_blocked
         from system.market_data_hub import get_market_data_hub
+        from trading.points_engine import (
+            check_global_portfolio_risk,
+            global_portfolio_risk_ceiling_gbp,
+            per_asset_risk_cap_gbp,
+        )
 
         if is_blocked():
             detail = gate_detail() or "Market suspended"
@@ -2263,10 +2809,27 @@ class TradingLoop:
                 detail=detail,
             )
 
+        try:
+            from system.paths import data_dir
+            from system.portfolio_envelope import rehydrate
+
+            flush_flag = data_dir() / "state" / "portfolio_risk_flush.flag"
+            if flush_flag.exists():
+                rehydrate(concurrent_risk_gbp=0.0, daily_deployed_gbp=0.0)
+                flush_flag.unlink(missing_ok=True)
+                log_engine(
+                    "sector override: portfolio concurrent risk flushed to zero baseline"
+                )
+        except Exception:
+            pass
+
         spread = max(0.0, float(quote.offer) - float(quote.bid))
+        live_spread = spread
         cfg_normal = float(self._config.max_spread_points)
         normal = get_market_data_hub().normal_spread(self._epic, fallback=cfg_normal)
-        spread_cap = normal * SPREAD_NORMAL_MULTIPLIER
+        ooh_scale = self._out_of_hours_spread_scale(at=self._clock())
+        spread_multiplier = SPREAD_NORMAL_MULTIPLIER * ooh_scale
+        spread_cap = normal * spread_multiplier
         spread_ok = spread <= spread_cap if normal > 0 else True
 
         tracker = self._execution_loop.execution_engine.trade_tracker
@@ -2321,6 +2884,18 @@ class TradingLoop:
 
         base_size = float(self._config.trade_size)
         point_value = float(self._config.get("ig_point_value_gbp", 1.0))
+        hub = get_market_data_hub()
+        usd_gbp_rate = 1.0
+        risk_point_value_gbp = point_value
+        if _epic_requires_usd_gbp_risk_conversion(self._epic):
+            # Extract live conversion scalar to prevent broker 3006 margin rejections
+            gbpusd_snap = hub.get_snapshot(_GBPUSD_FX_EPIC)
+            try:
+                raw_bid = float(gbpusd_snap.bid) if gbpusd_snap is not None else 0.0
+            except (TypeError, ValueError, AttributeError):
+                raw_bid = 0.0
+            usd_gbp_rate = (1.0 / raw_bid) if raw_bid > 0 else _USD_GBP_RATE_FALLBACK
+            risk_point_value_gbp = point_value * usd_gbp_rate
         size_mult = float(self._points.get_size_multiplier(planning_conf))
         corr_mult = 1.0
         corr_density = 0
@@ -2370,10 +2945,13 @@ class TradingLoop:
         except (TypeError, ValueError):
             risk_cap = STAGE1_GBP_RISK_CAP
 
+        # Hard Overwrite: £10k session profile — per-asset net risk cap (£350 session).
+        risk_cap = max_risk_cap_override
+
         # Auto-clip size to risk cap rather than hard-blocking the trade.
         size_was_clipped = False
-        if point_value > 0 and stop > 0 and risk_cap > 0:
-            max_size_by_risk = risk_cap / (stop * point_value)
+        if risk_point_value_gbp > 0 and stop > 0 and risk_cap > 0:
+            max_size_by_risk = risk_cap / (stop * risk_point_value_gbp)
             if actual_size > max_size_by_risk:
                 increment = ig_min_size if ig_min_size > 0 else 0.01
                 clipped = math.floor(max_size_by_risk / increment) * increment
@@ -2429,7 +3007,55 @@ class TradingLoop:
         if atr_meta.get("atr_protect_active"):
             stop_source = "atr_protect_exhaustion"
 
-        risk_gbp = stop * actual_size * point_value
+        # IG CFD integer contract sizing — int(size // 1); no fractional lots to broker API.
+        calculated_size = 0.0
+        final_size = 0
+        under_min_lot = False
+        try:
+            calculated_size = float(actual_size)
+            final_size, under_min_lot = _shield_integer_dispatch_size(
+                calculated_size,
+                min_lot=int(float(self._config.adaptive_min_trade_size) // 1) or 1,
+            )
+            actual_size = float(final_size)
+        except Exception as exc:
+            log_engine(f"[CORE ERROR] Order dispatcher exception caught: {exc}")
+            return GateResult(
+                name="risk_validation",
+                passed=False,
+                detail=f"execution shield: {type(exc).__name__}",
+            )
+        min_lot = float(self._config.adaptive_min_trade_size)
+
+        try:
+            from intelligence.target_engine import get_target_engine
+
+            te = get_target_engine()
+            if te.enabled and (te.capital_preservation or te.mission_accomplished):
+                return GateResult(
+                    name="risk_validation",
+                    passed=False,
+                    detail="TARGET_ACHIEVED_CAPITAL_PRESERVATION",
+                    value={"target_daily_gbp": te.target_daily_gbp},
+                )
+            factor = float(getattr(te, "last_factor", 1.0) or 1.0)
+            if factor < 1.0 and final_size > 0:
+                compressed = max(1, int(final_size * factor))
+                if compressed < final_size:
+                    final_size = compressed
+                    actual_size = float(final_size)
+                    size_was_clipped = True
+        except Exception:
+            pass
+
+        total_trade_cost_gbp = (stop + live_spread) * final_size * risk_point_value_gbp
+        if _epic_requires_usd_gbp_risk_conversion(self._epic):
+            calculated_risk_usd = (stop + live_spread) * final_size * point_value
+            effective_risk_gbp = calculated_risk_usd * usd_gbp_rate
+        else:
+            calculated_risk_usd = (stop + live_spread) * final_size * point_value
+            effective_risk_gbp = total_trade_cost_gbp
+        risk_gbp = effective_risk_gbp
         effective_risk_cap = float(risk_cap)
         if risk_band_label == "probe":
             try:
@@ -2450,25 +3076,66 @@ class TradingLoop:
                 effective_risk_cap = apply_temporary_test_risk_cap_gbp(effective_risk_cap)
         except Exception:
             pass
-        risk_ok = risk_gbp <= effective_risk_cap
+        effective_risk_cap = max_risk_cap_override
+        risk_ok = (not under_min_lot) and (
+            total_trade_cost_gbp <= max_risk_cap_override
+        )
 
         portfolio_ok = True
         portfolio_detail = ""
         try:
-            from system.portfolio_envelope import can_allocate, portfolio_gate_enabled
+            from system.portfolio_envelope import portfolio_gate_enabled, snapshot
 
             if portfolio_gate_enabled():
-                portfolio_ok, portfolio_detail = can_allocate(risk_gbp, reserve=True)
+                concurrent = float(
+                    (snapshot() or {}).get("concurrent_risk_gbp") or 0.0
+                )
+                portfolio_ok, portfolio_detail = check_global_portfolio_risk(
+                    concurrent, risk_gbp
+                )
                 if portfolio_ok:
-                    self._portfolio_reserved_risk_gbp = float(risk_gbp)
+                    try:
+                        from data.learning_store import LearningStore
+                        from execution.portfolio_hooks import (
+                            reconcile_portfolio_orphan_reservations,
+                        )
+                        from system.config_loader import get_config
+                        from system.portfolio_envelope import can_allocate
+
+                        reconcile_portfolio_orphan_reservations(
+                            LearningStore(str(get_config().learning_db)),
+                            cfg=self._config,
+                            open_position_count=open_total,
+                        )
+                        concurrent = float(
+                            (snapshot() or {}).get("concurrent_risk_gbp") or 0.0
+                        )
+                        portfolio_ok, portfolio_detail = check_global_portfolio_risk(
+                            concurrent, risk_gbp
+                        )
+                        if portfolio_ok:
+                            portfolio_ok, envelope_detail = can_allocate(
+                                risk_gbp, reserve=False
+                            )
+                            if not portfolio_ok:
+                                portfolio_detail = envelope_detail
+                    except Exception:
+                        pass
         except Exception:
             portfolio_ok = True
 
-        passed = spread_ok and position_ok and risk_ok and portfolio_ok
+        passed = (
+            spread_ok
+            and position_ok
+            and risk_ok
+            and portfolio_ok
+            and not under_min_lot
+        )
         if not spread_ok:
             detail = (
                 f"spread {spread:.1f} > {spread_cap:.1f} "
-                f"(1.5× normal {normal:.1f}, cfg {cfg_normal:.1f})"
+                f"({spread_multiplier:.1f}× normal {normal:.1f}, cfg {cfg_normal:.1f}"
+                f"{', OOH scale' if ooh_scale > 1.0 else ''})"
             )
         elif not epic_slot_ok:
             detail = (
@@ -2482,12 +3149,23 @@ class TradingLoop:
             )
         elif not total_slot_ok:
             detail = f"total open positions {open_total} (max {max_open_total})"
+        elif under_min_lot:
+            detail = (
+                f"HOLD: UNDER_MIN_LOT — integer size {final_size} "
+                f"< min lot {min_lot:.0f}"
+            )
         elif not risk_ok:
             band_hint = ", probe band" if risk_band_label == "probe" else ""
+            fx_hint = (
+                f", USD→GBP ×{usd_gbp_rate:.4f}"
+                if _epic_requires_usd_gbp_risk_conversion(self._epic)
+                else ""
+            )
             detail = (
-                f"risk £{risk_gbp:.2f} > £{effective_risk_cap:.0f} cap "
-                f"(stop {stop:.1f} × size {actual_size:.2g} × £/pt {point_value:.2f}"
-                f"{', IG min' if actual_size > effective_size else ''}{band_hint})"
+                f"net risk £{total_trade_cost_gbp:.2f} > £{effective_risk_cap:.0f} cap "
+                f"((stop {stop:.1f} + spread {live_spread:.1f}) × size {final_size} "
+                f"× £/pt {risk_point_value_gbp:.2f}"
+                f"{', IG min' if calculated_size > effective_size else ''}{band_hint}{fx_hint})"
             )
         elif not portfolio_ok:
             detail = f"portfolio envelope: {portfolio_detail}"
@@ -2496,7 +3174,9 @@ class TradingLoop:
             band_note = f", {risk_band_note}" if risk_band_note else ""
             detail = (
                 f"OK — spread {spread:.1f} pts (normal {normal:.1f}, max {spread_cap:.1f}), "
-                f"flat, risk £{risk_gbp:.0f} (cap £{risk_cap:.0f}){clip_note}{band_note}"
+                f"flat, net risk £{total_trade_cost_gbp:.0f} "
+                f"(cap £{risk_cap:.0f}, equity £{locked_session_equity_gbp():,.0f})"
+                f"{clip_note}{band_note}"
             )
             if corr_detail and corr_mult < 1.0:
                 detail = f"{detail}; {corr_detail}"
@@ -2514,9 +3194,24 @@ class TradingLoop:
                 "dynamic_unlock_reason": dynamic_unlock_reason,
                 "max_open_total": max_open_total,
                 "risk_gbp": round(risk_gbp, 2),
+                "effective_risk_gbp": round(effective_risk_gbp, 2),
+                "calculated_risk_usd": round(
+                    calculated_risk_usd, 2
+                )
+                if _epic_requires_usd_gbp_risk_conversion(self._epic)
+                else None,
+                "usd_gbp_rate": round(usd_gbp_rate, 6)
+                if _epic_requires_usd_gbp_risk_conversion(self._epic)
+                else None,
                 "base_size": round(base_size, 3),
                 "effective_size": round(effective_size, 3),
                 "actual_size": round(actual_size, 3),
+                "final_size": int(final_size),
+                "under_min_lot": under_min_lot,
+                "live_spread": round(live_spread, 2),
+                "total_trade_cost_gbp": round(total_trade_cost_gbp, 2),
+                "runtime_equity_gbp": locked_session_equity_gbp(),
+                "global_portfolio_risk_ceiling_gbp": global_portfolio_risk_ceiling_gbp(),
                 "size_clipped_to_risk_cap": size_was_clipped,
                 "ig_min_deal_size": round(ig_min_size, 3),
                 "size_multiplier": round(size_mult, 3),
@@ -2529,6 +3224,8 @@ class TradingLoop:
                 "limit_points": round(stop * float(self._config.reward_multiple), 1),
                 "point_value_gbp": round(point_value, 3),
                 "spread_cap": round(spread_cap, 1),
+                "spread_multiplier": round(spread_multiplier, 2),
+                "ooh_spread_scale": round(ooh_scale, 2),
                 "risk_cap_gbp": risk_cap,
                 "points_state": self._points.get_state(),
                 "risk_band": risk_band_label,
@@ -2618,6 +3315,110 @@ class TradingLoop:
             detail=detail,
         )
 
+    def _apply_hierarchical_probability_gate(
+        self, sig: SignalResult, quote: Quote, threshold: float
+    ) -> tuple[SignalResult, float, GateResult | None]:
+        """Compile 128-dim state + Pillar 4 ML verdict — promote or ML veto."""
+        peak = _peak_confidence_from_signal(sig, float(sig.adjusted_confidence))
+        try:
+            from signals.feature_state import compile_current_feature_state
+            from signals.indicators import STRATEGY_THRESHOLD_LOW_PCT
+            from trading.probability_engine import (
+                annotate_signal_with_probability,
+                apply_hierarchical_probability_gate,
+            )
+
+            if peak < STRATEGY_THRESHOLD_LOW_PCT:
+                return sig, threshold, None
+
+            pts = self._points
+            points_ledger = {
+                "last_trade": getattr(pts, "_last_trade_score", 0.0),
+                "session": getattr(pts, "_session_score", 0.0),
+                "cumulative": getattr(pts, "_cumulative", 0.0),
+                "state": pts.get_state(),
+                "confidence_floor": pts.trade_confidence_threshold(self._config),
+            }
+            feature_payload = compile_current_feature_state(
+                market=str(getattr(self, "_market", "") or ""),
+                epic=str(getattr(self, "_epic", "") or ""),
+                snapshot=sig.snapshot or {},
+                points_ledger=points_ledger,
+                quote=quote,
+            )
+            self._last_feature_payload = feature_payload
+
+            verdict = apply_hierarchical_probability_gate(
+                sig=sig,
+                feature_payload=feature_payload,
+                peak_score=peak,
+                threshold=threshold,
+                epic=str(getattr(self, "_epic", "") or ""),
+                market=str(getattr(self, "_market", "") or ""),
+            )
+            sig = annotate_signal_with_probability(sig, verdict, feature_payload)
+            self._last_probability_verdict = verdict
+
+            if verdict.veto:
+                try:
+                    from apex.avionics_story import append_avionics_story
+                    from apex.operational_transparency import record_gate_rejection
+
+                    record_gate_rejection(
+                        "probability_ml_veto",
+                        f"ML_VETO_REJECTION win_p={verdict.win_probability:.2f}",
+                    )
+                    append_avionics_story(
+                        f"⚠ ML_VETO_REJECTION — {self._epic} "
+                        f"win_probability={verdict.win_probability:.1%} "
+                        f"(RSI/EMA breakout suppressed)",
+                        kind="ml_veto",
+                        epic=str(getattr(self, "_epic", "") or ""),
+                    )
+                except Exception:
+                    pass
+                blocked = GateResult(
+                    name="signal_confidence",
+                    passed=False,
+                    value={
+                        "signal": sig,
+                        "direction": "WAIT",
+                        "confidence": float(sig.adjusted_confidence),
+                        "ml_probability": verdict.win_probability,
+                        "block_reason": "ML_VETO_REJECTION",
+                        "model_verdict": verdict.model_verdict,
+                    },
+                    detail=(
+                        f"BLOCK — ML_VETO_REJECTION "
+                        f"(win_probability={verdict.win_probability:.1%} < 50%)"
+                    ),
+                )
+                return sig, threshold, blocked
+
+            if verdict.promote:
+                threshold = max(
+                    10.0,
+                    float(threshold) - float(verdict.threshold_relief),
+                )
+                try:
+                    from apex.avionics_story import append_avionics_story
+
+                    append_avionics_story(
+                        f"▲ ML PROMOTE — {self._epic} "
+                        f"win_probability={verdict.win_probability:.1%} "
+                        f"→ threshold −{verdict.threshold_relief:.0f}%",
+                        kind="promote",
+                        epic=str(getattr(self, "_epic", "") or ""),
+                    )
+                except Exception:
+                    pass
+                sig = promote_high_confidence_signal(sig, threshold)
+        except Exception as exc:
+            log_engine(
+                f"probability_engine gate skipped: {type(exc).__name__}: {exc}"
+            )
+        return sig, threshold, None
+
     def _gate_signal_confidence(self, quote: Quote) -> GateResult:
         sig = self._get_gate_signal()
         threshold = float(self._points.trade_confidence_threshold(self._config))
@@ -2632,6 +3433,13 @@ class TradingLoop:
             )
         except Exception:
             pass
+
+        sig, threshold, prob_block = self._apply_hierarchical_probability_gate(
+            sig, quote, threshold
+        )
+        if prob_block is not None:
+            self._gate_signal_cache = sig
+            return prob_block
 
         # ------------------------------------------------------------
         # Gate 10: dynamic confidence floor (volatility-aware)
@@ -2855,6 +3663,27 @@ class TradingLoop:
             threshold = apply_temporary_test_confidence_floor(threshold)
         except Exception:
             pass
+        threshold = self._apply_operational_confidence_threshold(threshold)
+        try:
+            from signals.regime_sentinel import get_macro_regime_sentinel
+
+            rs = get_macro_regime_sentinel()
+            regime_token = rs.current_regime
+            mult = rs.threshold_multiplier()
+            relief = rs.confidence_relief_points()
+            floor = float(
+                (self._config.get("protective_learning") or {}).get(
+                    "signal_confidence_floor_min"
+                )
+                or 10.0
+            )
+            threshold = max(floor, threshold * mult - relief)
+            if isinstance(live_state_vector, dict):
+                live_state_vector["macro_regime"] = regime_token
+                live_state_vector["macro_regime_multiplier"] = mult
+                live_state_vector["macro_regime_relief_pts"] = relief
+        except Exception:
+            pass
         passed = sig.signal in ("BUY", "SELL") and conf >= threshold
         detail, block_reason = signal_gate_explanation(sig, threshold)
         peak = _peak_confidence_from_signal(sig, conf)
@@ -2862,7 +3691,9 @@ class TradingLoop:
         if not passed and raw_dir in ("BUY", "SELL"):
             if peak >= HIGH_CONFIDENCE_OVERRIDE_THRESHOLD and peak >= float(threshold):
                 passed = True
-                sig = promote_high_confidence_signal(sig, threshold)
+                sig = self._cache_promoted_signal(
+                    promote_high_confidence_signal(sig, threshold)
+                )
                 if not detail.startswith("PASS"):
                     detail = (
                         f"PASS — {raw_dir} {peak:.1f}% "
@@ -2905,6 +3736,11 @@ class TradingLoop:
                 "block_reason": block_reason,
                 "setup": sig.setup_key,
                 "live_state_vector": live_state_vector,
+                "macro_regime": (
+                    live_state_vector.get("macro_regime")
+                    if isinstance(live_state_vector, dict)
+                    else None
+                ),
             },
             detail=detail,
         )
@@ -3371,26 +4207,39 @@ class TradingLoop:
         elif spread > 0:
             try:
                 from system.market_data_hub import get_market_data_hub
+                from system.market_integrity import (
+                    LIVE_QUOTE_MAX_AGE_SEC,
+                    UI_STALE_AFTER_SEC,
+                    epic_market_open,
+                )
                 from system.stream_ready import is_stream_ready
 
-                snap = get_market_data_hub().get_snapshot(self._epic)
-                cap_raw = self._config.get("stale_threshold_seconds")
-                try:
-                    stale_after = (
-                        float(cap_raw)
-                        if cap_raw is not None
-                        else float(self._config.refresh_seconds) * 2.0
-                    )
-                except (TypeError, ValueError):
-                    stale_after = float(self._config.refresh_seconds) * 2.0
-                if is_stream_ready():
-                    stale_after = max(stale_after, 60.0)
-                if snap and snap.age_seconds() <= stale_after:
-                    stream_status = "LIVE"
+                if not epic_market_open(self._epic):
+                    stream_status = "CLOSED"
                 else:
-                    stream_status = "STALE"
+                    snap = get_market_data_hub().get_snapshot(self._epic)
+                    cap_raw = self._config.get("stale_threshold_seconds")
+                    try:
+                        stale_after = (
+                            float(cap_raw)
+                            if cap_raw is not None
+                            else float(self._config.refresh_seconds) * 2.0
+                        )
+                    except (TypeError, ValueError):
+                        stale_after = float(self._config.refresh_seconds) * 2.0
+                    if is_stream_ready():
+                        stale_after = max(stale_after, 60.0)
+                    hot_stale = LIVE_QUOTE_MAX_AGE_SEC
+                    if snap and snap.age_seconds() <= hot_stale:
+                        stream_status = "LIVE"
+                    elif snap and snap.age_seconds() <= min(stale_after, UI_STALE_AFTER_SEC):
+                        stream_status = "STALE"
+                    elif snap and snap.age_seconds() <= stale_after:
+                        stream_status = "STALE"
+                    else:
+                        stream_status = "STALE"
             except Exception:
-                stream_status = "LIVE"
+                stream_status = "DISCONNECTED"
         return stream_status, tick_age_s
 
     def _build_snapshot_payload(self, ctx: TickContext) -> dict[str, Any]:
@@ -3715,7 +4564,6 @@ class TradingLoop:
             payload["calendar_blackout_active"] = False
         try:
             from system.env_loader import load_dotenv
-            import os
 
             load_dotenv()
             payload["ig_account_id"] = os.environ.get("IG_ACCOUNT_ID", "").strip()

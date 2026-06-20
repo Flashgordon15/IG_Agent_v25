@@ -61,10 +61,10 @@ def enrich_tick_runtime(tick: dict[str, Any]) -> dict[str, Any]:
     from api.agent_health import get_runtime_tick_fields
 
     out = dict(tick)
+    out.update(get_runtime_tick_fields())
     out["trading_paused"] = is_paused()
     loops = is_trading_running()
     out["trading_loops_running"] = loops
-    out.update(get_runtime_tick_fields())
     try:
         from system.rest_api_budget import get_rest_api_budget
         from system.rest_poll_status import snapshot_fields as rest_poll_fields

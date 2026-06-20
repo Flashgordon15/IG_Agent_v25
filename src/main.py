@@ -2,7 +2,7 @@
 IG Agent v29 entry point — launchd / manual start.
 
 Preflight: emergency lock, config validation, demo guard, instance lock, credentials.
-Runtime: trading loop (background) + FastAPI on :8080 (foreground).
+Runtime: trading loop (background) + FastAPI on profile API port (foreground).
 """
 
 from __future__ import annotations
@@ -15,7 +15,6 @@ import subprocess
 import sys
 import threading
 import time
-import webbrowser
 from pathlib import Path
 from typing import Any
 
@@ -28,8 +27,44 @@ _BROWSER_DELAY_SEC = 3.0
 _LOG_ROTATE_MAX_BYTES = 20 * 1024 * 1024  # 20 MB — rotate shell-written logs
 _LOG_KEEP_BACKUPS = 3
 _API_HOST = "127.0.0.1"
-_API_PORT = 8080
-_DASHBOARD_URL = "http://localhost:8080/"
+_DESKTOP_API_PORT = 9090
+
+
+def _align_desktop_api_port() -> None:
+    """Apex Electron shell — force shadow :9090 regardless of NODE_ENV leakage."""
+    if os.environ.get("IG_APEX_DESKTOP", "").strip() != "1" and (
+        os.environ.get("IG_AGENT_DESKTOP_LAUNCH", "").strip() != "1"
+    ):
+        return
+    os.environ["IG_API_PORT"] = str(_DESKTOP_API_PORT)
+    os.environ["IG_NODE_PROFILE"] = "shadow"
+    os.environ["NODE_ENV"] = "shadow"
+
+
+def _api_port() -> int:
+    _align_desktop_api_port()
+    try:
+        from system.node_profile import get_node_profile
+
+        return int(get_node_profile().api_port)
+    except Exception:
+        raw = os.environ.get("IG_API_PORT", "").strip()
+        if raw.isdigit():
+            return int(raw)
+        if os.environ.get("IG_APEX_DESKTOP", "").strip() == "1":
+            return _DESKTOP_API_PORT
+        return int(os.environ.get("IG_API_PORT", "8080"))
+
+
+def _dashboard_url() -> str:
+    try:
+        from system.node_profile import get_node_profile
+
+        return get_node_profile().dashboard_url
+    except Exception:
+        if os.environ.get("IG_APEX_DESKTOP", "").strip() == "1":
+            return f"http://127.0.0.1:{_DESKTOP_API_PORT}/"
+        return "http://localhost:8080/"
 
 
 def _log_engine(message: str) -> None:
@@ -178,20 +213,65 @@ def merge_credentials_for_validation(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _clear_pycache() -> None:
-    """Remove all __pycache__ dirs under src/ to force fresh bytecode on launch."""
+    """Remove all .pyc and __pycache__ under project root — fresh bytecode on launch."""
+    _purge_workspace_bytecode()
+
+
+def _purge_workspace_bytecode() -> None:
+    """Absolute workspace bytecode purge (mirrors find . -name '*.pyc' / __pycache__)."""
     import shutil
 
-    src_root = Path(__file__).parent
-    cleared = 0
-    for cache_dir in src_root.rglob("__pycache__"):
+    from system.paths import project_root
+
+    root = project_root()
+    pyc_removed = 0
+    cache_removed = 0
+    for pyc in root.rglob("*.pyc"):
+        try:
+            pyc.unlink()
+            pyc_removed += 1
+        except Exception:
+            pass
+    for cache_dir in list(root.rglob("__pycache__")):
         try:
             shutil.rmtree(cache_dir)
-            cleared += 1
+            cache_removed += 1
         except Exception:
             pass
     _log_engine(
-        f"startup: cleared {cleared} __pycache__ dirs — fresh bytecode guaranteed"
+        f"startup: purged workspace bytecode "
+        f"({pyc_removed} .pyc, {cache_removed} __pycache__ dirs)"
     )
+
+
+def _exchange_rollover_emergence_pause() -> None:
+    """
+    Exchange rollover emergence pause — 22:58–23:02 Europe/London (BST/GMT).
+
+    Blocks boot briefly so IG daily accounting log wrap completes before trading init.
+    """
+    if os.environ.get("IG_AGENT_PYTEST") == "1":
+        return
+    try:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        now = datetime.now(ZoneInfo("Europe/London"))
+    except Exception:
+        from datetime import datetime
+
+        now = datetime.now()
+    in_window = (now.hour == 22 and now.minute >= 58) or (
+        now.hour == 23 and now.minute <= 2
+    )
+    if not in_window:
+        return
+    _log_engine(
+        "rollover pause: 22:58–23:02 Europe/London — "
+        f"sleeping 240s (now {now.strftime('%H:%M:%S %Z')})"
+    )
+    time.sleep(240)
+    _log_engine("rollover pause: complete — resuming boot")
 
 
 def _resolve_killable_pid(raw_pid: str | int) -> int | None:
@@ -216,6 +296,16 @@ def _pre_startup_kill_orphan_agents(*, wait_sec: float = 1.0) -> list[int]:
     """SIGTERM (then optional SIGKILL) stale src/main.py processes — never self."""
     if os.environ.get("IG_AGENT_PYTEST") == "1":
         return []
+    try:
+        from system.node_profile import is_shadow_node
+
+        if is_shadow_node():
+            _log_engine(
+                "pre-startup: orphan kill skipped (shadow profile — production :8080 protected)"
+            )
+            return []
+    except Exception:
+        pass
     if os.environ.get("IG_AGENT_SKIP_ORPHAN_KILL", "").strip() in ("1", "true", "yes"):
         _log_engine("pre-startup: orphan kill skipped (IG_AGENT_SKIP_ORPHAN_KILL=1)")
         return []
@@ -321,11 +411,17 @@ def _pre_startup_cleanup() -> None:
     except Exception as e:
         _log_engine(f"pre-startup: could not remove lock: {e}")
 
-    # 4. Kill any process still bound to port 8080 (lsof catches zombie workers
-    #    that pgrep may have missed, e.g. uvicorn sub-processes).
-    _force_cleanup_port(_API_PORT)
+    # 4. Kill any process still bound to API port (skip production ports in shadow desktop)
+    protect_prod = os.environ.get("IG_APEX_PROTECT_PRODUCTION_PORTS", "").strip() in (
+        "1",
+        "true",
+        "yes",
+    )
+    port = _api_port()
+    if not (protect_prod and port in (8080, 8787)):
+        _force_cleanup_port(port)
 
-    # 5. Wait for port 8080 to be free (previous server may still be tearing down)
+    # 5. Wait for API port to be free (previous server may still be tearing down)
     import socket as _socket
 
     _port_free = False
@@ -333,7 +429,7 @@ def _pre_startup_cleanup() -> None:
         with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
             s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
             try:
-                s.bind(("127.0.0.1", _API_PORT))
+                s.bind(("127.0.0.1", port))
                 _port_free = True
                 break
             except OSError:
@@ -341,7 +437,7 @@ def _pre_startup_cleanup() -> None:
         time.sleep(0.3)
     if not _port_free:
         _log_engine(
-            "pre-startup: port 8080 still in use after cleanup — proceeding anyway"
+            f"pre-startup: port {port} still in use after cleanup — proceeding anyway"
         )
 
     # 6. Clear any stale in-flight / pending-order state left by the previous
@@ -421,47 +517,35 @@ def _ensure_watchdog_running() -> None:
         _log_engine(f"startup: watchdog start failed: {type(e).__name__}: {e}")
 
 
-def _force_cleanup_port(port: int = 8080) -> None:
-    """Kill any process listening on *port* (other than self) and remove the lock.
+def _force_cleanup_port(port: int | None = None) -> None:
+    """Delegate to shared port eviction (startup, atexit, shutdown_cleanup)."""
+    from system.boot.port_eviction import reclaim_api_port
 
-    Uses ``lsof -ti :<port>`` which catches zombie uvicorn workers that
-    ``pgrep -f src/main.py`` misses.  Safe to call at startup and on exit.
-    """
-    from system.instance_lock import lock_path as instance_lock_path
-
-    if os.environ.get("IG_AGENT_PYTEST") == "1":
-        return
-    try:
-        result = subprocess.run(
-            ["lsof", "-iTCP", f":{port}", "-sTCP:LISTEN", "-t"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        for pid_str in result.stdout.strip().splitlines():
-            target_pid_int = _resolve_killable_pid(pid_str)
-            if target_pid_int is None:
-                continue
-            try:
-                os.kill(target_pid_int, signal.SIGKILL)
-                _log_engine(f"cleanup: SIGKILL PID {target_pid_int} on port {port}")
-            except ProcessLookupError:
-                pass
-            except Exception as e:
-                _log_engine(f"cleanup: could not kill PID {target_pid_int}: {e}")
-    except Exception:
-        pass
-    instance_lock_path().unlink(missing_ok=True)
+    reclaim_api_port(port if port is not None else _api_port())
 
 
 def run_preflight() -> int:
     """Steps 1–4. Returns exit code (0 = continue)."""
     try:
         from system.env_loader import prepare_boot_env
+        from system.node_profile import apply_node_profile_to_environ
 
         prepare_boot_env()
+        apply_node_profile_to_environ()
     except Exception as e:
         _log_engine(f"boot env prepare skipped: {type(e).__name__}: {e}")
+
+    api_port = _api_port()
+    from system.boot.port_eviction import reclaim_and_wait
+
+    if not reclaim_and_wait(api_port):
+        from system.app_identity import APP_DISPLAY_NAME
+
+        print(
+            f"{APP_DISPLAY_NAME}: port {api_port} is already in use — stop the other process first.",
+            file=sys.stderr,
+        )
+        return EXIT_INSTANCE
 
     from system.app_identity import APP_DISPLAY_NAME
     from system.config_validator import emergency_stop_lock_present, validate_config
@@ -529,14 +613,8 @@ def run_preflight() -> int:
 
 
 def _open_browser_delayed(url: str, delay: float = _BROWSER_DELAY_SEC) -> None:
-    def _worker() -> None:
-        time.sleep(delay)
-        try:
-            webbrowser.open(url, new=1)
-        except Exception as e:
-            _log_engine(f"browser open failed: {type(e).__name__}: {e}")
-
-    threading.Thread(target=_worker, name="open-browser", daemon=True).start()
+    """Permanently disabled — backend must never spawn an external browser."""
+    _log_engine(f"browser auto-launch disabled (use Electron or open manually): {url}")
 
 
 class AgentRuntime:
@@ -582,8 +660,11 @@ class AgentRuntime:
                     release_instance_lock()
                 return code
 
-        if not check_port_available(_API_PORT):
-            print(_port_in_use_banner(_API_PORT), file=sys.stderr)
+        from system.boot.port_eviction import reclaim_and_wait
+
+        bind_port = _api_port()
+        if not reclaim_and_wait(bind_port):
+            print(_port_in_use_banner(bind_port), file=sys.stderr)
             release_instance_lock()
             sys.exit(1)
 
@@ -600,13 +681,14 @@ class AgentRuntime:
                 boot_context=self._boot_context,
             )
             if not os.environ.get("IG_AGENT_FROM_LAUNCHER"):
-                _open_browser_delayed(_DASHBOARD_URL)
+                _open_browser_delayed(_dashboard_url())
 
             import uvicorn
 
-            _log_engine(f"API server: binding on port {_API_PORT}")
+            bind_port = _api_port()
+            _log_engine(f"API server: binding on port {bind_port}")
             config = uvicorn.Config(
-                app, host=_API_HOST, port=_API_PORT, log_level="info"
+                app, host=_API_HOST, port=bind_port, log_level="info"
             )
             server = uvicorn.Server(config)
             self._uvicorn_server = server
@@ -632,31 +714,70 @@ def _install_signal_handlers(runtime: AgentRuntime) -> None:
 
 def main() -> None:
     from system.env_loader import load_dotenv, prepare_boot_env
+    from system.node_profile import apply_node_profile_to_environ, get_node_profile
     from system.paths import project_root
     from system.system_state import stamp_process_boot_start
 
     os.environ.setdefault("IG_AGENT_ROOT", str(project_root()))
+    _align_desktop_api_port()
     # Finder/GUI launches inherit stale shell IG_* keys — .env must win.
     _from_launcher = os.environ.get("IG_AGENT_FROM_LAUNCHER") == "1" or (
         os.environ.get("IG_AGENT_DESKTOP_LAUNCH") == "1"
     )
     load_dotenv(override=_from_launcher)
     prepare_boot_env()
+    from system.apex_runtime_mode import apply_runtime_mode_to_environ
+
+    apply_runtime_mode_to_environ()
+    profile = apply_node_profile_to_environ()
     stamp_process_boot_start()
 
     from system.app_identity import APP_DISPLAY_NAME, APP_VERSION_LABEL
     from system.boot.exceptions import Gate1FatalError
     from system.boot.gate1_preflight import run_gate1_preflight
+    from system.system_state import BootPhase, get_system_state
 
-    atexit.register(_force_cleanup_port)
+    _desktop_fast_bind = os.environ.get("IG_APEX_DESKTOP", "").strip() == "1"
+
+    atexit.register(lambda: _force_cleanup_port(_api_port()))
     _rotate_oversized_logs()
-    _log_engine(f"=== {APP_DISPLAY_NAME} {APP_VERSION_LABEL} full restart ===")
-    _pre_startup_cleanup()
+    _log_engine(
+        f"=== {APP_DISPLAY_NAME} {APP_VERSION_LABEL} full restart "
+        f"(node={profile.kind} api=:{profile.api_port}) ==="
+    )
+    _exchange_rollover_emergence_pause()
+    _purge_workspace_bytecode()
+    if _desktop_fast_bind:
+        try:
+            from apex.ipc_bridge import start_ipc_bridge_daemon
+            from apex.microkernel import start_microkernel
+            from execution.atomic_gateway import set_monitoring_mode
 
-    try:
-        boot_ctx = run_gate1_preflight()
-    except Gate1FatalError as exc:
-        sys.exit(exc.exit_code)
+            # Boot gates need passive IG REST (accounts, positions, OHLC).
+            set_monitoring_mode(False)
+            start_ipc_bridge_daemon()
+            start_microkernel(workers_only=True)
+            _log_engine("Apex desktop: IPC bridge + micro-kernel armed (workers only)")
+        except Exception as exc:
+            _log_engine(f"Apex desktop bootstrap failed: {type(exc).__name__}: {exc}")
+        threading.Thread(
+            target=_pre_startup_cleanup,
+            name="pre-startup-cleanup",
+            daemon=True,
+        ).start()
+    else:
+        _pre_startup_cleanup()
+
+    boot_ctx = None
+    if _desktop_fast_bind:
+        _log_engine(
+            "Apex desktop: deferring Gate1 to post-bind lifespan (fast Electron handshake)"
+        )
+    else:
+        try:
+            boot_ctx = run_gate1_preflight()
+        except Gate1FatalError as exc:
+            sys.exit(exc.exit_code)
 
     runtime = AgentRuntime(boot_context=boot_ctx)
     _install_signal_handlers(runtime)

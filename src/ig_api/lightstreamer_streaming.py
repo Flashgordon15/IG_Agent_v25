@@ -167,6 +167,9 @@ class IGLightstreamerStreamingClient:
         self._blank_tick_resubscribe_scheduled = False
         self._auto_reconnect = True
         self._set_state(ConnectionState.CONNECTING)
+        from ig_api.streaming_client import ensure_network_heartbeat_sentinel_started
+
+        ensure_network_heartbeat_sentinel_started()
         try:
             from system.thread_affinity import spawn_priority_thread
 

@@ -19,6 +19,15 @@ from system.engine_log import log_engine
 from system.supervisor_history import sanitize_for_ws_json
 
 DEFAULT_COCKPIT_PORT = 8787
+
+
+def _cockpit_port() -> int:
+    import os
+
+    try:
+        return int(os.environ.get("IG_COCKPIT_PORT", str(DEFAULT_COCKPIT_PORT)))
+    except (TypeError, ValueError):
+        return DEFAULT_COCKPIT_PORT
 _server: Any | None = None
 _thread: threading.Thread | None = None
 _loop: asyncio.AbstractEventLoop | None = None
@@ -378,7 +387,9 @@ def _fetch_local_closed_trades_source() -> list[dict[str, Any]]:
         from system.config_loader import ConfigLoader
         from system.paths import config_dir
 
-        cfg = ConfigLoader(config_dir() / "config_v25.json").load_config()
+        from system.config_loader import load_active_config
+
+        cfg = load_active_config(validate=False)
         store = LearningStore(str(cfg.learning_db))
         rows = store.recent_agent_closed_trades(limit=200)
         filtered = [r for r in rows if not is_excluded_display_row(r)]
@@ -753,8 +764,9 @@ def create_cockpit_app() -> Any:
     return app
 
 
-def start_cockpit_web_server(*, port: int = DEFAULT_COCKPIT_PORT, hz: float = 2.5) -> bool:
+def start_cockpit_web_server(*, port: int | None = None, hz: float = 2.5) -> bool:
     """Start cockpit FastAPI + WebSocket hub in a daemon thread."""
+    bind_port = _cockpit_port() if port is None else int(port)
     global _server, _thread, _loop
     with _lock:
         if _thread is not None and _thread.is_alive():
@@ -797,7 +809,7 @@ def start_cockpit_web_server(*, port: int = DEFAULT_COCKPIT_PORT, hz: float = 2.
             config = uvicorn.Config(
                 create_cockpit_app(),
                 host="127.0.0.1",
-                port=int(port),
+                port=bind_port,
                 log_level="warning",
                 access_log=False,
             )
@@ -823,12 +835,12 @@ def start_cockpit_web_server(*, port: int = DEFAULT_COCKPIT_PORT, hz: float = 2.
     while time.time() < deadline:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
             try:
-                probe.connect(("127.0.0.1", int(port)))
-                log_engine(f"Flight Deck web cockpit live at http://127.0.0.1:{port}/")
+                probe.connect(("127.0.0.1", bind_port))
+                log_engine(f"Flight Deck web cockpit live at http://127.0.0.1:{bind_port}/")
                 return True
             except OSError:
                 time.sleep(0.15)
-    log_engine(f"Flight Deck web server failed to bind port {port}")
+    log_engine(f"Flight Deck web server failed to bind port {bind_port}")
     return False
 
 

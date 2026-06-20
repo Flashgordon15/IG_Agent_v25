@@ -18,6 +18,15 @@ def log_configured_account(credentials: Credentials) -> None:
     )
 
 
+def session_account_matches_credentials(
+    rest_client: Any, credentials: Credentials
+) -> bool:
+    """True when the authenticated REST client is bound to credentials account id."""
+    configured = str(credentials.ig_account_id or "").strip().upper()
+    client_aid = str(getattr(rest_client, "account_id", "") or "").strip().upper()
+    return bool(configured and client_aid == configured)
+
+
 def verify_account_on_broker(rest_client: Any, credentials: Credentials) -> dict[str, Any]:
     """
     Compare credentials.json account_id to GET /accounts.

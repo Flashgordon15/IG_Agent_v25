@@ -43,7 +43,7 @@
     "mode": "veto",
     "_note": "EUR/USD only \u2014 S4 veto-eligible after 6-bar label refresh (val WR 54.0%). Whitelist via per_epic.",
     "min_labelled_rows": 500,
-    "min_probability": 0.58,
+    "min_probability": 0.45,
     "min_probability_high_conf": 0.55,
     "setup_specific_thresholds": true,
     "blend_fallback": false,

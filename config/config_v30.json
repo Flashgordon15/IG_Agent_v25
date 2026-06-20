@@ -1,0 +1,38 @@
+{
+  "$schema": "./config_schema.json",
+  "$extends": "config_v29.json",
+  "version": "30.0.0",
+  "app_version": "v30.0",
+  "_note": "v30 Apex monolith — isolated namespace; no external browser failsafes",
+  "pricing": {
+    "reference_transport": "yahoo",
+    "execution_transport": "ig",
+    "yahoo_poll_sec": 3,
+    "ig_snapshot_at_execution": true,
+    "_note": "Yahoo signals; IG snapshot at Gate 7 uses budget_priority (hard cap bypass)"
+  },
+  "session_validation": {
+    "enabled": true,
+    "confidence_floor_pct": 42,
+    "clear_circuit_breaker_on_boot": true,
+    "bypass_min_atr": true,
+    "_note": "Armed when IG_SESSION_VALIDATION=1 (apex_launch.sh)"
+  },
+  "apex_demo_execution": {
+    "default_agent_mode": "DEMO",
+    "require_ig_credentials": true,
+    "mock_feed_allowed": false,
+    "allow_live_trading_locked": false,
+    "demo_only_deployment_locked": true,
+    "_note": "Gate 7 → LiveExecutor IG DEMO REST when IG_AGENT_MODE=DEMO"
+  },
+  "intelligence_layer": {
+    "cockpit": {
+      "enabled": true,
+      "auto_launch_after_gate4": true,
+      "auto_open_browser": false,
+      "web_port": 9191,
+      "_note": "Telemetry bridge only — avionics render inside Electron shell (no :8787 tab)"
+    }
+  }
+}

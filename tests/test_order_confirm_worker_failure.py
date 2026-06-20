@@ -61,6 +61,12 @@ class OrderConfirmWorkerFailureTests(unittest.TestCase):
         except Exception:
             pass
         try:
+            from execution.correlation_guard import reset_correlation_guard_for_tests
+
+            reset_correlation_guard_for_tests()
+        except Exception:
+            pass
+        try:
             from system.rate_limit_manager import get_rate_limit_manager
 
             get_rate_limit_manager().reset_for_tests()
@@ -140,8 +146,10 @@ class OrderConfirmWorkerFailureTests(unittest.TestCase):
     @patch("execution.live_executor.japan225_daily_risk_paused", return_value=False)
     @patch("system.portfolio_envelope.portfolio_gate_enabled", return_value=True)
     @patch("system.portfolio_envelope.release_allocation")
+    @patch("system.portfolio_envelope.can_allocate", return_value=(True, "ok"))
     def test_worker_exception_without_ref_releases_immediately(
         self,
+        _can: MagicMock,
         mock_release: MagicMock,
         _gate: MagicMock,
         _risk_pause: MagicMock,
@@ -174,8 +182,10 @@ class OrderConfirmWorkerFailureTests(unittest.TestCase):
     @patch("execution.live_executor.japan225_daily_risk_paused", return_value=False)
     @patch("system.portfolio_envelope.portfolio_gate_enabled", return_value=True)
     @patch("system.portfolio_envelope.release_allocation")
+    @patch("system.portfolio_envelope.can_allocate", return_value=(True, "ok"))
     def test_worker_ambiguous_ref_defers_release_until_reconciler(
         self,
+        _can: MagicMock,
         mock_release: MagicMock,
         _gate: MagicMock,
         _risk_pause: MagicMock,
@@ -224,8 +234,10 @@ class OrderConfirmWorkerFailureTests(unittest.TestCase):
 
     @patch("system.rate_limit_manager.get_rate_limit_manager")
     @patch("execution.live_executor.japan225_daily_risk_paused", return_value=False)
+    @patch("system.portfolio_envelope.portfolio_gate_enabled", return_value=False)
     def test_execute_returns_before_blocking_rest(
         self,
+        _gate: MagicMock,
         _risk_pause: MagicMock,
         rate_mgr: MagicMock,
     ) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import threading
+import time
 from typing import Any
 
 from execution.cooldown_tracker import CooldownTracker
@@ -95,6 +96,20 @@ class LiveExecutor:
         *,
         mode: ExecutionMode = ExecutionMode.LIVE,
     ) -> ExecutionResult:
+        from execution.atomic_gateway import assert_execution_allowed
+
+        hold = assert_execution_allowed()
+        if hold:
+            from system.engine_log import log_engine
+
+            log_engine(f"{hold} | epic={signal.epic}")
+            return ExecutionResult(
+                success=False,
+                action="REJECTED",
+                rejection_reason=hold,
+                execution_params=execution_params,
+            )
+
         cfg = self._cfg
         client_type = getattr(self._client, "account_type", cfg.account_type)
         is_demo = client_type == "DEMO" or mode == ExecutionMode.DEMO
@@ -294,6 +309,38 @@ class LiveExecutor:
                 execution_params=execution_params,
             )
 
+        portfolio_reserved_gbp = 0.0
+        if proposed_risk_gbp > 0:
+            try:
+                from system.portfolio_envelope import can_allocate, portfolio_gate_enabled
+
+                if portfolio_gate_enabled():
+                    alloc_ok, alloc_reason = can_allocate(
+                        proposed_risk_gbp, reserve=True
+                    )
+                    if not alloc_ok:
+                        clear_entry(signal.epic)
+                        reason = f"portfolio envelope: {alloc_reason}"
+                        update_demo_diagnostics(last_rejection=reason)
+                        trace_execution(
+                            "ORDER",
+                            "LiveExecutor.execute",
+                            decision=f"REJECTED: {reason}",
+                        )
+                        return ExecutionResult(
+                            success=False,
+                            action="REJECTED",
+                            rejection_reason=reason,
+                            execution_params=execution_params,
+                        )
+                    portfolio_reserved_gbp = proposed_risk_gbp
+                    execution_params = {
+                        **execution_params,
+                        "risk_gbp": proposed_risk_gbp,
+                    }
+            except Exception:
+                pass
+
         trace_execution(
             "ORDER",
             "LiveExecutor.execute",
@@ -320,6 +367,13 @@ class LiveExecutor:
             worker.start()
         except Exception:
             clear_entry(signal.epic)
+            if portfolio_reserved_gbp > 0:
+                try:
+                    from system.portfolio_envelope import release_allocation
+
+                    release_allocation(portfolio_reserved_gbp)
+                except Exception:
+                    pass
             self._handle_order_worker_failure(
                 signal,
                 worker_params,
@@ -485,6 +539,52 @@ class LiveExecutor:
                         f"Order confirmed: deal={result.deal_id or '—'} "
                         f"ref={result.deal_reference or '—'}"
                     )
+                    try:
+                        from apex.ipc_bridge import broadcast_ledger_event
+
+                        params = execution_params or {}
+                        broadcast_ledger_event(
+                            {
+                                "event": "broker_fill",
+                                "ts": time.time(),
+                                "epic": signal.epic,
+                                "side": str(signal.direction or "").upper(),
+                                "action": str(signal.direction or "").upper(),
+                                "size": int(
+                                    float(params.get("size") or params.get("dealSize") or 0)
+                                    // 1
+                                ),
+                                "entry": float(
+                                    params.get("entry")
+                                    or params.get("level")
+                                    or getattr(signal, "entry_price", 0)
+                                    or 0
+                                ),
+                                "deal_id": result.deal_id,
+                                "deal_reference": result.deal_reference,
+                                "latency_ms": float(
+                                    params.get("latency_ms") or params.get("latencyMs") or 0
+                                ),
+                                "mode": "DEMO" if mode == ExecutionMode.DEMO else "LIVE",
+                                "source": "worker_d_live",
+                            }
+                        )
+                        try:
+                            from apex.avionics_story import append_avionics_story
+
+                            lat = float(params.get("latency_ms") or params.get("latencyMs") or 0)
+                            sz = int(float(params.get("size") or params.get("dealSize") or 0) // 1)
+                            append_avionics_story(
+                                f"EXECUTED: {signal.direction} {signal.epic} "
+                                f"size={sz} via LiveExecutor "
+                                f"({lat:.1f} ms)",
+                                kind="executed",
+                                epic=signal.epic,
+                            )
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
                 else:
                     self._handle_order_worker_failure(
                         signal,
@@ -551,6 +651,22 @@ class LiveExecutor:
         size = float(execution_params.get("size", cfg.trade_size))
         stop_distance = float(execution_params.get("risk", cfg.stop_distance_points))
         limit_distance = float(execution_params.get("limit", cfg.limit_distance_points))
+
+        from apex.hardening import floor_contract_size, under_min_lot_detail
+
+        size_int, under_min_lot = floor_contract_size(size)
+        if under_min_lot:
+            reason = under_min_lot_detail(size_int)
+            from system.engine_log import log_engine
+
+            log_engine(reason)
+            return ExecutionResult(
+                success=False,
+                action="REJECTED",
+                rejection_reason="HOLD: UNDER_MIN_LOT",
+                execution_params={**execution_params, "size": size_int},
+            )
+        size = float(size_int)
 
         if hasattr(self._client, "normalize_order_params"):
             size, stop_distance, limit_distance, currency_code = (
@@ -713,13 +829,17 @@ class LiveExecutor:
                         cfg=cfg,
                     )
                 else:
-                    result = self._client.place_market_order(
+                    from execution.atomic_gateway import dispatch_atomic_market_order
+
+                    result = dispatch_atomic_market_order(
+                        self._client,
                         epic=signal.epic,
                         direction=signal.direction,
                         size=size,
                         stop_distance=stop_distance,
                         limit_distance=limit_distance,
                         currency_code=cfg.currency_code,
+                        trailing_distance_points=stop_distance,
                     )
                 update_demo_diagnostics(
                     last_ig_response=result,

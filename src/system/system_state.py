@@ -30,6 +30,7 @@ class BootPhase(StrEnum):
     """High-level boot phase exposed to dashboard and /api/health."""
 
     BOOTING = "BOOTING"
+    WARMING = "WARMING"
     G1 = "G1"
     G2 = "G2"
     G3_STREAMING = "G3_STREAMING"
@@ -394,6 +395,12 @@ class SystemState:
             self._snapshot.ready = False
             self._snapshot.error = error
             self._snapshot.error_gate = gate_id
+        try:
+            from apex.warmup_progress import mark_warmup_failed
+
+            mark_warmup_failed(error)
+        except Exception:
+            pass
 
     def gate_complete(self, gate_id: GateId) -> bool:
         with self._lock:

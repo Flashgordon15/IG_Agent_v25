@@ -15,7 +15,20 @@ def clear_port_8080(*, port: int = DEFAULT_PORT, host: str = "127.0.0.1") -> lis
     Terminate processes listening on the dashboard port.
 
     Returns list of PIDs sent SIGTERM. Uses TERM only (no kill -9).
+    Shadow desktop never evicts production :8080 / :8787.
     """
+    if port in (8080, 8787):
+        try:
+            from system.node_profile import is_shadow_node
+
+            if is_shadow_node() or os.environ.get("IG_APEX_PROTECT_PRODUCTION_PORTS", "").strip() in (
+                "1",
+                "true",
+                "yes",
+            ):
+                return []
+        except Exception:
+            pass
     killed: list[int] = []
     try:
         out = subprocess.check_output(

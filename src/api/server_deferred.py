@@ -165,7 +165,9 @@ def api_learning_status_legacy() -> dict[str, Any]:
         from system.config_loader import ConfigLoader
         from system.paths import config_dir
 
-        cfg = ConfigLoader(config_dir() / "config_v25.json").load_config()
+        from system.config_loader import load_active_config
+
+        cfg = load_active_config(validate=False)
         store = LearningStore(str(cfg.learning_db))
         if hasattr(store, "recent_confirmed_closed_trades"):
             confirmed_trade_count = len(store.recent_confirmed_closed_trades(limit=500))

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import threading
 import time
-import webbrowser
 from typing import Any
 
 from system.engine_log import log_engine
@@ -56,23 +56,36 @@ def _resolve_epics(cfg: Any | None) -> tuple[str, ...]:
 
 def _cockpit_port(cfg: Any | None) -> int:
     try:
+        from system.node_profile import get_node_profile
+
+        return int(get_node_profile().cockpit_port)
+    except Exception:
+        pass
+    try:
         return int(_cockpit_cfg(cfg).get("web_port", 8787))
     except (TypeError, ValueError):
         return 8787
 
 
 def _open_cockpit_browser(port: int, *, delay: float = 2.0) -> None:
-    url = f"http://127.0.0.1:{port}/"
+    """Permanently disabled — Flight Deck must not spawn an external browser."""
+    log_engine(
+        f"Flight Deck: browser auto-launch disabled — open cockpit manually at "
+        f"http://127.0.0.1:{port}/"
+    )
 
-    def _worker() -> None:
-        time.sleep(max(0.5, float(delay)))
-        try:
-            webbrowser.open(url, new=1)
-            log_engine(f"Flight Deck: opened web cockpit at {url}")
-        except Exception as e:
-            log_engine(f"Flight Deck: browser open failed: {type(e).__name__}: {e}")
 
-    threading.Thread(target=_worker, name="CockpitBrowserOpen", daemon=True).start()
+def _apex_desktop_mode() -> bool:
+    if os.environ.get("IG_APEX_DESKTOP", "").strip() == "1":
+        return True
+    if os.environ.get("IG_APEX_NO_BROWSER", "").strip() == "1":
+        return True
+    try:
+        from system.node_profile import is_shadow_node
+
+        return is_shadow_node()
+    except Exception:
+        return False
 
 
 def launch_flight_deck_after_gate4(cfg: Any | None) -> None:
@@ -86,6 +99,7 @@ def launch_flight_deck_after_gate4(cfg: Any | None) -> None:
         cockpit_block = _cockpit_cfg(cfg)
         hz = float(cockpit_block.get("telemetry_hz", 2.5))
         port = _cockpit_port(cfg)
+        desktop_mode = _apex_desktop_mode()
 
         if not _bridge_started:
             from cockpit.telemetry_bridge import start_telemetry_bridge
@@ -93,6 +107,13 @@ def launch_flight_deck_after_gate4(cfg: Any | None) -> None:
             start_telemetry_bridge(epics=_resolve_epics(cfg) or None, hz=hz)
             _bridge_started = True
             log_engine("Flight Deck telemetry bridge active")
+
+        if desktop_mode:
+            _ipc_ready.set()
+            log_engine(
+                "Flight Deck: telemetry only — Apex desktop shell (no browser / no :8787)"
+            )
+            return
 
         if not _web_started:
             from cockpit.web_server import start_cockpit_web_server

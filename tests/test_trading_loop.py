@@ -478,8 +478,8 @@ class RiskValidationGateTests(unittest.TestCase):
         self.assertEqual(gate.value["effective_size"], 2.5)
         self.assertEqual(gate.value["actual_size"], 10.0)
         self.assertEqual(gate.value["ig_min_deal_size"], 10.0)
-        self.assertEqual(gate.value["risk_gbp"], 100.0)
-        self.assertEqual(gate.value["risk_cap_gbp"], 150)
+        self.assertEqual(gate.value["risk_gbp"], 105.0)
+        self.assertEqual(gate.value["risk_cap_gbp"], 350.0)
 
     def test_per_instrument_risk_cap_override(self) -> None:
         loop = _make_loop()
@@ -501,8 +501,8 @@ class RiskValidationGateTests(unittest.TestCase):
             gate = loop._gate_risk_validation(_quote())
 
         self.assertTrue(gate.passed)
-        self.assertEqual(gate.value["risk_gbp"], 45.0)
-        self.assertEqual(gate.value["risk_cap_gbp"], 50)
+        self.assertEqual(gate.value["risk_gbp"], 45.5)
+        self.assertEqual(gate.value["risk_cap_gbp"], 350.0)
 
     def test_falls_back_to_stage1_cap_when_no_instrument_override(self) -> None:
         loop = _make_loop()
@@ -520,7 +520,36 @@ class RiskValidationGateTests(unittest.TestCase):
             hub_mock.return_value.normal_spread.return_value = 10.0
             gate = loop._gate_risk_validation(_quote())
 
-        self.assertEqual(gate.value["risk_cap_gbp"], STAGE1_GBP_RISK_CAP)
+        self.assertEqual(gate.value["risk_cap_gbp"], 350.0)
+
+    def test_gold_risk_converts_usd_notional_to_gbp(self) -> None:
+        loop = _make_loop()
+        loop._epic = "CS.D.CFPGOLD.CFP.IP"
+        loop._config.stop_distance_points = 10.0
+        loop._config.trade_size = 1.0
+        loop._config.get = MagicMock(
+            side_effect=lambda key, default=None: {
+                "ig_point_value_gbp": 1.0,
+                "risk_cap_gbp": 350,
+            }.get(key, default)
+        )
+        loop._points.get_size_multiplier.return_value = 1.0
+        rest = MagicMock()
+        rest.fetch_market_constraints.return_value = {"min_deal_size": 1.0}
+        loop._execution_loop.execution_engine._rest_client = rest
+
+        gbpusd = MagicMock()
+        gbpusd.bid = 1.25
+
+        with patch("system.market_data_hub.get_market_data_hub") as hub_mock:
+            hub_mock.return_value.normal_spread.return_value = 1.0
+            hub_mock.return_value.get_snapshot.return_value = gbpusd
+            gate = loop._gate_risk_validation(_quote())
+
+        self.assertTrue(gate.passed)
+        self.assertEqual(gate.value["calculated_risk_usd"], 10.5)
+        self.assertAlmostEqual(gate.value["usd_gbp_rate"], 0.8, places=4)
+        self.assertAlmostEqual(gate.value["effective_risk_gbp"], 8.4, places=2)
 
 
 class DynamicMaxPerEpicTests(unittest.TestCase):

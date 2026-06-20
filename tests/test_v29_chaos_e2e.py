@@ -193,6 +193,26 @@ class TestV29ChaosE2E(unittest.TestCase):
             patch.object(
                 MarketOrchestrator, "_strategy_session_eligible", return_value=True
             ),
+            patch(
+                "trading.qmm_asset_selector.rank_qmm_epics",
+                side_effect=lambda candidates: sorted(
+                    [
+                        (
+                            epic,
+                            float(
+                                getattr(
+                                    getattr(loop, "_env", None),
+                                    "_last",
+                                    SimpleNamespace(total=0.0),
+                                ).total
+                            ),
+                        )
+                        for epic, loop, _, _ in candidates
+                    ],
+                    key=lambda item: item[1],
+                    reverse=True,
+                ),
+            ),
         ):
             orch = _build_five_market_orchestrator()
             data = orch._config.as_dict()

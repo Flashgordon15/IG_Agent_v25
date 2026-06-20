@@ -58,145 +58,164 @@ class OrderValidator:
         cfg = self._cfg
         reasons: list[str] = []
         checks: dict[str, bool] = {}
+        allowed = False
 
-        if signal.direction not in ("BUY", "SELL"):
-            checks["signal"] = False
-            reasons.append("No actionable signal (WAIT)")
-            return ValidationResult(allowed=False, reasons=reasons, checks=checks)
-        checks["signal"] = True
+        try:
+            if signal.direction not in ("BUY", "SELL"):
+                checks["signal"] = False
+                reasons.append("No actionable signal (WAIT)")
+                return ValidationResult(allowed=False, reasons=reasons, checks=checks)
+            checks["signal"] = True
 
-        session_ok, session_msg = self.check_session(signal.epic)
-        checks["session"] = session_ok
-        if not session_ok:
-            reasons.append(session_msg)
+            session_ok, session_msg = self.check_session(signal.epic)
+            checks["session"] = session_ok
+            if not session_ok:
+                reasons.append(session_msg)
 
-        market_ok, market_msg = self.check_market_hours(signal.epic)
-        checks["market_hours"] = market_ok
-        if not market_ok:
-            reasons.append(market_msg)
+            market_ok, market_msg = self.check_market_hours(signal.epic)
+            checks["market_hours"] = market_ok
+            if not market_ok:
+                reasons.append(market_msg)
 
-        circuit_ok, circuit_msg = self.check_circuit_breaker()
-        checks["circuit_breaker"] = circuit_ok
-        if not circuit_ok:
-            reasons.append(circuit_msg)
+            circuit_ok, circuit_msg = self.check_circuit_breaker()
+            checks["circuit_breaker"] = circuit_ok
+            if not circuit_ok:
+                reasons.append(circuit_msg)
 
-        blocked, block_reason = self.adaptive.should_block(
-            signal.setup_key, signal.adjusted_confidence, signal.snapshot
-        )
-        checks["adaptive"] = not blocked
-        if blocked:
-            reasons.append(block_reason)
-
-        spread_ok, spread_msg = self.check_spread(signal)
-        checks["spread"] = spread_ok
-        if not spread_ok:
-            reasons.append(spread_msg)
-
-        prot_spread_ok, prot_spread_msg = self.check_execution_protect_spread(signal)
-        checks["execution_protect_spread"] = prot_spread_ok
-        if not prot_spread_ok:
-            reasons.append(prot_spread_msg)
-
-        scalp_halt_ok, scalp_halt_msg = self.check_scalping_entry_halt()
-        checks["scalping_entry_halt"] = scalp_halt_ok
-        if not scalp_halt_ok:
-            reasons.append(scalp_halt_msg)
-
-        scalp_eq_ok, scalp_eq_msg = self.check_scalping_equity_circuit()
-        checks["scalping_equity_circuit"] = scalp_eq_ok
-        if not scalp_eq_ok:
-            reasons.append(scalp_eq_msg)
-
-        atr_ok, atr_msg = self.check_atr(signal)
-        checks["atr"] = atr_ok
-        if not atr_ok:
-            reasons.append(atr_msg)
-
-        struct_ok, struct_msg = self.check_structural_risk(signal)
-        checks["structural_risk"] = struct_ok
-        if not struct_ok:
-            reasons.append(struct_msg)
-
-        conf_floor = (
-            self._points.trade_confidence_threshold(cfg)
-            if self._points is not None
-            else float(cfg.signal_threshold)
-        )
-        conf_ok = signal.adjusted_confidence >= conf_floor
-        checks["confidence"] = conf_ok
-        if not conf_ok:
-            reasons.append(
-                f"Adjusted confidence {signal.adjusted_confidence:.0f}% "
-                f"below threshold {conf_floor:.0f}"
+            blocked, block_reason = self.adaptive.should_block(
+                signal.setup_key, signal.adjusted_confidence, signal.snapshot
             )
+            checks["adaptive"] = not blocked
+            if blocked:
+                reasons.append(block_reason)
 
-        pending_open = False
-        if has_pending_open is not None:
-            pending_open = bool(has_pending_open(signal.epic))
-        else:
+            spread_ok, spread_msg = self.check_spread(signal)
+            checks["spread"] = spread_ok
+            if not spread_ok:
+                reasons.append(spread_msg)
+
+            prot_spread_ok, prot_spread_msg = self.check_execution_protect_spread(signal)
+            checks["execution_protect_spread"] = prot_spread_ok
+            if not prot_spread_ok:
+                reasons.append(prot_spread_msg)
+
+            scalp_halt_ok, scalp_halt_msg = self.check_scalping_entry_halt()
+            checks["scalping_entry_halt"] = scalp_halt_ok
+            if not scalp_halt_ok:
+                reasons.append(scalp_halt_msg)
+
+            scalp_eq_ok, scalp_eq_msg = self.check_scalping_equity_circuit()
+            checks["scalping_equity_circuit"] = scalp_eq_ok
+            if not scalp_eq_ok:
+                reasons.append(scalp_eq_msg)
+
+            atr_ok, atr_msg = self.check_atr(signal)
+            checks["atr"] = atr_ok
+            if not atr_ok:
+                reasons.append(atr_msg)
+
+            struct_ok, struct_msg = self.check_structural_risk(signal)
+            checks["structural_risk"] = struct_ok
+            if not struct_ok:
+                reasons.append(struct_msg)
+
+            conf_floor = (
+                self._points.trade_confidence_threshold(cfg)
+                if self._points is not None
+                else float(cfg.signal_threshold)
+            )
             try:
-                from execution.live_executor import epic_has_pending_open
+                from system.agent_execution_mode import demo_operational_floors_active
 
-                pending_open = epic_has_pending_open(signal.epic)
+                if demo_operational_floors_active():
+                    conf_floor = min(conf_floor, 42.0)
             except Exception:
-                pending_open = False
-        checks["pending_order"] = not pending_open
-        if pending_open:
-            reasons.append("Entry already in flight — awaiting IG confirm")
+                pass
+            conf_ok = signal.adjusted_confidence >= conf_floor
+            checks["confidence"] = conf_ok
+            if not conf_ok:
+                reasons.append(
+                    f"Adjusted confidence {signal.adjusted_confidence:.0f}% "
+                    f"below threshold {conf_floor:.0f}"
+                )
 
-        count = 0
-        if open_position_count:
-            count = int(open_position_count(signal.epic))
-        elif has_open_position and has_open_position(signal.epic):
-            count = 1
-        elif store_has_position and store_has_position(signal.epic):
-            count = max(
-                count, self._store_count_fallback(store_has_position, signal.epic)
+            pending_open = False
+            if has_pending_open is not None:
+                pending_open = bool(has_pending_open(signal.epic))
+            else:
+                try:
+                    from execution.live_executor import epic_has_pending_open
+
+                    pending_open = epic_has_pending_open(signal.epic)
+                except Exception:
+                    pending_open = False
+            checks["pending_order"] = not pending_open
+            if pending_open:
+                reasons.append("Entry already in flight — awaiting IG confirm")
+
+            count = 0
+            if open_position_count:
+                count = int(open_position_count(signal.epic))
+            elif has_open_position and has_open_position(signal.epic):
+                count = 1
+            elif store_has_position and store_has_position(signal.epic):
+                count = max(
+                    count, self._store_count_fallback(store_has_position, signal.epic)
+                )
+
+            from trading.position_ladder import base_max_per_epic, effective_max_per_epic
+
+            trade_tracker = getattr(self, "_trade_tracker", None)
+            max_pos, ladder_reason = effective_max_per_epic(
+                cfg=cfg,
+                epic=signal.epic,
+                open_count=count,
+                points_engine=self._points,
+                tracker=trade_tracker,
             )
 
-        from trading.position_ladder import base_max_per_epic, effective_max_per_epic
+            pos_ok = count < max_pos
+            if not pos_ok:
+                base_cap = base_max_per_epic(cfg)
+                suffix = f", ladder: {ladder_reason}" if max_pos > base_cap else ""
+                reasons.append(f"Max positions reached ({count}/{max_pos}){suffix}")
+            checks["position_limit"] = pos_ok
 
-        trade_tracker = getattr(self, "_trade_tracker", None)
-        max_pos, ladder_reason = effective_max_per_epic(
-            cfg=cfg,
-            epic=signal.epic,
-            open_count=count,
-            points_engine=self._points,
-            tracker=trade_tracker,
-        )
+            max_total = max(1, int(cfg.max_open_positions))
+            total_count = 0
+            if open_total_count is not None:
+                total_raw = open_total_count()
+                if isinstance(total_raw, (int, float)):
+                    total_count = int(total_raw)
+            total_ok = total_count < max_total
+            if not total_ok:
+                reasons.append(
+                    f"Total open positions reached ({total_count}/{max_total})"
+                )
+            checks["total_position_limit"] = total_ok
 
-        pos_ok = count < max_pos
-        if not pos_ok:
-            base_cap = base_max_per_epic(cfg)
-            suffix = f", ladder: {ladder_reason}" if max_pos > base_cap else ""
-            reasons.append(f"Max positions reached ({count}/{max_pos}){suffix}")
-        checks["position_limit"] = pos_ok
+            if count > 0 and count < max_pos:
+                cd_ok = True
+            else:
+                cd_ok = not self.cooldown.is_active(signal.epic, signal.direction)
+            checks["cooldown"] = cd_ok
+            if not cd_ok:
+                reasons.append(
+                    f"Cooldown active ({self.cooldown.format_remaining(signal.epic, signal.direction)} remaining)"
+                )
 
-        max_total = max(1, int(cfg.max_open_positions))
-        total_count = 0
-        if open_total_count is not None:
-            total_raw = open_total_count()
-            if isinstance(total_raw, (int, float)):
-                total_count = int(total_raw)
-        total_ok = total_count < max_total
-        if not total_ok:
-            reasons.append(f"Total open positions reached ({total_count}/{max_total})")
-        checks["total_position_limit"] = total_ok
+            allowed = all(checks.values()) and not reasons
+            return ValidationResult(allowed=allowed, reasons=reasons, checks=checks)
+        except Exception as exc:
+            from system.engine_log import log_engine
 
-        # Cooldown: when max_positions > 1, allow stacking up to the cap without
-        # waiting between concurrent opens; still enforce cooldown after all slots close.
-        if count > 0 and count < max_pos:
-            cd_ok = True
-        else:
-            cd_ok = not self.cooldown.is_active(signal.epic, signal.direction)
-        checks["cooldown"] = cd_ok
-        if not cd_ok:
-            reasons.append(
-                f"Cooldown active ({self.cooldown.format_remaining(signal.epic, signal.direction)} remaining)"
+            log_engine(f"[CORE ERROR] Order validator exception caught: {exc}")
+            checks["validator_shield"] = False
+            return ValidationResult(
+                allowed=False,
+                reasons=[f"validator shield: {type(exc).__name__}"],
+                checks=checks,
             )
-
-        allowed = all(checks.values()) and not reasons
-        return ValidationResult(allowed=allowed, reasons=reasons, checks=checks)
 
     @staticmethod
     def _weekend_gate_check() -> tuple[bool, str]:
@@ -221,8 +240,14 @@ class OrderValidator:
         return True, ""
 
     def check_session(self, epic: str = "") -> tuple[bool, str]:
+        try:
+            from system.agent_execution_mode import demo_sandbox_unblock_active
+
+            if demo_sandbox_unblock_active():
+                return True, ""
+        except Exception:
+            pass
         cfg = self._cfg
-        # Weekend gap protection applies regardless of session whitelist config.
         ok, reason = self._weekend_gate_check()
         if not ok:
             return False, reason
@@ -251,6 +276,13 @@ class OrderValidator:
         return False, f"Outside allowed trading session (current={sess})"
 
     def check_market_hours(self, epic: str) -> tuple[bool, str]:
+        try:
+            from system.agent_execution_mode import force_market_open_active
+
+            if force_market_open_active():
+                return True, ""
+        except Exception:
+            pass
         cfg = self._cfg
         if not cfg.market_watch_enabled:
             return True, ""
@@ -335,6 +367,13 @@ class OrderValidator:
 
     def check_atr(self, signal: TradeSignal) -> tuple[bool, str]:
         min_atr = self._cfg.min_atr_points
+        try:
+            from system.agent_execution_mode import demo_operational_floors_active
+
+            if demo_operational_floors_active():
+                min_atr = 0.0
+        except Exception:
+            pass
         if min_atr <= 0:
             return True, ""
         last = signal.snapshot.get("last")
@@ -424,14 +463,23 @@ class OrderValidator:
     def check_circuit_breaker(self) -> tuple[bool, str]:
         """Block new entries after max_consecutive_losses; auto-resume after pause at half size."""
         try:
+            from system.agent_execution_mode import (
+                demo_operational_floors_active,
+                demo_sandbox_unblock_active,
+            )
             from system.protective_learning import (
                 clear_circuit_breaker_for_test_run,
                 log_temporary_test_execution_bypass_once,
                 temporary_test_gate_active,
             )
 
-            if temporary_test_gate_active():
-                log_temporary_test_execution_bypass_once()
+            if (
+                temporary_test_gate_active()
+                or demo_operational_floors_active()
+                or demo_sandbox_unblock_active()
+            ):
+                if temporary_test_gate_active():
+                    log_temporary_test_execution_bypass_once()
                 clear_circuit_breaker_for_test_run(self._store)
                 return True, ""
         except Exception:

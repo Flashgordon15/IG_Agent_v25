@@ -1,6 +1,7 @@
 /** £1,000/Day Roadmap telemetry helpers — graceful fallbacks for dashboard UI. */
 
-export const APP_VERSION_LABEL = "v29.1";
+export const APP_VERSION_LABEL = "v30.0";
+export const APP_VERSION_FULL = "30.0.0";
 
 const MEDALS = ["🥇", "🥈", "🥉"];
 
@@ -35,6 +36,7 @@ export function resolveBootMetrics(state) {
 
 export function resolveInitCleared(state) {
   if (state?.system_state?.ready === true) return true;
+  if (state?.system_state?.phase_label === "ACTIVE") return true;
   if (state?.boot_metrics?.ready === true) return true;
   if (state?.init_force_cleared === true) return true;
   const boot = resolveBootMetrics(state);

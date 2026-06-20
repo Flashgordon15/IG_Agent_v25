@@ -63,6 +63,9 @@ class LearningStore:
 
     @_locked
     def connect(self) -> None:
+        from system.testbed_firewall import guard_database_path
+
+        guard_database_path(self.db_path, operation="sqlite_open")
         self._conn = sqlite3.connect(
             self.db_path,
             check_same_thread=False,
@@ -398,6 +401,35 @@ class LearningStore:
                     else float(pnl_points or 0.0)
                 )
                 record_trade_closed(row_epic, pnl=pnl_value, result=str(result or ""))
+        except Exception:
+            pass
+        try:
+            from analytics.triage_logger import log_trade_settlement
+
+            row_keys = row.keys() if hasattr(row, "keys") else []
+            row_epic = str(row["epic"]) if "epic" in row_keys else ""
+            ticket = str(
+                ig_close_deal_id
+                or (row["ig_deal_id"] if "ig_deal_id" in row_keys else "")
+                or trade_id
+            )
+            gross = (
+                float(ig_pnl_currency)
+                if ig_pnl_currency is not None
+                else float(pnl_points or 0.0)
+            )
+            log_trade_settlement(
+                ticket=ticket,
+                asset=str(row["market"] if "market" in row_keys else row_epic),
+                epic=row_epic,
+                size=float(row["size"] if "size" in row_keys else 0.0),
+                entry=float(row["entry"] if "entry" in row_keys else 0.0),
+                exit_price=float(exit_price),
+                execution_side=str(row["side"] if "side" in row_keys else ""),
+                gross_pnl=gross,
+                net_pnl=gross,
+                result=str(result or ""),
+            )
         except Exception:
             pass
 
@@ -1767,7 +1799,7 @@ class LearningStore:
 
     @_locked
     def consecutive_losses(self, n: int = 5) -> int:
-        """Count trailing consecutive LOSS results in the last *n* strategy trades."""
+        """Count trailing consecutive LOSS results in the last *n* strategy trades (24h window)."""
         rows = list(
             self.conn.execute(
                 """
@@ -1775,6 +1807,7 @@ class LearningStore:
                 WHERE closed_at IS NOT NULL
                   AND dry_run = 0
                   AND (source IS NULL OR source = 'strategy')
+                  AND closed_at >= datetime('now', '-24 hours')
                 ORDER BY closed_at DESC
                 LIMIT ?
                 """,
@@ -1788,6 +1821,22 @@ class LearningStore:
             else:
                 break
         return count
+
+    @_locked
+    def has_strategy_trades_within_hours(self, hours: int = 24) -> bool:
+        """True when at least one closed strategy trade exists inside the rolling window."""
+        row = self.conn.execute(
+            """
+            SELECT 1 FROM trades
+            WHERE closed_at IS NOT NULL
+              AND dry_run = 0
+              AND (source IS NULL OR source = 'strategy')
+              AND closed_at >= datetime('now', ?)
+            LIMIT 1
+            """,
+            (f"-{int(hours)} hours",),
+        ).fetchone()
+        return row is not None
 
     @_locked
     def effective_consecutive_losses(self, n: int = 5) -> int:

@@ -1,4 +1,6 @@
-const API = "";
+import { API_BASE } from "../config.js";
+
+const API = API_BASE;
 const AUTH_TOKEN_KEY = "ig_agent_auth_token";
 const AUTH_FLAG_KEY = "ig_agent_authenticated";
 
@@ -117,5 +119,14 @@ export const api = {
   toggleRotationFilter: () =>
     fetchJson("/api/admin/toggle-rotation-filter", { method: "POST" }),
   getHealth: () => fetchJson("/api/health"),
+  testbedStatus: () => fetchJson("/api/testbed/status"),
+  testbedSetReplaySpeed: (speed) =>
+    fetchJson("/api/testbed/replay-speed", {
+      method: "POST",
+      body: JSON.stringify({ speed }),
+    }),
   time: () => fetchJson("/api/time"),
+  triageLedger: (limit = 50) => fetchJson(`/api/trades/triage-ledger?limit=${limit}`),
+  triageStats: () => fetchJson("/api/stats/triage"),
+  v30Cert: () => fetchJson("/api/v30/cert"),
 };

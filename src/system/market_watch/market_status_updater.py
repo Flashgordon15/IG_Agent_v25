@@ -76,7 +76,21 @@ def _refresh_epic(epic: str) -> None:
     if status is None:
         return
     with _cache_lock:
+        prev = _cached_market_statuses.get(key)
         _cached_market_statuses[key] = status
+    try:
+        from system.market_integrity import note_market_status
+
+        note_market_status(key, bool(status.open))
+    except Exception:
+        pass
+    if prev is not None and prev.open and not status.open:
+        try:
+            from system.market_integrity import on_market_closed
+
+            on_market_closed(key, reason=str(status.reason or "market closed"))
+        except Exception:
+            pass
 
 
 def _poll_loop() -> None:
@@ -122,9 +136,6 @@ def ensure_market_status_updater_started(
         )
         _updater_thread.start()
         _started = True
-        epics_now = list(_registered_epics)
-    for epic in epics_now:
-        _refresh_epic(epic)
 
 
 def stop_market_status_updater_for_tests() -> None:

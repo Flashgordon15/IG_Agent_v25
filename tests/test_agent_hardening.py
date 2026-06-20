@@ -49,12 +49,13 @@ def _reset_control() -> None:
 
 
 class AutoStartTradingTests(unittest.TestCase):
-    def test_main_registers_auto_start_via_start_trading(self) -> None:
-        """Bootstrap must auto-start loops — user must not click Start."""
-        source = (ROOT / "src" / "main.py").read_text(encoding="utf-8")
-        assert "register_api_startup(_start_live_engines)" in source
-        assert "start_trading()" in source
-        assert "Auto-start trading loops" in source
+    def test_boot_pipeline_auto_starts_loops_via_gate5(self) -> None:
+        """Gate 5 unpause is the v30 auto-start path (replaces main.py register_api_startup)."""
+        source = (ROOT / "src" / "system" / "boot" / "gate5_runner.py").read_text(
+            encoding="utf-8"
+        )
+        assert "accepting_ticks" in source or "unpause" in source.lower()
+        assert "Gate5Runner" in source
 
     def test_start_trading_clears_paused_and_starts_loop(self) -> None:
         _reset_control()
@@ -77,6 +78,13 @@ class ApiHealthTests(unittest.TestCase):
         _reset_control()
         set_snapshot_path_for_tests(snap)
         self.client = TestClient(create_app(watch_snapshot=False))
+        try:
+            import api.server_deferred as sd
+
+            sd._router_mounted = False
+            sd.register_deferred_route_tables(self.client.app)
+        except Exception:
+            pass
 
     def tearDown(self) -> None:
         self.client.close()

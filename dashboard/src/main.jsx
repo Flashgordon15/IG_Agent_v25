@@ -35,3 +35,8 @@ ReactDOM.createRoot(document.getElementById("root")).render(
     </ErrorBoundary>
   </React.StrictMode>,
 );
+
+const bootSplash = document.getElementById("apex-boot-splash");
+if (bootSplash) {
+  bootSplash.remove();
+}

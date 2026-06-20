@@ -5,6 +5,7 @@ IG REST API client — authenticates via :class:`~system.credentials_loader.Cred
 from __future__ import annotations
 
 import json
+import os
 import time
 from typing import Any
 
@@ -177,6 +178,84 @@ class IGRestClient:
             self.login()
             return bool(self._auth.tokens and self._auth.tokens.is_valid)
         except (IGAuthError, Exception):
+            return False
+
+    def _evict_session_token_cache(self) -> None:
+        """Delete in-memory tokens and HTTP session cookie residue."""
+        self._auth.clear()
+        self._token_created_at = 0.0
+        self._session_refresh_in_progress = False
+        try:
+            self._session.cookies.clear()
+        except Exception:
+            pass
+        for path in self._token_cache_file_paths():
+            try:
+                if path.is_file():
+                    path.unlink()
+                    log_engine(f"IG REST: evicted stale token cache {path}")
+            except OSError as exc:
+                log_engine(
+                    f"IG REST: token cache eviction skipped {path}: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+        try:
+            from system.ig_rest_session import clear_shared_rest_client
+
+            clear_shared_rest_client()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _token_cache_file_paths() -> list[Any]:
+        paths: list[Any] = []
+        try:
+            from pathlib import Path
+
+            from system.paths import data_dir, logs_dir
+
+            for base in (data_dir(), logs_dir()):
+                paths.append(Path(base) / "ig_session_tokens.json")
+                paths.append(Path(base) / "ig_rest_session.json")
+        except Exception:
+            pass
+        return paths
+
+    def _token_eviction_reauth(self) -> bool:
+        """
+        Token Eviction Loop — purge cached session, sleep 2s, clean handshake.
+        Keeps REST budget silent during re-auth (no refresh recursion).
+        """
+        self._evict_session_token_cache()
+        time.sleep(2.0)
+        try:
+            url = f"{self._base}/session"
+            body = self._auth.login_body(self.account_id)
+            headers = self._auth.login_headers()
+            r = self._session.request(
+                "POST",
+                url,
+                json=body,
+                headers=headers,
+                timeout=self.timeout_seconds,
+            )
+            if r.status_code not in (200, 201):
+                self._log_auth_failure_critical()
+                return False
+            resp_body = r.json() if r.text else {}
+            self._auth.apply_login_response(
+                dict(r.headers),
+                resp_body,
+                preferred_account_id=self.account_id,
+            )
+            self._touch_token_created()
+            self.record_rest_success("/session")
+            log_engine("IG REST: token eviction re-auth handshake complete")
+            return bool(self._auth.tokens and self._auth.tokens.is_valid)
+        except Exception as exc:
+            log_engine(
+                f"IG REST: token eviction re-auth failed: {type(exc).__name__}: {exc}"
+            )
             return False
 
     def _log_auth_state(self, label: str) -> None:
@@ -493,7 +572,11 @@ class IGRestClient:
         return str(instrument.get("currency", "USD")).upper()
 
     def fetch_market_constraints(
-        self, epic: str, *, max_age_seconds: float = 300.0
+        self,
+        epic: str,
+        *,
+        max_age_seconds: float = 300.0,
+        budget_priority: bool = False,
     ) -> dict[str, Any]:
         """IG dealing rules for an epic (cached to limit API calls)."""
         now = time.time()
@@ -509,10 +592,20 @@ class IGRestClient:
             return {}
 
         self.ensure_session()
-        r = self.request("GET", f"/markets/{epic}", headers=self._auth_headers("3"))
+        r = self.request(
+            "GET",
+            f"/markets/{epic}",
+            headers=self._auth_headers("3"),
+            budget_priority=budget_priority,
+        )
         if r.status_code == 401:
             self.login()
-            r = self.request("GET", f"/markets/{epic}", headers=self._auth_headers("3"))
+            r = self.request(
+                "GET",
+                f"/markets/{epic}",
+                headers=self._auth_headers("3"),
+                budget_priority=budget_priority,
+            )
         if r.status_code == 403:
             code = parse_rate_limit_error(r.status_code, r.text)
             if code:
@@ -610,6 +703,7 @@ class IGRestClient:
         *,
         max_age_seconds: float = 5.0,
         constraints_fallback_seconds: float = 60.0,
+        budget_priority: bool = False,
     ) -> tuple[float, float]:
         """
         Fresh bid/offer for streaming/UI — short live cache (default 5s).
@@ -639,10 +733,20 @@ class IGRestClient:
                     return bid, offer
 
         self.ensure_session()
-        r = self.request("GET", f"/markets/{epic}", headers=self._auth_headers("3"))
+        r = self.request(
+            "GET",
+            f"/markets/{epic}",
+            headers=self._auth_headers("3"),
+            budget_priority=budget_priority,
+        )
         if r.status_code == 401:
             self.login()
-            r = self.request("GET", f"/markets/{epic}", headers=self._auth_headers("3"))
+            r = self.request(
+                "GET",
+                f"/markets/{epic}",
+                headers=self._auth_headers("3"),
+                budget_priority=budget_priority,
+            )
         if r.status_code != 200:
             if cached:
                 return float(cached["bid"]), float(cached["offer"])
@@ -663,10 +767,12 @@ class IGRestClient:
             self._market_constraints_cache[epic]["data"] = data
         return bid, offer
 
-    def fetch_market_snapshot(self, epic: str, *, live: bool = False) -> dict[str, Any]:
-        c = self.fetch_market_constraints(epic)
+    def fetch_market_snapshot(
+        self, epic: str, *, live: bool = False, budget_priority: bool = False
+    ) -> dict[str, Any]:
+        c = self.fetch_market_constraints(epic, budget_priority=budget_priority)
         if live:
-            bid, offer = self.fetch_live_prices(epic)
+            bid, offer = self.fetch_live_prices(epic, budget_priority=budget_priority)
         else:
             bid = float(c["bid"])
             offer = float(c["offer"])
@@ -702,12 +808,19 @@ class IGRestClient:
         self, *, min_interval: float = 60.0
     ) -> dict[str, float | None]:
         """Throttled GET /accounts — avoids UI/stream hammering IG rate limits."""
+        from system.broker_status_cache import (
+            record_broker_sync_failure,
+            should_serve_from_cache,
+        )
         from system.market_watch.calendar import background_rest_paused
         from system.rest_api_budget import RestBudgetPausedError, order_in_flight_paused
 
-        if order_in_flight_paused("account_summary"):
+        endpoint = "account_summary"
+        if should_serve_from_cache(endpoint):
             return self.get_cached_account_summary()
-        if background_rest_paused("account_summary"):
+        if order_in_flight_paused(endpoint):
+            return self.get_cached_account_summary()
+        if background_rest_paused(endpoint):
             return self.get_cached_account_summary()
         interval = max(60.0, float(min_interval))
         now = time.time()
@@ -718,20 +831,33 @@ class IGRestClient:
             return self.refresh_account_summary()
         except RestBudgetPausedError:
             return self.get_cached_account_summary()
-        except Exception:
+        except Exception as exc:
+            record_broker_sync_failure(endpoint, exc)
             return self.get_cached_account_summary()
 
     def refresh_account_summary(self) -> dict[str, float | None]:
         """Refresh balance / P&L from GET /accounts (used by stream heartbeat)."""
+        from system.broker_status_cache import (
+            record_broker_sync_failure,
+            write_broker_status_cache,
+        )
+
+        endpoint = "account_summary"
         try:
             get_rate_limit_manager().check_rest_allowed()
-        except Exception:
+        except Exception as exc:
+            record_broker_sync_failure(endpoint, exc)
             return self.get_cached_account_summary()
         self.ensure_session()
         r = self.request("GET", "/accounts", headers=self._auth_headers("1"))
         if r.status_code != 200:
+            record_broker_sync_failure(endpoint, http_status=r.status_code)
             return self.get_cached_account_summary()
         body = r.json()
+        if isinstance(body, dict):
+            status_token = str(body.get("marketStatus") or body.get("status") or "").upper()
+            if status_token == "CLOSED":
+                write_broker_status_cache(endpoint, "CLOSED", detail="accounts CLOSED")
         self._last_accounts_raw_payload = body if isinstance(body, dict) else {"raw": body}
         from system.balance_pnl_decimal import decimal_to_float, money_decimal
 
@@ -1123,6 +1249,75 @@ class IGRestClient:
         limit_distance: float | None = None,
         currency_code: str = "GBP",
     ) -> dict[str, Any]:
+        from system.engine_log import log_engine
+
+        try:
+            from system.node_profile import is_shadow_node
+        except Exception:
+            def is_shadow_node() -> bool:  # type: ignore[misc]
+                return False
+
+        if is_shadow_node() or os.environ.get("IG_AGENT_SHADOW_DESK", "").strip() == "1":
+            try:
+                from apex.hardening import is_execution_frozen
+
+                if is_execution_frozen():
+                    log_engine(
+                        f"[SHADOW DESK] Execution frozen (network degraded) — "
+                        f"blocked {direction} {epic}"
+                    )
+                    return {
+                        "dealReference": "MOCK_SHADOW_FROZEN",
+                        "shadow": True,
+                        "status": "EXECUTION_FROZEN",
+                    }
+            except Exception:
+                pass
+            deal_ref = "MOCK_SHADOW_ENTRY"
+            log_engine(
+                f"[SHADOW DESK] Order Intercepted epic={epic} {direction} "
+                f"size={size} stop={stop_distance} — no IG REST dispatch"
+            )
+            try:
+                import sqlite3
+                from pathlib import Path
+
+                db = Path(os.environ.get("IG_TRIAGE_DB", "src/analytics/triage_v30.db"))
+                db.parent.mkdir(parents=True, exist_ok=True)
+                with sqlite3.connect(str(db)) as conn:
+                    conn.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS shadow_orders (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            token TEXT NOT NULL,
+                            epic TEXT,
+                            direction TEXT,
+                            size REAL,
+                            stop_distance REAL,
+                            created_at TEXT DEFAULT (datetime('now'))
+                        )
+                        """
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO shadow_orders(token, epic, direction, size, stop_distance)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (deal_ref, epic, direction.upper(), float(size), float(stop_distance)),
+                    )
+                    conn.commit()
+            except Exception as exc:
+                log_engine(
+                    f"[SHADOW DESK] ledger write failed: {type(exc).__name__}: {exc}"
+                )
+            trace_execution(
+                "REST",
+                "IGRestClient.place_market_order",
+                decision="SHADOW intercept",
+                params={"dealReference": deal_ref, "epic": epic},
+            )
+            return {"dealReference": deal_ref, "shadow": True, "status": "MOCK_SHADOW_ENTRY"}
+
         self.ensure_session()
         size, stop_distance, limit_distance, currency_code = (
             self.normalize_order_params(
@@ -1873,6 +2068,18 @@ class IGRestClient:
     ) -> requests.Response:
         from system.rest_api_budget import RestBudgetPausedError, get_rest_api_budget
 
+        try:
+            from execution.atomic_gateway import ig_radio_silence_blocks_rest
+
+            if auth_required and ig_radio_silence_blocks_rest(method, path):
+                raise IGAPIError(
+                    f"HOLD: IG_RADIO_SILENCE — passive REST blocked: {method} {path}"
+                )
+        except IGAPIError:
+            raise
+        except Exception:
+            pass
+
         # budget_priority=True bypasses the min-interval wait and hard cap for
         # critical order-confirmation calls — must be popped before passing to
         # requests.Session.request() which does not accept this kwarg.
@@ -1911,8 +2118,11 @@ class IGRestClient:
                 if auth_required and r.status_code == 401:
                     if not relogin_done:
                         relogin_done = True
-                        log_demo_rest("HTTP 401 — re-login and retry", path=path)
-                        if self._safe_relogin():
+                        log_demo_rest(
+                            "HTTP 401 — token eviction + clean re-auth",
+                            path=path,
+                        )
+                        if self._token_eviction_reauth():
                             if "headers" in kwargs:
                                 ver = kwargs["headers"].get("VERSION", "3")
                                 kwargs["headers"] = self._auth_headers(str(ver))

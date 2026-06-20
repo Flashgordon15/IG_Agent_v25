@@ -27,7 +27,12 @@ _OPEN_POSITIONS: dict[str, dict[str, Any]] = {}
 
 
 def shadow_mode_active() -> bool:
-    return os.environ.get("IG_AGENT_MODE", "").strip().upper() == "SHADOW"
+    try:
+        from system.agent_execution_mode import shadow_execution_active
+
+        return shadow_execution_active()
+    except Exception:
+        return os.environ.get("IG_AGENT_MODE", "").strip().upper() == "SHADOW"
 
 
 def shadow_ledger_path() -> Path:
@@ -106,6 +111,20 @@ class ShadowExecutor:
             "mode": "SHADOW",
         }
         _append_ledger_row(row)
+        try:
+            from apex.ipc_bridge import broadcast_ledger_event
+
+            broadcast_ledger_event(
+                {
+                    **row,
+                    "action": side,
+                    "entry_price": entry,
+                    "latency_ms": 0.0,
+                    "source": "worker_d_shadow",
+                }
+            )
+        except Exception:
+            pass
         with _OPEN_LOCK:
             _OPEN_POSITIONS[deal_id] = {
                 "deal_id": deal_id,

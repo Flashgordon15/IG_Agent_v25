@@ -212,6 +212,12 @@ def perform_shutdown_cleanup(
         )
 
         stop_market_stream()
+        try:
+            from feeder.yahoo_quote_poller import stop_yahoo_quote_poller
+
+            stop_yahoo_quote_poller()
+        except Exception:
+            pass
         stop_order_reconciler_worker()
         stop_ig_position_sync()
         log_engine("shutdown cleanup: market stream, reconciler, and position sync stopped")

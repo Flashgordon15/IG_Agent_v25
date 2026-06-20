@@ -660,12 +660,12 @@ function marketPillLabel(epic, name) {
 function marketStatusMeta(marketState, streamStatus) {
   const ms = String(marketState ?? "").toUpperCase();
   const ss = String(streamStatus ?? "").toUpperCase();
-  if (ms === "MAINTENANCE" || ss === "MAINTENANCE") return { label: "MAINT", color: "text-warning", dot: "bg-warning" };
-  if (ms === "CLOSED") return { label: "CLOSED", color: "text-muted", dot: "bg-border" };
-  if (ms === "OPEN" && ss === "LIVE") return { label: "OPEN", color: "text-success", dot: "bg-success animate-pulse" };
-  if (ms === "OPEN") return { label: "OPEN", color: "text-success/70", dot: "bg-success/50" };
-  if (ms === "OFFLINE") return { label: "OFFLINE", color: "text-muted", dot: "bg-border" };
-  return { label: "—", color: "text-muted", dot: "bg-border" };
+  if (ms === "MAINTENANCE" || ss === "MAINTENANCE") return { label: "MAINT", color: "text-warning", dot: "bg-warning", chip: false };
+  if (ms === "CLOSED" || ss === "CLOSED") return { label: "EXCHANGE CLOSED", color: "apex-exchange-closed", dot: "bg-border", chip: true };
+  if (ms === "OPEN" && ss === "LIVE") return { label: "OPEN", color: "text-success", dot: "bg-success animate-pulse", chip: false };
+  if (ms === "OPEN") return { label: "OPEN", color: "text-success/70", dot: "bg-success/50", chip: false };
+  if (ms === "OFFLINE") return { label: "EXCHANGE CLOSED", color: "apex-exchange-closed", dot: "bg-border", chip: true };
+  return { label: "—", color: "text-muted", dot: "bg-border", chip: false };
 }
 
 function MarketCard({
@@ -755,7 +755,7 @@ function MarketCard({
           className={[
             "font-bold uppercase tracking-wider",
             featured ? "text-[11px]" : "text-[9px]",
-            status.color,
+            status.chip ? status.color : status.color,
           ].join(" ")}
         >
           {status.label}
@@ -893,7 +893,7 @@ function MarketGrid({ rawState, selectedEpic, onSelectEpic }) {
       {secondary.length > 0 && (
         <div>
           {featured.length > 0 && (
-            <p className="label-caps mb-1 text-center text-muted/80">Other markets</p>
+            <p className="label-caps mb-1 text-center hud-primary">OTHER MARKETS</p>
           )}
           <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-6">
             {secondary.map((epic) => (

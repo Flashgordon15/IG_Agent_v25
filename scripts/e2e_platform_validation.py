@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import sys
 import tempfile
@@ -24,6 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -657,9 +659,17 @@ def run_layer3(ctx: ValidationContext) -> LayerSummary:
         )
     )
 
-    # 3.2 — SIM trade open
+    # 3.2 — SIM trade open (isolated TEST path — ignore host shadow/DEMO routing)
     open_before = len(ctx.store.active_trades(EPIC))
-    result = exec_engine.execute_trade(signal, prevalidated=True)
+    env_patch = {"IG_AGENT_MODE": "", "IG_APEX_DESKTOP": "0"}
+    with (
+        patch.dict(os.environ, env_patch, clear=False),
+        patch("intelligence.integration.intelligence_enabled", return_value=False),
+        patch("trading.shadow_executor.shadow_mode_active", return_value=False),
+        patch("system.agent_execution_mode.shadow_execution_active", return_value=False),
+        patch("system.agent_execution_mode.demo_broker_execution_active", return_value=False),
+    ):
+        result = exec_engine.execute_trade(signal, prevalidated=True)
     open_after = ctx.store.active_trades(EPIC)
     sim_ok = (
         result.success

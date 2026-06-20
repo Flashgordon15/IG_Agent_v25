@@ -21,6 +21,7 @@ EligibilityKind = Literal[
     "next_bar",
     "session_closed",
     "blocked",
+    "under_min_lot",
     "none",
 ]
 
@@ -243,6 +244,8 @@ def build_trade_eligibility(
             "score",
             "vol regime",
             "blocked:",
+            "hold: under_min_lot",
+            "under_min_lot",
             "points",
             "spread",
             "risk",
@@ -266,7 +269,23 @@ def build_trade_eligibility(
 
     risk_gate = _gate_by_name(gates, "risk_validation")
     if risk_gate is not None and not bool(getattr(risk_gate, "passed", False)):
-        return _score_block_display(str(getattr(risk_gate, "detail", "") or "risk"))
+        risk_detail = str(getattr(risk_gate, "detail", "") or "risk")
+        risk_value = getattr(risk_gate, "value", None) or {}
+        if isinstance(risk_value, dict) and risk_value.get("under_min_lot"):
+            return TradeEligibility(
+                kind="under_min_lot",
+                label="HOLD: UNDER_MIN_LOT",
+                remaining_sec=None,
+                display="HOLD: UNDER_MIN_LOT",
+            )
+        if "under_min_lot" in risk_detail.lower():
+            return TradeEligibility(
+                kind="under_min_lot",
+                label="HOLD: UNDER_MIN_LOT",
+                remaining_sec=None,
+                display="HOLD: UNDER_MIN_LOT",
+            )
+        return _score_block_display(risk_detail)
 
     sig_gate = _gate_by_name(gates, "signal_confidence")
     if sig_gate is not None and not bool(getattr(sig_gate, "passed", False)):

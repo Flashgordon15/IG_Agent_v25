@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
 from typing import Any
 
 # Temporary test override — set False to restore production protective floor (62%).
@@ -22,19 +21,40 @@ _test_mode_logged = False
 _test_rsi_relaxation_logged = False
 _test_execution_bypass_logged = False
 
-@lru_cache(maxsize=1)
-def _block() -> dict[str, Any]:
-    try:
-        from system.config_loader import get_config
+_block_mtime: float = -1.0
+_block_cache: dict[str, Any] = {}
 
-        raw = get_config().get("protective_learning") or {}
-        return raw if isinstance(raw, dict) else {}
+
+def _config_mtime() -> float:
+    try:
+        from system.config_loader import _primary_config_path
+
+        path = _primary_config_path()
+        return float(path.stat().st_mtime) if path.is_file() else 0.0
     except Exception:
-        return {}
+        return 0.0
+
+
+def _block() -> dict[str, Any]:
+    """Protective-learning overlay — reloads when primary config mtime changes."""
+    global _block_mtime, _block_cache
+    mtime = _config_mtime()
+    if mtime != _block_mtime:
+        try:
+            from system.config_loader import get_config
+
+            raw = get_config().get("protective_learning") or {}
+            _block_cache = raw if isinstance(raw, dict) else {}
+        except Exception:
+            _block_cache = {}
+        _block_mtime = mtime
+    return _block_cache
 
 
 def reset_protective_learning_cache_for_tests() -> None:
-    _block.cache_clear()
+    global _block_mtime, _block_cache
+    _block_mtime = -1.0
+    _block_cache = {}
 
 
 def protective_learning_enabled() -> bool:
@@ -119,7 +139,20 @@ def apply_temporary_test_risk_cap_gbp(cap_gbp: float) -> float:
 
 def clear_circuit_breaker_for_test_run(store: Any | None = None) -> None:
     """Force consecutive-loss count to zero and clear the 60-minute pause."""
-    if not USE_TEMPORARY_TEST_GATE:
+    try:
+        from system.agent_execution_mode import (
+            demo_operational_floors_active,
+            demo_sandbox_unblock_active,
+        )
+
+        allowed = (
+            USE_TEMPORARY_TEST_GATE
+            or demo_operational_floors_active()
+            or demo_sandbox_unblock_active()
+        )
+    except Exception:
+        allowed = USE_TEMPORARY_TEST_GATE
+    if not allowed:
         return
     if store is None:
         try:
@@ -192,7 +225,7 @@ _autonomous_engine_boot_armed = False
 
 
 def ensure_autonomous_engine_on_boot() -> None:
-    """One-shot boot: clear manual_stop and arm SHADOW so the autonomous toggle loads ON."""
+    """One-shot boot: clear manual_stop and resolve execution mode (never force SHADOW)."""
     global _autonomous_engine_boot_armed
     if _autonomous_engine_boot_armed:
         return
@@ -206,9 +239,11 @@ def ensure_autonomous_engine_on_boot() -> None:
     if USE_TEMPORARY_TEST_GATE:
         return
     try:
-        import os
+        from system.agent_execution_mode import (
+            ensure_execution_plane_armed_on_boot,
+        )
 
-        os.environ["IG_AGENT_MODE"] = "SHADOW"
+        ensure_execution_plane_armed_on_boot()
     except Exception:
         pass
 

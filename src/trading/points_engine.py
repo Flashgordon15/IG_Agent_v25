@@ -115,6 +115,72 @@ EQUITY_LOCK_SESSION_MILESTONE = 3.0
 EQUITY_LOCK_SIZE_MULTIPLIER = 0.5
 EQUITY_LOCK_SIGNAL_THRESHOLD = 65.0
 
+# v30 pre-container session capital profile — blinds demo hub £9M equity snapshots.
+RUNTIME_SESSION_EQUITY_GBP = 10_000.0
+GLOBAL_PORTFOLIO_RISK_CEILING_GBP = 750.0
+PER_ASSET_RISK_CAP_GBP = 350.0
+_HUB_EQUITY_BLIND_OVERRIDE = True
+
+
+def hub_equity_blind_override_active() -> bool:
+    """When True, runtime sizing/risk ignores live IG hub balance snapshots."""
+    return _HUB_EQUITY_BLIND_OVERRIDE
+
+
+def runtime_session_equity_gbp() -> float:
+    """Hard session equity for risk math — fixed £10,000 GBP."""
+    try:
+        from execution.atomic_gateway import locked_session_equity_gbp
+
+        return locked_session_equity_gbp()
+    except Exception:
+        return RUNTIME_SESSION_EQUITY_GBP
+
+
+def global_portfolio_risk_ceiling_gbp() -> float:
+    """Maximum concurrent portfolio risk across all open assets."""
+    try:
+        from execution.atomic_gateway import locked_portfolio_ceiling_gbp
+
+        return locked_portfolio_ceiling_gbp()
+    except Exception:
+        return GLOBAL_PORTFOLIO_RISK_CEILING_GBP
+
+
+def per_asset_risk_cap_gbp() -> float:
+    """Per-asset maximum net risk including spread friction."""
+    try:
+        from execution.atomic_gateway import locked_per_asset_cap_gbp
+
+        return locked_per_asset_cap_gbp()
+    except Exception:
+        return PER_ASSET_RISK_CAP_GBP
+
+
+def check_global_portfolio_risk(
+    concurrent_risk_gbp: float, proposed_risk_gbp: float
+) -> tuple[bool, str]:
+    """Session portfolio ceiling — replaces inflated demo envelope blocks."""
+    concurrent = max(0.0, float(concurrent_risk_gbp))
+    proposed = max(0.0, float(proposed_risk_gbp))
+    ceiling = global_portfolio_risk_ceiling_gbp()
+    total = concurrent + proposed
+    if total > ceiling:
+        return (
+            False,
+            f"systemic portfolio risk £{total:.0f} > £{ceiling:.0f} "
+            f"(7.5% of £{runtime_session_equity_gbp():,.0f} base)",
+        )
+    reserve_floor = runtime_session_equity_gbp() * 0.10
+    available = runtime_session_equity_gbp() - reserve_floor - concurrent
+    if available - proposed < 0:
+        return (
+            False,
+            f"available session equity £{available:.0f} insufficient for £{proposed:.0f} risk",
+        )
+    return True, "ok"
+
+
 # Hard multiplier floors (applied before equity lock) for HEALTHY/CAUTION entries.
 PROBE_MULTIPLIER_FLOOR = 0.5
 CORE_MULTIPLIER_FLOOR = 0.8
@@ -323,6 +389,10 @@ class PointsEngine:
             "equity_lock_milestone": EQUITY_LOCK_SESSION_MILESTONE,
             "equity_lock_signal_threshold": EQUITY_LOCK_SIGNAL_THRESHOLD,
             "operator_reset_healthy": self._operator_reset_healthy,
+            "runtime_equity_gbp": runtime_session_equity_gbp(),
+            "global_portfolio_risk_ceiling_gbp": global_portfolio_risk_ceiling_gbp(),
+            "per_asset_risk_cap_gbp": per_asset_risk_cap_gbp(),
+            "hub_equity_blind_override": hub_equity_blind_override_active(),
         }
 
     def _apply_payload(self, data: dict[str, Any]) -> None:
