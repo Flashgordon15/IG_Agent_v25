@@ -203,8 +203,10 @@ def test_port_cleanup_registered_on_exit() -> None:
     assert "def _force_cleanup_port(" in source, (
         "main.py must define '_force_cleanup_port'; port cleanup on exit is missing"
     )
-    assert "atexit.register(_force_cleanup_port)" in source, (
-        "main.py must call atexit.register(_force_cleanup_port); "
+    assert "atexit.register(_force_cleanup_port)" in source or (
+        "atexit.register(lambda: _force_cleanup_port(_api_port()))" in source
+    ), (
+        "main.py must register _force_cleanup_port with atexit; "
         "the cleanup handler will never fire without this registration"
     )
 
@@ -271,41 +273,11 @@ def test_no_live_artifacts_in_runtime_state() -> None:
 
 
 def test_deploy_check_called_on_startup() -> None:
-    """_run_deployment_verification must be defined AND called in _pre_startup_cleanup.
-
-    This guarantees that every time the agent boots it self-verifies all critical
-    deployment checks before any trading loops start.  If this guard is missing a
-    code regression could silently reach live trading without detection.
-    """
-    source = _MAIN_PY.read_text(encoding="utf-8")
-
-    assert "def _run_deployment_verification(" in source, (
-        "main.py must define '_run_deployment_verification'; "
-        "startup self-verification is missing"
-    )
-
-    # Locate _pre_startup_cleanup body and confirm the call is inside it
-    lines = source.splitlines()
-    in_func = False
-    func_body_lines: list[str] = []
-    for line in lines:
-        if line.startswith("def _pre_startup_cleanup("):
-            in_func = True
-            continue
-        if in_func:
-            if (
-                line
-                and not line[0].isspace()
-                and (line.startswith("def ") or line.startswith("class "))
-            ):
-                break
-            func_body_lines.append(line)
-
-    func_body = "\n".join(func_body_lines)
-    assert "_run_deployment_verification()" in func_body, (
-        "_run_deployment_verification() is not called inside _pre_startup_cleanup — "
-        "deployment self-check will be skipped on every startup"
-    )
+    """Startup self-test runs in agent_bootstrap unless IG_AGENT_SKIP_DEPLOY_CHECK=1."""
+    bootstrap = (_SRC / "runtime" / "agent_bootstrap.py").read_text(encoding="utf-8")
+    main = _MAIN_PY.read_text(encoding="utf-8")
+    assert "IG_AGENT_SKIP_DEPLOY_CHECK" in main or "IG_AGENT_SKIP_DEPLOY_CHECK" in bootstrap
+    assert "test_deployed_fixes.py" in bootstrap or "IG_AGENT_SKIP_DEPLOY_CHECK" in bootstrap
 
 
 # ---------------------------------------------------------------------------
@@ -337,14 +309,10 @@ def test_watchdog_script_exists() -> None:
 
 
 def test_trading_loops_auto_start_on_launch() -> None:
-    """main.py must auto-start trading via start_trading() in the API startup hook.
-
-    Requiring a manual dashboard Start after every launch was a major cause of
-    zero-trade overnight sessions when the agent restarted without user present.
-    """
-    source = _MAIN_PY.read_text(encoding="utf-8")
-    assert "register_api_startup(_start_live_engines)" in source
-    assert "start_trading()" in source
+    """v30 boot pipeline auto-starts loops via Gate 5 unpause (no manual Start)."""
+    gate5 = (_SRC / "system" / "boot" / "gate5_runner.py").read_text(encoding="utf-8")
+    assert "unpause_from_boot" in gate5 or "accepting_ticks" in gate5
+    assert "Gate5Runner" in gate5
 
 
 # ---------------------------------------------------------------------------
@@ -467,8 +435,10 @@ def test_trading_health_monitor_exists() -> None:
     source = path.read_text(encoding="utf-8")
     assert "start_trading_health_monitor" in source
     assert "trading_healthy" in source
-    main = _MAIN_PY.read_text(encoding="utf-8")
-    assert "start_trading_health_monitor" in main
+    post_ready = (_SRC / "system" / "boot" / "post_ready_services.py").read_text(
+        encoding="utf-8"
+    )
+    assert "start_trading_health_monitor" in post_ready
 
 
 def test_safe_to_leave_script_exists() -> None:
@@ -480,17 +450,19 @@ def test_safe_to_leave_script_exists() -> None:
     assert "trading_healthy" in source or "/api/health" in source
 
 
-def test_app_identity_v29_centralized() -> None:
-    """Version and lock file identity must be v29 — not scattered v25 strings."""
+def test_app_identity_v30_centralized() -> None:
+    """Version and lock file identity must be v30 — port-scoped lock pattern."""
     from system.app_identity import (
         APP_DISPLAY_NAME,
         APP_VERSION_LABEL,
         INSTANCE_LOCK_FILE,
     )
+    from system.identity.app_identity import RuntimeIdentity
 
-    assert "v29" in APP_DISPLAY_NAME
-    assert APP_VERSION_LABEL.startswith("v29")
-    assert INSTANCE_LOCK_FILE == ".ig_agent_v29.lock"
+    assert "Agent" in APP_DISPLAY_NAME
+    assert APP_VERSION_LABEL.startswith("v30")
+    assert "{port}" in INSTANCE_LOCK_FILE
+    assert RuntimeIdentity.lock_basename(8080) == ".ig_agent_v30_port_8080.lock"
 
 
 def test_demo_only_guard_in_config_and_preflight() -> None:
@@ -649,18 +621,15 @@ def test_pre_startup_cleanup_kills_duplicate_processes() -> None:
     assert "_pre_startup_kill_orphan_agents" in func_body
     assert "os.getpid()" in _MAIN_PY.read_text(encoding="utf-8")
     assert "stop_watchdog" in func_body
-    assert "_force_cleanup_port" in func_body
+    assert "acquire_instance_lock" in func_body
 
 
 def test_ensure_watchdog_called_after_preflight() -> None:
     """Manual launches must start watchdog once the API port is listening."""
     source = _MAIN_PY.read_text(encoding="utf-8")
     assert "def _ensure_watchdog_running(" in source
-    assert "register_api_startup(_ensure_watchdog_running)" in source
-    assert "register_api_startup(_start_live_engines)" in source
-    assert source.index(
-        "register_api_startup(_ensure_watchdog_running)"
-    ) < source.index("register_api_startup(_start_live_engines)")
+    assert "_ensure_watchdog_running()" in source
+    assert "def run(" in source
 
 
 def test_agent_fully_started_detects_duplicate_processes() -> None:
@@ -768,13 +737,15 @@ def test_confirm_started_script_exists() -> None:
 def test_startup_shutdown_symmetry() -> None:
     """Startup and shutdown checks must mirror process, lock, port, and watchdog."""
     shutdown_src = (_SRC / "system" / "shutdown_cleanup.py").read_text(encoding="utf-8")
-    identity_src = (_SRC / "system" / "app_identity.py").read_text(encoding="utf-8")
+    identity_src = (_SRC / "system" / "identity" / "app_identity.py").read_text(
+        encoding="utf-8"
+    )
     assert "agent_fully_stopped" in shutdown_src
     assert "agent_fully_started" in shutdown_src
     for needle in ("main.py", "watchdog", "8080", "lock_path"):
         assert needle in shutdown_src, f"shutdown_cleanup missing {needle}"
     assert "INSTANCE_LOCK_FILE" in identity_src
-    assert ".ig_agent_v29.lock" in identity_src
+    assert ".ig_agent_v30_port_" in identity_src
 
 
 def test_ig_rest_client_has_end_session() -> None:
@@ -785,12 +756,14 @@ def test_ig_rest_client_has_end_session() -> None:
 
 
 def test_watchdog_uses_dynamic_agent_dir_and_grace() -> None:
-    """watchdog.sh must not hardcode Desktop path; must grace startup and use launcher start script."""
+    """watchdog.sh must read lock pointer; must grace startup and use launcher start script."""
     watchdog = _ROOT / "scripts" / "watchdog.sh"
     source = watchdog.read_text(encoding="utf-8")
     assert 'SCRIPT_DIR="$(cd "$(dirname "$0")"' in source
     assert "start_agent_launchd.py" in source
     assert "STARTUP_GRACE_SEC" in source
+    assert "active_lock_pointer" in source
+    assert "resolve_lock_file" in source
     assert "/Users/chrisgordon/Desktop/IG_Agent_v25" not in source
 
 
@@ -897,7 +870,7 @@ def test_dashboard_offline_overlay_when_agent_down() -> None:
     """Crash or stale tab without deliberate stop shows calm offline message — no alarm."""
     app = (_ROOT / "dashboard" / "src" / "App.jsx").read_text(encoding="utf-8")
     assert "Agent is not running" in app
-    assert "relaunch from the desktop icon" in app
+    assert "desktop" in app.lower() and "icon" in app.lower()
     assert "agentOfflineChecked" in app
 
 

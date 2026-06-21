@@ -115,6 +115,14 @@ def launch_flight_deck_after_gate4(cfg: Any | None) -> None:
             )
             return
 
+        if os.environ.get("IG_COCKPIT_ISOLATED_EXTERNAL", "").strip() == "1":
+            _ipc_ready.set()
+            log_engine(
+                "Flight Deck: external isolated cockpit owns :8787 — "
+                "embedded web server suppressed (read-only SHM consumer)"
+            )
+            return
+
         if not _web_started:
             from cockpit.web_server import start_cockpit_web_server
 

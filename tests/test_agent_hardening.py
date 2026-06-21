@@ -83,6 +83,10 @@ class ApiHealthTests(unittest.TestCase):
 
             sd._router_mounted = False
             sd.register_deferred_route_tables(self.client.app)
+            self.client.app.state.deferred_routes_registered = True
+            from api.agent_health import refresh_health_cache
+
+            refresh_health_cache()
         except Exception:
             pass
 
@@ -98,6 +102,9 @@ class ApiHealthTests(unittest.TestCase):
         loop = MagicMock()
         loop.is_running.return_value = True
         register_trading_loop(loop)
+        from api.agent_health import refresh_health_cache
+
+        refresh_health_cache()
 
         r = self.client.get(
             "/api/health",

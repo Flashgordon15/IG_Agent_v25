@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchState, fetchSplash } from "./api.js";
-import { API_BASE, DEFAULT_API_PORT, isShadowProfile, recoveryHealthUrl, resolveTargetPort } from "./config.js";
-import { api, authHeaders, storeAuthSession } from "./api/client.js";
+import { API_BASE, DEFAULT_API_PORT, isLiveVanguardPort, isShadowProfile, isShadowSimulatorPort, isUnifiedEnginePort, recoveryHealthUrl, resolveApiBase, resolveTargetPort } from "./config.js";
+import { api, authHeaders, storeAuthSession, isAuthenticated as hasAuthSession, clearAuthSession } from "./api/client.js";
 import { useSidecarPid } from "./hooks/useSidecarPid.js";
 import {
   getTransportLabel,
@@ -42,6 +42,8 @@ import TestbedSimulationBanner from "./components/TestbedSimulationBanner.jsx";
 import MLInsightsPostMortemTab from "./tabs/MLInsightsPostMortemTab.jsx";
 import SystemMonitorTab from "./tabs/SystemMonitorTab.jsx";
 import ApexCockpitView from "./components/apex/ApexCockpitView.jsx";
+import AlphaMatrixOpsConsole from "./components/AlphaMatrixOpsConsole.jsx";
+import ProcessFulfillmentRow from "./components/ProcessFulfillmentRow.jsx";
 
 const BASE_TABS = [
   { id: "live", label: "LIVE" },
@@ -58,17 +60,19 @@ const BASE_TABS = [
 
 const APEX_TAB = { id: "apex", label: "APEX AVIONICS" };
 
+const SHADOW_ALPHA_TABS = [{ id: "alpha_matrix", label: "MATRIX OPS" }];
+const UNIFIED_PERF_TABS = [{ id: "fulfillment", label: "FULFILLMENT" }];
+
 const POLL_INTERVAL_MS = 5000;
 const TESTBED_POLL_INTERVAL_MS = 100;
 const VERIFY_POLL_TIMEOUT_MS = 90000;
 const DELIBERATE_STOP_KEY = "ig_agent_deliberate_stop_ts";
 const DELIBERATE_STOP_TTL_MS = 600_000; // 10 min — matches manual_stop max age
 
-/** Stage 2 / boot health probe — unified :9090 desktop monolith. */
+/** Stage 2 / boot health probe — same origin as the loaded dashboard page. */
 function agentApiUrl(path = "") {
-  const port = resolveTargetPort();
   const suffix = path.startsWith("/") ? path : `/${path}`;
-  return `http://127.0.0.1:${port}${suffix}`;
+  return `${resolveApiBase()}${suffix}`;
 }
 
 async function checkAgentApi() {
@@ -344,8 +348,18 @@ function createSoundEngine() {
 
 export default function App() {
   const apexShell = isApexDesktopShell();
-  const TABS = apexShell ? [APEX_TAB, ...BASE_TABS] : BASE_TABS;
-  const [tab, setTab] = useState(apexShell ? "apex" : "live");
+  const shadowBrainUi = isShadowSimulatorPort();
+  const unifiedPerfUi = isUnifiedEnginePort() && !apexShell;
+  const TABS = shadowBrainUi
+    ? SHADOW_ALPHA_TABS
+    : unifiedPerfUi
+      ? UNIFIED_PERF_TABS
+      : apexShell
+        ? [APEX_TAB, ...BASE_TABS]
+        : BASE_TABS;
+  const [tab, setTab] = useState(
+    shadowBrainUi ? "alpha_matrix" : unifiedPerfUi ? "fulfillment" : apexShell ? "apex" : "live"
+  );
   const [state, setState] = useState(null);
   const [wsConnected, setWsConnected] = useState(false);
   const [reconnecting, setReconnecting] = useState(true);
@@ -384,15 +398,26 @@ export default function App() {
     }
   }, []);
 
-  // v30.0 Emergency Password Bypass — seed session token; never reset to auth gate
+  // Live :8080 requires real admin login; shadow :9199 keeps local session bypass.
   useEffect(() => {
-    storeAuthSession("v30_unlocked_session_token");
-    setIsAuthenticated(true);
-    setLaunchStage("boot");
     const params = new URLSearchParams(window.location.search);
     if (params.has("launch")) {
       window.history.replaceState({}, "", window.location.pathname || "/");
     }
+    if (isLiveVanguardPort()) {
+      if (hasAuthSession()) {
+        setIsAuthenticated(true);
+        setLaunchStage("boot");
+      } else {
+        clearAuthSession();
+        setIsAuthenticated(false);
+        setLaunchStage("auth");
+      }
+      return;
+    }
+    storeAuthSession("v30_unlocked_session_token");
+    setIsAuthenticated(true);
+    setLaunchStage("boot");
   }, []);
 
   // Stage 2 — vector array warmup via IPC + /api/startup/status (shadow :9090 only).
@@ -660,6 +685,13 @@ export default function App() {
           credentials: "include",
           headers: authHeaders(),
         });
+        if (res.status === 401) {
+          healthFailRef.current = 0;
+          clearAuthSession();
+          setIsAuthenticated(false);
+          setLaunchStage("auth");
+          return;
+        }
         if (res.ok) {
           healthFailRef.current = 0;
           setAgentAlive(true);
@@ -1217,8 +1249,8 @@ export default function App() {
           color: "#64748b", fontSize: "12px", margin: 0,
           textAlign: "center", maxWidth: "360px", lineHeight: 1.5,
         }}>
-          Shadow sidecar on :{recoveryPort} is unreachable. Launch IG Agent Apex from the desktop
-          icon, or retry the recovery handshake below.
+          Live Vanguard on :{recoveryPort} is unreachable. Use the desktop shortcut
+          &ldquo;Open IG Agent&rdquo;, or retry the recovery handshake below.
         </p>
         <button
           type="button"
@@ -1246,6 +1278,16 @@ export default function App() {
         >
           {recoveryBusy ? "Recovering…" : "Launch when down — retry connection"}
         </button>
+      </div>
+    );
+  }
+
+  if (unifiedPerfUi) {
+    return (
+      <div className="fulfillment-app min-h-screen bg-bg text-foreground">
+        <main className="mx-auto max-w-5xl px-4 py-8">
+          <ProcessFulfillmentRow />
+        </main>
       </div>
     );
   }
@@ -1347,7 +1389,8 @@ export default function App() {
       />
 
       <nav className="sticky top-0 z-10 flex shrink-0 gap-0 overflow-x-auto border-b border-border bg-card px-1 sm:px-2">
-        {TABS.map((item) => {
+        {!unifiedPerfUi &&
+          TABS.map((item) => {
           const active = tab === item.id;
           return (
             <button
@@ -1378,8 +1421,11 @@ export default function App() {
       )}
 
       <main className="min-h-0 flex-1 overflow-y-auto px-2 py-3 sm:px-4 sm:py-4">
-        {tab === "apex" && <ApexCockpitView />}
-        {tab === "live" && (
+        {tab === "fulfillment" && <ProcessFulfillmentRow />}
+        {tab === "performance" && <ProcessFulfillmentRow />}
+        {tab === "alpha_matrix" && <AlphaMatrixOpsConsole />}
+        {!unifiedPerfUi && tab === "apex" && <ApexCockpitView />}
+        {!unifiedPerfUi && tab === "live" && (
           <LivePanel
             state={viewState}
             rawState={mergedState}
@@ -1388,15 +1434,15 @@ export default function App() {
             wsConnected={wsConnected}
           />
         )}
-        {tab === "trades" && <TradesPanel state={mergedState} />}
-        {tab === "points" && <PointsPanel state={mergedState} />}
-        {tab === "stats" && <StatsTab />}
-        {tab === "ml_insights" && <MLInsightsPostMortemTab />}
-        {tab === "system_monitor" && <SystemMonitorTab />}
-        {tab === "intelligence" && <IntelligencePanel />}
-        {tab === "profit" && <ProfitPanel />}
-        {tab === "cert" && <CertPanel />}
-        {tab === "system" && (
+        {!unifiedPerfUi && tab === "trades" && <TradesPanel state={mergedState} />}
+        {!unifiedPerfUi && tab === "points" && <PointsPanel state={mergedState} />}
+        {!unifiedPerfUi && tab === "stats" && <StatsTab />}
+        {!unifiedPerfUi && tab === "ml_insights" && <MLInsightsPostMortemTab />}
+        {!unifiedPerfUi && tab === "system_monitor" && <SystemMonitorTab />}
+        {!unifiedPerfUi && tab === "intelligence" && <IntelligencePanel />}
+        {!unifiedPerfUi && tab === "profit" && <ProfitPanel />}
+        {!unifiedPerfUi && tab === "cert" && <CertPanel />}
+        {!unifiedPerfUi && tab === "system" && (
           <SystemPanel
             state={mergedState}
             wsConnected={wsConnected}

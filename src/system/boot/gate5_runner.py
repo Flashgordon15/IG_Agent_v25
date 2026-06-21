@@ -1,7 +1,8 @@
-"""Gate 5 — atomic READY flip, unpause dormant loops, background deploy verify."""
+"""Gate 5 — instant READY flip; array warmup and deploy verify run in background."""
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 import sys
@@ -85,7 +86,9 @@ def _spawn_background_deploy_verify(state: SystemState) -> None:
                 log_engine("Gate5: background deploy verify passed")
         except Exception as exc:
             status = f"error:{type(exc).__name__}"
-            log_engine(f"Gate5: background deploy verify error: {type(exc).__name__}: {exc}")
+            log_engine(
+                f"Gate5: background deploy verify error: {type(exc).__name__}: {exc}"
+            )
         _update_pytest_status(state, pytest_status=status, last_run_at=_utc_now_iso())
 
     threading.Thread(
@@ -95,8 +98,117 @@ def _spawn_background_deploy_verify(state: SystemState) -> None:
     ).start()
 
 
+def _array_warmup_worker(state: SystemState, context: BootContext) -> None:
+    """Background array warmup — may run up to 900s without blocking READY."""
+    from apex.array_warmup import (
+        _GATE5_CACHE_MIN_BARS,
+        _WARMUP_BOOT_DEADLINE_SEC,
+        _loops_cache_sufficient,
+    )
+    from apex.warmup_progress import (
+        is_warmup_active,
+        mark_warmup_ready,
+        wait_until_warmup_ready,
+    )
+
+    if not is_warmup_active():
+        log_engine("Gate5: lazy warmup — not active (already complete)")
+        return
+
+    state.update_state(
+        BootPhase.WARMING,
+        state.snapshot_model().percent,
+        "Compiling Vector Arrays (background)",
+        gates_dict=None,
+    )
+    log_engine(
+        f"Gate5: lazy warmup started (background, boot window={_WARMUP_BOOT_DEADLINE_SEC}s)"
+    )
+
+    if wait_until_warmup_ready(timeout=_WARMUP_BOOT_DEADLINE_SEC):
+        log_engine("Gate5: lazy warmup complete within boot window")
+        return
+
+    orch = context.orchestrator
+    loops = list(getattr(orch, "loops", []) or []) if orch else []
+    if loops and _loops_cache_sufficient(loops, min_bars=_GATE5_CACHE_MIN_BARS):
+        mark_warmup_ready()
+        log_engine("Gate5: lazy warmup — OHLC cache sufficient, marked ready")
+        return
+
+    if wait_until_warmup_ready(timeout=870.0):
+        log_engine("Gate5: lazy warmup complete (extended window)")
+        return
+
+    log_engine("Gate5: lazy warmup TIMED OUT after 900s — trading continues in degraded mode")
+
+
+async def _array_warmup_coroutine(state: SystemState, context: BootContext) -> None:
+    await asyncio.to_thread(_array_warmup_worker, state, context)
+
+
+def _inject_production_warmed_alpha_weights() -> bool:
+    """Gate 5 — load v30 warmed checkpoint into LiveEngine before READY flip."""
+    if os.environ.get("IG_APEX_RUNTIME_MODE", "").strip().upper() not in (
+        "PRODUCTION",
+        "LIVE",
+        "PROD",
+    ):
+        try:
+            from system.apex_runtime_mode import get_apex_runtime_mode
+
+            if not get_apex_runtime_mode().is_production:
+                return False
+        except Exception:
+            return False
+    try:
+        from system.ml.cold_start_compiler import inject_warmed_alpha_weights
+
+        applied = inject_warmed_alpha_weights()
+        if applied:
+            log_engine(
+                "Gate5: production warmed-alpha weights injected into LiveEngine "
+                "(cold-start zero-vector bypass)"
+            )
+        else:
+            log_engine(
+                "Gate5: warmed-alpha checkpoint not found — LiveEngine cold-start vector retained"
+            )
+        return applied
+    except Exception as exc:
+        log_engine(
+            f"Gate5: warmed-alpha injection skipped: {type(exc).__name__}: {exc}"
+        )
+        return False
+
+
+def _schedule_lazy_array_warmup(state: SystemState, context: BootContext) -> None:
+    """Schedule warmup on the uvicorn event loop via asyncio.create_task."""
+    try:
+        from system.boot.boot_loop_holder import get_boot_loop, schedule_coro
+
+        loop = get_boot_loop()
+        if loop is not None and loop.is_running():
+            schedule_coro(_array_warmup_coroutine(state, context))
+            log_engine("Gate5: lazy warmup scheduled on boot event loop (create_task)")
+            return
+    except Exception as exc:
+        log_engine(
+            f"Gate5: lazy warmup loop schedule failed: {type(exc).__name__}: {exc} "
+            "— falling back to daemon thread"
+        )
+
+    threading.Thread(
+        target=_array_warmup_worker,
+        args=(state, context),
+        name="gate5-lazy-array-warmup",
+        daemon=True,
+    ).start()
+    log_engine("Gate5: lazy warmup scheduled on daemon thread (no boot loop)")
+
+
 class Gate5Runner:
-    """Verify prior gates, unpause trading loops, flip SystemState.ready."""
+    """Verify prior gates, unpause trading loops, flip SystemState.ready immediately."""
 
     def __init__(
         self,
@@ -125,44 +237,32 @@ class Gate5Runner:
             )
 
     def _execute(self) -> None:
+        import os
+
+        harness_mode = os.environ.get("IG_TEST_HARNESS", "").strip() == "1"
         for gate_id in _PRIOR_GATES:
             if not self._state.gate_complete(gate_id):
                 raise RuntimeError(f"{gate_id} not COMPLETE — cannot activate")
 
-        from apex.warmup_progress import is_warmup_active, wait_until_warmup_ready
-        from apex.array_warmup import _WARMUP_BOOT_DEADLINE_SEC
+        if harness_mode:
+            try:
+                from apex.warmup_progress import mark_warmup_ready
 
-        if is_warmup_active():
-            self._state.update_state(
-                BootPhase.WARMING,
-                self._state.snapshot_model().percent,
-                "Compiling Vector Arrays",
-                gates_dict=None,
-            )
-            log_engine("Gate5: awaiting array warmup (30s boot compile window)")
-            if not wait_until_warmup_ready(timeout=_WARMUP_BOOT_DEADLINE_SEC):
-                from apex.array_warmup import (
-                    _GATE5_CACHE_MIN_BARS,
-                    _loops_cache_sufficient,
+                mark_warmup_ready()
+                log_engine("Gate5: harness fast-path — warmup marked ready")
+            except Exception as exc:
+                log_engine(
+                    f"Gate5: harness warmup ready skipped: {type(exc).__name__}: {exc}"
                 )
-
-                orch = self._context.orchestrator
-                loops = list(getattr(orch, "loops", []) or []) if orch else []
-                if loops and _loops_cache_sufficient(
-                    loops, min_bars=_GATE5_CACHE_MIN_BARS
-                ):
-                    from apex.warmup_progress import mark_warmup_ready
-
-                    log_engine(
-                        "Gate5: 30s window elapsed — OHLC sufficient, forcing READY"
-                    )
-                    mark_warmup_ready()
-                elif not wait_until_warmup_ready(timeout=870.0):
-                    raise RuntimeError("Array warmup timed out after 900s")
+        else:
+            _schedule_lazy_array_warmup(self._state, self._context)
 
         orch = self._context.orchestrator
         if orch is None:
             raise RuntimeError("Gate 5 requires orchestrator from Gate 4")
+
+        if not harness_mode:
+            _inject_production_warmed_alpha_weights()
 
         unpause = getattr(orch, "unpause_from_boot", None)
         if callable(unpause):
@@ -189,28 +289,37 @@ class Gate5Runner:
         from system.boot.post_ready_services import start_post_ready_services
 
         start_post_ready_services(self._context)
-        _spawn_background_deploy_verify(self._state)
+        if not harness_mode:
+            _spawn_background_deploy_verify(self._state)
 
         self._state.set_ready(label="ACTIVE")
         try:
             from system.agent_execution_mode import ensure_demo_sandbox_execution_armed
 
             ensure_demo_sandbox_execution_armed()
-        except Exception:
-            pass
+        except Exception as exc:
+            log_engine(
+                f"Gate5: demo sandbox arm skipped: {type(exc).__name__}: {exc}"
+            )
         try:
             from execution.atomic_gateway import set_monitoring_mode
 
             set_monitoring_mode(True)
             log_engine("Gate5: IG monitoring radio silence armed post-READY")
-        except Exception:
-            pass
-        try:
-            from system.diagnostics.perf_metrics import start_disk_flush_after_ready
+        except Exception as exc:
+            log_engine(
+                f"Gate5: monitoring mode arm skipped: {type(exc).__name__}: {exc}"
+            )
+        if not harness_mode:
+            try:
+                from system.diagnostics.perf_metrics import start_disk_flush_after_ready
 
-            start_disk_flush_after_ready()
-        except Exception:
-            pass
+                start_disk_flush_after_ready()
+            except Exception as exc:
+                log_engine(
+                    f"Gate5: disk flush scheduler skipped: {type(exc).__name__}: {exc}"
+                )
         log_engine(
-            f"Gate5: SystemState READY — {snap.loops.built} loop(s) accepting live ticks"
+            f"Gate5: SystemState READY — {snap.loops.built} loop(s) accepting live ticks "
+            "(array warmup continues in background if active)"
         )

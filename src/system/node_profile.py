@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Literal
 
 from system.app_identity import APP_VERSION
+from system.identity.app_identity import RuntimeIdentity
 from system.paths import analytics_dir, data_dir, logs_dir, triage_db_path
 
 NodeKind = Literal["production", "shadow", "testbed"]
@@ -89,15 +90,16 @@ def _build_profile(kind: NodeKind) -> NodeProfile:
 
         ledger = testbed_ledger_path()
         state = testbed_state_path()
+        api_port = int(os.environ.get("IG_API_PORT", "9199"))
         return NodeProfile(
             kind="testbed",
-            api_port=int(os.environ.get("IG_API_PORT", "9199")),
+            api_port=api_port,
             cockpit_port=9299,
             runtime_state_file=state,
             engine_log_file=logs_dir() / "testbed.log",
             analytics_db=ledger,
             triage_db=ledger,
-            instance_lock_file=".ig_agent_testbed.lock",
+            instance_lock_file=RuntimeIdentity.lock_basename(api_port),
             learning_db=ledger,
             ipc_socket_name="testbed_ipc.sock",
             version_label="30.0.0-testbed",
@@ -106,32 +108,31 @@ def _build_profile(kind: NodeKind) -> NodeProfile:
     triage = triage_db_path()
     v30_monolith = str(APP_VERSION).startswith("30.")
     version_label = "30.0.0" if v30_monolith else "v29.1.0"
-    lock_file = (
-        ".ig_agent_v30_shadow.lock" if kind == "shadow" else ".ig_agent_v29.lock"
-    )
     if kind == "shadow":
+        api_port = int(os.environ.get("IG_API_PORT", "9090"))
         return NodeProfile(
             kind="shadow",
-            api_port=9090,
+            api_port=api_port,
             cockpit_port=9191,
             runtime_state_file=data_dir() / "runtime_state_shadow.json",
             engine_log_file=logs_dir() / "shadow_v30.log",
             analytics_db=triage,
             triage_db=triage,
-            instance_lock_file=lock_file,
+            instance_lock_file=RuntimeIdentity.lock_basename(api_port),
             learning_db=data_dir() / "learning_db_shadow.sqlite3",
             ipc_socket_name="apex_ipc.sock",
             version_label=version_label,
         )
+    api_port = int(os.environ.get("IG_API_PORT", "8080"))
     return NodeProfile(
         kind="production",
-        api_port=8080,
+        api_port=api_port,
         cockpit_port=8787,
         runtime_state_file=data_dir() / "runtime_state.json",
         engine_log_file=logs_dir() / "production.log",
         analytics_db=triage if v30_monolith else analytics / "production.db",
         triage_db=triage if v30_monolith else analytics / "production.db",
-        instance_lock_file=lock_file,
+        instance_lock_file=RuntimeIdentity.lock_basename(api_port),
         learning_db=data_dir() / "learning_db.sqlite3",
         ipc_socket_name="apex_ipc.sock",
         version_label=version_label,
@@ -163,9 +164,9 @@ def apply_node_profile_to_environ() -> NodeProfile:
     os.environ["IG_ENGINE_LOG_FILE"] = str(profile.engine_log_file)
     os.environ["IG_ANALYTICS_DB"] = str(profile.analytics_db)
     os.environ["IG_TRIAGE_DB"] = str(profile.triage_db)
-    os.environ["IG_INSTANCE_LOCK_FILE"] = profile.instance_lock_file
     os.environ["IG_LEARNING_DB"] = str(profile.learning_db)
     os.environ["IG_APEX_IPC_SOCKET"] = profile.ipc_socket_name
+    RuntimeIdentity.export_pointer_for_scripts()
     if profile.is_shadow:
         os.environ["IG_AGENT_SHADOW_DESK"] = "1"
         os.environ.setdefault("IG_AGENT_SKIP_ORPHAN_KILL", "1")

@@ -25,10 +25,14 @@ def _credential_key(credentials: Credentials) -> tuple[str, str, str]:
 
 def get_shared_rest_client(credentials: Credentials) -> Any:
     """Return the process-wide IGRestClient for these credentials."""
+    global _client, _cred_key
     try:
         from system.apex_runtime_mode import ApexRuntimeMode, get_apex_runtime_mode
 
         if get_apex_runtime_mode() is ApexRuntimeMode.HARDENED_TESTBED:
+            with _lock:
+                if _client is not None:
+                    return _client
             from system.testbed_firewall import testbed_panic
 
             testbed_panic("IG REST client construction blocked in HARDENED_TESTBED")
@@ -36,7 +40,6 @@ def get_shared_rest_client(credentials: Credentials) -> Any:
         raise
     except Exception:
         pass
-    global _client, _cred_key
 
     from ig_api.rest_client import IGRestClient
 

@@ -73,6 +73,7 @@ class WatchdogSelfHealer:
                 daemon=True,
             )
             self._thread.start()
+            port = int(os.environ.get("IG_API_PORT", "9090"))
             log_engine(f"WatchdogSelfHealer: passive :{port} monitor armed (5s)")
 
     def stop(self) -> None:
@@ -125,8 +126,48 @@ class WatchdogSelfHealer:
         except Exception:
             return False
 
+    def _recovery_suppressed(self) -> str | None:
+        """Return reason when auto-spawn recovery must not run."""
+        try:
+            from system.apex_runtime_mode import ApexRuntimeMode, get_apex_runtime_mode
+
+            if get_apex_runtime_mode() is ApexRuntimeMode.HARDENED_TESTBED:
+                return "hardened_testbed"
+        except Exception:
+            pass
+        if os.environ.get("TESTBED_ALLOW_ZOMBIE", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        ):
+            return "testbed_zombie_protection"
+        try:
+            from system.shutdown_cleanup import manual_stop_active
+
+            if manual_stop_active():
+                return "manual_stop_active"
+        except Exception:
+            pass
+        try:
+            from system.overnight_supervision import launchd_watchdog_active
+
+            if launchd_watchdog_active():
+                return "launchd_supervises_host"
+        except Exception:
+            pass
+        if os.environ.get("IG_APEX_DAEMON", "").strip() == "1":
+            return "apex_daemon_supervised"
+        return None
+
     def _execute_recovery(self) -> None:
         if time.monotonic() - self._started_mono < _BOOT_GRACE_SEC:
+            return
+        suppressed = self._recovery_suppressed()
+        if suppressed:
+            log_engine(
+                f"WatchdogSelfHealer: recovery suppressed ({suppressed}) — "
+                "not spawning duplicate agent"
+            )
             return
         now = time.monotonic()
         if now - self._last_recovery_mono < _RECOVERY_COOLDOWN_SEC:

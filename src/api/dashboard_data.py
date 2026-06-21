@@ -276,9 +276,11 @@ def get_system_info() -> dict[str, Any]:
     try:
         import time
 
-        lock_path = data_dir() / ".ig_agent_v25.lock"
-        if lock_path.exists():
-            uptime_s = round(time.time() - lock_path.stat().st_mtime, 0)
+        from system.instance_lock import lock_path
+
+        lock_path_val = lock_path()
+        if lock_path_val.exists():
+            uptime_s = round(time.time() - lock_path_val.stat().st_mtime, 0)
     except Exception:
         pass
 

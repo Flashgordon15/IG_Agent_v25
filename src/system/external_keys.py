@@ -10,6 +10,7 @@ from system.paths import project_root
 
 _KEY_ALIASES = {
     "finnhub": ("FINNHUB_API_KEY", "finnhub_api_key"),
+    "twelvedata": ("TWELVE_DATA_API_KEY", "twelve_data_api_key", "twelvedata_api_key"),
     "alphavantage": (
         "ALPHAVANTAGE_API_KEY",
         "alpha_vantage_api_key",
@@ -47,6 +48,14 @@ def _file_keys() -> dict[str, str]:
 def finnhub_api_key() -> str:
     return os.environ.get("FINNHUB_API_KEY", "").strip() or _file_keys().get(
         "finnhub", ""
+    )
+
+
+def twelve_data_api_key() -> str:
+    return (
+        os.environ.get("TWELVE_DATA_API_KEY", "").strip()
+        or os.environ.get("TWELVEDATA_API_KEY", "").strip()
+        or _file_keys().get("twelvedata", "")
     )
 
 

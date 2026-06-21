@@ -89,6 +89,8 @@ class TradingLoop:
         *,
         prefetched_signal: SignalResult | None = None,
         gate_execution_params: dict[str, Any] | None = None,
+        gate_snapshot: dict[str, bool] | None = None,
+        shadow_force_fill: bool = False,
     ) -> TickOutcome:
         from system.market_watch.japan225_session import (
             japan225_strategy_paused,
@@ -394,8 +396,8 @@ class TradingLoop:
         can_execute = (
             self.auto_trade
             and sig.signal in ("BUY", "SELL")
-            and validation.allowed
-            and block_reason is None
+            and (validation.allowed or shadow_force_fill)
+            and (block_reason is None or shadow_force_fill)
         )
 
         if can_execute and self.execution_engine.mode.uses_broker():
@@ -442,7 +444,7 @@ class TradingLoop:
             gate_sourced = gate_norm is not None and bool(
                 (gate_norm or {}).get("gate_sourced")
             )
-            if integrity_gate_sourced_required() and not gate_sourced:
+            if integrity_gate_sourced_required() and not gate_sourced and not shadow_force_fill:
                 block_reason = (
                     "INTEGRITY_ABORT: gate_execution_params missing or invalid "
                     "(Profile B requires gate-sourced sizing)"
@@ -505,7 +507,10 @@ class TradingLoop:
                     signal_time=quote.time.isoformat(),
                 )
                 execution = self.execution_engine.execute_trade(
-                    trade_signal, prevalidated=True
+                    trade_signal,
+                    prevalidated=True,
+                    gate_snapshot=gate_snapshot,
+                    shadow_force_fill=shadow_force_fill,
                 )
             else:
                 execution = None

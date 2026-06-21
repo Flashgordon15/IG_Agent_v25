@@ -614,6 +614,10 @@ class LiveExecutor:
         *,
         mode: ExecutionMode = ExecutionMode.LIVE,
     ) -> ExecutionResult:
+        from execution.parallel_track_guard import enforce_live_track_or_fail
+
+        enforce_live_track_or_fail(epic=str(signal.epic or ""))
+
         cfg = self._cfg
         client_type = getattr(self._client, "account_type", cfg.account_type)
         is_demo = client_type == "DEMO" or mode == ExecutionMode.DEMO
@@ -701,6 +705,21 @@ class LiveExecutor:
         )
         size = float(payload["size"])
         update_demo_diagnostics(last_order_payload=payload)
+
+        from execution.capital_guard import CapitalGuard
+
+        cg_ok, cg_reason = CapitalGuard.enforce_order_transmission(
+            size=size,
+            rest_client=self._client,
+            epic=str(signal.epic or ""),
+        )
+        if not cg_ok:
+            return ExecutionResult(
+                success=False,
+                action="REJECTED",
+                rejection_reason=cg_reason,
+                execution_params=execution_params,
+            )
 
         bus = get_lifecycle_bus()
         max_retries = int(cfg.max_retries) if hasattr(cfg, "max_retries") else 2
@@ -855,6 +874,33 @@ class LiveExecutor:
                     next_fn="IGRestClient.confirm_deal",
                     params={"dealReference": ref},
                 )
+            except (ConnectionError, TimeoutError, BrokenPipeError) as e:
+                from system.guard.kernel_interceptor import dispatch_broker_connectivity_teardown
+
+                dispatch_broker_connectivity_teardown(
+                    e, source="LiveExecutor._execute_order_blocking"
+                )
+                raise
+            except OSError as e:
+                import errno
+
+                if getattr(e, "errno", None) in (
+                    errno.ECONNREFUSED,
+                    errno.ECONNRESET,
+                    errno.ETIMEDOUT,
+                    errno.EHOSTUNREACH,
+                    errno.ENETUNREACH,
+                    errno.ENETDOWN,
+                    errno.EPIPE,
+                ):
+                    from system.guard.kernel_interceptor import (
+                        dispatch_broker_connectivity_teardown,
+                    )
+
+                    dispatch_broker_connectivity_teardown(
+                        e, source="LiveExecutor._execute_order_blocking"
+                    )
+                raise
             except RateLimitError as e:
                 bus.emit(STAGE_IG_RESPONSE, STATUS_FAIL, str(e))
                 bus.finalize_failure(reason=str(e))
@@ -1175,3 +1221,11 @@ class LiveExecutor:
                 f"{label} IG {order_type} size={size} stop={stop_distance} limit={limit_distance}"
             ],
         )
+
+
+try:
+    from system.guard.kernel_interceptor import ensure_kernel_armed_for_execution
+
+    ensure_kernel_armed_for_execution()
+except Exception:
+    pass

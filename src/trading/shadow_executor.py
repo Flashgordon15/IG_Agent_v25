@@ -13,6 +13,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,12 @@ from execution.types import ExecutionResult, TradeSignal
 from system.engine_log import log_engine
 from system.paths import data_dir
 from trading.position_ladder import finalize_dispatch_lot_size, truncate_to_broker_lot
+
+# Fully qualified loopback — never use truncated http://127.0.0
+LIVE_VANGUARD_DISPATCH_URL = os.environ.get(
+    "IG_LIVE_VANGUARD_TOLERANCE_URL",
+    "http://127.0.0.1:8080/api/internal/live-tolerance",
+)
 
 _LEDGER_LOCK = threading.Lock()
 _OPEN_LOCK = threading.Lock()
@@ -66,12 +73,21 @@ class ShadowExecutor:
         self,
         signal: TradeSignal,
         execution_params: dict[str, Any],
+        *,
+        gate_snapshot: dict[str, bool] | None = None,
     ) -> ExecutionResult:
         epic = str(signal.epic or "").strip()
         side = str(signal.direction or "").upper()
         entry = float(execution_params.get("entry") or execution_params.get("level") or 0)
         if entry <= 0:
             entry = float(getattr(signal, "entry_price", 0) or 0)
+        if entry <= 0:
+            quote = getattr(signal, "quote", None)
+            if quote is not None:
+                bid = float(getattr(quote, "bid", 0) or 0)
+                offer = float(getattr(quote, "offer", 0) or 0)
+                if bid > 0 and offer > bid:
+                    entry = (bid + offer) / 2.0
 
         raw_size = float(execution_params.get("size") or execution_params.get("dealSize") or 0)
         size, lot_note = finalize_dispatch_lot_size(
@@ -90,6 +106,8 @@ class ShadowExecutor:
 
         deal_id = f"SHADOW-{uuid.uuid4().hex[:12].upper()}"
         ts = time.time()
+        ts_utc = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+        snapshot = dict(gate_snapshot or {})
         fill = ShadowFillResult(
             deal_id=deal_id,
             epic=epic,
@@ -101,9 +119,14 @@ class ShadowExecutor:
         )
         row = {
             "event": "shadow_fill",
+            "timestamp": ts_utc,
             "ts": ts,
             "deal_id": deal_id,
             "epic": epic,
+            "action": side,
+            "entry_price": entry,
+            "gate_snapshot": snapshot,
+            "trade_status": "OPEN",
             "side": side,
             "size": size,
             "entry": entry,
@@ -117,7 +140,6 @@ class ShadowExecutor:
             broadcast_ledger_event(
                 {
                     **row,
-                    "action": side,
                     "entry_price": entry,
                     "latency_ms": 0.0,
                     "source": "worker_d_shadow",
@@ -247,6 +269,117 @@ def _read_ledger_summary() -> dict[str, Any]:
         "ledger_path": str(shadow_ledger_path()),
         "ts": time.time(),
     }
+
+
+def archive_lookahead_is_true_win(
+    *,
+    epic: str,
+    direction: str,
+    rsi: float = 0.0,
+    atr: float = 0.0,
+) -> tuple[bool, dict[str, Any]]:
+    """Historical matrix look-ahead must resolve true_win before live injection."""
+    from intelligence.matrix_backtuner import evaluate_archive_lookahead_outcome
+
+    outcome, detail = evaluate_archive_lookahead_outcome(
+        epic,
+        direction,
+        rsi=rsi,
+        atr=atr,
+    )
+    return outcome == "true_win", detail
+
+
+def dispatch_live_tolerance_to_vanguard(
+    payload: dict[str, Any],
+    *,
+    epic: str,
+    market: str = "",
+    direction: str,
+    rsi: float = 0.0,
+    atr: float = 0.0,
+    near_miss_gate: str = "",
+    margin_pct: float = 0.0,
+) -> dict[str, Any]:
+    """
+    Shadow dispatcher — POST tolerance to Live Vanguard only when archive
+    look-ahead confirms a winning first-touch outcome.
+    """
+    result: dict[str, Any] = {
+        "dispatched": False,
+        "http_status": None,
+        "archive_outcome": None,
+        "dispatch_url": LIVE_VANGUARD_DISPATCH_URL,
+    }
+    side = str(direction or "").upper()
+    if side not in ("BUY", "SELL"):
+        result["blocked_reason"] = "direction_not_tradeable"
+        log_engine(f"shadow_dispatcher: blocked POST — direction={direction!r}")
+        return result
+
+    winning, detail = archive_lookahead_is_true_win(
+        epic=epic,
+        direction=side,
+        rsi=rsi,
+        atr=atr,
+    )
+    result["archive_outcome"] = detail.get("outcome")
+    result["archive_detail"] = detail
+    if not winning:
+        result["blocked_reason"] = "archive_lookahead_not_true_win"
+        log_engine(
+            "shadow_dispatcher: blocked POST "
+            f"epic={epic} dir={side} outcome={detail.get('outcome')}"
+        )
+        return result
+
+    body = {
+        **dict(payload or {}),
+        "source": "shadow_dispatcher",
+        "epic": str(epic or ""),
+        "market": str(market or ""),
+        "near_miss_gate": str(near_miss_gate or ""),
+        "margin_pct": round(float(margin_pct), 3),
+        "archive_lookahead": detail,
+        "published_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "published_at_epoch": time.time(),
+    }
+    try:
+        import urllib.error
+        import urllib.request
+
+        req = urllib.request.Request(
+            LIVE_VANGUARD_DISPATCH_URL,
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=3.0) as resp:
+            result["http_status"] = int(getattr(resp, "status", 0) or 0)
+            result["dispatched"] = 200 <= result["http_status"] < 300
+    except Exception as exc:
+        result["blocked_reason"] = f"http_failed: {exc}"
+        log_engine(f"shadow_dispatcher: HTTP POST failed ({exc}); manifest fallback")
+        try:
+            from system.identity.live_tolerance_bridge import publish_live_tolerance
+
+            publish_live_tolerance(
+                body,
+                epic=epic,
+                market=market,
+                near_miss_gate=near_miss_gate,
+                margin_pct=margin_pct,
+            )
+            result["manifest_fallback"] = True
+        except Exception as fallback_exc:
+            log_engine(f"shadow_dispatcher: manifest fallback failed ({fallback_exc})")
+        return result
+
+    log_engine(
+        "shadow_dispatcher: POST ok "
+        f"epic={epic} dir={side} archive=true_win status={result['http_status']}"
+    )
+    return result
 
 
 def reset_shadow_executor_for_tests() -> None:

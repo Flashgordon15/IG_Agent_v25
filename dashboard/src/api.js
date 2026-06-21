@@ -34,6 +34,22 @@ export function fetchShadowToday() {
   return getJson("/api/shadow/today");
 }
 
+export function fetchShadowBrain() {
+  return getJson("/api/shadow/brain");
+}
+
+export function fetchAlphaMatrixOps() {
+  return getJson("/api/shadow/alpha-matrix");
+}
+
+export function fetchUnifiedFulfillment() {
+  return getJson("/api/unified/fulfillment");
+}
+
+export function fetchUnifiedPerformance() {
+  return getJson("/api/unified/performance");
+}
+
 export function fetchLearningStatus() {
   return getJson("/api/learning/status");
 }

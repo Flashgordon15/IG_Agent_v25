@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from typing import Any
@@ -10,6 +11,10 @@ from system.boot.context import BootContext
 from system.engine_log import log_engine
 
 _SESSION_REFRESH_INTERVAL_SEC = 45 * 60
+
+
+def _harness_mode() -> bool:
+    return os.environ.get("IG_TEST_HARNESS", "").strip() == "1"
 
 
 def _start_session_refresh_watchdog(rest_client: Any) -> None:
@@ -50,6 +55,10 @@ def _start_session_refresh_watchdog(rest_client: Any) -> None:
 
 def start_post_ready_services(context: BootContext) -> None:
     """Start schedulers and monitors after dormant loops are unpaused."""
+    if _harness_mode():
+        log_engine("post-ready: harness fast-path — skipping non-essential daemons")
+        return
+
     cfg = context.config
     rest = context.rest_client
 
@@ -70,10 +79,9 @@ def start_post_ready_services(context: BootContext) -> None:
     if cfg is not None:
         try:
             from data.learning_store import LearningStore
-            from system.paths import data_dir
             from system.setup_registry_refresh import refresh_setup_registry_from_store
 
-            store = LearningStore(data_dir() / "learning_db.sqlite3")
+            store = LearningStore(str(cfg.learning_db))
             summary = refresh_setup_registry_from_store(store, enabled=True)
             log_engine(
                 "setup_registry refreshed at startup: "

@@ -38,6 +38,45 @@ export function useApexTelemetry() {
   }, []);
 
   useEffect(() => {
+    let ws = null;
+    let cancelled = false;
+    const port = resolveTargetPort() || DEFAULT_API_PORT;
+    const base =
+      (typeof window !== "undefined" && window.apexConfig?.apiBase) ||
+      API_BASE ||
+      `http://127.0.0.1:${port}`;
+    const wsUrl = `${base.replace(/^http/i, "ws").replace(/\/$/, "")}/api/telemetry/stream`;
+    try {
+      ws = new WebSocket(wsUrl);
+      ws.onmessage = (event) => {
+        if (cancelled) return;
+        try {
+          const payload = JSON.parse(String(event.data || "{}"));
+          handleTick(payload);
+          setIpcConnected(true);
+          setNetworkDegraded(false);
+        } catch {
+          /* malformed frame */
+        }
+      };
+      ws.onerror = () => {
+        if (!cancelled) setNetworkDegraded(true);
+      };
+      ws.onclose = () => {
+        if (!cancelled) setIpcConnected(false);
+      };
+    } catch {
+      /* WebSocket unavailable in this shell */
+    }
+    return () => {
+      cancelled = true;
+      if (ws && ws.readyState <= WebSocket.OPEN) {
+        ws.close();
+      }
+    };
+  }, [handleTick]);
+
+  useEffect(() => {
     if (window.apexIPC && typeof window.apexIPC.onTick === "function") {
       console.log("[APEX ENGINE] Native Zero-Copy IPC Preload Bridge engaged.");
       const unsubTick = window.apexIPC.onTick((tickPayload) => {

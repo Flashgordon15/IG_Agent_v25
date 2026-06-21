@@ -274,11 +274,42 @@ export function extractPillarTelemetry(tick) {
 }
 
 /**
+ * Parse schema 1.1 dual-track SHM envelope for 4-Pillar cockpit.
+ * @param {unknown} raw
+ * @returns {{ live: ApexTickPayload | null, shadow: ApexTickPayload | null, envelope: Record<string, unknown> | null }}
+ */
+export function parseDualTrackEnvelope(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { live: null, shadow: null, envelope: null };
+  }
+  const obj = /** @type {Record<string, unknown>} */ (raw);
+  if (obj.schema_version !== "1.1" || !Array.isArray(obj.streams)) {
+    return { live: null, shadow: null, envelope: null };
+  }
+  let live = null;
+  let shadow = null;
+  for (const stream of obj.streams) {
+    if (!stream || typeof stream !== "object") continue;
+    const row = /** @type {Record<string, unknown>} */ (stream);
+    const prefix = String(row.prefix || "");
+    const payload = parseTickPayload(row.payload);
+    if (!payload) continue;
+    if (prefix.includes("LIVE-TRACK")) {
+      live = payload;
+    } else if (prefix.includes("MOCK-TRACK")) {
+      shadow = payload;
+    }
+  }
+  return { live, shadow, envelope: obj };
+}
+
+/**
  * @param {unknown} raw
  * @returns {ParsedApexTelemetry | null}
  */
 export function parseApexTelemetry(raw) {
-  const tick = parseTickPayload(raw);
+  const dual = parseDualTrackEnvelope(raw);
+  const tick = dual.live || parseTickPayload(raw);
   if (!tick) return null;
 
   const assets = {};

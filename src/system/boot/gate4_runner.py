@@ -41,6 +41,9 @@ class Gate4Runner:
             )
 
     def _execute(self) -> None:
+        import os
+
+        harness_mode = os.environ.get("IG_TEST_HARNESS", "").strip() == "1"
         cfg = self._context.config
         rest = self._context.rest_client
         if cfg is None or rest is None:
@@ -83,27 +86,41 @@ class Gate4Runner:
         # Parallel array warmup must start before any blocking orchestrator work —
         # orch.start() can stall on REST/market-status refresh and previously
         # prevented schedule_array_warmup from ever running (0/256 splash hang).
-        from apex.microkernel import schedule_array_warmup
+        if not harness_mode:
+            from apex.microkernel import schedule_array_warmup
 
-        schedule_array_warmup(rest, loops, cfg)
+            schedule_array_warmup(rest, loops, cfg)
+        else:
+            log_engine("Gate4: harness fast-path — skipping microkernel array warmup")
 
-        def _start_orchestrator() -> None:
+        if harness_mode:
             try:
                 orch.start()
                 log_engine(
-                    f"Gate4: {total} dormant loop thread(s) online "
-                    "(paused_at_boot=True)"
+                    f"Gate4: harness sync start — {total} loop thread(s) online"
                 )
             except Exception as exc:
                 log_engine(
-                    f"Gate4: orchestrator start error: {type(exc).__name__}: {exc}"
+                    f"Gate4: harness orchestrator start error: {type(exc).__name__}: {exc}"
                 )
+        else:
+            def _start_orchestrator() -> None:
+                try:
+                    orch.start()
+                    log_engine(
+                        f"Gate4: {total} dormant loop thread(s) online "
+                        "(paused_at_boot=True)"
+                    )
+                except Exception as exc:
+                    log_engine(
+                        f"Gate4: orchestrator start error: {type(exc).__name__}: {exc}"
+                    )
 
-        threading.Thread(
-            target=_start_orchestrator,
-            name="gate4-orchestrator-start",
-            daemon=True,
-        ).start()
+            threading.Thread(
+                target=_start_orchestrator,
+                name="gate4-orchestrator-start",
+                daemon=True,
+            ).start()
 
         self._state.update_state(
             BootPhase.G4,
@@ -122,7 +139,7 @@ class Gate4Runner:
             "detached array warmup started (paused_at_boot=True)"
         )
 
-        if cfg.get("intelligence_layer", {}).get("enabled"):
+        if not harness_mode and cfg.get("intelligence_layer", {}).get("enabled"):
             try:
                 from intelligence.target_engine import initialize_target_engine
 
@@ -137,14 +154,18 @@ class Gate4Runner:
                 )
 
         cockpit_cfg = cfg.get("intelligence_layer", {}).get("cockpit", {})
-        if isinstance(cockpit_cfg, dict) and cockpit_cfg.get("enabled"):
+        if (
+            not harness_mode
+            and isinstance(cockpit_cfg, dict)
+            and cockpit_cfg.get("enabled")
+        ):
             try:
                 from system.node_profile import get_node_profile, is_shadow_node
 
                 profile = get_node_profile()
-                if is_shadow_node():
+                if is_shadow_node() or profile.is_testbed:
                     log_engine(
-                        "Gate4: shadow profile — production :8080/:8787 protected; "
+                        f"Gate4: {profile.kind} profile — production :8080 protected; "
                         f"cockpit binds :{profile.cockpit_port} only"
                     )
                 else:

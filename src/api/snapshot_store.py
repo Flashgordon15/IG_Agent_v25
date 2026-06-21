@@ -173,8 +173,9 @@ def _build_slow_enrichment_blob(*, force: bool = False) -> dict[str, Any]:
         import time as _time
 
         from system.paths import data_dir as _data_dir
+        from system.instance_lock import lock_path as _lock_path
 
-        lock = _data_dir() / ".ig_agent_v25.lock"
+        lock = _lock_path()
         if lock.exists():
             secs = int(_time.time() - lock.stat().st_mtime)
             h, m = divmod(secs // 60, 60)
@@ -439,9 +440,11 @@ def push_hub_quote_to_dashboard(
     _last_hub_push_ts = now
 
     age = float(tick_age_s) if tick_age_s is not None else 0.0
+    from types import SimpleNamespace
+
     stream_status = stream_status_for_hub(
         epic_key,
-        type("_S", (), {"age_seconds": lambda: age})(),
+        SimpleNamespace(age_seconds=lambda: age),
     )
 
     tick = _raw_tick_copy()

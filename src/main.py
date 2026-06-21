@@ -44,16 +44,16 @@ def _align_desktop_api_port() -> None:
 def _api_port() -> int:
     _align_desktop_api_port()
     try:
-        from system.node_profile import get_node_profile
+        from system.identity.app_identity import RuntimeIdentity
 
-        return int(get_node_profile().api_port)
+        return RuntimeIdentity.resolve_api_port()
     except Exception:
         raw = os.environ.get("IG_API_PORT", "").strip()
         if raw.isdigit():
             return int(raw)
         if os.environ.get("IG_APEX_DESKTOP", "").strip() == "1":
             return _DESKTOP_API_PORT
-        return int(os.environ.get("IG_API_PORT", "8080"))
+        return 8080
 
 
 def _dashboard_url() -> str:
@@ -71,6 +71,54 @@ def _log_engine(message: str) -> None:
     from system.engine_log import log_engine
 
     log_engine(message)
+
+
+def _parse_harness_ticks(argv: list[str] | None = None) -> int | None:
+    """Return tick count when ``--test-harness-ticks=N`` is present."""
+    args = list(argv if argv is not None else sys.argv[1:])
+    for i, raw in enumerate(args):
+        if raw.startswith("--test-harness-ticks="):
+            return int(raw.split("=", 1)[1])
+        if raw == "--test-harness-ticks" and i + 1 < len(args):
+            return int(args[i + 1])
+    return None
+
+
+def _parse_isolated_track(argv: list[str] | None = None) -> str | None:
+    """Return ``live`` or ``shadow`` when ``--isolated-track=TRACK`` is present."""
+    args = list(argv if argv is not None else sys.argv[1:])
+    for i, raw in enumerate(args):
+        if raw.startswith("--isolated-track="):
+            track = raw.split("=", 1)[1].strip().lower()
+            return track if track in ("live", "shadow") else None
+        if raw == "--isolated-track" and i + 1 < len(args):
+            track = args[i + 1].strip().lower()
+            return track if track in ("live", "shadow") else None
+    env_track = os.environ.get("IG_PARALLEL_TRACK", "").strip().lower()
+    if env_track in ("live", "shadow"):
+        return env_track
+    return None
+
+
+def _parse_daemon_cycle(argv: list[str] | None = None) -> int | None:
+    """Return cycle interval seconds when ``--daemon-cycle=N`` is present."""
+    args = list(argv if argv is not None else sys.argv[1:])
+    for i, raw in enumerate(args):
+        if raw.startswith("--daemon-cycle="):
+            return int(raw.split("=", 1)[1])
+        if raw == "--daemon-cycle" and i + 1 < len(args):
+            return int(args[i + 1])
+    return None
+
+
+def _is_test_harness_mode() -> bool:
+    return os.environ.get("IG_TEST_HARNESS", "").strip() == "1"
+
+
+def _is_daemon_cycle_mode() -> bool:
+    from system.daemon_cycle_kernel import is_daemon_cycle_mode
+
+    return is_daemon_cycle_mode()
 
 
 def _startup_mark(phase_id: str, note: str | None = None) -> None:
@@ -289,6 +337,14 @@ def _resolve_killable_pid(raw_pid: str | int) -> int | None:
     if target_pid_int == os.getpid() or target_pid_int == os.getppid():
         return None
 
+    try:
+        from simulation.testbed_daemon import is_protected_pid, zombie_protection_enabled
+
+        if zombie_protection_enabled() and is_protected_pid(target_pid_int):
+            return None
+    except Exception:
+        pass
+
     return target_pid_int
 
 
@@ -309,6 +365,17 @@ def _pre_startup_kill_orphan_agents(*, wait_sec: float = 1.0) -> list[int]:
     if os.environ.get("IG_AGENT_SKIP_ORPHAN_KILL", "").strip() in ("1", "true", "yes"):
         _log_engine("pre-startup: orphan kill skipped (IG_AGENT_SKIP_ORPHAN_KILL=1)")
         return []
+    try:
+        from simulation.testbed_daemon import zombie_protection_enabled
+
+        if zombie_protection_enabled():
+            _log_engine(
+                "pre-startup: orphan kill skipped (TESTBED_ALLOW_ZOMBIE=1 — "
+                "daemon PID protected)"
+            )
+            return []
+    except Exception:
+        pass
     killed: list[int] = []
     try:
         result = subprocess.run(
@@ -372,8 +439,17 @@ def _pre_startup_kill_orphan_agents(*, wait_sec: float = 1.0) -> list[int]:
 
 
 def _pre_startup_cleanup() -> None:
-    """Kill stale processes and release resources before Gate 1 acquires the instance lock."""
-    from system.instance_lock import lock_path as instance_lock_path
+    """Synchronous pre-flight — idempotent lock acquire; fail-closed on live sibling."""
+    from system.identity.app_identity import RuntimeIdentity
+    from system.identity.instance_lock import acquire_instance_lock, pid_alive, read_lock_holder
+
+    RuntimeIdentity.export_pointer_for_scripts()
+    port = RuntimeIdentity.resolve_api_port()
+    os.environ["IG_API_PORT"] = str(port)
+    lock_target = RuntimeIdentity.get_lock_path()
+
+    if not _is_test_harness_mode() and not _is_daemon_cycle_mode():
+        _pre_startup_kill_orphan_agents()
 
     if os.environ.get("IG_AGENT_CLEAR_PYCACHE", "").strip().lower() in (
         "1",
@@ -381,17 +457,33 @@ def _pre_startup_cleanup() -> None:
         "yes",
     ):
         _clear_pycache()
-    from system.shutdown_cleanup import clear_manual_stop
 
-    clear_manual_stop()
+    if os.environ.get("TESTBED_ALLOW_ZOMBIE", "").strip().lower() not in (
+        "1",
+        "true",
+        "yes",
+    ) and not _is_test_harness_mode():
+        parallel_track = os.environ.get("IG_PARALLEL_TRACK", "").strip()
+        orchestrator_child = os.environ.get("IG_ORCHESTRATOR_CHILD", "").strip() == "1"
+        if parallel_track not in ("live", "shadow") and not orchestrator_child:
+            from system.shutdown_cleanup import clear_manual_stop
+
+            clear_manual_stop()
     _init_telegram_from_config()
 
-    lock_file = instance_lock_path()
+    my_pid = os.getpid()
+    holder = read_lock_holder(lock_target)
+    if holder is not None and holder != my_pid and pid_alive(holder):
+        _log_engine(
+            f"pre-startup FAIL-CLOSED: live sibling pid={holder} holds {lock_target.name}"
+        )
+        sys.exit(15)
 
-    # 1. Find and SIGTERM any other agent processes (never this PID).
-    killed_pids = _pre_startup_kill_orphan_agents(wait_sec=1.0)
+    ok, msg = acquire_instance_lock()
+    if not ok:
+        _log_engine(f"pre-startup FAIL-CLOSED: {msg}")
+        sys.exit(15)
 
-    # 2b. Orphan watchdog from a prior session can race this startup — stop it first.
     try:
         from system.overnight_supervision import launchd_watchdog_active
 
@@ -400,51 +492,9 @@ def _pre_startup_cleanup() -> None:
 
             stop_watchdog(preserve_launchd=False)
             _log_engine("pre-startup: cleared standalone watchdog from prior session")
-    except Exception as e:
-        _log_engine(f"pre-startup: watchdog cleanup error (ignored): {e}")
+    except Exception as exc:
+        _log_engine(f"pre-startup: watchdog cleanup error: {type(exc).__name__}: {exc}")
 
-    # 3. Remove stale lock
-    try:
-        if lock_file.exists():
-            lock_file.unlink()
-            _log_engine("pre-startup: removed stale instance lock")
-    except Exception as e:
-        _log_engine(f"pre-startup: could not remove lock: {e}")
-
-    # 4. Kill any process still bound to API port (skip production ports in shadow desktop)
-    protect_prod = os.environ.get("IG_APEX_PROTECT_PRODUCTION_PORTS", "").strip() in (
-        "1",
-        "true",
-        "yes",
-    )
-    port = _api_port()
-    if not (protect_prod and port in (8080, 8787)):
-        _force_cleanup_port(port)
-
-    # 5. Wait for API port to be free (previous server may still be tearing down)
-    import socket as _socket
-
-    _port_free = False
-    for _ in range(10):  # up to 3 s
-        with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
-            s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
-            try:
-                s.bind(("127.0.0.1", port))
-                _port_free = True
-                break
-            except OSError:
-                pass
-        time.sleep(0.3)
-    if not _port_free:
-        _log_engine(
-            f"pre-startup: port {port} still in use after cleanup — proceeding anyway"
-        )
-
-    # 6. Clear any stale in-flight / pending-order state left by the previous
-    #    session.  These are in-memory-only dicts that survive process death via
-    #    runtime_state.json.  Clearing them here means a fresh session always
-    #    starts from a clean state; broker reconciliation re-establishes the
-    #    correct view within seconds of the first position-sync tick.
     try:
         from execution.entry_inflight import recover_startup_inflight_state
         from execution.pending_order_reconcile import recover_pending_state_for_startup
@@ -456,17 +506,15 @@ def _pre_startup_cleanup() -> None:
                 f"pre-startup: cleared {cleared_pending} stale pending order(s) "
                 f"and {cleared_inflight} in-flight entry/ies from previous session"
             )
-    except Exception as e:
-        _log_engine(f"pre-startup: inflight/pending clear failed (ignored): {e}")
+    except Exception as exc:
+        _log_engine(
+            f"pre-startup: inflight/pending clear failed: {type(exc).__name__}: {exc}"
+        )
 
-    # 7. Mark startup phase (visible in splash screen)
-    note = (
-        f"killed {len(killed_pids)} previous session(s)"
-        if killed_pids
-        else "no previous session running"
+    _startup_mark("session_cleanup", f"lock={lock_target.name} port={port}")
+    _log_engine(
+        f"pre-startup: cleanup complete — lock={lock_target.name} port={port} pid={my_pid}"
     )
-    _startup_mark("session_cleanup", note)
-    _log_engine(f"pre-startup: cleanup complete — {note}")
 
 
 def _ensure_watchdog_running() -> None:
@@ -647,6 +695,237 @@ class AgentRuntime:
                 _log_engine(f"telegram shutdown notify failed: {type(e).__name__}: {e}")
         _log_engine("shutdown complete")
 
+    def run_harness(self, *, tick_count: int) -> int:
+        """Boot pipeline + deterministic replay harness; self-terminates on completion."""
+        import time
+
+        from system.instance_lock import release_instance_lock
+        from system.paths import logs_dir, project_root
+        from system.system_state import get_system_state
+        from system.test_harness.runner import (
+            emit_harness_summary,
+            run_harness_tick_phase,
+            run_sync_harness_boot,
+            wait_for_ready,
+        )
+
+        if not get_system_state().gate_complete("G1"):
+            code = run_preflight()
+            if code != EXIT_OK:
+                if code == EXIT_INSTANCE:
+                    release_instance_lock()
+                return code
+
+        from system.boot.port_eviction import reclaim_and_wait
+
+        bind_port = _api_port()
+        if not reclaim_and_wait(bind_port):
+            print(_port_in_use_banner(bind_port), file=sys.stderr)
+            release_instance_lock()
+            return 1
+
+        os.environ.setdefault("IG_AGENT_ROOT", str(project_root()))
+        os.environ.setdefault("PYTHONPATH", str(project_root() / "src"))
+        logs_dir().mkdir(parents=True, exist_ok=True)
+
+        sync_boot = os.environ.get("IG_HARNESS_SYNC_BOOT", "").strip() == "1"
+        ctx = self._boot_context
+
+        if sync_boot:
+            _log_engine("HARNESS: synchronous turbo boot (no uvicorn)")
+            try:
+                ctx = run_sync_harness_boot(ctx)
+            except Exception as exc:
+                _log_engine(
+                    f"HARNESS FAIL-CLOSED: sync boot — {type(exc).__name__}: {exc}"
+                )
+                release_instance_lock()
+                return 15
+        else:
+            import threading
+
+            from api.server import create_app
+
+            app = create_app(
+                watch_snapshot=False,
+                use_boot_pipeline=True,
+                boot_context=self._boot_context,
+            )
+
+            import uvicorn
+
+            config = uvicorn.Config(
+                app, host=_API_HOST, port=bind_port, log_level="warning"
+            )
+            server = uvicorn.Server(config)
+            self._uvicorn_server = server
+
+            def _serve() -> None:
+                try:
+                    server.run()
+                except Exception:
+                    pass
+
+            thread = threading.Thread(target=_serve, name="harness-uvicorn", daemon=True)
+            thread.start()
+
+            _log_engine(f"HARNESS: uvicorn binding :{bind_port} — awaiting READY")
+            if not wait_for_ready(timeout_sec=120.0):
+                self.shutdown(source="harness_boot_failed")
+                release_instance_lock()
+                return 15
+            ctx = getattr(app.state, "boot_context", None) or self._boot_context
+
+        harness_started = time.monotonic()
+        summary = run_harness_tick_phase(tick_count, boot_context=ctx)
+        emit_harness_summary(summary)
+        _log_engine(
+            f"HARNESS: tick phase completed in {time.monotonic() - harness_started:.2f}s"
+        )
+
+        exit_code = 0 if summary.ok else 1
+        release_instance_lock()
+        from system.identity.app_identity import RuntimeIdentity
+
+        lock_path = RuntimeIdentity.get_lock_path()
+        if lock_path.is_file():
+            try:
+                lock_path.unlink(missing_ok=True)
+            except OSError as exc:
+                _log_engine(f"HARNESS: lock unlink failed: {type(exc).__name__}: {exc}")
+
+        if self._uvicorn_server is not None:
+            self._uvicorn_server.should_exit = True
+        os._exit(exit_code)
+
+    def run_daemon_cycle(self, *, interval_sec: float) -> int:
+        """Persistent background daemon — API thread + monotonic trading/ML heartbeats."""
+        import threading
+
+        from api.server import create_app
+        from system.daemon_cycle_kernel import run_monotonic_cycle_loop
+        from system.identity.instance_lock import release_instance_lock
+        from system.paths import logs_dir, project_root
+        from system.system_state import get_system_state
+        from system.test_harness.runner import wait_for_ready
+
+        if not get_system_state().gate_complete("G1"):
+            code = run_preflight()
+            if code != EXIT_OK:
+                if code == EXIT_INSTANCE:
+                    release_instance_lock()
+                return code
+
+        from system.boot.port_eviction import reclaim_and_wait
+
+        bind_port = _api_port()
+        if not reclaim_and_wait(bind_port):
+            print(_port_in_use_banner(bind_port), file=sys.stderr)
+            release_instance_lock()
+            return 1
+
+        os.environ.setdefault("IG_AGENT_ROOT", str(project_root()))
+        os.environ.setdefault("PYTHONPATH", str(project_root() / "src"))
+        logs_dir().mkdir(parents=True, exist_ok=True)
+
+        shutdown_event = threading.Event()
+
+        def _handle_daemon_signal(signum: int, _frame: Any) -> None:
+            _log_engine(f"DAEMON-CYCLE: signal {signum} — graceful shutdown")
+            shutdown_event.set()
+            self.shutdown(source=f"signal:{signum}")
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                signal.signal(sig, _handle_daemon_signal)
+            except (ValueError, OSError):
+                pass
+
+        try:
+            app = create_app(
+                watch_snapshot=True,
+                use_boot_pipeline=True,
+                boot_context=self._boot_context,
+            )
+
+            import uvicorn
+
+            _log_engine(
+                f"DAEMON-CYCLE: API binding :{bind_port} interval={interval_sec:.0f}s"
+            )
+            config = uvicorn.Config(
+                app, host=_API_HOST, port=bind_port, log_level="info"
+            )
+            server = uvicorn.Server(config)
+            self._uvicorn_server = server
+
+            def _serve() -> None:
+                try:
+                    server.run()
+                except Exception as exc:
+                    _log_engine(
+                        f"DAEMON-CYCLE: uvicorn stopped — {type(exc).__name__}: {exc}"
+                    )
+                finally:
+                    shutdown_event.set()
+
+            api_thread = threading.Thread(
+                target=_serve, name="daemon-cycle-uvicorn", daemon=True
+            )
+            api_thread.start()
+
+            if not wait_for_ready(timeout_sec=180.0):
+                self.shutdown(source="daemon_boot_failed")
+                release_instance_lock()
+                return 15
+
+            ctx = getattr(app.state, "boot_context", None) or self._boot_context
+            from system.identity.app_identity import RuntimeIdentity
+
+            lock_path = RuntimeIdentity.get_lock_path()
+            _log_engine(
+                f"DAEMON-CYCLE: READY pid={os.getpid()} lock={lock_path.name} "
+                f"port={bind_port} track={os.environ.get('IG_PARALLEL_TRACK', 'single')} "
+                f"— entering monotonic scheduler"
+            )
+
+            if os.environ.get("IG_PARALLEL_TRACK", "").strip() == "shadow":
+                from system.identity.process_orchestrator import start_shadow_historical_replayer
+
+                start_shadow_historical_replayer(loop=True)
+                try:
+                    from intelligence.matrix_prebaker import start_alpha_matrix_compiler_async
+
+                    start_alpha_matrix_compiler_async()
+                except Exception as exc:
+                    from system.guard.runtime_guard import log_guarded_exception
+
+                    log_guarded_exception("alpha_matrix_compiler_boot", exc)
+
+            try:
+                from system.ipc.ring_buffer import unified_engine_active
+                from system.unified_engine import start_unified_engine
+
+                if unified_engine_active():
+                    start_unified_engine(boot_context=ctx)
+                else:
+                    from system.ipc.shm_watchdog import start_shm_watchdog_async
+
+                    start_shm_watchdog_async()
+            except Exception as exc:
+                from system.guard.runtime_guard import log_guarded_exception
+
+                log_guarded_exception("unified_engine_boot", exc)
+
+            run_monotonic_cycle_loop(
+                interval_sec=interval_sec,
+                boot_context=ctx,
+                shutdown_event=shutdown_event,
+            )
+            return EXIT_OK
+        finally:
+            self.shutdown(source="daemon_cycle_exit")
+
     def run(self) -> int:
         from api.server import create_app
         from system.instance_lock import release_instance_lock
@@ -673,7 +952,8 @@ class AgentRuntime:
         logs_dir().mkdir(parents=True, exist_ok=True)
 
         try:
-            _ensure_watchdog_running()
+            if not _is_test_harness_mode():
+                _ensure_watchdog_running()
 
             app = create_app(
                 watch_snapshot=True,
@@ -713,12 +993,93 @@ def _install_signal_handlers(runtime: AgentRuntime) -> None:
 
 
 def main() -> None:
+    harness_ticks = _parse_harness_ticks()
+    daemon_cycle_sec = _parse_daemon_cycle()
+    isolated_track = _parse_isolated_track()
+    if harness_ticks is not None and harness_ticks <= 0:
+        print("FAIL-CLOSED: --test-harness-ticks must be a positive integer", file=sys.stderr)
+        sys.exit(15)
+    if daemon_cycle_sec is not None and daemon_cycle_sec <= 0:
+        print("FAIL-CLOSED: --daemon-cycle must be a positive integer", file=sys.stderr)
+        sys.exit(15)
+    if harness_ticks is not None and daemon_cycle_sec is not None:
+        print(
+            "FAIL-CLOSED: --test-harness-ticks and --daemon-cycle are mutually exclusive",
+            file=sys.stderr,
+        )
+        sys.exit(15)
+
+    parallel_dual = os.environ.get("IG_PARALLEL_DUAL", "0").strip() == "1"
+    unified_engine = os.environ.get("IG_UNIFIED_ENGINE", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+    orchestrator_child = os.environ.get("IG_ORCHESTRATOR_CHILD", "").strip() == "1"
+    if (
+        daemon_cycle_sec is not None
+        and isolated_track is None
+        and parallel_dual
+        and not unified_engine
+        and not orchestrator_child
+        and harness_ticks is None
+    ):
+        from system.identity.process_orchestrator import launch_dual_tracks_detached
+        from system.paths import project_root
+
+        os.environ.setdefault("IG_AGENT_ROOT", str(project_root()))
+        live_pid, shadow_pid = launch_dual_tracks_detached(cycle_sec=int(daemon_cycle_sec))
+        try:
+            from system.shutdown_cleanup import clear_manual_stop
+
+            clear_manual_stop()
+        except Exception as exc:
+            _log_engine(f"parallel launch: clear_manual_stop failed: {type(exc).__name__}: {exc}")
+        from system.identity.process_orchestrator import run_parallel_supervisor_forever
+
+        run_parallel_supervisor_forever(
+            cycle_sec=int(daemon_cycle_sec),
+            live_pid=int(live_pid),
+            shadow_pid=int(shadow_pid),
+        )
+
+    if daemon_cycle_sec is not None and isolated_track is not None and not orchestrator_child:
+        from system.identity.process_orchestrator import (
+            configure_live_vanguard_env,
+            configure_shadow_simulator_env,
+        )
+
+        if isolated_track == "live":
+            configure_live_vanguard_env(cycle_sec=int(daemon_cycle_sec))
+        else:
+            configure_shadow_simulator_env(cycle_sec=int(daemon_cycle_sec))
+    elif (
+        daemon_cycle_sec is not None
+        and isolated_track is None
+        and unified_engine
+        and not orchestrator_child
+    ):
+        from system.unified_engine import configure_unified_engine_env
+
+        configure_unified_engine_env(cycle_sec=int(daemon_cycle_sec), api_port=_api_port())
+    elif daemon_cycle_sec is not None and isolated_track is None and orchestrator_child:
+        pass
+    elif daemon_cycle_sec is not None and isolated_track is None:
+        from system.daemon_cycle_kernel import configure_daemon_cycle_env, detach_daemon_runtime
+        from system.paths import project_root
+
+        os.environ.setdefault("IG_AGENT_ROOT", str(project_root()))
+        configure_daemon_cycle_env(daemon_cycle_sec)
+        detach_daemon_runtime(log_path=Path("/tmp/ig_agent.live.log"))
+
     from system.env_loader import load_dotenv, prepare_boot_env
     from system.node_profile import apply_node_profile_to_environ, get_node_profile
     from system.paths import project_root
     from system.system_state import stamp_process_boot_start
 
     os.environ.setdefault("IG_AGENT_ROOT", str(project_root()))
+
     _align_desktop_api_port()
     # Finder/GUI launches inherit stale shell IG_* keys — .env must win.
     _from_launcher = os.environ.get("IG_AGENT_FROM_LAUNCHER") == "1" or (
@@ -726,6 +1087,20 @@ def main() -> None:
     )
     load_dotenv(override=_from_launcher)
     prepare_boot_env()
+
+    if os.environ.get("IG_ORCHESTRATOR_CHILD", "").strip() != "1" or isolated_track is not None:
+        try:
+            from system.guard.kernel_interceptor import install_kernel_interceptor
+
+            install_kernel_interceptor()
+        except Exception as exc:
+            _log_engine(f"KernelInterceptor bootstrap failed: {type(exc).__name__}: {exc}")
+
+    if harness_ticks is not None:
+        from system.test_harness.runner import configure_harness_env
+
+        # Watchdog relaunches use IG_AGENT_SKIP_DEPLOY_CHECK=1 (see start_agent_background.sh)
+        configure_harness_env(harness_ticks)
     from system.apex_runtime_mode import apply_runtime_mode_to_environ
 
     apply_runtime_mode_to_environ()
@@ -738,35 +1113,33 @@ def main() -> None:
     from system.system_state import BootPhase, get_system_state
 
     _desktop_fast_bind = os.environ.get("IG_APEX_DESKTOP", "").strip() == "1"
+    _harness_entry = harness_ticks is not None
+    _daemon_entry = daemon_cycle_sec is not None
 
-    atexit.register(lambda: _force_cleanup_port(_api_port()))
-    _rotate_oversized_logs()
+    if not _harness_entry and not _daemon_entry:
+        atexit.register(lambda: _force_cleanup_port(_api_port()))
+        _rotate_oversized_logs()
     _log_engine(
         f"=== {APP_DISPLAY_NAME} {APP_VERSION_LABEL} full restart "
         f"(node={profile.kind} api=:{profile.api_port}) ==="
     )
-    _exchange_rollover_emergence_pause()
-    _purge_workspace_bytecode()
+    if not _harness_entry and not _daemon_entry:
+        _exchange_rollover_emergence_pause()
+        _purge_workspace_bytecode()
     if _desktop_fast_bind:
         try:
             from apex.ipc_bridge import start_ipc_bridge_daemon
             from apex.microkernel import start_microkernel
             from execution.atomic_gateway import set_monitoring_mode
 
-            # Boot gates need passive IG REST (accounts, positions, OHLC).
             set_monitoring_mode(False)
             start_ipc_bridge_daemon()
             start_microkernel(workers_only=True)
             _log_engine("Apex desktop: IPC bridge + micro-kernel armed (workers only)")
         except Exception as exc:
             _log_engine(f"Apex desktop bootstrap failed: {type(exc).__name__}: {exc}")
-        threading.Thread(
-            target=_pre_startup_cleanup,
-            name="pre-startup-cleanup",
-            daemon=True,
-        ).start()
-    else:
-        _pre_startup_cleanup()
+
+    _pre_startup_cleanup()
 
     boot_ctx = None
     if _desktop_fast_bind:
@@ -782,6 +1155,10 @@ def main() -> None:
     runtime = AgentRuntime(boot_context=boot_ctx)
     _install_signal_handlers(runtime)
     try:
+        if harness_ticks is not None:
+            raise SystemExit(runtime.run_harness(tick_count=harness_ticks))
+        if daemon_cycle_sec is not None:
+            raise SystemExit(runtime.run_daemon_cycle(interval_sec=float(daemon_cycle_sec)))
         raise SystemExit(runtime.run())
     except SystemExit as exc:
         if exc.code not in (None, 0):

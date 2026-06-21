@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { api } from "../api/client";
+import { api, authHeaders } from "../api/client";
 import { subscribeWarmup } from "../api/apexIpc.js";
 import { subscribeBootPhase } from "../api/apexBootPhase.js";
-import { recoveryHealthUrl, resolveTargetPort } from "../config.js";
+import { isLiveVanguardPort, recoveryHealthUrl, resolveTargetPort } from "../config.js";
 
 const POLL_MS = 400;
 const API_GRACE_MS = 18000;
@@ -46,6 +46,7 @@ async function probeHealth200() {
     const res = await fetch(recoveryHealthUrl(), {
       method: "GET",
       credentials: "include",
+      headers: authHeaders(),
       signal: AbortSignal.timeout(4000),
     });
     return res.status === 200;
@@ -155,7 +156,11 @@ export default function StartupSplash({ onComplete }) {
         if (elapsed >= API_GRACE_MS && apiFailRef.current >= MAX_API_FAILURES) {
           setError(`Cannot reach agent API — is the server running on :${resolveTargetPort()}?`);
         } else {
-          setLabel("Waiting for detached daemon on :9090…");
+          setLabel(
+            isLiveVanguardPort()
+              ? `Waiting for Live Vanguard on :${resolveTargetPort()}…`
+              : `Waiting for Shadow Simulator on :${resolveTargetPort()}…`,
+          );
         }
       }
 

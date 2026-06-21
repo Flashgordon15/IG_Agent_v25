@@ -1,0 +1,63 @@
+{
+  "schema_version": "1.0",
+  "compiler": "cold_start_compiler",
+  "compiled_at_utc": "2026-06-21T19:05:53+00:00",
+  "compiled_at_epoch": 1782068753.571011,
+  "archive_path": "/Users/chrisgordon/Projects/IG_Agent_v25/src/simulation/data/production_5day_archive.jsonl",
+  "archive_ticks": 43200,
+  "samples_processed": 43200,
+  "evaluation_threshold_pct": 51.5,
+  "evaluation_passes": 22890,
+  "production_confidence_floor_pct": 54.5,
+  "compilation_elapsed_sec": 1.622,
+  "weights": {
+    "bias": 0.0,
+    "coeffs": {
+      "adjusted_score": -1.4699532690867314,
+      "rsi": 0.8899240386435764,
+      "atr_ratio": -0.04721630319038399
+    },
+    "version": 32345,
+    "trained_at": 1782068753.57073
+  },
+  "feature_stats": {
+    "adjusted_score": {
+      "mean": 45.667625,
+      "stdev": 9.286011
+    },
+    "rsi": {
+      "mean": 56.003993,
+      "stdev": 20.466509
+    },
+    "atr_ratio": {
+      "mean": 0.059761,
+      "stdev": 0.079415
+    }
+  },
+  "top_indicators": [
+    {
+      "name": "Adjusted Score",
+      "feature": "adjusted_score",
+      "weight": -1.469953,
+      "weight_pct": 100.0,
+      "delta": -1.469953,
+      "direction": "negative"
+    },
+    {
+      "name": "RSI Momentum",
+      "feature": "rsi",
+      "weight": 0.889924,
+      "weight_pct": 89.0,
+      "delta": 0.889924,
+      "direction": "positive"
+    },
+    {
+      "name": "ATR Regime Ratio",
+      "feature": "atr_ratio",
+      "weight": -0.047216,
+      "weight_pct": 4.7,
+      "delta": -0.047216,
+      "direction": "negative"
+    }
+  ]
+}

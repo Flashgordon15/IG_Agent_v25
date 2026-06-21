@@ -81,8 +81,10 @@ def rotate_oversized_logs() -> None:
                     src.rename(dst)
             log_path.rename(Path(f"{log_path}.1"))
             log_path.touch()
-        except Exception:
-            pass
+        except Exception as exc:
+            from system.guard.runtime_guard import log_guarded_exception
+
+            log_guarded_exception("preflight_helpers", exc)
 
 
 def check_port_available(port: int | None = None) -> bool:

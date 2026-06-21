@@ -86,7 +86,10 @@ class Gate1Runner:
         from system.engine_log import log_engine
 
         ensure_execution_plane_armed_on_boot()
-        if force_market_open_active():
+        import os
+
+        harness_mode = os.environ.get("IG_TEST_HARNESS", "").strip() == "1"
+        if force_market_open_active() and not harness_mode:
             log_engine(
                 "Gate1: DEMO/session validation — market_open=True, "
                 "weekend blackout disabled (24/7 execution plane)"
@@ -117,14 +120,16 @@ class Gate1Runner:
             validate_config,
         )
         from system.credentials_holder import bootstrap_credentials
-        from system.instance_lock import acquire_instance_lock
         from system.paths import logs_dir
 
         profile = apply_node_profile_to_environ()
         api_port = profile.api_port
 
-        logs_dir().mkdir(parents=True, exist_ok=True)
-        rotate_oversized_logs()
+        if not harness_mode:
+            logs_dir().mkdir(parents=True, exist_ok=True)
+            rotate_oversized_logs()
+        else:
+            logs_dir().mkdir(parents=True, exist_ok=True)
 
         if profile.is_shadow:
             log_engine(
@@ -138,8 +143,6 @@ class Gate1Runner:
                 exit_code=self.EXIT_LOCK,
             )
             raise Gate1FatalError("emergency_stop.lock present", exit_code=self.EXIT_LOCK)
-
-        import os
 
         desktop_fast_bind = os.environ.get("IG_APEX_DESKTOP", "").strip() == "1"
         if desktop_fast_bind:
@@ -192,24 +195,39 @@ class Gate1Runner:
         except Exception as exc:
             log_engine(f"Gate1: demo guard error (continuing): {type(exc).__name__}: {exc}")
 
-        ok, msg = acquire_instance_lock()
-        if not ok:
-            try:
-                if not is_benign_startup_lock_failure(msg):
-                    from system.watchdog_banner import record_startup_failure
+        from system.identity.instance_lock import (
+            acquire_instance_lock,
+            lock_held_by_current_process,
+            lock_path,
+            read_lock_holder,
+        )
+        from system.guard.runtime_guard import log_guarded_exception
 
-                    record_startup_failure(msg)
-            except Exception:
-                pass
-            self._fail(f"{APP_DISPLAY_NAME}: {msg}", exit_code=self.EXIT_INSTANCE)
-            raise Gate1FatalError(msg, exit_code=self.EXIT_INSTANCE)
+        my_pid = os.getpid()
+        if lock_held_by_current_process() or read_lock_holder(lock_path()) == my_pid:
+            log_engine(
+                f"Gate1: instance lock already held pid={my_pid} "
+                f"({lock_path().name}) — skipping duplicate acquire"
+            )
+        else:
+            ok, msg = acquire_instance_lock()
+            if not ok:
+                try:
+                    if not is_benign_startup_lock_failure(msg):
+                        from system.watchdog_banner import record_startup_failure
+
+                        record_startup_failure(msg)
+                except Exception as exc:
+                    log_guarded_exception("gate1_runner", exc)
+                self._fail(f"{APP_DISPLAY_NAME}: {msg}", exit_code=self.EXIT_INSTANCE)
+                raise Gate1FatalError(msg, exit_code=self.EXIT_INSTANCE)
 
         try:
             from system.watchdog_banner import record_startup_success
 
             record_startup_success()
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("gate1_runner", exc)
 
         holder = bootstrap_credentials()
         if holder.credentials:

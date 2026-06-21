@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# IG Agent v29 Watchdog — auto-restarts the agent if it dies
-# Runs as a background process independent of the agent itself.
-# Checks every 30 s; restarts on death; caps at 10 restarts/hour.
+# IG Agent watchdog — auto-restarts the agent if it dies.
+# Port and lock path are read from $HOME/.ig_agent_global/active_lock_pointer
+# (written by RuntimeIdentity.export_pointer_for_scripts on every boot).
 
 set -uo pipefail
 
@@ -11,17 +11,67 @@ if [ -n "${IG_AGENT_ROOT:-}" ]; then
 else
     AGENT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 fi
-LOCK_FILE="$AGENT_DIR/src/data/.ig_agent_v29.lock"
+
+POINTER_FILE="${HOME}/.ig_agent_global/active_lock_pointer"
 LOG="$AGENT_DIR/src/data/logs/watchdog.log"
 RESTART_LOG="$AGENT_DIR/src/data/logs/agent_restart.log"
 PID_FILE="$AGENT_DIR/src/data/watchdog.pid"
 START_SCRIPT="$AGENT_DIR/scripts/start_agent_background.sh"
 MAX_RESTARTS_PER_HOUR=10
-PORT=8080
 CHECK_INTERVAL=30
 STARTUP_GRACE_SEC=720
 
+# Resolved each cycle from the global lock pointer (no hardcoded port/lock).
+LOCK_FILE=""
+PORT="8080"
+
 mkdir -p "$AGENT_DIR/src/data/logs"
+
+resolve_lock_file() {
+    if [ -f "$POINTER_FILE" ]; then
+        local p
+        p="$(tr -d '[:space:]' < "$POINTER_FILE" 2>/dev/null || true)"
+        if [ -n "$p" ]; then
+            printf '%s\n' "$p"
+            return 0
+        fi
+    fi
+    printf '%s\n' "${AGENT_DIR}/src/data/.ig_agent_v30_port_8080.lock"
+}
+
+resolve_port_from_lock() {
+    local lock="$1"
+    local base port
+    base="$(basename "$lock")"
+    port="${base#.ig_agent_v30_port_}"
+    port="${port%.lock}"
+    if [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -gt 0 ]; then
+        printf '%s\n' "$port"
+        return 0
+    fi
+    printf '%s\n' "8080"
+}
+
+resolve_agent_dir_from_lock() {
+    local lock="$1"
+    if [[ "$lock" == */src/data/* ]]; then
+        printf '%s\n' "${lock%/src/data/*}"
+        return 0
+    fi
+    printf '%s\n' "$AGENT_DIR"
+}
+
+resolve_runtime_targets() {
+    LOCK_FILE="$(resolve_lock_file)"
+    PORT="$(resolve_port_from_lock "$LOCK_FILE")"
+    AGENT_DIR="$(resolve_agent_dir_from_lock "$LOCK_FILE")"
+    LOG="$AGENT_DIR/src/data/logs/watchdog.log"
+    RESTART_LOG="$AGENT_DIR/src/data/logs/agent_restart.log"
+    PID_FILE="$AGENT_DIR/src/data/watchdog.pid"
+    START_SCRIPT="$AGENT_DIR/scripts/start_agent_background.sh"
+    START_LAUNCHD="$AGENT_DIR/scripts/start_agent_launchd.py"
+    mkdir -p "$AGENT_DIR/src/data/logs"
+}
 
 watchdog_already_running() {
     if [ ! -f "$PID_FILE" ]; then
@@ -42,13 +92,14 @@ log() {
 trap 'rm -f "$PID_FILE"; log "WATCHDOG: received SIGTERM — exiting cleanly"; exit 0' TERM
 trap 'rm -f "$PID_FILE"; log "WATCHDOG: received SIGINT — exiting cleanly"; exit 0' INT
 
+resolve_runtime_targets
+
 if watchdog_already_running; then
     log "WATCHDOG: already running pid=$(tr -d '[:space:]' < "$PID_FILE") — exiting duplicate"
     exit 0
 fi
 
 echo "$$" > "$PID_FILE"
-clear_stale_agent_lock
 
 agent_alive() {
     lsof -iTCP:"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1 && [ -f "$LOCK_FILE" ]
@@ -62,7 +113,7 @@ clear_stale_agent_lock() {
     lock_pid=$(head -1 "$LOCK_FILE" 2>/dev/null | awk '{print $1}' || true)
     if [ -z "$lock_pid" ]; then
         rm -f "$LOCK_FILE"
-        log "WATCHDOG: removed empty instance lock"
+        log "WATCHDOG: removed empty instance lock ($LOCK_FILE)"
         return 0
     fi
     if kill -0 "$lock_pid" 2>/dev/null \
@@ -77,6 +128,8 @@ clear_stale_agent_lock() {
         log "WATCHDOG: removed stale instance lock (pid=${lock_pid} but port ${PORT} free)"
     fi
 }
+
+clear_stale_agent_lock
 
 main_py_booting() {
     if ! /usr/bin/pgrep -f "${AGENT_DIR}/src/main.py" >/dev/null 2>&1; then
@@ -154,7 +207,6 @@ except Exception:
 UNHEALTHY_STREAK=0
 UNHEALTHY_RESTART_AFTER=3
 last_restart_epoch=$(date +%s)
-START_LAUNCHD="$AGENT_DIR/scripts/start_agent_launchd.py"
 
 resolve_python_bin() {
     local candidate PY=""
@@ -176,17 +228,15 @@ resolve_python_bin() {
     printf '%s\n' "${PY}"
 }
 
-# Grace applies after watchdog or agent restarts an instance — not when agent is
-# simply down on a fresh watchdog start (otherwise kickstart waits 720s idle).
 last_restart_epoch=0
 if agent_alive; then
     last_restart_epoch=$(date +%s)
-    log "WATCHDOG: agent already up — startup grace ${STARTUP_GRACE_SEC}s"
+    log "WATCHDOG: agent already up — startup grace ${STARTUP_GRACE_SEC}s (port=${PORT} lock=${LOCK_FILE})"
 elif main_py_booting; then
     last_restart_epoch=$(date +%s)
-    log "WATCHDOG: main.py booting — startup grace ${STARTUP_GRACE_SEC}s"
+    log "WATCHDOG: main.py booting — startup grace ${STARTUP_GRACE_SEC}s (port=${PORT})"
 else
-    log "WATCHDOG: agent down on watchdog start — first restart check immediate"
+    log "WATCHDOG: agent down on watchdog start — first restart check immediate (port=${PORT})"
 fi
 
 cleanup_stale() {
@@ -201,7 +251,7 @@ cleanup_stale() {
 
     if [ -f "$LOCK_FILE" ] && ! main_py_booting; then
         rm -f "$LOCK_FILE"
-        log "WATCHDOG: removed stale lock file"
+        log "WATCHDOG: removed stale lock file ($LOCK_FILE)"
     fi
 }
 
@@ -264,11 +314,13 @@ in_startup_grace() {
     (( elapsed < STARTUP_GRACE_SEC ))
 }
 
-log "=== WATCHDOG started pid=$$ dir=$AGENT_DIR port=$PORT interval=${CHECK_INTERVAL}s grace=${STARTUP_GRACE_SEC}s max_restarts_per_hour=$MAX_RESTARTS_PER_HOUR ==="
+log "=== WATCHDOG started pid=$$ dir=$AGENT_DIR port=$PORT lock=$LOCK_FILE pointer=$POINTER_FILE interval=${CHECK_INTERVAL}s grace=${STARTUP_GRACE_SEC}s max_restarts_per_hour=$MAX_RESTARTS_PER_HOUR ==="
 
 declare -a restart_times=()
 
 while true; do
+    resolve_runtime_targets
+
     need_restart=0
     restart_reason=""
 

@@ -344,7 +344,16 @@ class ApexMicroKernel:
                 # apex_ipc.sock during boot (IPC suicide loop).
                 port = int(os.environ.get("IG_API_PORT", "8080"))
                 desktop = os.environ.get("IG_APEX_DESKTOP", "").strip() == "1"
-                if port != 9090 and not desktop:
+                try:
+                    from system.apex_runtime_mode import (
+                        ApexRuntimeMode,
+                        get_apex_runtime_mode,
+                    )
+
+                    testbed = get_apex_runtime_mode() is ApexRuntimeMode.HARDENED_TESTBED
+                except Exception:
+                    testbed = False
+                if not testbed and port != 9090 and not desktop:
                     from system.watchdog_sentinel import start_watchdog_self_healer
 
                     start_watchdog_self_healer()
@@ -414,6 +423,7 @@ class ApexMicroKernel:
             offer = float(getattr(quote, "offer", 0) or 0)
         except (TypeError, ValueError):
             return
+        bid, offer = _maybe_chaos_widen_quote(str(epic or ""), bid, offer)
         raw: dict[str, Any] = {}
         if isinstance(quote, dict):
             raw = quote
@@ -615,6 +625,7 @@ class ApexMicroKernel:
             )
             if verdict.allowed:
                 self._stats["risk_pass"] += 1
+                _maybe_chaos_execution_delay()
             try:
                 self._close_q.put_nowait(mf)
             except queue.Full:
@@ -755,6 +766,28 @@ def schedule_array_warmup(
         cfg,
         on_complete=on_complete,
     )
+
+
+def _maybe_chaos_widen_quote(epic: str, bid: float, offer: float) -> tuple[float, float]:
+    try:
+        from simulation.optimization_chaos import chaos_enabled, widen_spread
+
+        if chaos_enabled() and bid > 0 and offer > 0:
+            bid, offer, _ = widen_spread(bid, offer, epic=epic)
+    except Exception:
+        pass
+    return bid, offer
+
+
+def _maybe_chaos_execution_delay() -> float:
+    try:
+        from simulation.optimization_chaos import apply_fill_latency, chaos_enabled
+
+        if chaos_enabled():
+            return apply_fill_latency()
+    except Exception:
+        pass
+    return 0.0
 
 
 def reset_microkernel_for_tests() -> None:

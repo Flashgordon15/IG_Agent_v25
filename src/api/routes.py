@@ -649,6 +649,47 @@ def api_intelligence_dashboard() -> dict[str, Any]:
     return intelligence_dashboard()
 
 
+@router.get("/api/shadow/brain")
+def api_shadow_brain() -> dict[str, Any]:
+    """Shadow Brain (:9199) — data health, gate funnel, live tolerance output."""
+    from intelligence.shadow_brain_loop import brain_dashboard_payload
+
+    return brain_dashboard_payload()
+
+
+@router.get("/api/shadow/alpha-matrix")
+def api_shadow_alpha_matrix() -> dict[str, Any]:
+    """Shadow (:9199) — pre-baked alpha matrix compiler + lookup telemetry."""
+    from intelligence.matrix_prebaker import alpha_matrix_dashboard_payload
+
+    return alpha_matrix_dashboard_payload()
+
+
+@router.get("/api/unified/performance")
+def api_unified_performance() -> dict[str, Any]:
+    """Unified engine — Thread A/B alignment, e2e latency, vector density."""
+    from system.unified_engine import unified_performance_payload
+
+    return unified_performance_payload()
+
+
+@router.get("/api/unified/fulfillment")
+def api_unified_fulfillment() -> dict[str, Any]:
+    """Decoupled 1 Hz fulfillment snapshot — zero hot-path cost."""
+    from system.unified_fulfillment_cache import get_fulfillment_payload
+
+    return get_fulfillment_payload()
+
+
+@router.post("/api/internal/live-tolerance")
+def api_internal_live_tolerance(payload: dict[str, Any]) -> dict[str, Any]:
+    """Shadow dispatcher handoff — apply gate-floor adjustments on Live Vanguard."""
+    from system.identity.live_tolerance_bridge import apply_tolerance_payload
+
+    applied = apply_tolerance_payload(payload)
+    return {"ok": applied, "applied": applied, "source": payload.get("source")}
+
+
 @router.post("/api/replay/run")
 def api_replay_run() -> dict[str, Any]:
     return run_replay_pipeline()

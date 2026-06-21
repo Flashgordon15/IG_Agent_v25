@@ -70,8 +70,8 @@ export default function AuthLogin({ onSuccess }) {
           />
 
           <p className="auth-gate__hint">
-            Password is <code>ADMIN_PASSWORD</code> from launchd (default:{" "}
-            <code>ig-agent-v30-workspace</code>).
+            Password is your <code>IG_PASSWORD</code> from the project{" "}
+            <code>.env</code> file (copied to dashboard admin auth at boot).
           </p>
 
           {error && (

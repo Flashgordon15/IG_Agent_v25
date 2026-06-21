@@ -4,20 +4,30 @@ FastAPI API server — lazy router bootstrap for fast Uvicorn bind.
 Bootstrap routes (health + dashboard SPA shell) register at factory time so
 port :8080 serves ``/`` immediately. Trading API routers mount via
 ``mount_deferred_routers`` after the socket is listening.
+
+Flight Deck cockpit (:8787) is **never** co-located with trading API lifecycle.
+The isolated read-only consumer lives in ``api.isolated_cockpit_server`` and is
+spawned by ``ParallelTrackSupervisor`` — it reads ``ig_agent_v30_live_state``
+only and cannot clear :8080 or mutate trading state.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import APIRouter, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse
+
+from api.agent_control import enrich_tick_runtime
+from api.snapshot_store import get_tick, subscribe
+from system.paths import data_dir
 from fastapi.staticfiles import StaticFiles
 
 _startup_hooks: list = []
@@ -64,6 +74,26 @@ def _register_bootstrap_routes(app: FastAPI) -> None:
 
     @app.get("/api/health", include_in_schema=False)
     def bootstrap_api_health() -> dict[str, Any]:
+        from datetime import datetime, timezone
+
+        from api.agent_health import get_cached_health_status
+        from api.snapshot_store import snapshot_age_s_fast
+
+        status = get_cached_health_status()
+        if isinstance(status.get("ok"), bool):
+            return {
+                **status,
+                "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
+                + "Z",
+                "snapshot_age_s": snapshot_age_s_fast(),
+            }
+        if getattr(app.state, "deferred_routes_registered", False):
+            return {
+                **status,
+                "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
+                + "Z",
+                "snapshot_age_s": snapshot_age_s_fast(),
+            }
         return bootstrap_health()
 
     @app.get("/api/startup/status", include_in_schema=False)
@@ -362,8 +392,6 @@ async def _run_legacy_deferred_mount(
     watcher: asyncio.Task | None = None
     await _yield_event_loop()
     try:
-        from api.server_deferred import mount_deferred_routers
-
         await asyncio.to_thread(mount_deferred_routers, app, loop)
         mount_done.set()
         threading.Thread(
@@ -416,7 +444,7 @@ def create_app(
 
         if os.environ.get("IG_AGENT_PYTEST") == "1":
             await mount_done.wait()
-        else:
+        elif os.environ.get("IG_TEST_HARNESS") != "1":
             try:
                 from system.manual_kill_monitor import start_manual_kill_monitor
 
@@ -449,6 +477,537 @@ def create_app(
     _register_bootstrap_routes(app)
     _mount_dashboard_static(app)
     return app
+
+
+
+# --- Monolithic deferred API surface (formerly server_deferred.py) ---
+
+_router_mounted = False
+
+_NO_CACHE = {
+    "Cache-Control": "no-cache, no-store, must-revalidate",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
+
+
+def _data(filename: str) -> Path:
+    return data_dir() / filename
+
+
+def _watchdog_failed() -> bool:
+    return _data("watchdog_failed.txt").exists()
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    out: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line:
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    return out
+
+
+router = APIRouter()
+
+
+@router.get("/api/live-state")
+def api_live_state() -> dict[str, Any]:
+    """Read dual-track telemetry — live + mock SHM segments with GUI prefixes."""
+    from system.identity.shared_memory_bridge import read_dual_track_telemetry_envelope
+
+    return read_dual_track_telemetry_envelope()
+
+
+@router.get("/api/state")
+def api_state() -> dict[str, Any]:
+    tick = get_tick()
+    sig = tick.get("signal") or {}
+    pts = tick.get("points") or {}
+    return {
+        "bid": tick.get("bid"),
+        "offer": tick.get("offer"),
+        "agent_state": pts.get("state", "CAUTION"),
+        "points_trade": float(pts.get("last_trade") or 0),
+        "points_session": float(pts.get("session") or 0),
+        "points_cumulative": float(pts.get("cumulative") or 0),
+        "ml_confidence": float(sig.get("confidence") or 0),
+        "signal_strength": float(sig.get("confidence") or 0),
+        "fitness_score": float(sig.get("fitness") or 0),
+        "fitness_factors": sig.get("fitness_factors") or {},
+        "signal_threshold": float(sig.get("threshold") or 0),
+        "config_signal_threshold": float(sig.get("config_signal_threshold") or 0),
+        "min_size_threshold": float(sig.get("min_size_threshold") or 0),
+        "points_confidence_floor": float(sig.get("points_confidence_floor") or 0),
+        "regime": tick.get("regime"),
+        "win_rate_today": tick.get("win_rate_today"),
+        "win_rate_alltime": tick.get("win_rate_20"),
+        "daily_pnl_gbp": float(tick.get("daily_pnl_gbp") or 0),
+        "stream_status": tick.get("stream_status", "DISCONNECTED"),
+        "rest_budget": tick.get("rest_calls_min", 0),
+        "spread_current": tick.get("spread"),
+        "spread_normal": tick.get("spread_normal"),
+        "sentiment_factor": tick.get("sentiment_factor"),
+        "watchdog_failed": _watchdog_failed(),
+    }
+
+
+@router.get("/api/trades")
+def api_trades() -> dict[str, Any]:
+    tick = get_tick()
+    active: list[dict[str, Any]] = list(tick.get("positions") or [])
+    closed: list[dict[str, Any]] = []
+    try:
+        from api.dashboard_data import get_closed_trades
+
+        for row in get_closed_trades(limit=100):
+            if not row.get("deal_id"):
+                continue
+            if row.get("pending"):
+                continue
+            result = str(row.get("result") or "").upper()
+            if result not in ("WIN", "LOSS", "PENDING"):
+                continue
+            closed.append(
+                {
+                    "deal_id": row["deal_id"],
+                    "direction": row.get("direction"),
+                    "market": row.get("market"),
+                    "entry": row.get("entry"),
+                    "exit": row.get("exit"),
+                    "pnl_gbp": row.get("pnl_gbp"),
+                    "result": result,
+                    "closed_at": row.get("closed_at"),
+                    "setup": row.get("setup"),
+                }
+            )
+    except Exception:
+        pass
+    return {"active": active, "closed": closed}
+
+
+@router.get("/api/points")
+def api_points() -> dict[str, Any]:
+    pts = get_tick().get("points") or {}
+    return {
+        "trade": float(pts.get("last_trade") or 0),
+        "session": float(pts.get("session") or 0),
+        "cumulative": float(pts.get("cumulative") or 0),
+        "agent_state": pts.get("state", "CAUTION"),
+    }
+
+
+@router.get("/api/replay/summary")
+def api_replay_summary() -> dict[str, Any]:
+    from system.replay_scheduler_state import load_replay_scheduler_state
+
+    rows = _read_jsonl(_data("replay_results.jsonl"))
+    last_entry = rows[-1] if rows else {}
+    replay_state = load_replay_scheduler_state()
+    return {"last_result": last_entry, "replay_state": replay_state}
+
+
+@router.get("/api/shadow/today")
+def api_shadow_today() -> dict[str, Any]:
+    from api.intelligence_data import shadow_today as _shadow_today
+
+    return _shadow_today()
+
+
+@router.get("/api/learning/status")
+def api_learning_status() -> dict[str, Any]:
+    from api.intelligence_data import learning_status as _learning_status
+
+    return _learning_status()
+
+
+@router.get("/api/learning/status_legacy")
+def api_learning_status_legacy() -> dict[str, Any]:
+    ml_store_rows = len(_read_jsonl(_data("ml_training_store.jsonl")))
+    confirmed_trade_count = 0
+    top_setups_by_win_rate: list[dict[str, Any]] = []
+    try:
+        from data.learning_store import LearningStore
+        from system.config_loader import ConfigLoader
+        from system.paths import config_dir
+
+        from system.config_loader import load_active_config
+
+        cfg = load_active_config(validate=False)
+        store = LearningStore(str(cfg.learning_db))
+        if hasattr(store, "recent_confirmed_closed_trades"):
+            confirmed_trade_count = len(store.recent_confirmed_closed_trades(limit=500))
+        rows = store.conn.execute(
+            """
+            SELECT setup_key, COUNT(*) AS n,
+                   ROUND(SUM(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) * 1.0 / COUNT(*), 3) AS win_rate
+            FROM trades WHERE closed_at IS NOT NULL AND setup_key IS NOT NULL
+            GROUP BY setup_key ORDER BY win_rate DESC LIMIT 5
+            """
+        ).fetchall()
+        top_setups_by_win_rate = [
+            {"setup_key": r[0], "count": int(r[1]), "win_rate": float(r[2])}
+            for r in rows
+        ]
+    except Exception:
+        pass
+    target = 500
+    progress = min(100.0, round(100 * ml_store_rows / target, 1)) if target else 0.0
+    return {
+        "ml_store_rows": ml_store_rows,
+        "confirmed_trade_count": confirmed_trade_count,
+        "top_setups_by_win_rate": top_setups_by_win_rate,
+        "progress_to_500": progress,
+    }
+
+
+_replay_mutex = threading.Lock()
+
+
+@router.post("/api/replay/run")
+def api_replay_run() -> Any:
+    from fastapi.responses import JSONResponse
+
+    from system.replay_scheduler_runner import in_replay_api_window, run_replay_pipeline
+    from system.replay_scheduler_state import load_replay_scheduler_state
+
+    if not in_replay_api_window():
+        return JSONResponse(
+            {"ok": False, "error": "outside trading window 07:00\u201322:30 London"},
+            status_code=409,
+        )
+    state = load_replay_scheduler_state()
+    if str(state.get("status") or "") == "running":
+        return JSONResponse(
+            {"ok": False, "error": "replay already running"},
+            status_code=423,
+        )
+    with _replay_mutex:
+
+        def _run() -> None:
+            try:
+                run_replay_pipeline(scheduled=False)
+            except Exception as exc:
+                from system.engine_log import log_engine
+
+                log_engine(f"api replay run failed: {type(exc).__name__}: {exc}")
+
+        try:
+            live = threading.active_count()
+            if live > 400:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": (
+                            f"thread count high ({live}) — restart agent to free threads, "
+                            "then retry replay"
+                        ),
+                    },
+                    status_code=503,
+                )
+            threading.Thread(target=_run, name="replay-manual", daemon=True).start()
+        except Exception as exc:
+            return JSONResponse(
+                {"ok": False, "error": f"launch failed: {type(exc).__name__}: {exc}"},
+                status_code=500,
+            )
+    return JSONResponse({"ok": True, "status": "accepted"}, status_code=202)
+
+
+ws_router = APIRouter()
+
+
+class _StreamHub:
+    """Fan-out snapshot_store tick updates to /ws/stream WebSocket clients."""
+
+    def __init__(self) -> None:
+        self._queues: dict[WebSocket, asyncio.Queue[dict[str, Any]]] = {}
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._unsub: Any | None = None
+
+    def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._loop = loop
+        if self._unsub is None:
+            self._unsub = subscribe(self._on_tick_threadsafe)
+
+    def _deliver(self, tick: dict[str, Any]) -> None:
+        enriched = enrich_tick_runtime(tick)
+        for q in list(self._queues.values()):
+            try:
+                q.put_nowait(enriched)
+            except asyncio.QueueFull:
+                try:
+                    q.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                try:
+                    q.put_nowait(enriched)
+                except asyncio.QueueFull:
+                    pass
+
+    def _on_tick_threadsafe(self, tick: dict[str, Any]) -> None:
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(lambda: self._deliver(tick))
+
+    def register(self, ws: WebSocket, queue: asyncio.Queue[dict[str, Any]]) -> None:
+        self._queues[ws] = queue
+
+    def unregister(self, ws: WebSocket) -> None:
+        self._queues.pop(ws, None)
+
+
+stream_hub = _StreamHub()
+
+
+class _SharedMemoryTelemetryHub:
+    """
+    Decoupled API consumer — polls both track SHM segments, broadcasts enveloped JSON.
+
+    Network failures stop at this process barrier; trading loops never observe
+    WebSocket disconnects or browser reloads.
+    """
+
+    def __init__(self) -> None:
+        self._queues: dict[WebSocket, asyncio.Queue[dict[str, Any]]] = {}
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._last_live_epoch: float = 0.0
+        self._last_shadow_epoch: float = 0.0
+
+    def attach_shared_memory(self) -> None:
+        from system.identity.shared_memory_bridge import attach_shared_memory_consumer
+
+        attach_shared_memory_consumer(track="live")
+        attach_shared_memory_consumer(track="shadow")
+
+    def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        if self._loop is not None:
+            return
+        self.attach_shared_memory()
+        self._loop = loop
+        self._thread = threading.Thread(
+            target=self._poll_loop,
+            name="shared-memory-telemetry-poller",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _poll_loop(self) -> None:
+        from system.identity.shared_memory_bridge import (
+            read_dual_track_telemetry_envelope,
+            read_track_state_payload,
+        )
+
+        while not self._stop.is_set():
+            try:
+                live_payload = read_track_state_payload("live")
+                shadow_payload = read_track_state_payload("shadow")
+                live_epoch = float(live_payload.get("updated_at_epoch") or 0.0)
+                shadow_epoch = float(shadow_payload.get("updated_at_epoch") or 0.0)
+                if (
+                    live_epoch > self._last_live_epoch
+                    or shadow_epoch > self._last_shadow_epoch
+                ):
+                    self._last_live_epoch = live_epoch
+                    self._last_shadow_epoch = shadow_epoch
+                    envelope = read_dual_track_telemetry_envelope()
+                    if self._loop is not None:
+                        self._loop.call_soon_threadsafe(
+                            lambda p=envelope: self._deliver(p)
+                        )
+            except Exception:
+                pass
+            self._stop.wait(timeout=0.25)
+
+    def _deliver(self, payload: dict[str, Any]) -> None:
+        dead: list[WebSocket] = []
+        for ws, q in list(self._queues.items()):
+            try:
+                q.put_nowait(payload)
+            except asyncio.QueueFull:
+                try:
+                    q.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                try:
+                    q.put_nowait(payload)
+                except asyncio.QueueFull:
+                    dead.append(ws)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self._queues.pop(ws, None)
+
+    def register(self, ws: WebSocket, queue: asyncio.Queue[dict[str, Any]]) -> None:
+        self._queues[ws] = queue
+
+    def unregister(self, ws: WebSocket) -> None:
+        self._queues.pop(ws, None)
+
+
+telemetry_stream_hub = _SharedMemoryTelemetryHub()
+live_state_hub = telemetry_stream_hub
+
+
+async def _serve_telemetry_stream(ws: WebSocket) -> None:
+    """Shared handler — dual-track envelope with [LIVE-TRACK] / [MOCK-TRACK] prefixes."""
+    from system.identity.shared_memory_bridge import read_dual_track_telemetry_envelope
+
+    await ws.accept()
+    outbound: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=32)
+    telemetry_stream_hub.register(ws, outbound)
+    await outbound.put(read_dual_track_telemetry_envelope())
+
+    async def _reader() -> None:
+        while True:
+            await ws.receive_text()
+
+    async def _writer() -> None:
+        while True:
+            payload = await outbound.get()
+            await ws.send_json(payload)
+
+    try:
+        await asyncio.gather(_reader(), _writer())
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        telemetry_stream_hub.unregister(ws)
+
+
+@ws_router.websocket("/api/telemetry/stream")
+async def ws_api_telemetry_stream(ws: WebSocket) -> None:
+    """Institutional telemetry stream — reads shared RAM, same JSON as ``/api/live-state``."""
+    await _serve_telemetry_stream(ws)
+
+
+@ws_router.websocket("/ws/live-state")
+async def ws_live_state(ws: WebSocket) -> None:
+    """Backward-compatible alias — identical payload to ``/api/telemetry/stream``."""
+    await _serve_telemetry_stream(ws)
+
+
+@ws_router.websocket("/ws/stream")
+async def ws_stream(ws: WebSocket) -> None:
+    await ws.accept()
+    outbound: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=64)
+    stream_hub.register(ws, outbound)
+    await outbound.put(enrich_tick_runtime(get_tick()))
+
+    async def _reader() -> None:
+        while True:
+            await ws.receive_text()
+
+    async def _writer() -> None:
+        while True:
+            tick = await outbound.get()
+            await ws.send_json(tick)
+
+    try:
+        await asyncio.gather(_reader(), _writer())
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        stream_hub.unregister(ws)
+
+
+def _dashboard_dist() -> Path:
+    dist = resolve_dashboard_dist()
+    if dist is not None:
+        return dist
+    return (Path(__file__).resolve().parents[2] / "dashboard" / "dist").resolve()
+
+
+def _mount_dashboard_spa_fallback(app: FastAPI, dist: Path) -> None:
+    """SPA deep-link fallback — must run after all ``/api/*`` routers are registered."""
+    if getattr(app.state, "dashboard_spa_fallback_mounted", False):
+        return
+
+    index = dist / "index.html"
+    if not index.is_file():
+        return
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def dashboard_static_or_spa(full_path: str) -> FileResponse:
+        if full_path.startswith("api/") or full_path in ("ws", "ws/stream", "ws/live-state"):
+            raise HTTPException(status_code=404, detail="Not Found")
+        candidate = dist / full_path
+        if candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(index, headers=_NO_CACHE)
+
+    app.state.dashboard_spa_fallback_mounted = True
+
+
+def register_deferred_route_tables(app: FastAPI) -> None:
+    """Register trading API + websocket routes at factory time (before Uvicorn start)."""
+    if getattr(app.state, "deferred_routes_registered", False):
+        return
+
+    from api import routes as _legacy_routes
+    from api import ws as _legacy_ws
+
+    app.include_router(router)
+    app.include_router(ws_router)
+    app.include_router(_legacy_routes.router)
+    app.include_router(_legacy_ws.router)
+
+    dist = getattr(app.state, "dashboard_dist", None) or _dashboard_dist()
+    if (dist / "index.html").is_file():
+        _mount_dashboard_spa_fallback(app, dist)
+
+    app.state.deferred_routes_registered = True
+
+
+def mount_deferred_routers(app: FastAPI, loop: asyncio.AbstractEventLoop) -> None:
+    """Post-bind: register trading routes, bind websocket loop, start health cache."""
+    global _router_mounted
+    if _router_mounted or getattr(app.state, "deferred_routers_mounted", False):
+        return
+
+    register_deferred_route_tables(app)
+
+    stream_hub.bind_loop(loop)
+    telemetry_stream_hub.bind_loop(loop)
+    from api import ws as _legacy_ws
+
+    _legacy_ws.hub.bind_loop(loop)
+
+    try:
+        from api.agent_health import start_health_cache_refresher
+
+        start_health_cache_refresher()
+    except Exception:
+        pass
+
+    _router_mounted = True
+    app.state.deferred_routers_mounted = True
+
+    from system.engine_log import log_engine
+
+    log_engine("API: deferred trading routers mounted")
+
+
+def isolated_cockpit_policy_summary() -> dict[str, str]:
+    """Document native Flight Deck isolation — no shell port-clearing scripts."""
+    return {
+        "cockpit_port": "8787",
+        "cockpit_module": "api.isolated_cockpit_server",
+        "shm_segment": "ig_agent_v30_live_state",
+        "mode": "read_only",
+        "live_vanguard_port": "8080",
+        "policy": "8787 recycle never signals 8080",
+    }
 
 
 def main() -> None:

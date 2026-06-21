@@ -22,10 +22,16 @@ def _agent_pid() -> int | None:
     lock = os.environ.get("IG_AGENT_PID")
     if lock and str(lock).isdigit():
         return int(lock)
-    lock_path = data_dir() / ".ig_agent_v25.lock"
-    if lock_path.exists():
+    lock_path_val = None
+    try:
+        from system.instance_lock import lock_path
+
+        lock_path_val = lock_path()
+    except Exception:
+        lock_path_val = data_dir() / ".ig_agent_v25.lock"
+    if lock_path_val.exists():
         try:
-            raw = lock_path.read_text(encoding="utf-8").strip()
+            raw = lock_path_val.read_text(encoding="utf-8").strip()
             pid = int(raw.split()[0]) if raw else 0
             return pid if pid > 0 else None
         except (ValueError, OSError):

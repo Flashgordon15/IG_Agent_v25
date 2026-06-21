@@ -328,7 +328,7 @@ class OrderValidator:
         return self.check_execution_protect_spread(signal)
 
     @staticmethod
-    def check_scalping_entry_halt() -> tuple[bool, str]:
+    def check_scalping_entry_halt(_self: object | None = None) -> tuple[bool, str]:
         try:
             from execution.scalping.config import is_scalping_enabled
             from execution.scalping.entry_halt import entry_halt_detail, is_entry_halted

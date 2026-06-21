@@ -292,64 +292,69 @@ def build_market_orchestrator(
     if not enabled:
         raise ValueError("No enabled instruments in config")
 
+    _harness_boot = boot_mode and os.environ.get("IG_TEST_HARNESS", "").strip() == "1"
+
     store = LearningStore(str(cfg.learning_db))
     points_engine = PointsEngine(store)
     _startup_mark("database")
 
-    try:
-        from system.v291_upgrade import apply_v291_upgrade
-
-        upgrade = apply_v291_upgrade(store, cfg=cfg, points_engine=points_engine)
-        if upgrade.get("applied") or upgrade.get("refreshed"):
-            log_engine(
-                f"daily_loss_reset: effective_loss_gbp="
-                f"{upgrade.get('effective_loss_gbp')} baseline_pnl="
-                f"{upgrade.get('baseline_pnl')} "
-                f"first_install={upgrade.get('first_install')}"
-            )
-    except Exception as e:
-        log_engine(f"v29.1 upgrade skipped: {type(e).__name__}: {e}")
-
-    try:
-        from execution.portfolio_hooks import rehydrate_risk_guards_from_store
-
-        rehydrate_risk_guards_from_store(store, cfg=cfg)
-    except Exception as e:
-        log_engine(f"phase_b risk rehydrate skipped: {type(e).__name__}: {e}")
-
-    try:
-        from system.gate_coherence import (
-            audit_trading_readiness,
-            format_report,
-            write_coherence_snapshot,
-        )
-
-        pts_state = points_engine.get_state()
-        coherence = audit_trading_readiness(
-            cfg, store, points_state=pts_state, repair_db=True, per_market=True
-        )
+    if not _harness_boot:
         try:
-            write_coherence_snapshot(coherence)
-        except Exception:
-            pass
-        for issue in coherence.critical:
-            log_engine(f"GATE COHERENCE CRITICAL [{issue.code}]: {issue.message}")
-        for issue in coherence.warnings:
-            log_engine(f"GATE COHERENCE WARN [{issue.code}]: {issue.message}")
-        if coherence.critical:
-            try:
-                from system.telegram_notifier import send_critical_alert
+            from system.v291_upgrade import apply_v291_upgrade
 
-                send_critical_alert(
-                    "Gate coherence CRITICAL — trading may be blocked; "
-                    + coherence.critical[0].message[:120]
+            upgrade = apply_v291_upgrade(store, cfg=cfg, points_engine=points_engine)
+            if upgrade.get("applied") or upgrade.get("refreshed"):
+                log_engine(
+                    f"daily_loss_reset: effective_loss_gbp="
+                    f"{upgrade.get('effective_loss_gbp')} baseline_pnl="
+                    f"{upgrade.get('baseline_pnl')} "
+                    f"first_install={upgrade.get('first_install')}"
                 )
+        except Exception as e:
+            log_engine(f"v29.1 upgrade skipped: {type(e).__name__}: {e}")
+
+        try:
+            from execution.portfolio_hooks import rehydrate_risk_guards_from_store
+
+            rehydrate_risk_guards_from_store(store, cfg=cfg)
+        except Exception as e:
+            log_engine(f"phase_b risk rehydrate skipped: {type(e).__name__}: {e}")
+
+        try:
+            from system.gate_coherence import (
+                audit_trading_readiness,
+                format_report,
+                write_coherence_snapshot,
+            )
+
+            pts_state = points_engine.get_state()
+            coherence = audit_trading_readiness(
+                cfg, store, points_state=pts_state, repair_db=True, per_market=True
+            )
+            try:
+                write_coherence_snapshot(coherence)
             except Exception:
                 pass
-        elif coherence.warnings:
-            log_engine(format_report(coherence))
-    except Exception as e:
-        log_engine(f"gate coherence audit skipped: {type(e).__name__}: {e}")
+            for issue in coherence.critical:
+                log_engine(f"GATE COHERENCE CRITICAL [{issue.code}]: {issue.message}")
+            for issue in coherence.warnings:
+                log_engine(f"GATE COHERENCE WARN [{issue.code}]: {issue.message}")
+            if coherence.critical:
+                try:
+                    from system.telegram_notifier import send_critical_alert
+
+                    send_critical_alert(
+                        "Gate coherence CRITICAL — trading may be blocked; "
+                        + coherence.critical[0].message[:120]
+                    )
+                except Exception:
+                    pass
+            elif coherence.warnings:
+                log_engine(format_report(coherence))
+        except Exception as e:
+            log_engine(f"gate coherence audit skipped: {type(e).__name__}: {e}")
+    else:
+        log_engine("build_market_orchestrator: harness turbo — skipped upgrade/coherence")
 
     # Quick self-test — run deployed-fixes regression suite to catch stale code
     if not boot_mode:
@@ -397,34 +402,48 @@ def build_market_orchestrator(
             log_engine(f"startup self-test skipped: {type(e).__name__}: {e}")
 
     # Smoke test — verify no known blocking conditions carried over from previous session
-    try:
-        from execution.pending_order_reconcile import recover_pending_state_for_startup
+    if not _harness_boot:
+        try:
+            from execution.pending_order_reconcile import recover_pending_state_for_startup
 
-        recover_pending_state_for_startup()
-        from api.agent_control import is_paused, start_trading
+            recover_pending_state_for_startup()
+            from api.agent_control import is_paused, start_trading
 
-        if is_paused():
-            start_trading()  # auto-unpause if somehow paused at startup
-            log_engine(
-                "startup smoke-test: auto-unpaused trading (was paused at startup)"
+            if is_paused():
+                start_trading()  # auto-unpause if somehow paused at startup
+                log_engine(
+                    "startup smoke-test: auto-unpaused trading (was paused at startup)"
+                )
+            _startup_mark("smoke_test", "clear")
+            log_engine("startup smoke-test: no blocking conditions detected")
+        except Exception as e:
+            _startup_mark("smoke_test", f"warning: {type(e).__name__}")
+            log_engine(f"startup smoke-test warning: {type(e).__name__}: {e}")
+
+        try:
+            from system.telegram_notifier import (
+                configure_telegram,
             )
-        _startup_mark("smoke_test", "clear")
-        log_engine("startup smoke-test: no blocking conditions detected")
-    except Exception as e:
-        _startup_mark("smoke_test", f"warning: {type(e).__name__}")
-        log_engine(f"startup smoke-test warning: {type(e).__name__}: {e}")
 
-    try:
-        from system.telegram_notifier import (
-            configure_telegram,
+            configure_telegram(cfg)
+            from system.telegram_notifier import send_startup_test
+
+            send_startup_test()
+        except Exception as e:
+            log_engine(f"telegram configure failed: {type(e).__name__}: {e}")
+
+        try:
+            from system.milestone_notifications import sync_milestones_on_startup
+
+            sync_milestones_on_startup()
+        except Exception as e:
+            log_engine(f"milestone sync failed: {type(e).__name__}: {e}")
+
+    exec_mode = mode
+    if exec_mode is None:
+        exec_mode = (
+            ExecutionMode.DEMO if rest_client is not None else ExecutionMode.TEST
         )
-
-        configure_telegram(cfg)
-        from system.telegram_notifier import send_startup_test
-
-        send_startup_test()
-    except Exception as e:
-        log_engine(f"telegram configure failed: {type(e).__name__}: {e}")
 
     try:
         from system.ml_filter_overrides import load_filter_overrides
@@ -433,21 +452,8 @@ def build_market_orchestrator(
     except Exception as e:
         log_engine(f"ml_filter_overrides init log failed: {type(e).__name__}: {e}")
 
-    try:
-        from system.milestone_notifications import sync_milestones_on_startup
-
-        sync_milestones_on_startup()
-    except Exception as e:
-        log_engine(f"milestone sync failed: {type(e).__name__}: {e}")
-
-    exec_mode = mode
-    if exec_mode is None:
-        exec_mode = (
-            ExecutionMode.DEMO if rest_client is not None else ExecutionMode.TEST
-        )
-
     position_sync = None
-    if rest_client is not None:
+    if rest_client is not None and not _harness_boot:
         from execution.trade_tracker import TradeTracker
         from runtime.ig_transaction_sync import (
             IgTransactionSync,

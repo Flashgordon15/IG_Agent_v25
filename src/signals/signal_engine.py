@@ -732,6 +732,13 @@ class SignalEngine:
         snapshot: dict[str, Any],
     ) -> None:
         try:
+            from system.bare_metal_exec import bare_metal_hot_path_active
+
+            if bare_metal_hot_path_active():
+                return
+        except Exception:
+            pass
+        try:
             import json
             from datetime import datetime
 

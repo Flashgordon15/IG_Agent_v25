@@ -86,6 +86,9 @@ def activate_mock_feed_engine(
     balance: float = 10_000.0,
 ) -> MockIGRest:
     """Start in-process mock REST + quote synthesis; marks process sandbox mode."""
+    from system.guard.live_path_guard import block_mock_client_factory
+
+    block_mock_client_factory("MockFeedEngine.activate_mock_feed_engine")
     global _MOCK_ACTIVE
     _MOCK_ACTIVE = True
     os.environ["IG_MOCK_FEED_ACTIVE"] = "1"

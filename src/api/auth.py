@@ -45,7 +45,8 @@ def issue_session_token() -> str:
     return token
 
 
-_APEX_BYPASS_TOKEN = "v30_unlocked_session_token"
+APEX_LOCAL_SESSION_TOKEN = "v30_unlocked_session_token"
+_APEX_BYPASS_TOKEN = APEX_LOCAL_SESSION_TOKEN
 
 
 def _apex_shadow_auth_bypass(token: str) -> bool:

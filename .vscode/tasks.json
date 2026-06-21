@@ -1,0 +1,18 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Fix & Run Simulation",
+            "type": "shell",
+            "command": "export TESTBED_ALLOW_ZOMBIE=1 IG_APEX_RUNTIME_MODE=HARDENED_TESTBED IG_TESTBED_ROOT=/tmp/apex_opt_calibration IG_HISTORICAL_REPLAY=src/simulation/data/production_5day_archive.jsonl IG_REPLAY_SPEED=100 IG_MATRIX_OPTIMIZATION=1 IG_OPTIMIZATION_CHAOS=1 PYTHONPATH=src && touch /tmp/testbed_daemon.pid && caffeinate -is .venv/bin/python3 src/simulation/main.py",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        }
+    ]
+}

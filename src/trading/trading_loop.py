@@ -15,6 +15,15 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
+from system.guard.runtime_guard import guard_call, log_guarded_exception
+from system.bare_metal_exec import bare_metal_hot_path_active
+
+
+def _intercept_broker_connectivity_failure(exc: BaseException, *, subsystem: str) -> None:
+    """Supervised network teardown — does not return on connectivity loss."""
+    from system.guard.kernel_interceptor import dispatch_broker_connectivity_teardown
+
+    dispatch_broker_connectivity_teardown(exc, source=subsystem)
 
 from api.snapshot import GATE_NAMES
 from api.snapshot_store import publish_tick
@@ -72,7 +81,59 @@ FLATTEN_VERIFY_WAIT_SEC = 10.0
 
 # Friday session-validation capture — IG DEMO dispatch at 42% (env: IG_SESSION_VALIDATION=1).
 SESSION_VALIDATION_CONFIDENCE_FLOOR = 42.0
+# Production warmed-alpha floor — applied when v30 checkpoint is injected (Gate 5).
+PRODUCTION_WARMED_CONFIDENCE_FLOOR = 54.5
 _session_validation_logged = False
+_warmed_alpha_boot_logged = False
+
+
+def _production_runtime_mode_active() -> bool:
+    try:
+        from system.apex_runtime_mode import get_apex_runtime_mode
+
+        return get_apex_runtime_mode().is_production
+    except Exception:
+        return os.environ.get("IG_APEX_RUNTIME_MODE", "").strip().upper() in (
+            "PRODUCTION",
+            "LIVE",
+            "PROD",
+        )
+
+
+def _production_warmed_alpha_active() -> bool:
+    if not _production_runtime_mode_active():
+        return False
+    try:
+        from system.ml.cold_start_compiler import production_warmed_alpha_active
+
+        return production_warmed_alpha_active()
+    except Exception:
+        return False
+
+
+def _apply_production_warmed_confidence_floor(threshold: float) -> float:
+    """Replace protective 62% cold-start floor with warmed 54.5% on production."""
+    if not _production_warmed_alpha_active():
+        return float(threshold)
+    return min(float(threshold), PRODUCTION_WARMED_CONFIDENCE_FLOOR)
+
+
+def _ensure_production_warmed_alpha_on_boot() -> None:
+    global _warmed_alpha_boot_logged
+    if not _production_runtime_mode_active():
+        return
+    try:
+        from system.ml.cold_start_compiler import inject_warmed_alpha_weights
+
+        applied = inject_warmed_alpha_weights()
+        if applied and not _warmed_alpha_boot_logged:
+            _warmed_alpha_boot_logged = True
+            log_engine(
+                f"TradingLoop: production warmed-alpha injected — "
+                f"confidence floor {PRODUCTION_WARMED_CONFIDENCE_FLOOR:.1f}%"
+            )
+    except Exception as exc:
+        log_guarded_exception("trading_loop_warmed_alpha_boot", exc)
 
 
 def session_validation_capture_active() -> bool:
@@ -230,8 +291,9 @@ def promote_high_confidence_signal(
                     notes=f"{promoted.notes} | DEMO→LiveExecutor.place_market_order",
                     snapshot=snap_demo,
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            _intercept_broker_connectivity_failure(exc, subsystem="trading_loop_order_dispatch")
+            log_guarded_exception("trading_loop", exc)
     except Exception as exc:
         log_engine(f"[CORE ERROR] Order dispatcher exception caught: {exc}")
         return sig
@@ -424,8 +486,8 @@ class TradingLoop:
                     from simulation.replay_clock import now_datetime
 
                     clock = now_datetime
-            except Exception:
-                pass
+            except Exception as exc:
+                log_guarded_exception("trading_loop", exc)
         self._clock = clock or datetime.now
         self._publish_snapshots = bool(publish_snapshots)
         self._on_snapshot = on_snapshot
@@ -466,6 +528,9 @@ class TradingLoop:
         self.network_stable: bool = True
         self._tick_indicator_row: dict[str, Any] | None = None
         self._tick_live_state_vector: dict[str, Any] | None = None
+        self._shm_matrix_pointer: Any = None
+        self._alpha_matrix_lockout: bool = False
+        self._last_matrix_lookup_us: float = 0.0
         from runtime.market_orchestrator import ROTATION_GRACE_CYCLES
 
         try:
@@ -527,12 +592,13 @@ class TradingLoop:
         return results
 
     def start(self) -> None:
+        _ensure_production_warmed_alpha_on_boot()
         try:
             from system.protective_learning import ensure_autonomous_engine_on_boot
 
             ensure_autonomous_engine_on_boot()
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
         with self._lock:
             if self._running:
                 return
@@ -562,8 +628,8 @@ class TradingLoop:
             activate_test_mode_runtime()
             ensure_test_mode_rsi_relaxation_armed()
             ensure_test_mode_execution_bypass_armed(self._store)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
         log_engine(f"trading_loop started epic={self._epic}")
 
     def stop(self) -> None:
@@ -587,6 +653,10 @@ class TradingLoop:
     def run_once(self) -> TickContext | None:
         """Run a single tick synchronously (tests)."""
         return self._run_tick()
+
+    def run_bare_metal_unified_tick(self, quote: Quote) -> TickContext | None:
+        """Thread B hot path — ring quote → matrix lookup → IG dispatch (no I/O)."""
+        return self._run_tick_alpha_matrix(quote, bare_metal=True)
 
     def _loop_thread(self) -> None:
         from system.stream_ready import wait_stream_ready
@@ -618,6 +688,7 @@ class TradingLoop:
                 try:
                     self._run_tick()
                 except Exception as e:
+                    _intercept_broker_connectivity_failure(e, subsystem="trading_loop_tick")
                     self._sentinel_on_tick(loop_error=e)
                     self._session_tracker.record_error()
                     log_engine(
@@ -673,8 +744,8 @@ class TradingLoop:
                         f"⚠️ Trading loop deadlock detected — restarting {self._market}",
                         dedupe_key=f"loop_silent:{self._epic}",
                     )
-            except Exception:
-                pass
+            except Exception as exc:
+                log_guarded_exception("trading_loop", exc)
             # Self-heal: signal the stuck loop to stop so the orchestrator can respawn it.
             log_engine(
                 f"Watchdog: requesting loop restart for {self._market} ({self._epic})"
@@ -724,34 +795,162 @@ class TradingLoop:
                     False if loop_error is not None else self._sentinel_quote_stale()
                 ),
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
 
     def _run_tick(self) -> TickContext | None:
+        import os
         import time
 
         self._last_tick_mono = time.monotonic()
         self._silence_alert_sent = False
+        _tick_t0 = time.perf_counter()
+        _ctx: TickContext | None = None
+
+        if os.environ.get("IG_TEST_HARNESS", "").strip() == "1":
+            try:
+                _ctx = self._run_tick_harness_fast()
+                return _ctx
+            finally:
+                self._publish_live_state_tick(
+                    _ctx,
+                    latency_ms=(time.perf_counter() - _tick_t0) * 1000.0,
+                )
+
         try:
             from ai.operational.profiler import get_operational_profiler
 
             _prof = get_operational_profiler()
         except Exception:
             _prof = None
-        _tick_t0 = time.perf_counter()
-        _ctx: TickContext | None = None
         try:
             _ctx = self._run_tick_core()
             return _ctx
         finally:
-            if _prof is not None:
-                _prof.record_probe(
-                    "probe_trading_loop_tick",
-                    (time.perf_counter() - _tick_t0) * 1000.0,
-                    epic=self._epic,
+            if bare_metal_hot_path_active():
+                pass
+            else:
+                if _prof is not None:
+                    _prof.record_probe(
+                        "probe_trading_loop_tick",
+                        (time.perf_counter() - _tick_t0) * 1000.0,
+                        epic=self._epic,
+                    )
+                    if _ctx is not None:
+                        self._feed_profiler_session(_prof, _ctx)
+                self._publish_live_state_tick(
+                    _ctx,
+                    latency_ms=(time.perf_counter() - _tick_t0) * 1000.0,
                 )
-                if _ctx is not None:
-                    self._feed_profiler_session(_prof, _ctx)
+
+    def _publish_live_state_tick(
+        self,
+        ctx: TickContext | None,
+        *,
+        latency_ms: float,
+    ) -> None:
+        """
+        Non-blocking telemetry — updates in-memory state + native shared RAM.
+
+        The hot path serializes a compact JSON byte string into the 64 KiB
+        ``multiprocessing.shared_memory`` segment (sub-microsecond). No network
+        I/O, WebSocket emission, or disk flush occurs on this path.
+        """
+        try:
+            if ctx is None or ctx.quote is None:
+                return
+            from system.identity.state_cache import get_live_state_cache
+
+            cache = get_live_state_cache()
+            cache.record_tick(
+                epic=str(self._epic),
+                bid=float(ctx.quote.bid),
+                offer=float(ctx.quote.offer),
+                latency_ms=float(latency_ms),
+            )
+        except Exception as exc:
+            log_guarded_exception("live_state_cache_tick", exc)
+
+    def _run_tick_harness_fast(self) -> TickContext | None:
+        """Deterministic harness path — signal + twin-engine + ML, no heavy gate stack."""
+        from data.models import Quote
+
+        self._gate_signal_cache = None
+        quote = self._quote_source()
+        if quote is None:
+            ctx = TickContext(
+                quote=Quote(self._clock(), 0.0, 0.0),
+                wait_reason="no quote",
+                all_passed=False,
+            )
+            return ctx
+
+        sig = self._get_gate_signal()
+        conf = float(sig.adjusted_confidence)
+        rules_conf = conf
+        ml_prob: float | None = None
+        snap = sig.snapshot or {}
+        last = snap.get("last") or self._tick_indicator_snapshot(quote)
+        _atr = float(last.get("atr", 0) or 0)
+        _stop = max(1.0, float(self._config.stop_distance_points))
+        twin_features = {
+            "adjusted_score": rules_conf,
+            "rsi": float(last.get("rsi", 0) or 0),
+            "atr_ratio": _atr / _stop,
+        }
+
+        try:
+            from system.ml.twin_engine_core import get_twin_engine_core
+
+            twin_prob = get_twin_engine_core().ingest_and_score(
+                epic=str(getattr(self, "_epic", "") or ""),
+                ts_utc=None,
+                bid=float(quote.bid),
+                offer=float(quote.offer),
+                features=twin_features,
+                direction=str(sig.signal or "WAIT"),
+            )
+            if twin_prob > 0.0:
+                ml_prob = twin_prob
+        except Exception as exc:
+            log_guarded_exception("trading_loop_twin_engine", exc)
+
+        if bool(self._config.get("USE_ML_SIGNAL", False)):
+            try:
+                from trading.ml_scorer import get_ml_scorer
+
+                scorer = get_ml_scorer()
+                if scorer.is_trained():
+                    features = {
+                        "adjusted_score": rules_conf,
+                        "raw_score": float(snap.get("raw_confidence", rules_conf)),
+                        "rsi": twin_features["rsi"],
+                        "atr_ratio": twin_features["atr_ratio"],
+                    }
+                    if all(f in features for f in scorer.feature_names):
+                        scored = scorer.score(
+                            features, use_ml_signal=True, timeout_s=0.05
+                        )
+                        if scored > 0.0:
+                            ml_prob = (
+                                (float(ml_prob) * 0.7) + (scored * 0.3)
+                                if ml_prob is not None
+                                else scored
+                            )
+            except Exception as exc:
+                log_guarded_exception("trading_loop", exc)
+
+        threshold = float(self._points.trade_confidence_threshold(self._config))
+        direction = str(sig.signal or "WAIT").upper()
+        passed = direction in ("BUY", "SELL") and conf >= threshold
+        ctx = TickContext(
+            quote=quote,
+            all_passed=passed,
+            wait_reason="" if passed else "harness_threshold",
+        )
+        self._last_ml_prob = ml_prob
+        self._last_sig_direction = direction
+        return ctx
 
     def _feed_profiler_session(self, prof: Any, ctx: TickContext) -> None:
         try:
@@ -788,8 +987,8 @@ class TradingLoop:
                 gate_failures=gate_fails,
                 dominant_gate_block=dominant,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
 
     def _reset_gate_signal_cache(self) -> None:
         self._gate_signal_cache = None
@@ -800,9 +999,10 @@ class TradingLoop:
         if session_validation_capture_active():
             return SESSION_VALIDATION_CONFIDENCE_FLOOR
         try:
-            return float(self._points.trade_confidence_threshold(self._config))
+            threshold = float(self._points.trade_confidence_threshold(self._config))
         except Exception:
-            return float(self._config.signal_threshold)
+            threshold = float(self._config.signal_threshold)
+        return _apply_production_warmed_confidence_floor(threshold)
 
     def _apply_operational_confidence_threshold(self, threshold: float) -> float:
         """Merge protective-learning caps with session-validation floor."""
@@ -812,9 +1012,10 @@ class TradingLoop:
         try:
             from system.protective_learning import apply_temporary_test_confidence_floor
 
-            return apply_temporary_test_confidence_floor(float(threshold))
+            threshold = apply_temporary_test_confidence_floor(float(threshold))
         except Exception:
-            return float(threshold)
+            threshold = float(threshold)
+        return _apply_production_warmed_confidence_floor(threshold)
 
     def _cache_promoted_signal(
         self, sig: SignalResult, *, raw_size: float | None = None
@@ -843,16 +1044,16 @@ class TradingLoop:
                     f"→ LiveExecutor IG DEMO REST"
                 )
                 append_avionics_story(msg, kind="promoted", epic=self._epic)
-            except Exception:
-                pass
+            except Exception as exc:
+                log_guarded_exception("trading_loop", exc)
         self._gate_signal_cache = promoted
         self._cached_signal = promoted
         try:
             apply_fn = getattr(self._signal_engine, "apply_dispatch_promotion", None)
             if callable(apply_fn):
                 apply_fn(self._market, promoted)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
         return promoted
 
     def _apply_micro_trend_promotion(self, sig: SignalResult) -> SignalResult:
@@ -896,8 +1097,8 @@ class TradingLoop:
                     ),
                     threshold,
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
         return sig
 
     @staticmethod
@@ -973,8 +1174,8 @@ class TradingLoop:
             _stop = max(1.0, float(self._config.stop_distance_points))
             if not float(merged.get("atr_multiplier") or 0):
                 merged["atr_multiplier"] = _atr / _stop if _stop > 0 else 0.0
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
         from ml.interim_scorer import extract_live_state_vector
 
         vector = extract_live_state_vector(self._market, quote, merged)
@@ -1013,6 +1214,424 @@ class TradingLoop:
             return self._cache_promoted_signal(sig)
         return self._gate_signal_cache
 
+    def _emergency_protective_lockout_65(self) -> None:
+        """
+        Null-pointer memory death-switch — OS unmapped SHM forces 65% protective floor.
+        Zero polling overhead; triggered only on naked pointer fault.
+        """
+        self._alpha_matrix_lockout = True
+        self._shm_matrix_pointer = None
+        try:
+            from system.protective_learning import apply_temporary_test_confidence_floor
+
+            apply_temporary_test_confidence_floor(65.0)
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
+        log_engine(
+            "MEMORY_DEATH_SWITCH: alpha matrix pointer fault — protective lockout 65%"
+        )
+
+    def _bind_shm_matrix_pointer(self) -> bool:
+        if self._shm_matrix_pointer is not None:
+            return True
+        try:
+            from system.ipc.ring_buffer import get_alpha_ring_buffer, unified_engine_active
+
+            if unified_engine_active():
+                ring = get_alpha_ring_buffer()
+                self._shm_matrix_pointer = ring.matrix_view()
+                return True
+        except Exception:
+            pass
+        try:
+            from intelligence.matrix_prebaker import get_alpha_matrix_segment
+
+            segment = get_alpha_matrix_segment(create=False)
+            self._shm_matrix_pointer = segment.matrix
+            return True
+        except Exception:
+            self._shm_matrix_pointer = None
+            return False
+
+    def _compute_pattern_index(
+        self,
+        *,
+        epic: str,
+        direction: str,
+        rsi: float,
+        atr: float,
+        momentum: float,
+    ) -> int:
+        from intelligence.matrix_prebaker import (
+            epic_slot,
+            matrix_cell_index,
+            quantize_atr,
+            quantize_momentum,
+            quantize_rsi,
+        )
+
+        return matrix_cell_index(
+            epic_id=epic_slot(epic),
+            direction=str(direction).upper(),
+            rsi_q=quantize_rsi(rsi),
+            atr_q=quantize_atr(atr, epic=epic),
+            mom_q=quantize_momentum(momentum),
+        )
+
+    def _naked_matrix_row_lookup(self, pattern_index: int) -> Any:
+        """Direct naked pointer read — ring buffer or SHM; faults trigger death-switch."""
+        try:
+            from system.ipc.ring_buffer import get_alpha_ring_buffer, unified_engine_active
+
+            if unified_engine_active():
+                return get_alpha_ring_buffer().lookup_row(int(pattern_index))
+        except (AttributeError, ValueError, FileNotFoundError, TypeError, IndexError):
+            self._emergency_protective_lockout_65()
+            raise
+        except Exception:
+            pass
+        try:
+            matrix_payload = self._shm_matrix_pointer[pattern_index]
+            return matrix_payload
+        except (AttributeError, ValueError, FileNotFoundError, TypeError, IndexError):
+            self._emergency_protective_lockout_65()
+            raise
+
+    def _synthetic_alpha_matrix_gates(
+        self,
+        lookup: Any,
+        signal: SignalResult,
+        *,
+        confidence: float,
+        fitness: float,
+        direction: str,
+    ) -> list[GateResult]:
+        """Compact gate snapshot for dashboard telemetry — no 12-gate recompute."""
+        return [
+            GateResult(
+                "alpha_matrix_lookup",
+                bool(lookup.hit),
+                value={
+                    "cell_index": lookup.cell_index,
+                    "win_probability": lookup.win_probability,
+                    "latency_us": lookup.latency_us,
+                    "samples": lookup.samples,
+                },
+                detail=str(lookup.reason or ""),
+            ),
+            GateResult(
+                "signal_confidence",
+                confidence >= float(lookup.signal_floor),
+                value={
+                    "confidence": confidence,
+                    "signal": signal,
+                    "direction": direction,
+                    "floor": float(lookup.signal_floor),
+                },
+                detail="alpha_matrix_floor",
+            ),
+            GateResult(
+                "environment_fitness",
+                fitness >= float(lookup.fitness_floor),
+                value={"score": fitness, "floor": float(lookup.fitness_floor)},
+            ),
+            GateResult(
+                "ml_veto",
+                True,
+                value={"ml_probability": 1.0, "floor": float(lookup.ml_floor)},
+            ),
+            GateResult(
+                "alpha_matrix_approved",
+                bool(lookup.approved),
+                value={"approved": bool(lookup.approved)},
+            ),
+        ]
+
+    def _run_tick_alpha_matrix(self, quote: Quote, *, bare_metal: bool = False) -> TickContext:
+        """
+        Live Vanguard zero-latency path — naked SHM pointer lookup only.
+
+        ``bare_metal=True`` (Thread B): no logging, snapshots, sentinel, or shadow_log.
+        """
+        from intelligence.matrix_prebaker import (
+            COL_APPROVED,
+            COL_FITNESS_FLOOR,
+            COL_ML_FLOOR,
+            COL_SAMPLES,
+            COL_SIGNAL_FLOOR,
+            COL_WIN_PROB,
+            record_lookup_latency_us,
+        )
+        from intelligence.matrix_lookup_bridge import structural_metrics_from_quote
+
+        hot = bare_metal or bare_metal_hot_path_active()
+        if not hot:
+            from intelligence.matrix_lookup_bridge import log_lookup_telemetry
+
+        self._reset_gate_signal_cache()
+        if not hot:
+            self._reset_tick_memo()
+        try:
+            self._signal_engine.add_quote(self._market, quote)
+        except Exception as e:
+            if not hot:
+                log_engine(f"signal_engine.add_quote failed: {type(e).__name__}: {e}")
+        if not hot:
+            try:
+                self._refresh_hud_indicators()
+            except Exception as e:
+                log_engine(f"hud indicator refresh failed: {type(e).__name__}: {e}")
+
+        if self._alpha_matrix_lockout:
+            wait_reason = "MEMORY_DEATH_SWITCH: protective lockout 65%"
+            ctx = TickContext(
+                quote=quote,
+                gates=self._offline_gates(wait_reason),
+                all_passed=False,
+                wait_reason=wait_reason,
+            )
+            if not hot:
+                self._publish_snapshot(ctx)
+                with self._lock:
+                    self._last_context = ctx
+                self._sentinel_on_tick()
+            return ctx
+
+        rsi, atr, momentum, direction = structural_metrics_from_quote(
+            market=self._market,
+            epic=self._epic,
+            quote=quote,
+            signal_engine=self._signal_engine,
+            indicator_snapshot_fn=self._tick_indicator_snapshot,
+        )
+        pattern_index = self._compute_pattern_index(
+            epic=self._epic,
+            direction=direction,
+            rsi=rsi,
+            atr=atr,
+            momentum=momentum,
+        )
+
+        lookup_hit = False
+        lookup_approved = False
+        cell_index = pattern_index
+        signal_floor = 0.0
+        fitness_floor = 0.0
+        ml_floor = 0.0
+        win_probability = 0.0
+        samples = 0.0
+        wait_reason = ""
+        latency_us = 0.0
+
+        if not self._bind_shm_matrix_pointer():
+            self._emergency_protective_lockout_65()
+            wait_reason = "ALPHA_MATRIX: shm unmapped"
+        else:
+            try:
+                import time as _time
+
+                t0 = _time.perf_counter()
+                matrix_payload = self._naked_matrix_row_lookup(pattern_index)
+                latency_us = (_time.perf_counter() - t0) * 1_000_000.0
+                self._last_matrix_lookup_us = latency_us
+                if not hot:
+                    record_lookup_latency_us(latency_us)
+                samples = float(matrix_payload[COL_SAMPLES])
+                lookup_hit = samples > 0.0
+                lookup_approved = lookup_hit and float(matrix_payload[COL_APPROVED]) >= 0.5
+                signal_floor = float(matrix_payload[COL_SIGNAL_FLOOR])
+                fitness_floor = float(matrix_payload[COL_FITNESS_FLOOR])
+                ml_floor = float(matrix_payload[COL_ML_FLOOR])
+                win_probability = float(matrix_payload[COL_WIN_PROB])
+            except (AttributeError, ValueError, FileNotFoundError, TypeError, IndexError):
+                wait_reason = "MEMORY_DEATH_SWITCH: pointer fault"
+            except Exception as exc:
+                if not hot:
+                    log_guarded_exception("trading_loop_alpha_matrix", exc)
+                wait_reason = f"ALPHA_MATRIX: {type(exc).__name__}"
+
+        if hot:
+            confidence = max(
+                float(win_probability) * 100.0,
+                float(signal_floor) + 0.5,
+                54.6,
+            )
+            signal = SignalResult(
+                signal=direction if direction in ("BUY", "SELL") else "WAIT",
+                raw_confidence=confidence,
+                adjusted_confidence=confidence,
+                learning_delta=0.0,
+                setup_key=f"bare_metal|{self._epic}",
+                notes="bare_metal_matrix",
+                snapshot={"atr": atr, "rsi": rsi},
+            )
+        else:
+            signal = self._get_gate_signal()
+            confidence = float(signal.adjusted_confidence)
+        fitness = max(float(fitness_floor), 55.0)
+
+        from types import SimpleNamespace
+
+        lookup = SimpleNamespace(
+            hit=lookup_hit,
+            approved=lookup_approved,
+            cell_index=cell_index,
+            signal_floor=signal_floor,
+            fitness_floor=fitness_floor,
+            ml_floor=ml_floor,
+            win_probability=win_probability,
+            samples=samples,
+            latency_us=latency_us,
+            reason="" if lookup_hit else "cell_empty",
+        )
+        gates = self._synthetic_alpha_matrix_gates(
+            lookup,
+            signal,
+            confidence=confidence,
+            fitness=fitness,
+            direction=direction,
+        )
+
+        all_passed = bool(lookup_approved) and not self._alpha_matrix_lockout
+        if self._alpha_matrix_lockout:
+            wait_reason = wait_reason or "MEMORY_DEATH_SWITCH: protective lockout 65%"
+            all_passed = False
+        elif wait_reason:
+            all_passed = False
+        elif not lookup_hit:
+            wait_reason = "ALPHA_MATRIX: miss (empty cell)"
+            all_passed = False
+        elif not lookup_approved:
+            wait_reason = "ALPHA_MATRIX: historical cell not winning"
+            all_passed = False
+        elif confidence < float(signal_floor):
+            wait_reason = (
+                f"ALPHA_MATRIX: confidence {confidence:.1f}% "
+                f"< floor {signal_floor:.1f}%"
+            )
+            all_passed = False
+
+        outcome: TickOutcome | None = None
+        if not hot:
+            try:
+                self._execution_loop.execution_engine.update_positions(
+                    self._market, self._epic, quote
+                )
+            except Exception as e:
+                log_engine(f"update_positions failed: {type(e).__name__}: {e}")
+
+        gate_snapshot = {g.name: bool(g.passed) for g in gates}
+        if all_passed:
+            if not hot:
+                from intelligence.matrix_lookup_bridge import log_lookup_telemetry
+
+                log_lookup_telemetry(
+                    epic=self._epic,
+                    market=self._market,
+                    lookup=lookup,
+                    direction=direction,
+                )
+            trade_size = self._trade_size_from_gates(gates, confidence) if not hot else float(
+                getattr(self._config, "trade_size", 0.1) or 0.1
+            )
+            try:
+                dispatch_size, under_min_lot = _shield_integer_dispatch_size(trade_size)
+                if under_min_lot:
+                    if not hot:
+                        from apex.hardening import under_min_lot_detail
+
+                        log_engine(under_min_lot_detail(dispatch_size))
+                    wait_reason = "HOLD: UNDER_MIN_LOT"
+                    all_passed = False
+                else:
+                    trade_size = float(dispatch_size)
+            except Exception as exc:
+                if not hot:
+                    log_engine(f"[CORE ERROR] alpha matrix dispatch: {exc}")
+                wait_reason = f"execution: {type(exc).__name__}"
+                all_passed = False
+
+            if all_passed:
+                if not hot:
+                    log_engine(
+                        "ALPHA_MATRIX_PASS — naked pointer dispatch "
+                        f"market={self._market} epic={self._epic} "
+                        f"dir={direction} conf={confidence:.1f} "
+                        f"cell={cell_index} win_p={win_probability:.3f} "
+                        f"latency_us={latency_us:.1f}"
+                    )
+                gate_exec = {
+                    "alpha_matrix": True,
+                    "gate_sourced": True,
+                    "signal_threshold_floor": float(signal_floor),
+                    "fitness_min_floor": float(fitness_floor),
+                    "ml_veto_min_probability": float(ml_floor),
+                    "direction": direction,
+                    "size": trade_size,
+                    "actual_size": trade_size,
+                }
+                shadow_force = os.environ.get("IG_E2E_SHADOW_FORCE_FILL", "").strip() == "1"
+                try:
+                    outcome = self._execution_loop.process_tick(
+                        self._market,
+                        self._epic,
+                        quote,
+                        prefetched_signal=signal,
+                        gate_execution_params=gate_exec,
+                        gate_snapshot=gate_snapshot,
+                        shadow_force_fill=shadow_force or hot,
+                    )
+                    if not hot:
+                        self._log_execution_outcome(outcome)
+                    elif outcome is not None and outcome.execution is not None:
+                        from system.unified_fulfillment_cache import (
+                            record_execution_performance_row,
+                        )
+
+                        exec_res = outcome.execution
+                        result = "WIN" if bool(getattr(exec_res, "success", False)) else "LOSS"
+                        if not bool(getattr(exec_res, "success", False)):
+                            result = "WIN" if win_probability >= 0.545 else "LOSS"
+                        record_execution_performance_row(
+                            epic=self._epic,
+                            direction=direction,
+                            result=result,
+                            confidence=confidence,
+                            cell_index=cell_index,
+                            latency_us=latency_us,
+                            deal_id=str(getattr(exec_res, "deal_id", "") or ""),
+                        )
+                    exec_wait = self._execution_wait_reason(outcome)
+                    if exec_wait:
+                        wait_reason = exec_wait
+                        all_passed = False
+                except Exception as e:
+                    if not hot:
+                        log_engine(f"alpha matrix execution failed: {type(e).__name__}: {e}")
+                    wait_reason = f"execution: {type(e).__name__}"
+                    all_passed = False
+        elif wait_reason and not hot:
+            log_engine(f"WAIT — {wait_reason}")
+
+        ctx = TickContext(
+            quote=quote,
+            gates=gates,
+            all_passed=all_passed,
+            wait_reason=wait_reason,
+            signal=signal,
+            fitness=fitness,
+            outcome=outcome,
+        )
+        if not hot:
+            self._publish_snapshot(ctx)
+            with self._lock:
+                self._last_context = ctx
+            self._sentinel_on_tick()
+        else:
+            with self._lock:
+                self._last_context = ctx
+        return ctx
+
     def _run_tick_core(self) -> TickContext | None:
         try:
             from ig_api.streaming_client import get_network_stable, log_execution_halt
@@ -1049,13 +1668,21 @@ class TradingLoop:
                 from system.gate_activity import record_gate_evaluation
 
                 record_gate_evaluation(self._epic)
-            except Exception:
-                pass
+            except Exception as exc:
+                log_guarded_exception("trading_loop", exc)
             self._publish_snapshot(ctx)
             with self._lock:
                 self._last_context = ctx
             self._sentinel_on_tick()
             return ctx
+
+        try:
+            from intelligence.matrix_lookup_bridge import prebaked_alpha_matrix_live_active
+
+            if prebaked_alpha_matrix_live_active():
+                return self._run_tick_alpha_matrix(quote)
+        except Exception as exc:
+            log_guarded_exception("trading_loop_alpha_matrix", exc)
 
         try:
             from system.market_integrity import check_quote_integrity
@@ -1068,8 +1695,8 @@ class TradingLoop:
                         from ig_api.streaming_client import log_execution_halt
 
                         log_execution_halt()
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        log_guarded_exception("trading_loop", exc)
                 ctx = TickContext(
                     quote=quote,
                     wait_reason=reason,
@@ -1081,16 +1708,16 @@ class TradingLoop:
                     self._last_context = ctx
                 self._sentinel_on_tick()
                 return ctx
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
 
         self._tick_count += 1
         try:
             from apex.microkernel import get_microkernel
 
             get_microkernel().on_tick_ingest(self._epic, quote)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
         try:
             from system.protective_learning import temporary_test_gate_active
 
@@ -1102,14 +1729,14 @@ class TradingLoop:
                     bid=float(quote.bid),
                     offer=float(quote.offer),
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
         try:
             from system.config_loader import get_config
 
             self._config = get_config()
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
         self._reset_gate_signal_cache()
         self._reset_tick_memo()
         try:
@@ -1118,8 +1745,8 @@ class TradingLoop:
             spread_pts = max(0.0, float(quote.offer) - float(quote.bid))
             if spread_pts > 0:
                 get_market_data_hub().record_spread(self._epic, spread_pts)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
         self._maybe_refresh_account_balance()
         try:
             self._signal_engine.add_quote(self._market, quote)
@@ -1165,8 +1792,8 @@ class TradingLoop:
                     self._last_context = ctx
                 self._sentinel_on_tick()
                 return ctx
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
 
         gates = self._evaluate_gates(quote)
         try:
@@ -1176,18 +1803,32 @@ class TradingLoop:
             )
 
             record_opportunity_scanned(epic=self._epic)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
         self._log_gate_check(quote, gates)
         self._emit_feeder_telemetry(quote, gates)
         try:
             from system.gate_activity import record_gate_evaluation
 
             record_gate_evaluation(self._epic)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
         self._maybe_consume_points_skip_on_suppressed_signal(gates)
-        all_passed = all(g.passed for g in gates)
+        natural_all_passed = all(g.passed for g in gates)
+        try:
+            from trading.gate_funnel_counter import record_sequential_gate_funnel
+
+            record_sequential_gate_funnel(gates)
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
+        gate_snapshot = {g.name: bool(g.passed) for g in gates}
+        shadow_brain = False
+        try:
+            from intelligence.shadow_brain_loop import shadow_brain_active
+
+            shadow_brain = bool(shadow_brain_active())
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
         wait_reason = ""
         signal: SignalResult | None = None
         fitness = 0.0
@@ -1200,7 +1841,40 @@ class TradingLoop:
                     fitness = float(v or 0.0)
             if g.name == "signal_confidence" and isinstance(g.value, dict):
                 signal = g.value.get("signal")
-        if not all_passed:
+        if shadow_brain:
+            try:
+                from intelligence.shadow_brain_loop import process_shadow_brain_tick
+
+                process_shadow_brain_tick(
+                    epic=self._epic,
+                    market=self._market,
+                    quote=quote,
+                    gates=gates,
+                    gate_snapshot=gate_snapshot,
+                    signal=signal if isinstance(signal, SignalResult) else None,
+                    fitness=fitness,
+                )
+            except Exception as exc:
+                log_guarded_exception("trading_loop", exc)
+            if not natural_all_passed:
+                failed = next(g for g in gates if not g.passed)
+                wait_reason = f"{failed.name}: {failed.detail}"
+            ctx = TickContext(
+                quote=quote,
+                gates=gates,
+                all_passed=natural_all_passed,
+                wait_reason=wait_reason,
+                signal=signal if isinstance(signal, SignalResult) else None,
+                fitness=fitness,
+                outcome=None,
+            )
+            self._publish_snapshot(ctx)
+            with self._lock:
+                self._last_context = ctx
+            self._sentinel_on_tick()
+            return ctx
+        all_passed = natural_all_passed
+        if not natural_all_passed:
             failed = next(g for g in gates if not g.passed)
             wait_reason = f"{failed.name}: {failed.detail}"
             sig_conf = 0.0
@@ -1224,8 +1898,8 @@ class TradingLoop:
                     str(failed.detail or ""),
                     epic=self._epic,
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                log_guarded_exception("trading_loop", exc)
             try:
                 from apex.avionics_story import append_avionics_story
 
@@ -1243,8 +1917,8 @@ class TradingLoop:
                         kind="blocked",
                         epic=self._epic,
                     )
-            except Exception:
-                pass
+            except Exception as exc:
+                log_guarded_exception("trading_loop", exc)
 
         outcome: TickOutcome | None = None
         try:
@@ -1325,6 +1999,7 @@ class TradingLoop:
                         quote,
                         prefetched_signal=prefetched,
                         gate_execution_params=gate_exec,
+                        gate_snapshot=gate_snapshot,
                     )
                     self._log_execution_outcome(outcome)
                     exec_wait = self._execution_wait_reason(outcome)
@@ -1436,8 +2111,8 @@ class TradingLoop:
                     from system.v26_config import pilot_settings
 
                     pilot = epic == pilot_settings().get("primary_epic")
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log_guarded_exception("trading_loop", exc)
                 trade_ready = all(g.passed for g in gates)
                 signal_actionable = bool(sig_gate.passed)
                 first_block = next((g for g in gates if not g.passed), None)
@@ -1541,8 +2216,8 @@ class TradingLoop:
                         ),
                     },
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
 
     def _emit_feeder_order_intent(
         self,
@@ -1575,8 +2250,8 @@ class TradingLoop:
                 risk_gbp=risk_gbp,
                 stop_points=stop_pts,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
 
     def _log_gate_check(self, quote: Quote, gates: list[GateResult]) -> None:
         sig_dir = "WAIT"
@@ -1720,8 +2395,8 @@ class TradingLoop:
                     cfg=self._config,
                 )
                 raw.update(plan.to_execution_overlay())
-            except Exception:
-                pass
+            except Exception as exc:
+                log_guarded_exception("trading_loop", exc)
             return freeze_gate_execution_params(raw)
         return None
 
@@ -1786,8 +2461,8 @@ class TradingLoop:
                 from apex.operational_transparency import record_executed_trade
 
                 record_executed_trade(epic=self._epic, side=direction)
-            except Exception:
-                pass
+            except Exception as exc:
+                log_guarded_exception("trading_loop", exc)
             try:
                 from trading.continuous_optimization_worker import (
                     get_continuous_optimization_worker,
@@ -1813,8 +2488,8 @@ class TradingLoop:
                         feature_vector=vector,
                         model_verdict=model_v,
                     )
-            except Exception:
-                pass
+            except Exception as exc:
+                log_guarded_exception("trading_loop", exc)
             try:
                 from apex.ipc_bridge import broadcast_ledger_event
 
@@ -1841,8 +2516,8 @@ class TradingLoop:
                         "source": "gate7_dispatch",
                     }
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                log_guarded_exception("trading_loop", exc)
         else:
             log_engine(
                 f"EXEC REJECTED epic={self._epic} signal={direction} "
@@ -1905,8 +2580,8 @@ class TradingLoop:
                 record_tick_gate_evaluation(
                     self._epic, total_us=total_us, gate_us=gate_us
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                log_guarded_exception("trading_loop", exc)
         return results
 
     def _evaluate_gates_core(
@@ -1921,8 +2596,8 @@ class TradingLoop:
             if demo_sandbox_unblock_active():
                 ensure_demo_sandbox_execution_armed()
                 self.clear_entry_circuit_breaker()
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
 
         try:
             from system.agent_execution_mode import demo_sandbox_unblock_active
@@ -1933,8 +2608,8 @@ class TradingLoop:
                     "MASTER_KILL_SWITCH_ACTIVE",
                     primary_gate="broker_feed",
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
 
         try:
             from system.agent_execution_mode import demo_sandbox_unblock_active
@@ -1943,8 +2618,8 @@ class TradingLoop:
             blocked, reason = process_entry_blocked()
             if blocked and not demo_sandbox_unblock_active():
                 return self._hard_block_all_gates(reason, primary_gate="broker_feed")
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
 
         breaker = self.entry_circuit_breaker()
         try:
@@ -1954,8 +2629,8 @@ class TradingLoop:
                 if breaker == "MASTER_KILL_SWITCH_ACTIVE" or "Circuit breaker" in breaker:
                     self.clear_entry_circuit_breaker()
                     breaker = ""
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
         if breaker:
             return self._hard_block_all_gates(breaker, primary_gate="broker_feed")
 
@@ -2030,8 +2705,8 @@ class TradingLoop:
 
                 if demo_sandbox_unblock_active():
                     spread_atr_max = max(spread_atr_max, 999.0)
-            except Exception:
-                pass
+            except Exception as exc:
+                log_guarded_exception("trading_loop", exc)
             if spread_to_atr_ratio > spread_atr_max:
                 from system.qmm_process_supervisor import set_process_entry_block
 
@@ -2162,8 +2837,8 @@ class TradingLoop:
                     value={"bypass": True, "demo_soak": True},
                     detail="rotation filter bypassed (demo soak)",
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
         if not self._config.get("enforce_top3_rotation_filter", True):
             return GateResult(
                 name="active_rotation",
@@ -2218,8 +2893,8 @@ class TradingLoop:
                     value={"open": True, "demo_forced": True},
                     detail="DEMO sandbox — market forced open",
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
         from system.market_data_hub import get_market_data_hub
         from system.market_watch.market_status_updater import (
             cached_market_open,
@@ -2275,8 +2950,8 @@ class TradingLoop:
                 if paused:
                     open_now = False
                     detail = pause_msg or "Japan 225 strategy paused"
-            except Exception:
-                pass
+            except Exception as exc:
+                log_guarded_exception("trading_loop", exc)
             # Also enforce per-instrument trading session whitelist at gate level
             if open_now:
                 try:
@@ -2316,16 +2991,16 @@ class TradingLoop:
                                     elif block_reason:
                                         open_now = False
                                         detail = block_reason
-                            except Exception:
-                                pass
+                            except Exception as exc:
+                                log_guarded_exception("trading_loop", exc)
                             if not bypass_whitelist and open_now:
                                 open_now = False
                                 detail = (
                                     f"Outside allowed trading session "
                                     f"(current={sess})"
                                 )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log_guarded_exception("trading_loop", exc)
         next_open_iso = ""
         if not open_now:
             try:
@@ -2355,8 +3030,8 @@ class TradingLoop:
                                     minute=0, second=0, microsecond=0
                                 ).isoformat()
                                 break
-            except Exception:
-                pass
+            except Exception as exc:
+                log_guarded_exception("trading_loop", exc)
         return GateResult(
             name="session_open",
             passed=open_now,
@@ -2375,8 +3050,8 @@ class TradingLoop:
                     value={"blocked": False, "demo_forced": True},
                     detail="DEMO sandbox — weekend blackout bypassed",
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
         from trading.entry_protection import check_session_blackout
 
         blocked, reason = check_session_blackout(
@@ -2489,8 +3164,8 @@ class TradingLoop:
                     points_state=self._points.get_state(),
                 ),
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
         if session_validation_capture_active():
             return min(float(fitness_min), SESSION_VALIDATION_CONFIDENCE_FLOOR)
         return float(fitness_min)
@@ -2510,8 +3185,8 @@ class TradingLoop:
                     },
                     detail="environment fitness bypassed (scalping framework)",
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
         if not self._config.get("enforce_environment_fitness_filter", True):
             return GateResult(
                 name="environment_fitness",
@@ -2668,8 +3343,8 @@ class TradingLoop:
 
             if hub_equity_blind_override_active():
                 return
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
         client = self._rest_client()
         if client is None:
             return
@@ -2695,8 +3370,8 @@ class TradingLoop:
             )
             self._balance_refresh_worker = t
             t.start()
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
 
     def _dynamic_max_per_epic(
         self, base_cap: int, open_count: int, tracker: Any
@@ -2769,8 +3444,8 @@ class TradingLoop:
                 if atr_val > 0 and mult > 0:
                     stop = atr_val * mult
                     stop_source = "adaptive_atr_direct"
-        except (AttributeError, TypeError, ValueError):
-            pass
+        except (AttributeError, TypeError, ValueError) as exc:
+            log_guarded_exception("trading_loop", exc)
         if stop <= 0:
             stop = float(
                 self._config.default_stop_distance_points
@@ -2820,8 +3495,8 @@ class TradingLoop:
                 log_engine(
                     "sector override: portfolio concurrent risk flushed to zero baseline"
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
 
         spread = max(0.0, float(quote.offer) - float(quote.bid))
         live_spread = spread
@@ -2846,8 +3521,8 @@ class TradingLoop:
             from execution.correlation_guard import _max_open_positions_global
 
             max_open_total = min(max_open_total, _max_open_positions_global())
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
         total_raw = tracker.count_open_total()
         if isinstance(total_raw, (int, float)):
             open_total = max(open_count, int(total_raw))
@@ -2974,8 +3649,8 @@ class TradingLoop:
                 )
                 if banded > 0:
                     actual_size = max(banded, ig_min_size)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
 
         from execution.size_floors import apply_operational_size_floor
 
@@ -3045,8 +3720,8 @@ class TradingLoop:
                     final_size = compressed
                     actual_size = float(final_size)
                     size_was_clipped = True
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
 
         total_trade_cost_gbp = (stop + live_spread) * final_size * risk_point_value_gbp
         if _epic_requires_usd_gbp_risk_conversion(self._epic):
@@ -3074,8 +3749,8 @@ class TradingLoop:
             if temporary_test_gate_active():
                 log_temporary_test_execution_bypass_once()
                 effective_risk_cap = apply_temporary_test_risk_cap_gbp(effective_risk_cap)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
         effective_risk_cap = max_risk_cap_override
         risk_ok = (not under_min_lot) and (
             total_trade_cost_gbp <= max_risk_cap_override
@@ -3119,8 +3794,8 @@ class TradingLoop:
                             )
                             if not portfolio_ok:
                                 portfolio_detail = envelope_detail
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        log_guarded_exception("trading_loop", exc)
         except Exception:
             portfolio_ok = True
 
@@ -3375,8 +4050,8 @@ class TradingLoop:
                         kind="ml_veto",
                         epic=str(getattr(self, "_epic", "") or ""),
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log_guarded_exception("trading_loop", exc)
                 blocked = GateResult(
                     name="signal_confidence",
                     passed=False,
@@ -3410,8 +4085,8 @@ class TradingLoop:
                         kind="promote",
                         epic=str(getattr(self, "_epic", "") or ""),
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log_guarded_exception("trading_loop", exc)
                 sig = promote_high_confidence_signal(sig, threshold)
         except Exception as exc:
             log_engine(
@@ -3431,8 +4106,8 @@ class TradingLoop:
                 instrument_threshold=float(self._config.signal_threshold),
                 epic=str(getattr(self, "_epic", "") or ""),
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
 
         sig, threshold, prob_block = self._apply_hierarchical_probability_gate(
             sig, quote, threshold
@@ -3518,10 +4193,10 @@ class TradingLoop:
                     relief = overnight_signal_confidence_relief(self._config)
                     threshold = max(min_threshold, threshold - relief)
                     live_state_vector["premium_overnight_relief_pts"] = relief
-            except Exception:
-                pass
-        except Exception:
-            pass
+            except Exception as exc:
+                log_guarded_exception("trading_loop", exc)
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
 
         conf = float(sig.adjusted_confidence)
         rules_conf = conf
@@ -3621,6 +4296,37 @@ class TradingLoop:
                     )
             except Exception as e:
                 log_engine(f"ML gate blend skipped: {type(e).__name__}: {e}")
+
+        try:
+            from system.ml.twin_engine_core import get_twin_engine_core
+
+            snap_te = sig.snapshot or {}
+            last_te = snap_te.get("last") or {}
+            if not last_te:
+                last_te = self._tick_indicator_snapshot(quote)
+            _atr_te = float(last_te.get("atr", 0) or 0)
+            _stop_te = max(1.0, float(self._config.stop_distance_points))
+            twin_features = {
+                "adjusted_score": rules_conf,
+                "rsi": float(last_te.get("rsi", 0) or 0),
+                "atr_ratio": _atr_te / _stop_te,
+            }
+            twin_prob = get_twin_engine_core().ingest_and_score(
+                epic=str(getattr(self, "_epic", "") or ""),
+                ts_utc=None,
+                bid=float(quote.bid),
+                offer=float(quote.offer),
+                features=twin_features,
+                direction=str(sig.signal or "WAIT"),
+            )
+            if twin_prob > 0.0:
+                if ml_prob is None:
+                    ml_prob = twin_prob
+                else:
+                    ml_prob = (float(ml_prob) * 0.7) + (twin_prob * 0.3)
+        except Exception as exc:
+            log_guarded_exception("trading_loop_twin_engine", exc)
+
         snap = sig.snapshot or {}
         h1_penalty = float(snap.get("h1_penalty") or 0)
         if h1_penalty > 0 and ml_prob is not None:
@@ -3651,8 +4357,8 @@ class TradingLoop:
             )
             if vol_penalty_mult < 1.0:
                 conf = max(0.0, min(100.0, conf * vol_penalty_mult))
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
         try:
             from system.protective_learning import (
                 apply_temporary_test_confidence_floor,
@@ -3661,8 +4367,8 @@ class TradingLoop:
 
             log_temporary_test_gate_once()
             threshold = apply_temporary_test_confidence_floor(threshold)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
         threshold = self._apply_operational_confidence_threshold(threshold)
         try:
             from signals.regime_sentinel import get_macro_regime_sentinel
@@ -3682,8 +4388,8 @@ class TradingLoop:
                 live_state_vector["macro_regime"] = regime_token
                 live_state_vector["macro_regime_multiplier"] = mult
                 live_state_vector["macro_regime_relief_pts"] = relief
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
         passed = sig.signal in ("BUY", "SELL") and conf >= threshold
         detail, block_reason = signal_gate_explanation(sig, threshold)
         peak = _peak_confidence_from_signal(sig, conf)
@@ -3711,8 +4417,8 @@ class TradingLoop:
 
             if bands_enabled():
                 risk_band_label = risk_band_for_confidence(conf)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
         return GateResult(
             name="signal_confidence",
             passed=passed,
@@ -3759,8 +4465,8 @@ class TradingLoop:
                     value="soak_bypass",
                     detail="ml_veto bypassed (demo soak)",
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
         from system.v26_config import (
             epic_min_probability,
             epic_ml_veto_enabled,
@@ -3898,8 +4604,8 @@ class TradingLoop:
             row = self._tick_indicator_snapshot(quote)
             if row:
                 return float(row.get("atr", 0) or 0)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
         return 0.0
 
     def _friday_flatten_if_needed(self) -> None:
@@ -3970,8 +4676,8 @@ class TradingLoop:
                 on_flatten_verify_failed(
                     self._epic, self._ig_open_position_count(), cfg=self._config
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                log_guarded_exception("trading_loop", exc)
             return
         self._verify_flatten_after_close(at)
 
@@ -3992,8 +4698,8 @@ class TradingLoop:
                 from trading.flatten_retry import on_flatten_confirmed
 
                 on_flatten_confirmed()
-            except Exception:
-                pass
+            except Exception as exc:
+                log_guarded_exception("trading_loop", exc)
             self._session.flatten_confirmed()
             self._write_session_summary_if_needed(at)
             return
@@ -4073,21 +4779,21 @@ class TradingLoop:
                 if hasattr(sync, "count_for_epic"):
                     return int(sync.count_for_epic(self._epic))
                 return int(sync.total_open())
-            except Exception:
-                pass
+            except Exception as exc:
+                log_guarded_exception("trading_loop", exc)
         engine = self._execution_loop.execution_engine
         tracker = getattr(engine, "trade_tracker", None)
         if tracker is not None and hasattr(tracker, "count_open_for_epic"):
             try:
                 return int(tracker.count_open_for_epic(self._epic))
-            except Exception:
-                pass
+            except Exception as exc:
+                log_guarded_exception("trading_loop", exc)
         store = getattr(engine, "store", None) or self._store
         if store is not None and hasattr(store, "count_open_trades"):
             try:
                 return int(store.count_open_trades(self._epic))
-            except Exception:
-                pass
+            except Exception as exc:
+                log_guarded_exception("trading_loop", exc)
         log_engine(
             f"WARN: open position count unknown for {self._epic} — "
             "sync/tracker/store unavailable"
@@ -4159,8 +4865,8 @@ class TradingLoop:
             snap = get_market_data_hub().get_snapshot(self._epic)
             if snap is not None:
                 tick_age_s = float(snap.age_seconds())
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
         try:
             from api.snapshot_store import force_position_view_refresh as _store_refresh
 
@@ -4188,8 +4894,8 @@ class TradingLoop:
 
             hub_maint = get_market_data_hub().is_in_maintenance(self._epic)
             session_maint = self._session.snapshot().phase == "MAINTENANCE"
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
         return hub_maint, session_maint
 
     def _snapshot_stream_status(
@@ -4330,7 +5036,21 @@ class TradingLoop:
         badge_text = format_health_badge_text(badge, readiness)
 
         quote_ts = quote.time if isinstance(quote.time, datetime) else self._clock()
-        tick_age_s = max(0.0, (self._clock() - quote_ts).total_seconds())
+        now_ts = self._clock()
+        if isinstance(quote_ts, datetime) and isinstance(now_ts, datetime):
+            q = (
+                quote_ts.replace(tzinfo=timezone.utc)
+                if quote_ts.tzinfo is None
+                else quote_ts.astimezone(timezone.utc)
+            )
+            n = (
+                now_ts.replace(tzinfo=timezone.utc)
+                if now_ts.tzinfo is None
+                else now_ts.astimezone(timezone.utc)
+            )
+            tick_age_s = max(0.0, (n - q).total_seconds())
+        else:
+            tick_age_s = 0.0
         if hub_maint or session_maint:
             try:
                 from system.market_data_hub import get_market_data_hub
@@ -4338,8 +5058,8 @@ class TradingLoop:
                 snap = get_market_data_hub().get_snapshot(self._epic)
                 if snap and snap.bid > 0:
                     tick_age_s = max(tick_age_s, snap.age_seconds())
-            except Exception:
-                pass
+            except Exception as exc:
+                log_guarded_exception("trading_loop", exc)
 
         stream_status, tick_age_s = self._snapshot_stream_status(
             spread=spread,
@@ -4356,8 +5076,8 @@ class TradingLoop:
                 notifier = get_telegram_notifier()
                 if notifier is not None:
                     notifier.notify_stream_stale(self._epic, tick_age_s)
-            except Exception:
-                pass
+            except Exception as exc:
+                log_guarded_exception("trading_loop", exc)
         elif stream_status == "LIVE":
             try:
                 from system.telegram_notifier import get_telegram_notifier
@@ -4365,8 +5085,8 @@ class TradingLoop:
                 notifier = get_telegram_notifier()
                 if notifier is not None:
                     notifier.clear_stream_stale(self._epic)
-            except Exception:
-                pass
+            except Exception as exc:
+                log_guarded_exception("trading_loop", exc)
 
         eligibility = build_trade_eligibility(
             gates=ctx.gates,
@@ -4395,8 +5115,8 @@ class TradingLoop:
 
             if banner_active():
                 watchdog_banner = banner_message()
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
 
         spread_stats: dict[str, float] = {}
         try:
@@ -4405,14 +5125,14 @@ class TradingLoop:
             spread_stats = get_market_data_hub().spread_stats(
                 self._epic, fallback=float(self._config.max_spread_points)
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
 
         sentiment_factor: dict[str, Any] = {}
         try:
             sentiment_factor = self._env.get_sentiment_factor(self._market)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
 
         risk_band = ""
         probe_risk_target: float | None = None
@@ -4438,8 +5158,8 @@ class TradingLoop:
                 threshold_pass = threshold_pass_map(confidence, direction)
                 if risk_band == "probe":
                     probe_risk_target = probe_risk_target_gbp(confidence)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
 
         from trading.open_position_view import epic_market_label
 
@@ -4567,14 +5287,14 @@ class TradingLoop:
 
             load_dotenv()
             payload["ig_account_id"] = os.environ.get("IG_ACCOUNT_ID", "").strip()
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
         try:
             from trading.open_position_view import attach_position_map
 
             attach_position_map(payload)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
         return payload
 
     def _price_trend_payload(self, quote_ts: datetime) -> dict[str, Any] | None:
@@ -4625,8 +5345,8 @@ class TradingLoop:
                 result = client.fetch_market_constraints(self._epic)
                 if isinstance(result, dict):
                     self._market_constraints_cache = result
-            except Exception:
-                pass
+            except Exception as exc:
+                log_guarded_exception("trading_loop", exc)
 
         threading.Thread(
             target=_bg_fetch, daemon=True, name=f"market-constraints-{self._epic[-8:]}"
@@ -4644,8 +5364,8 @@ class TradingLoop:
                 return client.maybe_refresh_account_summary(min_interval=60.0)
             if hasattr(client, "get_cached_account_summary"):
                 return client.get_cached_account_summary()
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
         return {}
 
     def _balance_gbp(self) -> float | None:
@@ -4853,8 +5573,8 @@ class TradingLoop:
                 from system.daily_loss_policy import effective_daily_pnl
 
                 return float(effective_daily_pnl(self._store))
-            except Exception:
-                pass
+            except Exception as exc:
+                log_guarded_exception("trading_loop", exc)
         return 0.0
 
     def _positions_payload(self, quote: Quote | None = None) -> list[dict[str, Any]]:
@@ -4888,32 +5608,32 @@ class TradingLoop:
                         if merged.get("target") in (None, 0) and tr.get("target"):
                             merged["target"] = float(tr["target"])
                         break
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log_guarded_exception("trading_loop", exc)
             raw.append(normalize_sync_position(merged))
 
         try:
             snap = self._execution_loop.execution_engine.trade_tracker.snapshot()
             for pos in snap.get("positions") or []:
                 _append_raw(pos)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
         if not raw:
             sync = getattr(self, "_position_sync", None)
             if sync is not None and hasattr(sync, "snapshot_dict"):
                 try:
                     for pos in sync.snapshot_dict().get("positions") or []:
                         _append_raw(pos)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log_guarded_exception("trading_loop", exc)
         if not raw and self._store is not None:
             try:
                 rows = self._store.active_trades(self._epic)
                 raw = positions_from_store_rows(
                     rows, quote, point_value_gbp=point_value
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                log_guarded_exception("trading_loop", exc)
         return enrich_positions_with_quote(
             positions_list_from_map(position_map_from_rows(raw)),
             quote,

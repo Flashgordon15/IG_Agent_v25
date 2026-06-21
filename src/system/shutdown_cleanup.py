@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import signal
 import socket
 import stat
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 
 from system.engine_log import log_engine
+from system.guard.runtime_guard import log_guarded_exception
 from system.paths import data_dir, find_python_executable, project_root
 
 # Supervision / post-exit utilities — must stay executable for launchd + verify spawn.
@@ -102,12 +105,217 @@ def reset_shutdown_cleanup_for_tests() -> None:
     _cleanup_done = False
 
 
+def is_broker_connectivity_failure(exc: BaseException) -> bool:
+    """True for broker/network dropouts that require supervised RAM + lock purge."""
+    if isinstance(
+        exc,
+        (
+            ConnectionError,
+            ConnectionResetError,
+            BrokenPipeError,
+            TimeoutError,
+            socket.timeout,
+        ),
+    ):
+        return True
+    if isinstance(exc, OSError):
+        code = getattr(exc, "errno", None)
+        if code in (
+            errno.ECONNREFUSED,
+            errno.ECONNRESET,
+            errno.ETIMEDOUT,
+            errno.EHOSTUNREACH,
+            errno.ENETUNREACH,
+            errno.ENETDOWN,
+            errno.EPIPE,
+        ):
+            return True
+    try:
+        from ig_api.exceptions import IGAPIError, IGStreamError
+
+        if isinstance(exc, (IGAPIError, IGStreamError)):
+            status = getattr(exc, "status_code", None)
+            if status in (502, 503, 504):
+                return True
+            msg = str(exc).lower()
+            if any(
+                token in msg
+                for token in (
+                    "connection reset",
+                    "connection refused",
+                    "network is unreachable",
+                    "timed out",
+                    "timeout",
+                    "broken pipe",
+                    "connection aborted",
+                    "failed to establish",
+                )
+            ):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _network_teardown_capital_guard_flatten() -> None:
+    """Best-effort flatten via CapitalGuard before lock + SHM purge."""
+    rest_client = None
+    try:
+        import system.ig_rest_session as session_mod
+
+        with session_mod._lock:
+            rest_client = session_mod._client
+    except Exception as exc:
+        log_guarded_exception("network_teardown_rest_client", exc)
+    try:
+        from execution.capital_guard import CapitalGuard
+
+        CapitalGuard._cancel_all_open_orders_and_positions(rest_client)
+    except Exception as exc:
+        log_guarded_exception("network_teardown_capital_guard", exc)
+
+
+def force_release_parallel_port_locks(ports: tuple[int, ...] = (8080, 9199)) -> None:
+    """Unlink port-anchored v30 lock markers for parallel live + shadow tracks."""
+    from system.identity.app_identity import RuntimeIdentity
+
+    for port in ports:
+        path = RuntimeIdentity.get_lock_path(port)
+        try:
+            if path.is_file():
+                path.unlink(missing_ok=True)
+                log_engine(f"network teardown: unlinked port lock {path.name}")
+        except OSError as exc:
+            log_guarded_exception(f"network_teardown_lock_{port}", exc)
+    try:
+        from system.identity.instance_lock import force_release_instance_lock
+
+        force_release_instance_lock()
+    except Exception as exc:
+        log_guarded_exception("network_teardown_instance_lock", exc)
+
+
+def purge_shared_memory_segments(*, reinit: bool = True) -> None:
+    """Close, unlink, and optionally re-seed native telemetry RAM segments."""
+    try:
+        from system.identity.shared_memory_bridge import (
+            get_shared_memory_bridge,
+            reset_shared_memory_bridge,
+            track_label_for_key,
+        )
+        from system.identity.weight_transfer_bridge import (
+            get_weight_transfer_bridge,
+            reset_weight_transfer_bridge,
+        )
+
+        reset_shared_memory_bridge(unlink=True)
+        reset_weight_transfer_bridge(unlink=True)
+        if not reinit:
+            return
+        now = time.time()
+        for track in ("live", "shadow"):
+            port = 8080 if track == "live" else 9199
+            payload = {
+                "schema_version": "1.0",
+                "track": track_label_for_key(track),
+                "api_port": port,
+                "updated_at_epoch": now,
+                "trailing_stops": [],
+                "ml_optimization": {},
+                "system_health": {"network_teardown_epoch": now},
+            }
+            get_shared_memory_bridge(create=True, track=track).write_json(payload)
+        get_weight_transfer_bridge(create=True).write_json(
+            {"approved": False, "track": "shadow", "published_at": now}
+        )
+        _detach_shared_memory_handles()
+        log_engine("network teardown: shared memory segments purged and re-seeded")
+    except SystemExit:
+        raise
+    except Exception as exc:
+        log_guarded_exception("network_teardown_shared_memory", exc)
+
+
+def _unregister_shm_from_resource_tracker(segment_name: str) -> None:
+    """Prevent ``os._exit`` subprocesses from unlinking re-seeded RAM segments."""
+    try:
+        from multiprocessing import resource_tracker
+
+        key = segment_name if segment_name.startswith("/") else f"/{segment_name}"
+        resource_tracker.unregister(key, "shared_memory")
+    except Exception as exc:
+        log_guarded_exception("network_teardown_shm_unregister", exc)
+
+
+def _detach_shared_memory_handles() -> None:
+    """Close producer handles without unlinking — segments must survive ``os._exit(0)``."""
+    try:
+        from system.identity import shared_memory_bridge as shm_mod
+        from system.identity import weight_transfer_bridge as wt_mod
+
+        for name in (
+            "ig_agent_v30_live_state",
+            "ig_agent_v30_shadow_state",
+            "ig_agent_v30_weight_xfer",
+        ):
+            _unregister_shm_from_resource_tracker(name)
+
+        with shm_mod._bridge_lock:
+            for bridge in list(shm_mod._bridge_singletons.values()):
+                bridge.close(unlink=False)
+            shm_mod._bridge_singletons.clear()
+        with wt_mod._bridge_lock:
+            bridge = wt_mod._bridge_singleton
+            if bridge is not None:
+                bridge.close(unlink=False)
+            wt_mod._bridge_singleton = None
+    except Exception as exc:
+        log_guarded_exception("network_teardown_shm_detach", exc)
+
+
+def perform_network_failure_teardown(
+    exc: BaseException,
+    *,
+    source: str = "network",
+) -> None:
+    """
+    Supervised fail-closed purge on broker connectivity loss.
+
+    Sequential law: CapitalGuard flatten → port locks → SHM unlink → ``os._exit(0)``.
+    Never returns.
+    """
+    log_guarded_exception(
+        "network_failure_teardown",
+        exc,
+        detail=f"source={source} {type(exc).__name__}",
+    )
+    log_engine(
+        "network failure teardown: begin "
+        f"({type(exc).__name__}: {exc}) source={source}"
+    )
+
+    _network_teardown_capital_guard_flatten()
+    force_release_parallel_port_locks()
+    purge_shared_memory_segments(reinit=True)
+
+    print(f"PROPAGATED {type(exc).__name__} {exc}", flush=True)
+    log_engine("network failure teardown: complete — os._exit(0)")
+    os._exit(0)
+
+
 def _should_skip_pid(pid: int, exclude_pid: int | None) -> bool:
     """Never signal the running process; also honour an explicit exclude PID."""
     if pid == os.getpid():
         return True
     if exclude_pid is not None and pid == exclude_pid:
         return True
+    try:
+        from simulation.testbed_daemon import is_protected_pid, zombie_protection_enabled
+
+        if zombie_protection_enabled() and is_protected_pid(pid):
+            return True
+    except Exception:
+        pass
     return False
 
 
@@ -121,6 +329,21 @@ def kill_other_agent_processes(
     """SIGTERM (then optional SIGKILL) any other src/main.py processes."""
     if os.environ.get("IG_AGENT_PYTEST") == "1":
         return []
+    if os.environ.get("IG_AGENT_SKIP_ORPHAN_KILL", "").strip() in ("1", "true", "yes"):
+        return []
+    if os.environ.get("IG_PARALLEL_TRACK", "").strip() in ("live", "shadow"):
+        return []
+    try:
+        from system.identity.process_orchestrator import read_pid_registry
+
+        registry = read_pid_registry()
+        sibling_pids = {
+            int(registry[k])
+            for k in ("live_pid", "shadow_pid")
+            if registry.get(k) is not None
+        }
+    except Exception:
+        sibling_pids = set()
     killed: list[int] = []
     try:
         result = subprocess.run(
@@ -135,6 +358,8 @@ def kill_other_agent_processes(
             except ValueError:
                 continue
             if _should_skip_pid(pid, exclude_pid):
+                continue
+            if pid in sibling_pids:
                 continue
             try:
                 os.kill(pid, signal.SIGTERM)
@@ -302,13 +527,14 @@ def perform_shutdown_cleanup(
         try:
             import sys
 
+            bind_port = _resolve_shutdown_port()
             mod = sys.modules.get("__main__")
             if mod is not None and hasattr(mod, "_force_cleanup_port"):
-                mod._force_cleanup_port(8080)
+                mod._force_cleanup_port(bind_port)
             else:
                 import main as _main
 
-                _main._force_cleanup_port(8080)
+                _main._force_cleanup_port(bind_port)
         except Exception as e:
             log_engine(f"shutdown cleanup: port cleanup error (continuing): {e}")
 
@@ -336,12 +562,27 @@ def _list_main_py_pids() -> list[int]:
     return pids
 
 
-def _port_bound(port: int = 8080, *, timeout_sec: float = 1.0) -> bool:
+def _resolve_shutdown_port() -> int:
+    try:
+        from system.boot.preflight_helpers import resolve_api_port
+
+        return resolve_api_port()
+    except Exception:
+        import os
+
+        try:
+            return int(os.environ.get("IG_API_PORT", "8080"))
+        except ValueError:
+            return 8080
+
+
+def _port_bound(port: int | None = None, *, timeout_sec: float = 1.0) -> bool:
     """True when something accepts TCP connections on loopback (agent API up)."""
+    bind_port = _resolve_shutdown_port() if port is None else int(port)
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.settimeout(max(0.2, float(timeout_sec)))
-            return s.connect_ex(("127.0.0.1", port)) == 0
+            return s.connect_ex(("127.0.0.1", bind_port)) == 0
     except Exception:
         return False
 
@@ -440,7 +681,7 @@ def agent_fully_started(
         issues.append(f"duplicate main.py processes ({len(pids)})")
 
     if not _port_bound():
-        issues.append("port 8080 not bound")
+        issues.append(f"port {_resolve_shutdown_port()} not bound")
 
     lock_pid = _instance_lock_holder_pid()
     if lock_pid is None:

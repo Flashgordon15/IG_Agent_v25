@@ -11,6 +11,7 @@ import string
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from ig_api.auth import SessionTokens
@@ -82,8 +83,11 @@ class MockIGRest:
         if not self._logged_in:
             self.login()
 
-    def fetch_market_snapshot(self, epic: str, *, live: bool = False) -> dict[str, Any]:
+    def fetch_market_snapshot(
+        self, epic: str, *, live: bool = False, **kwargs: Any
+    ) -> dict[str, Any]:
         _ = live
+        kwargs.pop("budget_priority", None)
         return {
             "epic": epic,
             "bid": self._bid,
@@ -98,6 +102,58 @@ class MockIGRest:
             "available": bal,
             "profit_loss": 0.0,
         }
+
+    def fetch_transactions(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        """Flight Deck / sync paths — ledger derived from mock open positions."""
+        from_date = kwargs.get("from_date") or (args[0] if args else None)
+        to_date = kwargs.get("to_date") or (args[1] if len(args) > 1 else None)
+        for label, raw in (("from_date", from_date), ("to_date", to_date)):
+            if raw is None:
+                continue
+            if isinstance(raw, datetime):
+                if raw.tzinfo is None:
+                    raise IGOrderError(
+                        f"Mock ledger fail-closed: naive {label} rejected",
+                        status_code=400,
+                    )
+            elif isinstance(raw, str) and raw.strip():
+                text = raw.strip()
+                if len(text) == 10 and text[4] == "-" and text[7] == "-":
+                    continue  # YYYY-MM-DD calendar bounds — UTC-agnostic OK
+                try:
+                    parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+                    if parsed.tzinfo is None and "T" in text:
+                        raise IGOrderError(
+                            f"Mock ledger fail-closed: naive {label} rejected",
+                            status_code=400,
+                        )
+                except ValueError as exc:
+                    raise IGOrderError(
+                        f"Mock ledger fail-closed: invalid {label}",
+                        status_code=400,
+                    ) from exc
+        txns: list[dict[str, Any]] = []
+        for pos in self._positions:
+            txns.append(
+                {
+                    "type": "POSITION",
+                    "epic": pos.get("epic"),
+                    "direction": pos.get("direction"),
+                    "size": pos.get("size"),
+                    "dealId": pos.get("dealId"),
+                    "status": "OPEN",
+                }
+            )
+        return txns
+
+    def maybe_refresh_account_summary(
+        self, min_interval: float = 60.0
+    ) -> dict[str, float | None]:
+        _ = min_interval
+        return self.refresh_account_summary()
+
+    def get_cached_account_summary(self) -> dict[str, float | None]:
+        return self.refresh_account_summary()
 
     def request(
         self,
@@ -143,6 +199,16 @@ class MockIGRest:
     ) -> dict[str, Any]:
         if self.mock.reject_order:
             raise IGOrderError("Mock order rejected", status_code=400)
+        if not epic or not str(epic).strip():
+            raise IGOrderError("Mock order rejected: missing epic", status_code=400)
+        if str(direction or "").upper() not in ("BUY", "SELL"):
+            raise IGOrderError("Mock order rejected: invalid direction", status_code=400)
+        if size <= 0 or size > 1_000_000:
+            raise IGOrderError(
+                f"Mock order rejected: invalid size {size}", status_code=400
+            )
+        if stop_distance <= 0 or limit_distance < 0:
+            raise IGOrderError("Mock order rejected: invalid stop/limit distances", status_code=400)
         ref = "MOCK-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=10))
         deal_id = "D" + ref[5:]
         self._positions.append(

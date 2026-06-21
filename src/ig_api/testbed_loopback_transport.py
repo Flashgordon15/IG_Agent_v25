@@ -83,21 +83,30 @@ class TestbedLoopbackTransport:
         self._running = True
         self._stop.clear()
         self._state = ConnectionState.CONNECTING
-        self._thread = threading.Thread(
-            target=self._replay_loop,
-            name="testbed-replay-feed",
-            daemon=True,
-        )
+        historical = os.environ.get("IG_HISTORICAL_REPLAY", "").strip()
+        if historical:
+            log_engine(
+                "TestbedLoopbackTransport: file replay feed skipped — "
+                f"HistoricalReplayer owns {historical}"
+            )
+        else:
+            self._thread = threading.Thread(
+                target=self._replay_loop,
+                name="testbed-replay-feed",
+                daemon=True,
+            )
+            self._thread.start()
         self._socket_thread = threading.Thread(
             target=self._fill_socket_loop,
             name="testbed-fill-socket",
             daemon=True,
         )
-        self._thread.start()
         self._socket_thread.start()
         self._state = ConnectionState.CONNECTED
         log_engine(
-            "TestbedLoopbackTransport: armed — replay feed + fill socket (no outbound network)"
+            "TestbedLoopbackTransport: armed — fill socket + "
+            + ("HistoricalReplayer feed" if historical else "jsonl replay feed")
+            + " (no outbound network)"
         )
 
     def disconnect(self) -> None:
@@ -150,6 +159,7 @@ class TestbedLoopbackTransport:
         px = float(price if price is not None else self._last_mid.get(key, 0.0))
         if px <= 0:
             raise ValueError(f"testbed fill rejected — no replay mid for epic={key}")
+        latency_ms = self._maybe_chaos_fill_delay(key, side, px)
         fill = TestbedFill(
             deal_id=str(deal_id or f"TB-{int(time.time() * 1000)}"),
             epic=key,
@@ -170,8 +180,31 @@ class TestbedLoopbackTransport:
         log_engine(
             f"TestbedLoopbackTransport: fill registered {fill.side} {fill.size} "
             f"{fill.epic} @ {fill.price} deal={fill.deal_id}"
+            + (f" chaos_latency={latency_ms:.0f}ms" if latency_ms > 0 else "")
         )
         return fill
+
+    def _maybe_chaos_widen(
+        self, epic: str, bid: float, offer: float
+    ) -> tuple[float, float, float]:
+        try:
+            from simulation.optimization_chaos import chaos_enabled, widen_spread
+
+            if chaos_enabled():
+                return widen_spread(bid, offer, epic=epic)
+        except Exception:
+            pass
+        return bid, offer, 0.0
+
+    def _maybe_chaos_fill_delay(self, epic: str, side: str, price: float) -> float:
+        try:
+            from simulation.optimization_chaos import apply_fill_latency, chaos_enabled
+
+            if chaos_enabled():
+                return apply_fill_latency()
+        except Exception:
+            pass
+        return 0.0
 
     def _emit_tick(
         self,
@@ -240,6 +273,7 @@ class TestbedLoopbackTransport:
                                 row.get("timestamp", row.get("ts"))
                             )
                             if epic and bid > 0 and offer > 0:
+                                bid, offer, _ = self._maybe_chaos_widen(epic, bid, offer)
                                 self._emit_tick(
                                     epic,
                                     bid,

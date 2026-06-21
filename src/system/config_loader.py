@@ -380,6 +380,35 @@ class ConfigLoader:
                         merged = _deep_merge(merged, json.load(fh))
         except Exception:
             pass
+        try:
+            matrix_overlay = (
+                Path(__file__).resolve().parents[1]
+                / "simulation"
+                / "data"
+                / "best_matrix_overlay.json"
+            )
+            if matrix_overlay.is_file():
+                with open(matrix_overlay, "r", encoding="utf-8") as fh:
+                    merged = _deep_merge(merged, json.load(fh))
+        except Exception:
+            pass
+        try:
+            from system.apex_runtime_mode import ApexRuntimeMode, get_apex_runtime_mode
+
+            if get_apex_runtime_mode() is ApexRuntimeMode.HARDENED_TESTBED:
+                from system.testbed_firewall import testbed_ledger_path
+
+                merged["learning_db"] = str(testbed_ledger_path())
+                repo_overlay = (
+                    Path(__file__).resolve().parents[2]
+                    / "analytics"
+                    / "optimization_overlay.json"
+                )
+                if repo_overlay.is_file():
+                    with open(repo_overlay, "r", encoding="utf-8") as fh:
+                        merged = _deep_merge(merged, json.load(fh))
+        except Exception:
+            pass
         return merged
 
     def _resolve_paths(self, cfg: dict[str, Any]) -> None:

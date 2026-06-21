@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, memo } from "react";
 import { authHeaders } from "../api/client.js";
-import { API_BASE, resolveTargetPort } from "../config.js";
+import { API_BASE, resolveApiBase } from "../config.js";
 import { useApexTelemetry } from "../apex/useApexTelemetry.js";
 import { useSidecarPid } from "../hooks/useSidecarPid.js";
 
@@ -9,9 +9,8 @@ const POLL_MS = 2000;
 const EXPORT_FLASH_MS = 5000;
 
 function agentApiUrl(path = "") {
-  const port = resolveTargetPort();
   const suffix = path.startsWith("/") ? path : `/${path}`;
-  return `http://127.0.0.1:${port}${suffix}`;
+  return `${resolveApiBase()}${suffix}`;
 }
 
 async function fetchSystemMonitor() {

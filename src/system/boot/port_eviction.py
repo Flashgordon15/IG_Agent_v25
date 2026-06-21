@@ -24,7 +24,19 @@ def _resolve_killable_pid(raw_pid: str | int) -> int | None:
 
 
 def should_protect_production_port(port: int) -> bool:
-    """Shadow desktop must not evict production :8080 / :8787."""
+    """Shadow/testbed profiles must not evict production :8080 / :8787."""
+    if port not in _PROTECTED_PORTS:
+        return False
+    try:
+        from system.node_profile import get_node_profile
+
+        profile = get_node_profile()
+        if profile.is_testbed or profile.is_shadow:
+            return True
+    except Exception as exc:
+        from system.guard.runtime_guard import log_guarded_exception
+
+        log_guarded_exception("port_eviction", exc)
     protect = os.environ.get("IG_APEX_PROTECT_PRODUCTION_PORTS", "").strip().lower() in (
         "1",
         "true",
@@ -35,11 +47,51 @@ def should_protect_production_port(port: int) -> bool:
     try:
         from system.node_profile import is_shadow_node
 
-        if is_shadow_node() and port in _PROTECTED_PORTS:
+        if is_shadow_node():
             return True
-    except Exception:
-        pass
+    except Exception as exc:
+        from system.guard.runtime_guard import log_guarded_exception
+
+        log_guarded_exception("port_eviction", exc)
     return False
+
+
+def _evict_listener_pid(target_pid: int, bind_port: int) -> bool:
+    """SIGTERM first, brief wait, then SIGKILL — never kill self."""
+    if _resolve_killable_pid(target_pid) is None:
+        return False
+    try:
+        os.kill(target_pid, signal.SIGTERM)
+        log_engine(f"port eviction: SIGTERM PID {target_pid} on :{bind_port}")
+    except ProcessLookupError:
+        return False
+    except Exception as exc:
+        log_engine(
+            f"port eviction: SIGTERM failed PID {target_pid}: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return False
+    deadline = time.time() + 2.5
+    while time.time() < deadline:
+        try:
+            os.kill(target_pid, 0)
+            time.sleep(0.15)
+        except ProcessLookupError:
+            return True
+        except Exception:
+            break
+    try:
+        os.kill(target_pid, signal.SIGKILL)
+        log_engine(f"port eviction: SIGKILL PID {target_pid} on :{bind_port}")
+        return True
+    except ProcessLookupError:
+        return True
+    except Exception as exc:
+        log_engine(
+            f"port eviction: SIGKILL failed PID {target_pid}: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return False
 
 
 def reclaim_api_port(port: int | None = None, *, force: bool = False) -> list[int]:
@@ -73,25 +125,19 @@ def reclaim_api_port(port: int | None = None, *, force: bool = False) -> list[in
             target_pid = _resolve_killable_pid(pid_str)
             if target_pid is None:
                 continue
-            try:
-                os.kill(target_pid, signal.SIGKILL)
+            if _evict_listener_pid(target_pid, bind_port):
                 killed.append(target_pid)
-                log_engine(
-                    f"port eviction: SIGKILL PID {target_pid} on :{bind_port}"
-                )
-            except ProcessLookupError:
-                pass
-            except Exception as exc:
-                log_engine(
-                    f"port eviction: could not kill PID {target_pid}: {type(exc).__name__}: {exc}"
-                )
-    except Exception:
-        pass
+    except Exception as exc:
+        from system.guard.runtime_guard import log_guarded_exception
+
+        log_guarded_exception("port_eviction", exc)
 
     try:
         instance_lock_path().unlink(missing_ok=True)
-    except Exception:
-        pass
+    except Exception as exc:
+        from system.guard.runtime_guard import log_guarded_exception
+
+        log_guarded_exception("port_eviction", exc)
     return killed
 
 
@@ -126,8 +172,10 @@ def port_held_by_current_process(port: int) -> bool:
         for pid_str in result.stdout.strip().splitlines():
             if pid_str.strip() in own:
                 return True
-    except Exception:
-        pass
+    except Exception as exc:
+        from system.guard.runtime_guard import log_guarded_exception
+
+        log_guarded_exception("port_eviction", exc)
     return False
 
 

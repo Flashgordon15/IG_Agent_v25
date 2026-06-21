@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -33,8 +34,10 @@ def _stream_heartbeat_ok(client: Any) -> bool:
         state = getattr(client, "state", None)
         if state == ConnectionState.CONNECTED:
             return True
-    except Exception:
-        pass
+    except Exception as exc:
+        from system.guard.runtime_guard import log_guarded_exception
+
+        log_guarded_exception("gate3_runner", exc)
     return bool(getattr(client, "_running", False))
 
 
@@ -57,8 +60,10 @@ def _open_market_epics(epics: list[str]) -> list[str]:
 
         if force_market_open_active():
             return list(epics)
-    except Exception:
-        pass
+    except Exception as exc:
+        from system.guard.runtime_guard import log_guarded_exception
+
+        log_guarded_exception("gate3_runner", exc)
     try:
         from system.market_watch.calendar import is_market_open
 
@@ -131,6 +136,28 @@ class Gate3Runner:
             epics = [str(cfg.epic)]
         self._context.epics = epics
 
+        if os.environ.get("IG_TEST_HARNESS", "").strip() == "1":
+            from system.stream_ready import signal_stream_ready
+
+            signal_stream_ready(source="test_harness")
+            self._state.update_state(
+                BootPhase.G3_STREAMING,
+                60,
+                "Harness Replay (no live socket)",
+                gates_dict=None,
+                streaming={
+                    "transport": "harness_replay",
+                    "heartbeat_ok": True,
+                    "first_tick_epic": epics[0] if epics else None,
+                    "first_tick_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "market_closed_exempt": False,
+                },
+            )
+            log_engine(
+                f"Gate3: test harness — live websocket bypassed epics={len(epics)}"
+            )
+            return
+
         wire_hub_quotes_to_dashboard(min_interval=0.25)
         wire_hub_quotes_to_position_protect(min_interval=0.05)
 
@@ -145,15 +172,28 @@ class Gate3Runner:
                     f"Gate3: intelligence hub wire skipped: {type(exc).__name__}: {exc}"
                 )
 
-        if reference_transport_is_yahoo(cfg):
+        use_yahoo = reference_transport_is_yahoo(cfg)
+        try:
+            from system.apex_runtime_mode import ApexRuntimeMode, get_apex_runtime_mode
+
+            if get_apex_runtime_mode() is ApexRuntimeMode.HARDENED_TESTBED:
+                use_yahoo = False
+        except Exception as exc:
+            from system.guard.runtime_guard import log_guarded_exception
+
+            log_guarded_exception("gate3_runner", exc)
+
+        if use_yahoo:
             shadow_timeout = 45.0 if self._context.config else self._timeout_sec
             try:
                 from system.node_profile import is_shadow_node
 
                 if is_shadow_node():
                     shadow_timeout = min(self._timeout_sec, 45.0)
-            except Exception:
-                pass
+            except Exception as exc:
+                from system.guard.runtime_guard import log_guarded_exception
+
+                log_guarded_exception("gate3_runner", exc)
             prev = self._timeout_sec
             self._timeout_sec = shadow_timeout
             try:

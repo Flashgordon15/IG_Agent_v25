@@ -460,7 +460,12 @@ class ExecutionEngine:
         return settings
 
     def execute_trade(
-        self, signal: TradeSignal, *, prevalidated: bool = False
+        self,
+        signal: TradeSignal,
+        *,
+        prevalidated: bool = False,
+        gate_snapshot: dict[str, bool] | None = None,
+        shadow_force_fill: bool = False,
     ) -> ExecutionResult:
         from ai.operational.profiler_hooks import probe_hot_path
 
@@ -468,10 +473,20 @@ class ExecutionEngine:
             "probe_execution_process_tick",
             epic=str(getattr(signal, "epic", "") or ""),
         ):
-            return self._execute_trade_body(signal, prevalidated=prevalidated)
+            return self._execute_trade_body(
+                signal,
+                prevalidated=prevalidated,
+                gate_snapshot=gate_snapshot,
+                shadow_force_fill=shadow_force_fill,
+            )
 
     def _execute_trade_body(
-        self, signal: TradeSignal, *, prevalidated: bool = False
+        self,
+        signal: TradeSignal,
+        *,
+        prevalidated: bool = False,
+        gate_snapshot: dict[str, bool] | None = None,
+        shadow_force_fill: bool = False,
     ) -> ExecutionResult:
         from execution.atomic_gateway import assert_execution_allowed
 
@@ -811,6 +826,19 @@ class ExecutionEngine:
             )
 
             if demo_broker_execution_active() and not shadow_execution_active():
+                from execution.parallel_track_guard import assert_live_track_order_transmission
+
+                pt_ok, pt_reason = assert_live_track_order_transmission(
+                    epic=str(signal.epic or "")
+                )
+                if not pt_ok:
+                    update_demo_diagnostics(last_rejection=pt_reason, executor_selected="none")
+                    return ExecutionResult(
+                        success=False,
+                        action="REJECTED",
+                        rejection_reason=pt_reason,
+                        execution_params=execution_params,
+                    )
                 if self._live is None:
                     reason = "IG DEMO mode requires REST client (LiveExecutor)"
                     update_demo_diagnostics(last_rejection=reason, executor_selected="none")
@@ -850,7 +878,11 @@ class ExecutionEngine:
                     params={"epic": signal.epic},
                 )
                 update_demo_diagnostics(executor_selected="shadow_executor (SHADOW)")
-                return ShadowExecutor().execute(signal, execution_params)
+                return ShadowExecutor().execute(
+                    signal,
+                    execution_params,
+                    gate_snapshot=gate_snapshot,
+                )
         except Exception as exc:
             log_engine(f"shadow_executor route failed: {type(exc).__name__}: {exc}")
 

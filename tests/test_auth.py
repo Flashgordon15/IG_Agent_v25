@@ -69,6 +69,20 @@ class AdminAuthTests(unittest.TestCase):
         self.assertEqual(ok.status_code, 200)
         self.assertIn("agent_alive", ok.json())
 
+    def test_health_loopback_bypass_without_login(self) -> None:
+        """Local dashboard boot probes /api/health from 127.0.0.1 without a session."""
+        with patch("api.auth_middleware._is_loopback_client", return_value=True):
+            ok = self.client.get("/api/health")
+        self.assertEqual(ok.status_code, 200)
+        self.assertIn("agent_alive", ok.json())
+
+    def test_health_remote_still_requires_auth(self) -> None:
+        blocked = self.client.get(
+            "/api/health",
+            headers={"X-Forwarded-For": "203.0.113.50"},
+        )
+        self.assertEqual(blocked.status_code, 401)
+
     def test_admin_routes_require_auth(self) -> None:
         blocked = self.client.get("/api/admin/risk-status")
         self.assertEqual(blocked.status_code, 401)

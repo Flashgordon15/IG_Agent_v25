@@ -155,6 +155,9 @@ async def boot_lifespan(app: Any) -> AsyncIterator[dict[str, Any]]:
     from api.server_deferred import mount_deferred_routers
 
     loop = asyncio.get_running_loop()
+    from system.boot.boot_loop_holder import set_boot_loop
+
+    set_boot_loop(loop)
     await asyncio.to_thread(mount_deferred_routers, app, loop)
     if hasattr(app.state, "_mount_done"):
         app.state._mount_done.set()

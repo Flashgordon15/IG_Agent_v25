@@ -18,6 +18,7 @@ from typing import Any
 from data.models import Quote
 from ig_api.exceptions import IGAPIError, RateLimitError
 from system.engine_log import log_engine
+from system.guard.runtime_guard import guard_call, log_guarded_exception
 
 # Passive read-only ECN wholesale baseline observer (RAM-only, no order authority).
 _ECN_BASELINE_CACHE: dict[str, dict[str, float | bool]] = {}
@@ -44,8 +45,8 @@ class QuoteSnapshot:
 
             if is_replay_active():
                 return max(0.0, now() - ref)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("hub_quote_age", exc, epic=self.epic)
         return max(0.0, time.time() - ref)
 
     def to_quote(self) -> Quote:
@@ -53,6 +54,50 @@ class QuoteSnapshot:
         return Quote(
             time=datetime.fromtimestamp(ref), bid=self.bid, offer=self.offer
         )
+
+
+NIGHT_MATRIX_EPICS: tuple[str, ...] = (
+    "CS.D.CFPGOLD.CFP.IP",
+    "IX.D.DOW.IFM.IP",
+    "IX.D.NIKKEI.IFM.IP",
+    "CS.D.EURUSD.CFD.IP",
+)
+
+
+def normalize_hub_quote_source(source: str) -> str:
+    """Map internal hub publish sources to institutional telemetry labels."""
+    raw = str(source or "").strip().lower()
+    if raw in ("ig_execution", "execution"):
+        return "ig_execution"
+    if raw in ("yahoo", "yahoo_reference", "yahoo_poll", "yahoo_heartbeat"):
+        return "yahoo"
+    if raw in ("synthetic", "mock", "stream_b", "macro_synthetic", "stream_a"):
+        return "synthetic"
+    if raw in ("rest", "stream", "ig", "ig_rest", "rest_poll", "lightstreamer"):
+        return "ig_rest"
+    if raw in ("replay", "mock_replay"):
+        return "synthetic"
+    return "ig_rest" if raw else "synthetic"
+
+
+def _sync_hub_quote_source_metric(epic: str, source: str, staleness_seconds: float) -> None:
+    """Publish per-epic quote provenance into ``ig_agent_v30_live_state`` shared memory."""
+    epic_key = str(epic or "").strip()
+    if not epic_key:
+        return
+    label = normalize_hub_quote_source(source)
+    staleness = max(0, int(round(float(staleness_seconds))))
+    try:
+        from system.identity.state_cache import get_live_state_cache
+
+        cache = get_live_state_cache()
+        cache.update_hub_quote_source(
+            epic=epic_key,
+            source=label,
+            staleness_seconds=staleness,
+        )
+    except Exception as exc:
+        log_guarded_exception("hub_quote_source_shm_sync", exc, epic=epic_key)
 
 
 class MarketDataHub:
@@ -83,10 +128,8 @@ class MarketDataHub:
                     "loopback replay only"
                 )
                 return
-        except Exception:
-            pass
-        with self._lock:
-            self._rest = rest_client
+        except Exception as exc:
+            log_guarded_exception("hub_rest_attach", exc)
 
     def set_min_fetch_interval(self, seconds: float) -> None:
         self._fetch_interval_sec = max(0.5, float(seconds))
@@ -107,11 +150,9 @@ class MarketDataHub:
     def _emit_quote(self, snap: QuoteSnapshot) -> None:
         with self._lock:
             listeners = list(self._listeners)
+        epic = str(getattr(snap, "epic", "") or "")
         for cb in listeners:
-            try:
-                cb(snap)
-            except Exception:
-                pass
+            guard_call("hub_quote_listener", cb, snap, epic=epic)
 
     def enter_maintenance(self, epic: str) -> None:
         """IG sends blank BID/OFFER during Japan 225 daily maintenance — pause REST/stale paths."""
@@ -253,9 +294,11 @@ class MarketDataHub:
 
                 if not is_stream_ready():
                     signal_stream_ready(source=f"hub_publish:{epic}")
-            except Exception:
-                pass
+            except Exception as exc:
+                log_guarded_exception("hub_stream_ready", exc, epic=epic)
         self._emit_quote(snap)
+        if epic_key in NIGHT_MATRIX_EPICS:
+            _sync_hub_quote_source_metric(epic_key, source, snap.age_seconds())
         return snap
 
     def publish_replay_tick(
@@ -272,12 +315,13 @@ class MarketDataHub:
 
         epoch = float(quote_time)
         set_replay_time(epoch)
+        epic_key = str(epic or "").strip()
         try:
             from simulation.replay_telemetry import record_tick
 
             record_tick(epic=epic_key)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_guarded_exception("hub_replay_telemetry", exc, epic=epic_key)
         return self.publish(
             epic,
             bid,
@@ -356,10 +400,8 @@ class MarketDataHub:
 
             if hub_quote_stream_fresh(epic=epic) and cached and cached.bid > 0:
                 return cached
-        except Exception:
-            pass
-
-        if cached and cached.bid > 0:
+        except Exception as exc:
+            log_guarded_exception("hub_quote_stream_fresh", exc, epic=epic)
             age = cached.age_seconds()
             if max_age is not None and age <= max_age:
                 return cached
