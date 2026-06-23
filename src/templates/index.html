@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>IG Agent — Traffic-Light Console</title>
+  <style>
+    :root {
+      --bg: #040507;
+      --panel: #0a0d12;
+      --border: #1a1f27;
+      --fg: #e8edf4;
+      --muted: #7d8590;
+      --green: #3fb950;
+      --blue: #58a6ff;
+      --fire: #ff7b47;
+      --crimson: #ff3b30;
+      --crimson-bg: #3d0a0a;
+      --dim: #484f58;
+      --win: #3fb950;
+      --loss: #f85149;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: var(--bg);
+      color: var(--fg);
+      min-height: 100vh;
+      padding: 0 0 2rem;
+    }
+    .stall-banner {
+      display: none;
+      width: 100%;
+      background: var(--crimson-bg);
+      border-bottom: 2px solid var(--crimson);
+      color: #fff;
+      text-align: center;
+      font-size: 0.95rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      padding: 0.85rem 1rem;
+      animation: stall-flash 1s ease-in-out infinite;
+    }
+    .stall-banner.visible { display: block; }
+    @keyframes stall-flash {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.72; }
+    }
+    .page-body { padding: 1.5rem 1.25rem 0; }
+    h1 {
+      font-size: 0.7rem;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--muted);
+      text-align: center;
+      margin-bottom: 1.5rem;
+    }
+    .lights {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 0.75rem;
+      margin-bottom: 1.5rem;
+      max-width: 960px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+    .light {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.25rem 1rem;
+      text-align: center;
+      min-height: 140px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+    }
+    .light .icon { font-size: 2.2rem; line-height: 1; }
+    .light .name {
+      font-size: 0.58rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+    }
+    .light .value {
+      font-size: 0.85rem;
+      font-weight: 600;
+      line-height: 1.35;
+    }
+    .light.green .value { color: var(--green); }
+    .light.blue .value { color: var(--blue); font-size: 1.6rem; font-variant-numeric: tabular-nums; }
+    .light.fire .value { color: var(--fire); }
+    .light.crimson { border-color: var(--crimson); background: #1a0808; }
+    .light.crimson .value { color: var(--crimson); }
+    .light.neutral .value { color: var(--muted); }
+    .light.blue .value.shift { animation: coord-pulse 1s ease-in-out infinite; }
+    @keyframes coord-pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.55; }
+    }
+    .fills-wrap {
+      max-width: 960px;
+      margin: 0 auto;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .fills-wrap h2 {
+      font-size: 0.62rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      padding: 0.75rem 1rem;
+      border-bottom: 1px solid var(--border);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.72rem;
+    }
+    th {
+      text-align: left;
+      color: var(--muted);
+      font-weight: 500;
+      padding: 0.55rem 0.75rem;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.58rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    td {
+      padding: 0.55rem 0.75rem;
+      border-bottom: 1px solid var(--border);
+      font-variant-numeric: tabular-nums;
+    }
+    tr:last-child td { border-bottom: none; }
+    .outcome-win { color: var(--win); }
+    .outcome-loss { color: var(--loss); }
+    .status-open { color: var(--blue); }
+    .status-closed { color: var(--muted); }
+    .empty-row td {
+      text-align: center;
+      color: var(--dim);
+      padding: 1.5rem;
+    }
+    .sync {
+      text-align: center;
+      margin-top: 1rem;
+      font-size: 0.55rem;
+      color: var(--dim);
+    }
+    @media (max-width: 720px) {
+      .lights { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="stall-banner" id="stall-banner">
+    ⚠️ CRITICAL STALL: DATA STREAM DISCONNECTED - TRADING PAUSED
+  </div>
+
+  <div class="page-body">
+    <h1>Visual Verification Dashboard</h1>
+
+    <div class="lights">
+      <div class="light neutral" id="light-ingestion">
+        <div class="icon" id="icon-ingestion">⚪</div>
+        <div class="name">Ingestion Health</div>
+        <div class="value" id="val-ingestion">—</div>
+      </div>
+      <div class="light blue" id="light-matrix">
+        <div class="icon">🔵</div>
+        <div class="name">Live Matrix Coordinates</div>
+        <div class="value shift" id="val-matrix">—</div>
+      </div>
+      <div class="light neutral" id="light-exec">
+        <div class="icon" id="icon-exec">⚪</div>
+        <div class="name">Master Execution Valve</div>
+        <div class="value" id="val-exec">⚪ SCANNING FRONTIER</div>
+      </div>
+    </div>
+
+    <div class="fills-wrap">
+      <h2>Real-Time Execution Performance</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Timestamp (UTC)</th>
+            <th>Epic</th>
+            <th>Action</th>
+            <th>Entry</th>
+            <th>Status</th>
+            <th>Outcome</th>
+          </tr>
+        </thead>
+        <tbody id="fills-body">
+          <tr class="empty-row"><td colspan="6">No executions yet</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="sync" id="sync-line">sync —</div>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const STALL_ALERT = "⚠️ CRITICAL STALL: DATA STREAM DISCONNECTED - TRADING PAUSED";
+    const STALL_SEC = 5;
+
+    // 5-second data velocity watchdog (client-side frame tracker)
+    const velocityTracker = {
+      lastTicksCached: null,
+      lastLiveRamTicks: null,
+      lastChangeMs: Date.now(),
+      stalled: false,
+    };
+
+    function setLight(el, color) {
+      el.className = "light " + color;
+    }
+
+    function fmtTs(iso) {
+      if (!iso) return "—";
+      try {
+        const d = new Date(iso);
+        return d.toISOString().replace("T", " ").replace("Z", " UTC");
+      } catch (_) { return iso; }
+    }
+
+    function updateVelocityWatchdog(data) {
+      const dv = data.data_velocity || {};
+      const ticksCached = Number(dv.ticks_cached ?? data.ticks_cached ?? 0);
+      const liveRamTicks = Number(dv.live_ram_ticks ?? dv.watchdog_metric ?? 0);
+      const now = Date.now();
+
+      if (
+        velocityTracker.lastTicksCached !== null &&
+        velocityTracker.lastTicksCached === ticksCached &&
+        velocityTracker.lastLiveRamTicks === liveRamTicks
+      ) {
+        // frozen — keep lastChangeMs
+      } else if (velocityTracker.lastTicksCached !== null) {
+        velocityTracker.lastChangeMs = now;
+      } else {
+        velocityTracker.lastChangeMs = now;
+      }
+
+      velocityTracker.lastTicksCached = ticksCached;
+      velocityTracker.lastLiveRamTicks = liveRamTicks;
+
+      const frozenMs = now - velocityTracker.lastChangeMs;
+      const clientStall =
+        velocityTracker.lastTicksCached !== null && frozenMs >= STALL_SEC * 1000;
+      const serverStall = Boolean(dv.stall_active || data.trading_paused);
+
+      velocityTracker.stalled = clientStall || serverStall;
+      return {
+        stalled: velocityTracker.stalled,
+        frozenSec: Math.floor(frozenMs / 1000),
+        ticksCached,
+        liveRamTicks,
+      };
+    }
+
+    function renderFills(rows) {
+      const body = $("fills-body");
+      if (!rows || !rows.length) {
+        body.innerHTML = '<tr class="empty-row"><td colspan="6">No executions yet</td></tr>';
+        return;
+      }
+      body.innerHTML = rows.slice().reverse().map((r) => {
+        const ts = fmtTs(r.executed_at || r.closed_at);
+        const epic = r.epic || "—";
+        const action = r.action || r.direction || "—";
+        const entry = r.entry != null ? Number(r.entry).toFixed(2) : "—";
+        const status = (r.status || "CLOSED").toUpperCase();
+        const result = (r.result || "—").toUpperCase();
+        const pnl = Number(r.pnl_gbp || 0);
+        const outcomeCls = result === "WIN" ? "outcome-win" : (result === "LOSS" ? "outcome-loss" : "");
+        const statusCls = status === "OPEN" ? "status-open" : "status-closed";
+        const outcomeText = result + (pnl !== 0 ? " (" + (pnl > 0 ? "+" : "") + pnl.toFixed(2) + " GBP)" : "");
+        return `<tr>
+          <td>${ts}</td>
+          <td>${epic}</td>
+          <td>${action}</td>
+          <td>${entry}</td>
+          <td class="${statusCls}">${status}</td>
+          <td class="${outcomeCls}">${outcomeText}</td>
+        </tr>`;
+      }).join("");
+    }
+
+    function render(data) {
+      const vel = updateVelocityWatchdog(data);
+      const stalled = vel.stalled;
+      const alertText =
+        data.critical_alert ||
+        (data.data_velocity && data.data_velocity.critical_alert) ||
+        STALL_ALERT;
+
+      const banner = $("stall-banner");
+      if (stalled) {
+        banner.textContent = alertText;
+        banner.classList.add("visible");
+      } else {
+        banner.classList.remove("visible");
+      }
+
+      const hub = stalled
+        ? {
+            ingestion: {
+              color: "crimson",
+              icon: "🔴",
+              detail: `CRIMSON — ticks_cached frozen ${vel.frozenSec}s`,
+            },
+            matrix: (data.traffic_light_hub || {}).matrix || {},
+            execution: {
+              color: "crimson",
+              icon: "🔴",
+              detail: "TRADING PAUSED — DATA STREAM DISCONNECTED",
+            },
+          }
+        : (data.traffic_light_hub || {});
+
+      const ing = hub.ingestion || {};
+      const mat = hub.matrix || {};
+      const ex = hub.execution || {};
+
+      $("icon-ingestion").textContent = ing.icon || "⚪";
+      $("val-ingestion").textContent = ing.detail || ing.label || "—";
+      if (stalled || ing.color === "crimson") {
+        setLight($("light-ingestion"), "crimson");
+      } else {
+        setLight($("light-ingestion"), ing.color === "green" ? "green" : "neutral");
+      }
+
+      const coord = mat.coordinate;
+      $("val-matrix").textContent =
+        coord != null
+          ? String(coord) + " / " + (mat.total_cells || 131072) +
+            " · cached " + vel.ticksCached.toLocaleString()
+          : "—";
+
+      $("icon-exec").textContent = ex.icon || "⚪";
+      $("val-exec").textContent = ex.detail || ex.label || "⚪ SCANNING FRONTIER";
+      if (stalled || ex.color === "crimson") {
+        setLight($("light-exec"), "crimson");
+      } else {
+        const exColor = ex.color === "fire" ? "fire" : (ex.color === "green" ? "green" : "neutral");
+        setLight($("light-exec"), exColor);
+      }
+
+      renderFills(data.performance_rows || []);
+
+      $("sync-line").textContent =
+        "pulse " + (data.pulse_serial ?? "—") +
+        " · ticks_cached " + vel.ticksCached +
+        " · live_ram " + vel.liveRamTicks +
+        (stalled ? " · STALL " + vel.frozenSec + "s" : "") +
+        " · " + (data.updated_at || "—");
+    }
+
+    async function poll() {
+      try {
+        const r = await fetch("/api/unified/fulfillment?_=" + Date.now(), { cache: "no-store" });
+        if (r.ok) render(await r.json());
+      } catch (_) { /* silent */ }
+    }
+
+    poll();
+    setInterval(poll, 1000);
+  </script>
+</body>
+</html>

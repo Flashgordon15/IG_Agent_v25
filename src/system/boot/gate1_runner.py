@@ -90,18 +90,25 @@ class Gate1Runner:
 
         harness_mode = os.environ.get("IG_TEST_HARNESS", "").strip() == "1"
         if force_market_open_active() and not harness_mode:
+            from system.agent_execution_mode import production_execution_active
+
             log_engine(
                 "Gate1: DEMO/session validation — market_open=True, "
                 "weekend blackout disabled (24/7 execution plane)"
             )
-            try:
-                from feeder.mock_feed_engine import start_aggressive_momentum_wave
+            if not production_execution_active():
+                try:
+                    from feeder.mock_feed_engine import start_aggressive_momentum_wave
 
-                start_aggressive_momentum_wave()
-            except Exception as exc:
+                    start_aggressive_momentum_wave()
+                except Exception as exc:
+                    log_engine(
+                        f"Gate1: momentum wave synthesizer skipped: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+            else:
                 log_engine(
-                    f"Gate1: momentum wave synthesizer skipped: "
-                    f"{type(exc).__name__}: {exc}"
+                    "Gate1: IG_PRODUCTION_EXECUTION — mock momentum wave suppressed"
                 )
 
         from system.node_profile import apply_node_profile_to_environ

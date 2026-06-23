@@ -18,6 +18,10 @@ import time
 from pathlib import Path
 from typing import Any
 
+# Single-String SHM ctypes registry (`/ig_agent_v30_shm`) — fields: ticks_cached,
+# signal_threshold, atr_multiplier, valve_status, last_trade_pnl (see CockpitShmHeader).
+from system.ipc.ring_buffer import CockpitShmHeader  # noqa: F401
+
 EXIT_OK = 0
 EXIT_LOCK = 2
 EXIT_CONFIG = 3
@@ -471,6 +475,14 @@ def _pre_startup_cleanup() -> None:
             clear_manual_stop()
     _init_telegram_from_config()
 
+    if not _is_test_harness_mode():
+        try:
+            from system.bootstrap_sanitizer import run_supervision_self_sanitize
+
+            run_supervision_self_sanitize(repair=True)
+        except Exception as exc:
+            _log_engine(f"pre-startup: supervision sanitize skipped: {type(exc).__name__}: {exc}")
+
     my_pid = os.getpid()
     holder = read_lock_holder(lock_target)
     if holder is not None and holder != my_pid and pid_alive(holder):
@@ -663,6 +675,27 @@ def run_preflight() -> int:
 def _open_browser_delayed(url: str, delay: float = _BROWSER_DELAY_SEC) -> None:
     """Permanently disabled — backend must never spawn an external browser."""
     _log_engine(f"browser auto-launch disabled (use Electron or open manually): {url}")
+
+
+def _foreground_execution_guard(shutdown_event: threading.Event) -> None:
+    """
+    Main-thread foreground keep-alive — holds the process open on macOS Darwin.
+
+    Prevents idle main-thread exit when the monotonic scheduler runs on a worker
+    thread. Honors ``shutdown_event`` for SIGTERM/SIGINT graceful teardown.
+    """
+    _log_engine(
+        f"DAEMON-CYCLE: foreground keep-alive armed pid={os.getpid()} — "
+        "main thread locked (1s trace)"
+    )
+    tick = 0
+    while not shutdown_event.is_set():
+        time.sleep(1)
+        tick += 1
+        if tick % 30 == 0:
+            _log_engine(
+                f"DAEMON-CYCLE: live execution heartbeat tick={tick}s pid={os.getpid()}"
+            )
 
 
 class AgentRuntime:
@@ -882,6 +915,58 @@ class AgentRuntime:
             ctx = getattr(app.state, "boot_context", None) or self._boot_context
             from system.identity.app_identity import RuntimeIdentity
 
+            try:
+                from system.agent_execution_mode import authentic_demo_broker_required
+
+                if authentic_demo_broker_required() and ctx is not None:
+                    from system.ig_rest_session import force_authenticated_ig_rest_client
+
+                    ctx.rest_client = force_authenticated_ig_rest_client()
+            except Exception as exc:
+                from system.guard.runtime_guard import log_guarded_exception
+
+                log_guarded_exception("demo_rest_force_daemon", exc)
+
+            preflight_report: dict | None = None
+            try:
+                from system.production_pipeline_integrity import (
+                    verify_production_pipeline_integrity,
+                )
+
+                rest_for_preflight = getattr(ctx, "rest_client", None) if ctx else None
+                preflight_report = verify_production_pipeline_integrity(
+                    rest_client=rest_for_preflight,
+                    timeout_sec=10.0,
+                    blocking=True,
+                )
+            except Exception as exc:
+                from system.guard.runtime_guard import log_guarded_exception
+
+                log_guarded_exception("verify_production_pipeline_integrity", exc)
+
+            barrier_report: dict | None = None
+            if ctx is not None:
+                try:
+                    from system.bootstrap_phase_barrier import (
+                        execute_atomic_bootstrap_phase_barrier,
+                    )
+
+                    barrier_report = execute_atomic_bootstrap_phase_barrier(
+                        ctx,
+                        verify_timeout_sec=5.0,
+                        emit=True,
+                    )
+                    if not barrier_report.get("armed"):
+                        _log_engine(
+                            "DAEMON-CYCLE: bootstrap phase barrier NOT armed — "
+                            f"phase={barrier_report.get('phase')} "
+                            f"detail={barrier_report.get('error', '')}"
+                        )
+                except Exception as exc:
+                    from system.guard.runtime_guard import log_guarded_exception
+
+                    log_guarded_exception("bootstrap_phase_barrier", exc)
+
             lock_path = RuntimeIdentity.get_lock_path()
             _log_engine(
                 f"DAEMON-CYCLE: READY pid={os.getpid()} lock={lock_path.name} "
@@ -907,7 +992,16 @@ class AgentRuntime:
                 from system.unified_engine import start_unified_engine
 
                 if unified_engine_active():
-                    start_unified_engine(boot_context=ctx)
+                    if barrier_report is not None and barrier_report.get("armed"):
+                        start_unified_engine(boot_context=ctx)
+                    elif barrier_report is None:
+                        _log_engine(
+                            "DAEMON-CYCLE: unified engine withheld — no bootstrap context"
+                        )
+                    else:
+                        _log_engine(
+                            "DAEMON-CYCLE: unified engine withheld — phase barrier not armed"
+                        )
                 else:
                     from system.ipc.shm_watchdog import start_shm_watchdog_async
 
@@ -917,11 +1011,19 @@ class AgentRuntime:
 
                 log_guarded_exception("unified_engine_boot", exc)
 
-            run_monotonic_cycle_loop(
-                interval_sec=interval_sec,
-                boot_context=ctx,
-                shutdown_event=shutdown_event,
+            scheduler_thread = threading.Thread(
+                target=run_monotonic_cycle_loop,
+                kwargs={
+                    "interval_sec": interval_sec,
+                    "boot_context": ctx,
+                    "shutdown_event": shutdown_event,
+                },
+                name="daemon-monotonic-scheduler",
+                daemon=False,
             )
+            scheduler_thread.start()
+            _foreground_execution_guard(shutdown_event)
+            scheduler_thread.join(timeout=30.0)
             return EXIT_OK
         finally:
             self.shutdown(source="daemon_cycle_exit")
@@ -1087,6 +1189,13 @@ def main() -> None:
     )
     load_dotenv(override=_from_launcher)
     prepare_boot_env()
+
+    try:
+        from system.agent_execution_mode import ensure_production_execution_armed_on_boot
+
+        ensure_production_execution_armed_on_boot()
+    except Exception as exc:
+        _log_engine(f"production execution arming failed: {type(exc).__name__}: {exc}")
 
     if os.environ.get("IG_ORCHESTRATOR_CHILD", "").strip() != "1" or isolated_track is not None:
         try:

@@ -26,6 +26,11 @@
     "demo_only_deployment_locked": true,
     "_note": "Gate 7 → LiveExecutor IG DEMO REST when IG_AGENT_MODE=DEMO"
   },
+  "signal_threshold": 52.5,
+  "protective_learning": {
+    "signal_threshold_floor": 52.5,
+    "fitness_min_floor": 52.5
+  },
   "intelligence_layer": {
     "cockpit": {
       "enabled": true,

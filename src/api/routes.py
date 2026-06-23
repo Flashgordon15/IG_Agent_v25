@@ -673,12 +673,29 @@ def api_unified_performance() -> dict[str, Any]:
     return unified_performance_payload()
 
 
+@router.post("/api/cockpit/heal")
+def api_cockpit_heal(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Feed + SHM self-heal — hard-reset feeds and re-publish cockpit segment."""
+    from system.unified_fulfillment_cache import force_cockpit_feed_heal
+
+    reason = str((payload or {}).get("reason") or "api")
+    return force_cockpit_feed_heal(reason=reason)
+
+
 @router.get("/api/unified/fulfillment")
-def api_unified_fulfillment() -> dict[str, Any]:
-    """Decoupled 1 Hz fulfillment snapshot — zero hot-path cost."""
+def api_unified_fulfillment() -> JSONResponse:
+    """Decoupled 500ms fulfillment snapshot — zero hot-path cost, no browser cache."""
     from system.unified_fulfillment_cache import get_fulfillment_payload
 
-    return get_fulfillment_payload()
+    payload = get_fulfillment_payload()
+    return JSONResponse(
+        content=payload,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 @router.post("/api/internal/live-tolerance")

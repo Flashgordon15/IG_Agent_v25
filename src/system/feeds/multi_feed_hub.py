@@ -13,6 +13,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from data.ohlc_yahoo_seeder import default_spread_for_yahoo_symbol
@@ -35,7 +36,7 @@ TWELVE_DATA_KEY = os.environ.get("TWELVE_DATA_KEY", "").strip() or (
     "c33d709357dd4ef8823d4e3eefdac056"
 )
 
-_FRAME_TIMEOUT_SEC = 15.0
+_FRAME_TIMEOUT_SEC = float(os.environ.get("IG_FEED_FRAME_TIMEOUT_SEC", "3.0") or 3.0)
 _YAHOO_POLL_SEC = 2.0
 
 
@@ -115,6 +116,184 @@ _FEED_STATUS: dict[str, dict[str, Any]] = {
     "twelvedata": {"connected": False, "last_frame_ns": 0, "timeouts": 0, "wins": 0},
 }
 _RACE_STATS: dict[str, int] = {"total_wins": 0}
+_YAHOO_ROUTE_BYPASS = False
+_API_VERIFY_REPORT: dict[str, Any] | None = None
+_API_VERIFY_LOCK = threading.Lock()
+
+_PASS_LINE = "🟢 [API-PASS] {name} Credentials and Network Route VALIDATED."
+_FAIL_LINE = "❌ [API-FAIL] {name} Route Blocked: Check Connection Flags / Session Tokens."
+
+
+def yahoo_route_bypassed() -> bool:
+    """True when Yahoo must be excluded from FPTP (errno 65 / timeout isolation)."""
+    if os.environ.get("IG_YAHOO_BYPASS", "").strip().lower() in ("1", "true", "yes", "on"):
+        return True
+    return bool(_YAHOO_ROUTE_BYPASS)
+
+
+def _set_yahoo_bypass(*, reason: str) -> None:
+    global _YAHOO_ROUTE_BYPASS
+    _YAHOO_ROUTE_BYPASS = True
+    log_engine(
+        f"MultiFeedHub: Yahoo route ISOLATED (FPTP bypass) — {reason} "
+        "(Finnhub + Twelve Data primary; no shutdown)"
+    )
+
+
+def _yahoo_error_isolated(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    if "errno 65" in text or "no route to host" in text:
+        return True
+    if "timed out" in text or "timeout" in text or "read timeout" in text:
+        return True
+    if isinstance(exc, (TimeoutError, OSError)) and getattr(exc, "errno", None) == 65:
+        return True
+    return False
+
+
+def _http_ping(url: str, *, timeout: float = 4.0, method: str = "GET") -> tuple[bool, str]:
+    import urllib.error
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(url, method=method, headers={"User-Agent": "IG-Agent/30"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            code = int(getattr(resp, "status", 200) or 200)
+            if code >= 400:
+                return False, f"HTTP {code}"
+            return True, ""
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            return False, f"HTTP {exc.code} auth"
+        if exc.code < 500:
+            return True, ""
+        return False, f"HTTP {exc.code}"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _ping_yahoo_finance(*, timeout: float = 4.0) -> tuple[bool, str]:
+    return _http_ping("https://yahoo.com", timeout=timeout, method="HEAD")
+
+
+def _ping_finnhub(*, timeout: float = 4.0) -> tuple[bool, str]:
+    key = _resolve_finnhub_key()
+    if not key:
+        return False, "FINNHUB_KEY missing"
+    url = f"https://finnhub.io/api/v1/quote?symbol=AAPL&token={key}"
+    return _http_ping(url, timeout=timeout)
+
+
+def _ping_twelve_data(*, timeout: float = 4.0) -> tuple[bool, str]:
+    key = _resolve_twelve_data_key()
+    if not key:
+        return False, "TWELVE_DATA_KEY missing"
+    url = f"https://api.twelvedata.com/price?symbol=AAPL&apikey={key}"
+    return _http_ping(url, timeout=timeout)
+
+
+def _ping_ig_trading(rest_client: Any | None, *, timeout: float = 5.0) -> tuple[bool, str]:
+    if rest_client is None:
+        return False, "IG REST client unavailable (Gate 2 pending)"
+    try:
+        rest_client.ensure_session()
+        headers = rest_client._auth_headers("1")
+        response = rest_client.request("GET", "/accounts", headers=headers)
+        status = int(getattr(response, "status_code", 0) or getattr(response, "status", 0) or 0)
+        if status >= 400:
+            return False, f"HTTP {status}"
+        return True, ""
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _emit_pipeline_line(*, name: str, ok: bool, detail: str = "") -> str:
+    line = _PASS_LINE.format(name=name) if ok else _FAIL_LINE.format(name=name)
+    if not ok and detail:
+        line = f"{line} ({detail})"
+    print(f"\033[1m{line}\033[0m", flush=True)
+    log_engine(line if ok else f"{line} ({detail})".strip())
+    return line
+
+
+def verify_all_api_pipelines(
+    *,
+    rest_client: Any | None = None,
+    timeout_sec: float = 5.0,
+    emit: bool = True,
+) -> dict[str, Any]:
+    """
+    4-way connectivity pass — Yahoo, Finnhub, Twelve Data, IG REST (parallel, bounded wait).
+    """
+    global _API_VERIFY_REPORT
+
+    if os.environ.get("IG_SKIP_API_VERIFY", "").strip().lower() in ("1", "true", "yes"):
+        return {"skipped": True, "lines": []}
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    probes = {
+        "Yahoo Finance": _ping_yahoo_finance,
+        "Finnhub": _ping_finnhub,
+        "Twelve Data": _ping_twelve_data,
+        "IG Trading Client": lambda: _ping_ig_trading(rest_client, timeout=timeout_sec),
+    }
+    results: dict[str, dict[str, Any]] = {}
+    lines: list[str] = []
+
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="api-pipeline") as pool:
+        futures = {pool.submit(fn): name for name, fn in probes.items()}
+        for fut in as_completed(futures, timeout=timeout_sec + 1.0):
+            name = futures[fut]
+            try:
+                ok, detail = fut.result(timeout=timeout_sec)
+            except Exception as exc:
+                ok, detail = False, str(exc)
+            results[name] = {"ok": ok, "detail": detail}
+            if name == "Yahoo Finance" and not ok and _yahoo_error_isolated(Exception(detail)):
+                _set_yahoo_bypass(reason=detail[:120])
+            if emit:
+                lines.append(_emit_pipeline_line(name=name, ok=ok, detail=detail))
+
+    report = {
+        "verified_at": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+        "results": results,
+        "lines": lines,
+        "yahoo_bypass": yahoo_route_bypassed(),
+        "all_ok": all(r.get("ok") for r in results.values()),
+    }
+    with _API_VERIFY_LOCK:
+        _API_VERIFY_REPORT = report
+    return report
+
+
+def start_verify_all_api_pipelines_async(
+    *,
+    rest_client: Any | None = None,
+    timeout_sec: float = 5.0,
+) -> threading.Thread:
+    """Non-blocking wrapper — results logged when the background thread completes."""
+
+    def _worker() -> None:
+        try:
+            verify_all_api_pipelines(
+                rest_client=rest_client, timeout_sec=timeout_sec, emit=True
+            )
+        except Exception as exc:
+            log_guarded_exception("verify_all_api_pipelines_async", exc)
+
+    thread = threading.Thread(
+        target=_worker,
+        name="api-pipeline-verify",
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+def api_pipeline_verify_report() -> dict[str, Any] | None:
+    with _API_VERIFY_LOCK:
+        return dict(_API_VERIFY_REPORT) if _API_VERIFY_REPORT else None
 
 
 @dataclass
@@ -178,10 +357,15 @@ class RacingMultiFeedHub:
 
     async def _yahoo_race_loop(self) -> None:
         """Baseline Yahoo REST poll — participates in async race array."""
+        if yahoo_route_bypassed():
+            log_engine("MultiFeedHub: Yahoo race loop skipped — route bypass active")
+            return
         self._touch_heartbeat("yahoo", connected=True)
         while not _HUB_STOP.is_set():
+            if yahoo_route_bypassed():
+                break
             for epic in NIGHT_MATRIX_EPICS:
-                if _HUB_STOP.is_set():
+                if _HUB_STOP.is_set() or yahoo_route_bypassed():
                     break
                 symbol = yahoo_symbol_for_epic(epic)
                 if not symbol:
@@ -200,6 +384,12 @@ class RacingMultiFeedHub:
                         source_id=SOURCE_YAHOO,
                     )
                 except Exception as exc:
+                    if _yahoo_error_isolated(exc):
+                        _set_yahoo_bypass(reason=str(exc)[:120])
+                        log_engine(
+                            f"MultiFeedHub: Yahoo fetch isolated — {type(exc).__name__}: {exc}"
+                        )
+                        return
                     log_guarded_exception("multi_feed_yahoo", exc)
                     self._record_timeout("yahoo")
             await asyncio.sleep(self.yahoo_poll_sec)
@@ -226,7 +416,10 @@ class RacingMultiFeedHub:
                             raw = await asyncio.wait_for(ws.recv(), timeout=self.frame_timeout_sec)
                         except asyncio.TimeoutError:
                             self._record_timeout("finnhub")
-                            log_engine("MultiFeedHub: Finnhub frame timeout — reconnecting")
+                            log_engine(
+                                f"MultiFeedHub: Finnhub empty frame >{self.frame_timeout_sec:.0f}s "
+                                "— aggressive socket reset"
+                            )
                             break
                         self._touch_heartbeat("finnhub")
                         try:
@@ -281,7 +474,10 @@ class RacingMultiFeedHub:
                             raw = await asyncio.wait_for(ws.recv(), timeout=self.frame_timeout_sec)
                         except asyncio.TimeoutError:
                             self._record_timeout("twelvedata")
-                            log_engine("MultiFeedHub: Twelve Data frame timeout — reconnecting")
+                            log_engine(
+                                f"MultiFeedHub: Twelve Data empty frame >{self.frame_timeout_sec:.0f}s "
+                                "— aggressive socket reset"
+                            )
                             break
                         self._touch_heartbeat("twelvedata")
                         try:
@@ -327,6 +523,16 @@ class RacingMultiFeedHub:
             await asyncio.sleep(1.0)
 
     async def run_forever(self) -> None:
+        if yahoo_route_bypassed():
+            log_engine(
+                "MultiFeedHub: racing feeds armed (Finnhub + Twelve Data primary — Yahoo bypassed)"
+            )
+            await asyncio.gather(
+                self._finnhub_ws_loop(),
+                self._twelve_data_ws_loop(),
+                self._heartbeat_watchdog(),
+            )
+            return
         log_engine("MultiFeedHub: racing feeds armed (Yahoo + Finnhub + Twelve Data)")
         await asyncio.gather(
             self._yahoo_race_loop(),
@@ -367,6 +573,35 @@ def stop_racing_multi_feed_hub() -> None:
     _HUB_STOP.set()
 
 
+def hard_reset_multi_feed_hub(*, reason: str = "velocity_stall") -> dict[str, Any]:
+    """
+    Hard socket reset — tear down dead WS lines and re-bind Finnhub + Twelve Data.
+    """
+    global _HUB_THREAD
+
+    log_engine(f"MultiFeedHub: HARD RESET ({reason}) — killing streams, re-binding WS")
+    _HUB_STOP.set()
+    if _HUB_THREAD is not None and _HUB_THREAD.is_alive():
+        _HUB_THREAD.join(timeout=5.0)
+    _HUB_THREAD = None
+    _HUB_STOP.clear()
+    for key in _FEED_STATUS:
+        _FEED_STATUS[key] = {
+            "connected": False,
+            "last_frame_ns": 0,
+            "timeouts": 0,
+            "wins": 0,
+        }
+    start_racing_multi_feed_hub()
+    return {
+        "reset": True,
+        "reason": str(reason),
+        "reset_at": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+        "finnhub_armed": bool(_resolve_finnhub_key()),
+        "twelve_data_armed": bool(_resolve_twelve_data_key()),
+    }
+
+
 def feed_hub_telemetry() -> dict[str, Any]:
     """Status for unified performance API + dashboard stream mapping."""
     now = time.monotonic()
@@ -402,10 +637,15 @@ def feed_hub_telemetry() -> dict[str, Any]:
         "active_feeds": active_names,
         "stream_mapping_banner": banner,
         "absolute_feed_resilience": len(active_names) >= 3,
+        "yahoo_bypass": yahoo_route_bypassed(),
+        "api_verify": api_pipeline_verify_report(),
     }
 
 
 def reset_multi_feed_hub_for_tests() -> None:
+    global _YAHOO_ROUTE_BYPASS, _API_VERIFY_REPORT
+    _YAHOO_ROUTE_BYPASS = False
+    _API_VERIFY_REPORT = None
     stop_racing_multi_feed_hub()
     global _HUB_THREAD
     _HUB_THREAD = None

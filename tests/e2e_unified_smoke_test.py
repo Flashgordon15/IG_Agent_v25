@@ -5,10 +5,14 @@ Proves:
   1. Zombie / SHM cleanup
   2. Multi-feed ring ingest → Thread B bare-metal matrix lookup
   3. 12-gate stack bypass on alpha path
-  4. Mock execution fill → in-memory WIN/LOSS performance row
+  4. Mock execution fill → in-memory WIN/LOSS performance row + Telegram close dispatch
 
 Run:
   PYTHONPATH=src IG_AGENT_PYTEST=1 python3 -m pytest tests/e2e_unified_smoke_test.py -x -v
+
+Live Telegram close probe:
+  IG_E2E_TELEGRAM=1 TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... \\
+    PYTHONPATH=src IG_AGENT_PYTEST=1 python3 -m pytest tests/e2e_unified_smoke_test.py -k telegram -v
 
 Optional live boot (local only, not CI):
   IG_E2E_BOOT_MAIN=1 FINNHUB_KEY=... TWELVE_DATA_KEY=... \\
@@ -62,11 +66,23 @@ MARKET = "Gold"
 
 
 def _cleanup_zombies_and_shm() -> None:
-    """Clear stale singletons, locks, and POSIX segments before boot."""
+    """Clear stale singletons, locks, POSIX segments, and supervision drift."""
     stop_unified_engine()
     reset_unified_engine_for_tests()
     reset_fulfillment_cache_for_tests()
     reset_alpha_ring_buffer_for_tests()
+    try:
+        from analytics.post_open_audit import reset_post_open_audit_for_tests
+
+        reset_post_open_audit_for_tests()
+    except Exception:
+        pass
+    try:
+        from system.bootstrap_sanitizer import run_supervision_self_sanitize
+
+        run_supervision_self_sanitize(repair=True)
+    except Exception:
+        pass
     try:
         from intelligence.matrix_prebaker import force_unmap_alpha_matrix, reset_alpha_matrix_for_tests
 
@@ -242,7 +258,7 @@ class UnifiedE2ESmokeTest(unittest.TestCase):
 
         self.assertIsNotNone(ctx)
         self.assertTrue(ctx.all_passed, ctx.wait_reason)
-        self.assertEqual(len(ctx.gates), 5, "alpha path uses compact gates, not 12-gate stack")
+        self.assertEqual(len(ctx.gates), 0, "zero-gate frontier path has no gate stack")
         self.assertTrue(mock_proc.called, "mock IG execution bridge must fire")
         mock_proc.assert_called_once()
         self.assertTrue(
@@ -256,6 +272,99 @@ class UnifiedE2ESmokeTest(unittest.TestCase):
         self.assertIn(str(row.get("result")), ("WIN", "LOSS"))
         self.assertGreater(float(row.get("confidence") or 0), 54.5)
         self.assertEqual(int(row.get("cell_index")), cell)
+        self.assertIn(str(row.get("status")), ("OPEN", "CLOSED"))
+
+    def test_supervision_self_sanitize_embedded(self) -> None:
+        from system.bootstrap_sanitizer import run_supervision_self_sanitize
+
+        payload = run_supervision_self_sanitize(repair=True)
+        self.assertIn("supervision_drift", payload)
+        self.assertIn("overnight_supervision", payload)
+
+    def test_instant_close_telegram_dispatch_mocked(self) -> None:
+        from analytics.post_open_audit import (
+            format_instant_trade_close,
+            record_closed_trade,
+            start_post_open_audit_hub,
+        )
+
+        start_post_open_audit_hub(hourly=False)
+        row = {
+            "epic": EPIC,
+            "direction": "BUY",
+            "result": "WIN",
+            "size": 1.0,
+            "entry": 2650.0,
+            "exit": 2655.0,
+            "pnl_gbp": 4.25,
+            "status": "CLOSED",
+        }
+        text = format_instant_trade_close(row)
+        self.assertIn(EPIC, text)
+        self.assertIn("WIN", text)
+        self.assertIn("£+4.25", text)
+
+        sent: list[str] = []
+
+        async def _fake_send(msg: str) -> bool:
+            sent.append(msg)
+            return True
+
+        with patch(
+            "analytics.post_open_audit._telegram_send_async",
+            side_effect=_fake_send,
+        ):
+            record_closed_trade(row)
+            deadline = time.time() + 3.0
+            while time.time() < deadline and not sent:
+                time.sleep(0.05)
+        self.assertTrue(sent, "async Telegram task must dispatch close alert")
+        self.assertIn("TRADE CLOSED", sent[0])
+
+    def test_dual_horizon_summary_format(self) -> None:
+        from analytics.post_open_audit import (
+            format_dual_horizon_summary,
+            record_closed_trade,
+        )
+
+        record_closed_trade(
+            {
+                "epic": EPIC,
+                "direction": "BUY",
+                "result": "WIN",
+                "pnl_gbp": 2.5,
+                "size": 1.0,
+                "entry": 100.0,
+                "exit": 101.0,
+            }
+        )
+        summary = format_dual_horizon_summary()
+        self.assertIn("Dual-Horizon Audit", summary)
+        self.assertIn("Last 1 Hour", summary)
+        self.assertIn("Rolling 24 Hours", summary)
+
+    @unittest.skipUnless(
+        os.environ.get("IG_E2E_TELEGRAM") == "1",
+        "set IG_E2E_TELEGRAM=1 to push a live Telegram close alert",
+    )
+    def test_live_telegram_close_notification(self) -> None:
+        from analytics.post_open_audit import record_closed_trade, start_post_open_audit_hub
+
+        start_post_open_audit_hub(hourly=False)
+        os.environ["IG_E2E_TELEGRAM"] = "1"
+        record_closed_trade(
+            {
+                "epic": EPIC,
+                "direction": "BUY",
+                "result": "WIN",
+                "size": 1.0,
+                "entry": 2650.0,
+                "exit": 2655.0,
+                "pnl_gbp": 0.01,
+                "deal_id": "E2E-TG-LIVE",
+            }
+        )
+        time.sleep(2.0)
 
     def test_thread_b_ring_seq_dedupes_stale_ticks(self) -> None:
         ring = get_alpha_ring_buffer()
@@ -321,6 +430,7 @@ class UnifiedE2ESmokeTest(unittest.TestCase):
             "PYTHONPATH": str(ROOT / "src"),
             "IG_UNIFIED_ENGINE": "1",
             "IG_PARALLEL_DUAL": "0",
+            "IG_AGENT_FROM_LAUNCHER": "1",
             "FINNHUB_KEY": os.environ.get("FINNHUB_KEY", ""),
             "TWELVE_DATA_KEY": os.environ.get("TWELVE_DATA_KEY", ""),
         }

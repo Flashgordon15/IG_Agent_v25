@@ -73,8 +73,10 @@ def credentials_unconfigured(holder: Any) -> bool:
 
 
 def should_use_mock_feed(holder: Any) -> bool:
-    from system.agent_execution_mode import broker_demo_execution_required
+    from system.agent_execution_mode import broker_demo_execution_required, production_execution_active
 
+    if production_execution_active():
+        return False
     if broker_demo_execution_required():
         return False
     return mock_feed_forced() or credentials_unconfigured(holder)

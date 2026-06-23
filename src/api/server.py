@@ -194,6 +194,41 @@ def _ensure_ig_agent_root_env() -> None:
         pass
 
 
+def _unified_engine_active() -> bool:
+    return os.environ.get("IG_UNIFIED_ENGINE", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def resolve_unified_fulfillment_template() -> Path | None:
+    """Lightweight static dashboard for headless unified engine."""
+    _ensure_ig_agent_root_env()
+    candidates: list[Path] = []
+    env_root = os.environ.get("IG_AGENT_ROOT", "").strip()
+    if env_root:
+        candidates.append(Path(env_root).resolve() / "src" / "templates" / "index.html")
+    repo_from_file = Path(__file__).resolve().parents[1] / "templates" / "index.html"
+    candidates.append(repo_from_file)
+    try:
+        from system.paths import project_root
+
+        candidates.append(project_root() / "src" / "templates" / "index.html")
+    except Exception:
+        pass
+    seen: set[Path] = set()
+    for path in candidates:
+        path = path.resolve()
+        if path in seen:
+            continue
+        seen.add(path)
+        if path.is_file():
+            return path
+    return None
+
+
 def resolve_dashboard_dist() -> Path | None:
     """
     Locate ``dashboard/dist`` using absolute paths (launcher / terminal / cwd safe).
@@ -237,6 +272,24 @@ def _mount_dashboard_static(app: FastAPI) -> None:
         return
 
     _ensure_ig_agent_root_env()
+
+    if _unified_engine_active():
+        unified_tpl = resolve_unified_fulfillment_template()
+        if unified_tpl is not None:
+            @app.get("/", include_in_schema=False)
+            async def unified_fulfillment_root() -> FileResponse:
+                return FileResponse(unified_tpl, headers=_DASHBOARD_NO_CACHE)
+
+            app.state.dashboard_dist = None
+            try:
+                from system.engine_log import log_engine
+
+                log_engine(f"API: unified fulfillment template mounted from {unified_tpl}")
+            except Exception:
+                pass
+            app.state.dashboard_static_mounted = True
+            return
+
     dist = resolve_dashboard_dist()
     index: Path | None = None
     if dist is not None:

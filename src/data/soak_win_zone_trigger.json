@@ -1,0 +1,11 @@
+{
+  "sequence": 5,
+  "epic": "CS.D.CFPGOLD.CFP.IP",
+  "action": "BUY",
+  "size": 0.1,
+  "order_type": "MARKET",
+  "signature": "SOAK_LIVE_FIRE",
+  "armed_at": 1782137825.088117,
+  "consumed": true,
+  "consumed_at": 1782137825.299092
+}

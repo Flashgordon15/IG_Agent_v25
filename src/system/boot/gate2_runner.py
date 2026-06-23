@@ -77,9 +77,9 @@ class Gate2Runner:
         try:
             self._execute()
         except Exception as exc:
-            from system.guard.live_path_guard import is_live_production_track
+            from system.guard.live_path_guard import is_live_production_track, mock_broker_forbidden
 
-            if is_live_production_track():
+            if mock_broker_forbidden() or is_live_production_track():
                 log_engine(
                     "Gate2: live PRODUCTION broker error — entering fail-closed "
                     f"network hold ({type(exc).__name__}: {exc})"
@@ -296,9 +296,40 @@ class Gate2Runner:
                 f"{len(orders)} working order(s)"
             )
         except Exception as exc:
-            from system.guard.live_path_guard import is_live_production_track
+            from system.guard.live_path_guard import is_live_production_track, mock_broker_forbidden
 
-            if is_live_production_track():
+            if mock_broker_forbidden() or is_live_production_track():
+                from system.agent_execution_mode import (
+                    authentic_demo_broker_required,
+                    production_execution_active,
+                )
+
+                rest = self._context.rest_client
+                try:
+                    from ig_api.rest_client import IGRestClient
+
+                    if (
+                        (production_execution_active() or authentic_demo_broker_required())
+                        and isinstance(rest, IGRestClient)
+                        and _session_valid(rest)
+                    ):
+                        from api.snapshot_store import set_boot_hydration
+
+                        log_engine(
+                            "Gate2: DEMO/PRODUCTION hydration timeout — authenticated IGRestClient "
+                            f"retained, deferring position sync ({type(exc).__name__})"
+                        )
+                        set_boot_hydration([], [])
+                        self._context.hydration_detail = {
+                            "degraded": True,
+                            "reason": f"{type(exc).__name__}: {exc}",
+                        }
+                        self.mark_gate_complete(
+                            detail="IGRestClient Armed (hydration deferred)"
+                        )
+                        return
+                except Exception:
+                    pass
                 logger.warning(
                     "[APEX FAILSAFE] Gate 2 position/order hydration failed on live "
                     f"PRODUCTION — entering network hold: {exc}"
@@ -375,9 +406,9 @@ class Gate2Runner:
 
         MockIGRest, MockFeedEngine, and sandbox bypass tokens are never installed.
         """
-        from system.guard.live_path_guard import is_live_production_track
+        from system.guard.live_path_guard import mock_broker_forbidden
 
-        if not is_live_production_track():
+        if not mock_broker_forbidden():
             return
 
         config_raw = (
@@ -506,9 +537,9 @@ class Gate2Runner:
 
     def _bypass_and_force_sandbox_ready_token(self, raw: dict[str, Any] | None = None) -> None:
         """Instant local sandbox emulation — never kill :9090 on weekend outage."""
-        from system.guard.live_path_guard import is_live_production_track
+        from system.guard.live_path_guard import is_live_production_track, mock_broker_forbidden
 
-        if is_live_production_track():
+        if mock_broker_forbidden() or is_live_production_track():
             logger.warning(
                 "[APEX FAILSAFE] Gate 2 network failsafe bypass blocked on live "
                 "PRODUCTION — MockIGRest forbidden; entering infinite network hold"

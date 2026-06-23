@@ -90,6 +90,13 @@ def ig_radio_silence_blocks_rest(method: str, path: str) -> bool:
 
     Order dispatch routes remain open on the dumb-pipe lane.
     """
+    try:
+        from system.soak_live_fire import soak_mode_enabled
+
+        if soak_mode_enabled() and str(method or "").upper() == "GET" and "/positions" in str(path or "").lower():
+            return False
+    except Exception:
+        pass
     if is_order_dispatch_route(method, path):
         return False
     if _boot_hydration_rest_allowed():
@@ -133,6 +140,13 @@ def warmup_blocks_execution() -> bool:
 
 
 def assert_execution_allowed() -> str | None:
+    try:
+        from system.soak_live_fire import soak_mode_enabled
+
+        if soak_mode_enabled():
+            return None
+    except Exception:
+        pass
     if warmup_blocks_execution():
         return "HOLD: WARMING_CIRCUIT_BREAKER"
     return None

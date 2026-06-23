@@ -6,18 +6,106 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from typing import Any
 
 import requests
 
 from ig_api.auth import AuthManager, SessionTokens
+from ig_api.endpoints import position_otc, position_otc_list, update_position
 from ig_api.exceptions import IGAPIError, IGAuthError, IGOrderError, RateLimitError
 from system.credentials_loader import Credentials
 from system.demo_execution_trace import trace_execution, update_demo_diagnostics
 from system.demo_rest_log import log_demo_rest, mask_token
 from system.engine_log import log_engine
 from system.rate_limit_manager import get_rate_limit_manager, parse_rate_limit_error
+
+
+IG_DEMO_GATEWAY = "https://demo-api.ig.com/gateway/deal"
+IG_LIVE_GATEWAY = "https://api.ig.com/gateway/deal"
+IG_DEMO_HOST = "demo-api.ig.com"
+
+
+def normalize_ig_gateway_url(url: str, *, demo: bool = True) -> str:
+    """
+    Sanitize broker base URLs — reject malformed ``://://`` / ``demo-api.://`` strings.
+    Always returns the verified IG gateway endpoint.
+    """
+    raw = str(url or "").strip()
+    broken = (
+        "://://" in raw
+        or ".://" in raw
+        or raw.startswith("https://://")
+        or raw.startswith("http://://")
+        or not raw
+    )
+    if broken or "ig.com" not in raw.lower():
+        return IG_DEMO_GATEWAY if demo else IG_LIVE_GATEWAY
+    if "demo-api" in raw.lower() or demo:
+        if raw.rstrip("/") == f"https://{IG_DEMO_HOST}":
+            return IG_DEMO_GATEWAY
+        if "/gateway/deal" not in raw:
+            return IG_DEMO_GATEWAY
+        return raw.rstrip("/") if raw.startswith("https://") else IG_DEMO_GATEWAY
+    if "/gateway/deal" not in raw:
+        return IG_LIVE_GATEWAY
+    return raw.rstrip("/") if raw.startswith("https://") else IG_LIVE_GATEWAY
+
+
+def ig_demo_gateway_reachable(base: str | None = None) -> bool:
+    """True when base resolves to the verified IG Demo REST host."""
+    return IG_DEMO_HOST in str(base or IG_DEMO_GATEWAY).lower()
+
+# Phase-4 shadow tracer / validate_order_schema — IG gateway token bucket (1.5s).
+_IG_VALIDATE_THROTTLE_SEC = 1.5
+_validate_throttle_lock = threading.Lock()
+_validate_last_network_mono = 0.0
+_validate_last_ok: dict[str, Any] | None = None
+
+
+def _validate_throttle_cached_ok(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return last ROUTE_OPEN or RAM-only pass — no duplicate IG REST ping."""
+    global _validate_last_ok
+    with _validate_throttle_lock:
+        if _validate_last_ok and _validate_last_ok.get("ok"):
+            out = dict(_validate_last_ok)
+            out["payload"] = payload
+            out["throttled"] = True
+            return out
+    return {
+        "ok": True,
+        "category": "ROUTE_OPEN",
+        "error": "",
+        "http_status": 200,
+        "payload": payload,
+        "throttled": True,
+        "detail": "schema_ok_ram_only — IG validate throttled 1500ms",
+    }
+
+
+def _validate_throttle_try_acquire() -> bool:
+    """True when a network validation ping to the IG gateway may proceed."""
+    global _validate_last_network_mono
+    now = time.monotonic()
+    with _validate_throttle_lock:
+        if _validate_last_network_mono > 0.0:
+            if (now - _validate_last_network_mono) < _IG_VALIDATE_THROTTLE_SEC:
+                return False
+        _validate_last_network_mono = now
+        return True
+
+
+def _validate_throttle_record_ok(result: dict[str, Any]) -> None:
+    global _validate_last_ok
+    if result.get("ok"):
+        with _validate_throttle_lock:
+            _validate_last_ok = {
+                "ok": True,
+                "category": "ROUTE_OPEN",
+                "error": "",
+                "http_status": int(result.get("http_status") or 200),
+            }
 
 
 class IGRestClient:
@@ -47,11 +135,10 @@ class IGRestClient:
             credentials.ig_password,
         )
         self._session = requests.Session()
-        self._base = (
-            "https://demo-api.ig.com/gateway/deal"
-            if self.account_type == "DEMO"
-            else "https://api.ig.com/gateway/deal"
-        )
+        if self.account_type == "DEMO":
+            self._base = normalize_ig_gateway_url(IG_DEMO_GATEWAY, demo=True)
+        else:
+            self._base = normalize_ig_gateway_url(IG_LIVE_GATEWAY, demo=False)
         self._bid = 0.0
         self._offer = 0.0
         self._last_login_status: int | None = None
@@ -835,6 +922,22 @@ class IGRestClient:
             record_broker_sync_failure(endpoint, exc)
             return self.get_cached_account_summary()
 
+    def get_accounts(self) -> dict[str, Any]:
+        """Pre-flight — GET /accounts on IG DEMO or LIVE gateway."""
+        from ig_api.exceptions import IGAPIError
+
+        self.ensure_session()
+        r = self.request("GET", "/accounts", headers=self._auth_headers("1"))
+        if r.status_code != 200:
+            raise IGAPIError(
+                f"GET /accounts failed: HTTP {r.status_code}",
+                status_code=r.status_code,
+            )
+        body = r.json()
+        if not isinstance(body, dict):
+            raise IGAPIError("GET /accounts returned non-object payload")
+        return body
+
     def refresh_account_summary(self) -> dict[str, float | None]:
         """Refresh balance / P&L from GET /accounts (used by stream heartbeat)."""
         from system.broker_status_cache import (
@@ -1205,18 +1308,170 @@ class IGRestClient:
             "message": "DEMO routing validated; no order submitted",
         }
 
+    def validate_order_schema(
+        self,
+        payload: dict[str, Any],
+        *,
+        full_session_ping: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Non-destructive order schema + session validation — no POST /positions/otc.
+
+        Used by the Target Shadow Tracer dry-run loop on Thread B.
+        """
+        from ig_api.mock_clients import MockIGRest
+
+        if isinstance(self, MockIGRest):
+            return {
+                "ok": False,
+                "category": "AUTH_EXPIRY",
+                "error": "Mock REST client — live route blocked",
+                "http_status": 0,
+                "payload": payload,
+            }
+
+        required = ("epic", "direction", "size", "orderType", "stopDistance")
+        for key in required:
+            if key not in payload or payload[key] in (None, ""):
+                return {
+                    "ok": False,
+                    "category": "SCHEMA_INVALID",
+                    "error": f"missing required field: {key}",
+                    "http_status": 0,
+                    "payload": payload,
+                }
+
+        try:
+            age = float(payload.get("quote_age_sec") or 0)
+            max_age = float(os.environ.get("IG_QUOTE_MAX_AGE_SEC", "45") or 45)
+            if age > max_age:
+                return {
+                    "ok": False,
+                    "category": "REGIME_MISMATCH",
+                    "error": f"quote_age_sec={age:.1f} exceeds {max_age:.0f}s safety lock",
+                    "http_status": 0,
+                    "payload": payload,
+                }
+        except (TypeError, ValueError):
+            pass
+
+        needs_network = full_session_ping or not (
+            getattr(self.session, "is_valid", False) if self.session else False
+        )
+        if needs_network and ig_demo_gateway_reachable(self._base):
+            if not _validate_throttle_try_acquire():
+                return _validate_throttle_cached_ok(payload)
+
+        try:
+            from ig_api.exceptions import RateLimitError
+            from system.rate_limit_manager import get_rate_limit_manager
+
+            get_rate_limit_manager().check_rest_allowed()
+        except Exception as exc:
+            return {
+                "ok": False,
+                "category": "RATE_WALL",
+                "error": str(exc),
+                "http_status": 429,
+                "payload": payload,
+            }
+
+        try:
+            self.ensure_session()
+        except Exception as exc:
+            return {
+                "ok": False,
+                "category": "AUTH_EXPIRY",
+                "error": str(exc),
+                "http_status": 401,
+                "payload": payload,
+            }
+
+        if full_session_ping:
+            try:
+                r = self.request("GET", "/accounts", headers=self._auth_headers("1"))
+                status = int(getattr(r, "status_code", 0) or 0)
+                if status in (401, 403):
+                    return {
+                        "ok": False,
+                        "category": "AUTH_EXPIRY",
+                        "error": f"session ping HTTP {status}",
+                        "http_status": status,
+                        "payload": payload,
+                    }
+                if status >= 400:
+                    return {
+                        "ok": False,
+                        "category": "SCHEMA_INVALID",
+                        "error": f"session ping HTTP {status}",
+                        "http_status": status,
+                        "payload": payload,
+                    }
+            except Exception as exc:
+                text = str(exc).lower()
+                if "401" in text or "403" in text or "auth" in text:
+                    cat = "AUTH_EXPIRY"
+                elif "429" in text or "rate" in text:
+                    cat = "RATE_WALL"
+                else:
+                    cat = "SCHEMA_INVALID"
+                return {
+                    "ok": False,
+                    "category": cat,
+                    "error": str(exc),
+                    "http_status": 0,
+                    "payload": payload,
+                }
+
+            try:
+                size = float(payload.get("size") or 0)
+                if size > 0:
+                    balance = float(self.fetch_account_balance() or 0)
+                    min_notional = size * 50.0
+                    if balance > 0 and balance < min_notional:
+                        return {
+                            "ok": False,
+                            "category": "MARGIN_LOCK",
+                            "error": f"balance {balance:.2f} < min_notional {min_notional:.2f}",
+                            "http_status": 0,
+                            "payload": payload,
+                        }
+            except Exception as exc:
+                text = str(exc).lower()
+                if "margin" in text or "insufficient" in text:
+                    return {
+                        "ok": False,
+                        "category": "MARGIN_LOCK",
+                        "error": str(exc),
+                        "http_status": 0,
+                        "payload": payload,
+                    }
+
+        result = {
+            "ok": True,
+            "category": "ROUTE_OPEN",
+            "error": "",
+            "http_status": 200,
+            "payload": payload,
+        }
+        _validate_throttle_record_ok(result)
+        return result
+
     def open_positions(self) -> list[dict[str, Any]]:
         self.ensure_session()
-        r = self.request("GET", "/positions", headers=self._auth_headers("2"))
-        if r.status_code == 401:
-            self.login()
-            r = self.request("GET", "/positions", headers=self._auth_headers("2"))
-        if r.status_code != 200:
-            raise IGAPIError(
-                f"Positions request failed: HTTP {r.status_code}",
-                status_code=r.status_code,
-            )
-        return r.json().get("positions", [])
+        last_status = 0
+        for path in (position_otc_list(), "/positions"):
+            r = self.request("GET", path, headers=self._auth_headers("2"))
+            if r.status_code == 401:
+                self.login()
+                r = self.request("GET", path, headers=self._auth_headers("2"))
+            last_status = int(r.status_code)
+            if r.status_code == 200:
+                return r.json().get("positions", [])
+        raise IGAPIError(
+            f"Positions request failed: HTTP {last_status}",
+            status_code=last_status,
+        )
 
     def fetch_open_positions(self, epic: str | None = None) -> list[dict[str, Any]]:
         """BrokerAdapter-protocol alias for open_positions() with optional epic filter."""
@@ -1319,15 +1574,31 @@ class IGRestClient:
             return {"dealReference": deal_ref, "shadow": True, "status": "MOCK_SHADOW_ENTRY"}
 
         self.ensure_session()
-        size, stop_distance, limit_distance, currency_code = (
-            self.normalize_order_params(
-                epic,
-                size=size,
-                stop_distance=stop_distance,
-                limit_distance=limit_distance,
-                currency_code=currency_code,
+        micro_lot = False
+        try:
+            from system.soak_live_fire import soak_mode_enabled
+            from trading.live_production_probe import live_probe_enabled
+
+            micro_lot = (soak_mode_enabled() or live_probe_enabled()) and float(size) >= 0.1
+        except Exception:
+            micro_lot = False
+
+        if micro_lot:
+            size = float(size)
+            stop_distance = max(float(stop_distance), 5.0)
+            if limit_distance is not None:
+                limit_distance = max(float(limit_distance), stop_distance)
+            currency_code = str(currency_code or "USD").upper()
+        else:
+            size, stop_distance, limit_distance, currency_code = (
+                self.normalize_order_params(
+                    epic,
+                    size=size,
+                    stop_distance=stop_distance,
+                    limit_distance=limit_distance,
+                    currency_code=currency_code,
+                )
             )
-        )
         payload: dict[str, Any] = {
             "epic": epic,
             "expiry": "-",
@@ -1342,9 +1613,9 @@ class IGRestClient:
         if limit_distance is not None and float(limit_distance) > 0:
             payload["limitDistance"] = float(limit_distance)
 
-        url = f"{self._base}/positions/otc"
+        url = f"{self._base}{position_otc()}"
         log_demo_rest(
-            "POST /positions/otc — place order",
+            "POST /v1/positions/otc — place order",
             url=url,
             account_id=self.account_id,
             payload=payload,
@@ -1358,13 +1629,14 @@ class IGRestClient:
 
         r = self.request(
             "POST",
-            "/positions/otc",
+            position_otc(),
             headers=self._auth_headers("2"),
             json=payload,
+            budget_priority=True,
         )
         body_preview = (r.text or "")[:500]
         log_demo_rest(
-            "POST /positions/otc — response",
+            "POST /v1/positions/otc — response",
             status_code=r.status_code,
             body=body_preview,
         )
@@ -1432,9 +1704,9 @@ class IGRestClient:
         if limit_distance is not None and float(limit_distance) > 0:
             payload["limitDistance"] = float(limit_distance)
 
-        url = f"{self._base}/positions/otc"
+        url = f"{self._base}{position_otc()}"
         log_demo_rest(
-            "POST /positions/otc — atomic limit entry",
+            "POST /v1/positions/otc — atomic limit entry",
             url=url,
             account_id=self.account_id,
             payload=payload,
@@ -1448,7 +1720,7 @@ class IGRestClient:
 
         r = self.request(
             "POST",
-            "/positions/otc",
+            position_otc(),
             headers=self._auth_headers("2"),
             json=payload,
         )
@@ -1580,7 +1852,7 @@ class IGRestClient:
             self.ensure_session()
             r = self.request(
                 "GET",
-                f"/positions/otc/{want}",
+                update_position(want),
                 headers=self._auth_headers("2"),
                 budget_priority=True,
             )
@@ -1838,7 +2110,7 @@ class IGRestClient:
         log_demo_rest("DELETE /positions/otc — close", deal_id=deal_id, payload=payload)
         r = self.request(
             "DELETE",
-            "/positions/otc",
+            position_otc(),
             headers=self._auth_headers("1"),
             json=payload,
         )
@@ -1893,7 +2165,7 @@ class IGRestClient:
             )
             r2 = self.request(
                 "POST",
-                "/positions/otc",
+                position_otc(),
                 headers=self._auth_headers("2"),
                 json=net_payload,
             )
@@ -2030,7 +2302,7 @@ class IGRestClient:
             payload["limitDistance"] = limit_distance
         r = self.request(
             "PUT",
-            f"/positions/otc/{deal_id}",
+            update_position(deal_id),
             headers=self._auth_headers("2"),
             json=payload,
         )
@@ -2152,3 +2424,12 @@ class IGRestClient:
                 raise IGAPIError(f"Network error: {e}") from e
 
         raise IGAPIError(f"Request failed after retries: {last_exc}")
+
+
+def get_shared_rest_client(credentials: Credentials | None = None) -> IGRestClient:
+    """Compat shim — delegates to process-wide session in ``system.ig_rest_session``."""
+    from system.credentials_loader import load_credentials
+    from system.ig_rest_session import get_shared_rest_client as _session_client
+
+    creds = credentials or load_credentials()
+    return _session_client(creds)

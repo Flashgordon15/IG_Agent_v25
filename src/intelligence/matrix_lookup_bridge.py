@@ -138,7 +138,9 @@ def lookup_alpha_decision(
             atr_q=atr_q,
             mom_q=mom_q,
         )
-        row = segment.matrix[cell_idx]
+        from intelligence.matrix_prebaker import matrix_row_with_streaming_ffill
+
+        row = matrix_row_with_streaming_ffill(segment.matrix, cell_idx, epic=epic)
         samples = float(row[COL_SAMPLES])
         approved_flag = float(row[COL_APPROVED]) >= 0.5
         hit = samples > 0.0
@@ -232,6 +234,11 @@ def structural_metrics_from_quote(
             momentum = 0.0008
         elif rsi <= 45.0:
             momentum = -0.0008
+
+    if not rsi or rsi == 0.0:
+        rsi = 50.0
+    if not atr or atr == 0.0:
+        atr = 1.5
 
     direction = "BUY" if momentum >= 0 else "SELL"
     return rsi, atr, momentum, direction

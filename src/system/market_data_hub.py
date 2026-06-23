@@ -196,6 +196,15 @@ class MarketDataHub:
         except statistics.StatisticsError:
             return float(fallback)
 
+    def spread_percentile(self, epic: str, current_spread: float) -> float:
+        """Fraction of rolling history >= current spread (lower = tighter liquidity)."""
+        with self._lock:
+            hist = list(self._spread_history.get(str(epic), []))
+        if len(hist) < 5 or current_spread <= 0:
+            return 0.5
+        rank = sum(1 for s in hist if s >= current_spread)
+        return rank / len(hist)
+
     def spread_stats(self, epic: str, *, fallback: float) -> dict[str, float]:
         current_snap = self.get_snapshot(epic)
         current = 0.0

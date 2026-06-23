@@ -62,6 +62,26 @@ EPIC_TO_SLOT: dict[str, int] = {
     "IX.D.FTSE.IFM.IP": 5,
 }
 
+SLOT_TO_EPIC: dict[int, str] = {v: k for k, v in EPIC_TO_SLOT.items()}
+
+# Night-matrix streaming epics — sparse archive cells forward-filled along mom_q.
+FFILL_STREAMING_EPICS: frozenset[str] = frozenset(
+    {
+        "CS.D.CFPGOLD.CFP.IP",
+        "IX.D.DOW.IFM.IP",
+        "IX.D.NIKKEI.IFM.IP",
+        "CS.D.EURUSD.CFD.IP",
+    }
+)
+
+# Lightstreamer latency gap — Nikkei / EURUSD require ffill + bfill population.
+LATENCY_PACKET_FFILL_EPICS: frozenset[str] = frozenset(
+    {
+        "IX.D.NIKKEI.IFM.IP",
+        "CS.D.EURUSD.CFD.IP",
+    }
+)
+
 _COMPILE_LOCK = threading.Lock()
 _COMPILER_THREAD: threading.Thread | None = None
 _TELEMETRY: dict[str, Any] = {
@@ -140,6 +160,182 @@ def matrix_cell_index(
         + mom_q
     )
     return epic_id * CELLS_PER_EPIC + dir_slot * (RSI_BINS * ATR_BINS * MOM_BINS) + offset
+
+
+def _matrix_parts_from_cell_index(cell_idx: int) -> tuple[int, int, int, int, int]:
+    """Return (epic_id, dir_slot, rsi_q, atr_q, mom_q) for a flat cell index."""
+    epic_id = int(cell_idx) // CELLS_PER_EPIC
+    remainder = int(cell_idx) % CELLS_PER_EPIC
+    dir_stride = RSI_BINS * ATR_BINS * MOM_BINS
+    dir_slot = remainder // dir_stride
+    offset = remainder % dir_stride
+    rsi_q = offset // (ATR_BINS * MOM_BINS)
+    atr_mom = offset % (ATR_BINS * MOM_BINS)
+    atr_q = atr_mom // MOM_BINS
+    mom_q = atr_mom % MOM_BINS
+    return epic_id, dir_slot, rsi_q, atr_q, mom_q
+
+
+def default_matrix_fallback_row(
+    *,
+    signal_floor: float = 43.2,
+    fitness_floor: float = 43.2,
+    ml_floor: float = 0.40,
+    win_prob: float = 0.55,
+) -> np.ndarray:
+    """Cold-start viable cell when archive compile has not yet populated SHM."""
+    row = np.zeros(MATRIX_COLS, dtype=np.float32)
+    row[COL_SIGNAL_FLOOR] = np.float32(signal_floor)
+    row[COL_FITNESS_FLOOR] = np.float32(fitness_floor)
+    row[COL_ML_FLOOR] = np.float32(ml_floor)
+    row[COL_WIN_PROB] = np.float32(win_prob)
+    row[COL_APPROVED] = np.float32(1.0)
+    row[COL_SAMPLES] = np.float32(1.0)
+    row[COL_RSI_ANCHOR] = np.float32(50.0)
+    row[COL_ATR_ANCHOR] = np.float32(1.5)
+    return row
+
+
+def _epic_slot_has_samples(matrix: np.ndarray, epic_id: int) -> bool:
+    start = int(epic_id) * CELLS_PER_EPIC
+    end = start + CELLS_PER_EPIC
+    if end > matrix.shape[0]:
+        return False
+    return bool(np.any(matrix[start:end, COL_SAMPLES] > 0.0))
+
+
+def matrix_row_with_streaming_ffill(
+    matrix: np.ndarray,
+    cell_idx: int,
+    *,
+    epic: str | None = None,
+) -> np.ndarray:
+    """
+    Forward-fill fallback for Nikkei / EURUSD streaming matrix slices.
+
+    Walks mom_q → atr_q → rsi_q within the epic slot (pandas ``ffill`` semantics).
+    """
+    row = matrix[int(cell_idx)]
+    if float(row[COL_SAMPLES]) > 0.0:
+        return row
+    epic_name = str(epic or "").strip()
+    if not epic_name:
+        epic_id, _, _, _, _ = _matrix_parts_from_cell_index(cell_idx)
+        epic_name = SLOT_TO_EPIC.get(epic_id, "")
+    if epic_name not in FFILL_STREAMING_EPICS:
+        return row
+
+    epic_id, dir_slot, rsi_q, atr_q, mom_q = _matrix_parts_from_cell_index(cell_idx)
+    for mq in range(mom_q - 1, -1, -1):
+        idx = matrix_cell_index(
+            epic_id=epic_id,
+            direction="BUY" if dir_slot == 0 else "SELL",
+            rsi_q=rsi_q,
+            atr_q=atr_q,
+            mom_q=mq,
+        )
+        candidate = matrix[idx]
+        if float(candidate[COL_SAMPLES]) > 0.0:
+            return candidate
+    for aq in range(atr_q - 1, -1, -1):
+        for mq in range(MOM_BINS - 1, -1, -1):
+            idx = matrix_cell_index(
+                epic_id=epic_id,
+                direction="BUY" if dir_slot == 0 else "SELL",
+                rsi_q=rsi_q,
+                atr_q=aq,
+                mom_q=mq,
+            )
+            candidate = matrix[idx]
+            if float(candidate[COL_SAMPLES]) > 0.0:
+                return candidate
+    for rq in range(rsi_q - 1, -1, -1):
+        for aq in range(ATR_BINS - 1, -1, -1):
+            for mq in range(MOM_BINS - 1, -1, -1):
+                idx = matrix_cell_index(
+                    epic_id=epic_id,
+                    direction="BUY" if dir_slot == 0 else "SELL",
+                    rsi_q=rq,
+                    atr_q=aq,
+                    mom_q=mq,
+                )
+                candidate = matrix[idx]
+                if float(candidate[COL_SAMPLES]) > 0.0:
+                    return candidate
+    if epic_name in FFILL_STREAMING_EPICS:
+        slot = epic_slot(epic_name) if epic_name else epic_id
+        if not _epic_slot_has_samples(matrix, slot):
+            return default_matrix_fallback_row()
+    return row
+
+
+def apply_streaming_ffill_to_matrix(matrix: np.ndarray) -> int:
+    """In-place ffill (+ bfill for latency epics) — returns cells filled."""
+    sanitize_matrix_nan_inf(matrix)
+    filled = 0
+    for epic in FFILL_STREAMING_EPICS:
+        filled += _apply_slot_ffill(matrix, epic=epic)
+    for epic in LATENCY_PACKET_FFILL_EPICS:
+        filled += _apply_slot_bfill(matrix, epic=epic)
+    return filled
+
+
+def sanitize_matrix_nan_inf(matrix: np.ndarray) -> None:
+    """Zero NaN/inf cells — prevents NaN blocks on live packet loss."""
+    np.nan_to_num(matrix, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def _apply_slot_ffill(matrix: np.ndarray, *, epic: str) -> int:
+    filled = 0
+    slot = epic_slot(epic)
+    for dir_slot in (0, 1):
+        direction = "BUY" if dir_slot == 0 else "SELL"
+        for rsi_q in range(RSI_BINS):
+            for atr_q in range(ATR_BINS):
+                last_row: np.ndarray | None = None
+                for mom_q in range(MOM_BINS):
+                    idx = matrix_cell_index(
+                        epic_id=slot,
+                        direction=direction,
+                        rsi_q=rsi_q,
+                        atr_q=atr_q,
+                        mom_q=mom_q,
+                    )
+                    row = matrix[idx]
+                    if float(row[COL_SAMPLES]) > 0.0:
+                        last_row = row
+                        continue
+                    if last_row is not None:
+                        matrix[idx] = last_row
+                        filled += 1
+    return filled
+
+
+def _apply_slot_bfill(matrix: np.ndarray, *, epic: str) -> int:
+    """Backward-fill along mom_q (pandas ``bfill``) after forward pass."""
+    filled = 0
+    slot = epic_slot(epic)
+    for dir_slot in (0, 1):
+        direction = "BUY" if dir_slot == 0 else "SELL"
+        for rsi_q in range(RSI_BINS):
+            for atr_q in range(ATR_BINS):
+                next_row: np.ndarray | None = None
+                for mom_q in range(MOM_BINS - 1, -1, -1):
+                    idx = matrix_cell_index(
+                        epic_id=slot,
+                        direction=direction,
+                        rsi_q=rsi_q,
+                        atr_q=atr_q,
+                        mom_q=mom_q,
+                    )
+                    row = matrix[idx]
+                    if float(row[COL_SAMPLES]) > 0.0:
+                        next_row = row
+                        continue
+                    if next_row is not None:
+                        matrix[idx] = next_row
+                        filled += 1
+    return filled
 
 
 class AlphaMatrixSegment:
@@ -330,10 +526,39 @@ _LOOKUP_LATENCY_SAMPLES: list[float] = []
 def get_alpha_matrix_segment(*, create: bool = False) -> AlphaMatrixSegment:
     global _SEGMENT_SINGLETON, _SHM_MAPPED
     with _SEGMENT_LOCK:
+        if create:
+            flush_stale_alpha_matrix_shm()
         if _SEGMENT_SINGLETON is None:
             _SEGMENT_SINGLETON = AlphaMatrixSegment(create=create)
             _SHM_MAPPED = True
         return _SEGMENT_SINGLETON
+
+
+def flush_stale_alpha_matrix_shm(*, current_pid: int | None = None) -> bool:
+    """Unbind alpha-matrix POSIX segment when publisher PID changes after restart."""
+    import os
+
+    from system.paths import data_dir
+
+    pid = int(current_pid if current_pid is not None else os.getpid())
+    marker = data_dir() / "state" / "alpha_matrix_publisher.pid"
+    stale = False
+    try:
+        if marker.is_file():
+            old = int(marker.read_text(encoding="ascii").strip())
+            stale = old != pid
+        else:
+            stale = True
+    except (OSError, ValueError):
+        stale = True
+    if stale:
+        force_unmap_alpha_matrix()
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(str(pid), encoding="ascii")
+    except OSError:
+        pass
+    return stale
 
 
 def alpha_matrix_mapped() -> bool:
@@ -380,8 +605,8 @@ def _optimized_floors(cfg: dict[str, Any]) -> tuple[float, float, float]:
     from intelligence.matrix_backtuner import resolve_floor_bases
 
     bases = resolve_floor_bases(cfg)
-    signal_floor = float(bases.signal_confidence_pct)
-    fitness_floor = float(bases.environment_fitness_pct)
+    signal_floor = min(float(bases.signal_confidence_pct), 52.5)
+    fitness_floor = min(float(bases.environment_fitness_pct), 52.5)
     ml_floor = float(bases.ml_veto_probability)
     try:
         report_path = project_root() / "src" / "data" / "matrix_backtuner_report.json"
@@ -492,6 +717,9 @@ def compile_prebaked_alpha_matrix(
             if samples == 1.0:
                 populated += 1
 
+    apply_streaming_ffill_to_matrix(matrix)
+    populated = int(np.sum(matrix[:, COL_SAMPLES] > 0.0))
+
     compile_ms = (time.perf_counter() - t0) * 1000.0
     header = segment.read_header()
     segment.write_header(
@@ -579,6 +807,24 @@ def _compiler_loop(*, interval_sec: float) -> None:
         time.sleep(max(30.0, float(interval_sec)))
 
 
+def fast_bootstrap_alpha_matrix_if_empty(*, stride: int = 48) -> bool:
+    """Synchronous fast compile when SHM is empty — unblocks live matrix lookups."""
+    try:
+        if alpha_matrix_mapped():
+            segment = get_alpha_matrix_segment(create=False)
+            if int(np.sum(segment.matrix[:, COL_SAMPLES] > 0)) > 64:
+                return False
+        report = compile_prebaked_alpha_matrix(stride=max(8, int(stride)))
+        log_engine(
+            f"AlphaMatrixPrebaker: fast bootstrap cells={report.cells_populated} "
+            f"ms={report.compile_ms:.0f}"
+        )
+        return report.cells_populated > 0
+    except Exception as exc:
+        log_guarded_exception("alpha_matrix_fast_bootstrap", exc)
+        return False
+
+
 def start_alpha_matrix_compiler_async(*, interval_sec: float = 300.0) -> None:
     """Shadow (:9199) background compiler — non-blocking to the hot path."""
     global _COMPILER_THREAD
@@ -587,8 +833,7 @@ def start_alpha_matrix_compiler_async(*, interval_sec: float = 300.0) -> None:
 
     def _bootstrap() -> None:
         try:
-            with _COMPILE_LOCK:
-                compile_prebaked_alpha_matrix()
+            fast_bootstrap_alpha_matrix_if_empty(stride=48)
         except Exception as exc:
             log_guarded_exception("alpha_matrix_bootstrap", exc)
         _compiler_loop(interval_sec=interval_sec)

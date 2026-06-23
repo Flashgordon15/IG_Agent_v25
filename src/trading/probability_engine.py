@@ -16,8 +16,8 @@ from signals.signal_engine import SignalResult
 from system.engine_log import log_engine
 
 WIN_PROMOTE_FLOOR = 0.65
-WIN_VETO_FLOOR = 0.50
-PROMOTE_THRESHOLD_RELIEF_PCT = 8.0
+WIN_VETO_FLOOR = 0.40
+PROMOTE_THRESHOLD_RELIEF_PCT = 10.0
 
 
 @dataclass(frozen=True)

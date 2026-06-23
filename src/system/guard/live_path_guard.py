@@ -17,13 +17,28 @@ def is_live_production_track() -> bool:
     return track == "live" and mode == "PRODUCTION"
 
 
+def mock_broker_forbidden() -> bool:
+    """True when mock REST / mock feed paths must never be installed."""
+    if is_live_production_track():
+        return True
+    try:
+        from system.agent_execution_mode import (
+            authentic_demo_broker_required,
+            production_execution_active,
+        )
+
+        return production_execution_active() or authentic_demo_broker_required()
+    except Exception:
+        return False
+
+
 def enforce_live_production_no_mock(context: str) -> None:
     """
     Hard stop — mock clients, MockIGRest, and MockFeedEngine are forbidden on live PRODUCTION.
 
     Never returns on violation (``sys.exit(101)``).
     """
-    if not is_live_production_track():
+    if not mock_broker_forbidden():
         return
     message = (
         "FailClosedSecurityError: Live PRODUCTION track forbids mock/simulated "

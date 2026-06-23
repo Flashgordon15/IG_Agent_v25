@@ -1,5 +1,16 @@
 """IG Agent v30.0 analytics plane."""
 
+from analytics.post_open_audit import (
+    compile_horizon_metrics,
+    dispatch_hourly_dual_horizon_summary,
+    format_dual_horizon_summary,
+    format_instant_trade_close,
+    record_closed_trade,
+    reset_post_open_audit_for_tests,
+    start_post_open_audit_hub,
+    stop_post_open_audit_hub,
+    telegram_configured,
+)
 from analytics.triage_logger import (
     ClosedPositionRecord,
     LatencyMetricRecord,
@@ -19,6 +30,15 @@ from analytics.triage_logger import (
 )
 
 __all__ = [
+    "compile_horizon_metrics",
+    "dispatch_hourly_dual_horizon_summary",
+    "format_dual_horizon_summary",
+    "format_instant_trade_close",
+    "record_closed_trade",
+    "reset_post_open_audit_for_tests",
+    "start_post_open_audit_hub",
+    "stop_post_open_audit_hub",
+    "telegram_configured",
     "ClosedPositionRecord",
     "LatencyMetricRecord",
     "SessionPerformanceSnapshot",

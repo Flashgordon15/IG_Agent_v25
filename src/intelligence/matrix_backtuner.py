@@ -129,12 +129,12 @@ def resolve_floor_bases(cfg: dict[str, Any]) -> FloorBases:
     conf = float(
         prot.get("signal_threshold_floor")
         or cfg.get("signal_threshold")
-        or PRODUCTION_WARMED_CONFIDENCE_FLOOR
+        or 52.5
     )
     fitness = float(
         soak.get("fitness_min")
         or prot.get("fitness_min_floor")
-        or 55.0
+        or 52.5
     )
     ml_prob = float(ml.get("min_probability") or 0.45)
     return FloorBases(

@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>IG Agent Apex — V30 Unified Command Console</title>
+<style>
+  :root {
+    --bg: #121214;
+    --panel: #1e1e24;
+    --cyan: #00e5ff;
+    --purple: #c77dff;
+    --orange: #ff9f1c;
+    --orange-bright: #ffb020;
+    --yellow: #ffd60a;
+    --green: #39ff14;
+    --crimson: #ff2244;
+    --white: #e8eaed;
+    --dim: #9ca3af;
+    --grey: #6b7280;
+    --kill: #8b0000;
+    --kill-hover: #b22222;
+    --font: "SF Mono", "Menlo", "Consolas", monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: var(--bg); color: var(--white); font-family: var(--font); }
+  body { display: flex; flex-direction: column; padding: 14px 16px 10px; gap: 10px; overflow: hidden; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .title-main { font-size: 1.25rem; font-weight: 700; color: var(--cyan); text-shadow: 0 0 16px rgba(0,229,255,.4); }
+  .title-sub { font-size: 0.72rem; color: var(--dim); margin-top: 4px; }
+  .kill-btn {
+    background: var(--kill); color: var(--white); border: none; padding: 11px 16px;
+    font-family: var(--font); font-size: 0.8rem; font-weight: 700; cursor: pointer;
+    box-shadow: 0 0 16px rgba(255,34,68,.3);
+  }
+  .kill-btn:hover { background: var(--kill-hover); }
+  .grid-top { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; flex: 1; min-height: 0; }
+  .panel {
+    border: 2px solid; background: var(--panel); display: flex; flex-direction: column;
+    box-shadow: inset 0 0 30px rgba(0,0,0,.35);
+  }
+  .panel.cyan { border-color: var(--cyan); }
+  .panel.purple { border-color: var(--purple); }
+  .panel.orange { border-color: var(--orange); }
+  .panel.yellow { border-color: var(--yellow); flex: 1; }
+  .panel.grey-valve { border-color: var(--grey); background: var(--grey); }
+  .panel.fire-valve { border-color: var(--orange-bright); background: var(--orange-bright); }
+  .panel-head { padding: 9px 12px 4px; font-size: 0.7rem; font-weight: 700; letter-spacing: .07em; }
+  .panel.cyan .panel-head { color: var(--cyan); }
+  .panel.purple .panel-head { color: var(--purple); }
+  .panel.orange .panel-head, .panel.grey-valve .panel-head, .panel.fire-valve .panel-head { color: var(--white); }
+  .panel.yellow .panel-head { color: var(--yellow); }
+  .panel.markets { border-color: var(--cyan); flex: 0 0 auto; }
+  .panel.markets .panel-head { color: var(--cyan); }
+  .panel.markets td { color: var(--cyan); font-size: 0.74rem; }
+  .panel.markets .zone-win { color: var(--green); }
+  .panel.markets .zone-fail { color: var(--crimson); }
+  .panel.markets .zone-scan { color: var(--dim); }
+  .panel.win-valve { border-color: var(--green); background: #1a3d2e; }
+  .panel.win-valve .panel-body { color: var(--green); }
+  .panel-body { padding: 8px 14px 12px; font-size: 0.85rem; line-height: 1.55; white-space: pre-wrap; flex: 1; overflow: auto; }
+  .panel.cyan .panel-body { color: var(--cyan); }
+  .panel.purple .panel-body { color: var(--purple); }
+  .panel.orange .panel-body { color: var(--green); }
+  .panel.grey-valve .panel-body, .panel.fire-valve .panel-body {
+    color: var(--white); font-size: 1.05rem; font-weight: 700; text-align: center;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .panel.cyan.stall .panel-body { background: var(--crimson); color: var(--white); animation: blink 0.5s step-end infinite alternate; }
+  .panel.offline { border-color: var(--crimson); }
+  .panel.offline .panel-body { color: var(--crimson); }
+  .panel.stale { border-color: var(--orange); }
+  .panel.stale .panel-body { color: var(--orange); }
+  .panel.booting { border-color: var(--yellow); }
+  .panel.booting .panel-body { color: var(--yellow); }
+  .recovery { font-size: 0.72rem; color: var(--dim); margin-top: 8px; }
+  @keyframes blink { from { opacity: 1; } to { opacity: 0.75; } }
+  table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+  th { text-align: left; color: var(--yellow); padding: 7px 10px; border-bottom: 1px solid #2a2a32; }
+  td { padding: 6px 10px; border-bottom: 1px solid #2a2a32; color: var(--yellow); }
+  .status-bar { font-size: 0.68rem; color: var(--dim); }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <div class="title-main">IG AGENT APEX — V30 UNIFIED COMMAND CONSOLE</div>
+    <div class="title-sub" id="subtitle">POSIX SHM · ig_agent_v30_shm · source=shm</div>
+  </div>
+  <button class="kill-btn" id="killBtn" type="button">[ EMERGENCY RECOVERY STOP ]</button>
+</header>
+
+<div class="grid-top">
+  <div class="panel cyan" id="healthPanel">
+    <div class="panel-head">INFRASTRUCTURE HEALTH TRACKER</div>
+    <div class="panel-body" id="healthBody">🟡 LOADING MEMORY SEGMENT...</div>
+  </div>
+  <div class="panel purple" id="brainPanel">
+    <div class="panel-head">BRAIN PARAMETERS PANEL</div>
+    <div class="panel-body" id="brainBody">signal_threshold —\natr_multiplier —</div>
+  </div>
+</div>
+
+<div class="panel orange" id="valvePanel">
+  <div class="panel-head">MASTER VALVE INDICATOR</div>
+  <div class="panel-body" id="valveBody">⚪ SCANNING ALPHAS — CAPITAL PROTECTED</div>
+</div>
+
+<div class="panel markets" style="min-height:100px;">
+  <div class="panel-head">MARKET GATE STATUS (live assessment)</div>
+  <table>
+    <thead><tr><th>Market</th><th>Zone</th><th>Dir</th><th>Gate status</th><th>Conf</th></tr></thead>
+    <tbody id="marketsBody"><tr><td colspan="5">loading gate diagnostics…</td></tr></tbody>
+  </table>
+</div>
+
+<div class="panel yellow" style="flex:1;min-height:140px;display:flex;flex-direction:column;">
+  <div class="panel-head">LIVING RECONCILIATION LEDGER</div>
+  <table style="flex:1">
+    <thead><tr><th>Timestamp</th><th>Epic</th><th>Action</th><th>Entry</th><th>Status</th><th>P&amp;L</th></tr></thead>
+    <tbody id="ledgerBody"><tr><td colspan="6">—</td></tr></tbody>
+  </table>
+</div>
+
+<div class="status-bar" id="statusBar">source=shm · 500ms</div>
+
+<script>
+  const STALL_SEC = 3;
+
+  function feedStalled(payload, v) {
+    if (payload && payload.feed_guardian) {
+      return Boolean(payload.feed_guardian.stalled);
+    }
+    if (v && v._publish_stalled) return true;
+    const frozen = Number(v && v._frozen_sec || 0);
+    return frozen >= STALL_SEC || Boolean(v && v.stall_active);
+  }
+  const EPIC_LABEL = {
+    "CS.D.CFPGOLD.CFP.IP": "Gold",
+    "IX.D.DOW.IFM.IP": "Wall St",
+    "IX.D.NIKKEI.IFM.IP": "Nikkei",
+    "CS.D.EURUSD.CFD.IP": "EUR/USD"
+  };
+  let lastTicks = null, lastLive = null, lastChange = Date.now();
+  let fireStreak = 0, lastValve = -1;
+
+  function fmtTs(iso) {
+    if (!iso) return "—";
+    return String(iso).replace("T", " ").slice(0, 23);
+  }
+
+  function renderLedger(rows) {
+    const tb = document.getElementById("ledgerBody");
+    const tail = (rows || []).slice(-5).reverse();
+    if (!tail.length) {
+      tb.innerHTML = "<tr><td colspan='6'>no trades yet</td></tr>";
+      return;
+    }
+    tb.innerHTML = tail.map(r => {
+      const pnl = Number(r.pnl_gbp || 0);
+      const pnlS = pnl !== 0 ? ((pnl > 0 ? "+" : "") + pnl.toFixed(2)) : "0.00";
+      const entry = r.entry != null ? Number(r.entry).toFixed(2) : "—";
+      return `<tr><td>${fmtTs(r.executed_at)}</td><td>${r.epic||"—"}</td><td>${r.action||"—"}</td><td>${entry}</td><td>${r.deal_id ? r.status||"—" : "SIMULATED"}</td><td>${pnlS}</td></tr>`;
+    }).join("");
+  }
+
+  function renderMarkets(frontier, gateDiag) {
+    const tb = document.getElementById("marketsBody");
+    const byEpic = (frontier && frontier.by_epic) || (gateDiag && gateDiag.by_epic) || {};
+    const keys = Object.keys(byEpic);
+    if (!keys.length) {
+      tb.innerHTML = "<tr><td colspan='5'>no market telemetry yet</td></tr>";
+      return;
+    }
+    tb.innerHTML = keys.map(epic => {
+      const row = byEpic[epic] || {};
+      const zone = row.zone_label || "—";
+      const zCls = zone === "WIN_ZONE" ? "zone-win" : (zone === "FAIL_ZONE" ? "zone-fail" : "zone-scan");
+      const wait = row.wait_reason || (row.all_passed ? "PASS" : "—");
+      const conf = row.strategy && row.strategy.win_probability != null
+        ? (Number(row.strategy.win_probability) * 100).toFixed(1) + "%"
+        : "—";
+      return `<tr><td>${EPIC_LABEL[epic] || epic}</td><td class="${zCls}">${zone}</td><td>${row.direction || "—"}</td><td>${wait}</td><td>${conf}</td></tr>`;
+    }).join("");
+  }
+
+  window.updateFromShm = function(payload) {
+    const link = (payload && payload.link) || {};
+    const state = link.state || (payload && payload.ok ? "LIVE" : "AGENT_OFFLINE");
+    const hp = document.getElementById("healthPanel");
+    const hb = document.getElementById("healthBody");
+    const vp = document.getElementById("valvePanel");
+    const vb = document.getElementById("valveBody");
+
+    function renderOffline(icon, title, detail, recovery) {
+      hp.className = "panel offline";
+      hb.textContent = `${icon} ${title}\n\n${detail}` +
+        (recovery ? `\n\n▶ RECOVERY\n${recovery}` : "");
+      vp.className = "panel grey-valve";
+      vb.textContent = "⚪ COCKPIT OFFLINE — NO LIVE AGENT FEED";
+      document.getElementById("subtitle").textContent =
+        "POSIX SHM · ig_agent_v30_shm · " + title;
+      document.getElementById("statusBar").textContent =
+        "source=none · state=" + state;
+      if (payload && payload.gates) {
+        renderMarkets(null, payload.gates.gate_diagnostics || payload.gates);
+      }
+    }
+
+    if (!payload || !payload.ok) {
+      const title = link.title || "AGENT OFFLINE";
+      const detail = link.detail || (payload && payload.error) || "main.py not running";
+      const recovery = link.recovery || "./flight_deck_launch.sh";
+      if (state === "MANUAL_STOP") {
+        renderOffline("🛑", title, detail, recovery);
+        return;
+      }
+      if (state === "STALE_SHM") {
+        hp.className = "panel stale";
+        hb.textContent = `⚠️ ${title}\n\n${detail}\n\n▶ RECOVERY\n${recovery}`;
+        vp.className = "panel grey-valve";
+        vb.textContent = "⚠️ STALE SHM — RESTART AGENT";
+        document.getElementById("statusBar").textContent = "source=stale_shm · DO NOT TRUST TICKS";
+        return;
+      }
+      if (state === "BOOTING") {
+        hp.className = "panel booting";
+        hb.textContent = `🟡 ${title}\n\n${detail}`;
+        vp.className = "panel grey-valve";
+        vb.textContent = "⏳ AGENT BOOTING — WAIT FOR G5";
+        document.getElementById("statusBar").textContent = "source=api · booting";
+        return;
+      }
+      renderOffline("🔴", title, detail, recovery);
+      return;
+    }
+    const v = payload.view;
+    const pid = v.agent_pid || "—";
+    const ticks = Number(v.ticks_cached || 0);
+    const live = Number(v.live_ram_ticks || 0);
+    const now = Date.now();
+    if (lastTicks === null || ticks !== lastTicks || live !== lastLive) {
+      lastChange = now; lastTicks = ticks; lastLive = live;
+    }
+    const frozen = Number(v._frozen_sec || 0);
+    const stalled = feedStalled(payload, v);
+
+    const hp = document.getElementById("healthPanel");
+    const hb = document.getElementById("healthBody");
+    if (stalled) {
+      hp.classList.add("stall");
+      const heal = (payload && payload.heal) ? JSON.stringify(payload.heal) : "";
+      const guard = payload && payload.feed_guardian;
+      const healNote = guard && guard.heal_count ? `\nself-heal #${guard.heal_count}` : "";
+      hb.textContent = `PID ${pid}\n\n❌ CRITICAL FEED STALL\nfrozen ${frozen.toFixed(1)}s (${v._stall_reason||"publish"})${healNote}\nticks ${ticks.toLocaleString()} | live ${live.toLocaleString()} | seq ${v.write_seq||"—"}`;
+    } else {
+      hp.classList.remove("stall");
+      hb.textContent = `PID ${pid}\n\n🟢 DATA VELOCITY: ACTIVE\nticks ${ticks.toLocaleString()} | live ${live.toLocaleString()}\nseq ${v.write_seq||"—"} | pulse ${v.pulse_serial||"—"}`;
+    }
+
+    document.getElementById("brainBody").textContent =
+      `signal_threshold  ${Number(v.signal_threshold||0).toFixed(2)}  (${v.tuning_source || "live"})\n` +
+      `atr_multiplier    ${Number(v.atr_multiplier||0).toFixed(3)}\n` +
+      `coordinate      ${Number(v.coordinate||0).toLocaleString()}\n` +
+      `last_trade_pnl  ${Number(v.last_trade_pnl||0).toFixed(2)} GBP`;
+
+    const valve = Number(v.valve_status || 0);
+    if (valve === lastValve) {
+      fireStreak = valve === 2 ? fireStreak + 1 : 0;
+    } else {
+      fireStreak = valve === 2 ? 1 : 0;
+      lastValve = valve;
+    }
+    const vp = document.getElementById("valvePanel");
+    const vb = document.getElementById("valveBody");
+    vp.className = "panel orange";
+    if (valve === 2 && fireStreak >= 2) {
+      vp.className = "panel fire-valve";
+      vb.textContent = "🔥 FIRE: INJECTING LIVE IG PRODUCTION ORDER";
+    } else if (valve === 1 || (payload.frontier && payload.frontier.last && payload.frontier.last.zone_label === "WIN_ZONE")) {
+      vp.className = "panel win-valve";
+      vb.textContent = "🟢 WIN ZONE — ARMED (matrix cell winning)";
+    } else if (valve === 3 || v.stall_active) {
+      vp.className = "panel cyan stall";
+      vb.textContent = "❌ STALL — FEED FROZEN";
+    } else {
+      vp.className = "panel grey-valve";
+      vb.textContent = "⚪ SCANNING ALPHAS — CAPITAL PROTECTED";
+    }
+
+    renderMarkets(payload.frontier, (payload.gates || {}).gate_diagnostics || payload.gates);
+    renderLedger(v.performance_rows || []);
+    document.getElementById("subtitle").textContent =
+      `POSIX SHM · ig_agent_v30_shm · pid ${pid} · ticks ${ticks.toLocaleString()}`;
+    const gateCount = Object.keys(((payload.frontier || {}).by_epic) || {}).length;
+    const src = (payload.link && payload.link.state === "API_ONLY") || (payload.feed_guardian && payload.feed_guardian.force_api) ? "api+gate" : "shm+gate";
+    document.getElementById("statusBar").textContent =
+      `source=${src} · 500ms · valve=${valve} · markets=${gateCount} · rows=${(v.performance_rows||[]).length} · ${v.memory_alignment||"SYNC"}`;
+  };
+
+  document.getElementById("killBtn").onclick = () => {
+    if (window.pywebview && window.pywebview.api) window.pywebview.api.emergency_stop();
+  };
+</script>
+</body>
+</html>

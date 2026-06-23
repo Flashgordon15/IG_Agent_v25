@@ -76,6 +76,32 @@ def start_post_ready_services(context: BootContext) -> None:
     except Exception as e:
         log_engine(f"post-ready: trading health monitor skipped: {type(e).__name__}: {e}")
 
+    try:
+        from intelligence.matrix_prebaker import (
+            fast_bootstrap_alpha_matrix_if_empty,
+            start_alpha_matrix_compiler_async,
+        )
+
+        fast_bootstrap_alpha_matrix_if_empty(stride=48)
+        start_alpha_matrix_compiler_async()
+        log_engine("post-ready: AlphaMatrixPrebaker fast bootstrap + async compiler started")
+    except Exception as e:
+        log_engine(f"post-ready: alpha matrix prebaker skipped: {type(e).__name__}: {e}")
+
+    try:
+        from system.cockpit_session_monitor import start_cockpit_session_monitor
+
+        start_cockpit_session_monitor()
+    except Exception as e:
+        log_engine(f"post-ready: cockpit session monitor skipped: {type(e).__name__}: {e}")
+
+    try:
+        from system.cockpit_feed_guardian_agent import start_agent_feed_guardian
+
+        start_agent_feed_guardian()
+    except Exception as e:
+        log_engine(f"post-ready: agent feed guardian skipped: {type(e).__name__}: {e}")
+
     if cfg is not None:
         try:
             from data.learning_store import LearningStore
@@ -106,6 +132,13 @@ def start_post_ready_services(context: BootContext) -> None:
         start_hourly_executive_telegram_scheduler()
     except Exception as e:
         log_engine(f"post-ready: telegram scheduler skipped: {type(e).__name__}: {e}")
+
+    try:
+        from analytics.post_open_audit import start_post_open_audit_hub
+
+        start_post_open_audit_hub(hourly=True)
+    except Exception as e:
+        log_engine(f"post-ready: post-open audit hub skipped: {type(e).__name__}: {e}")
 
     try:
         from system.v26_shadow_service import start_v26_shadow_service

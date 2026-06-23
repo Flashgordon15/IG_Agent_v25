@@ -168,6 +168,16 @@ def _walk_and_instrument_package(root_name: str) -> int:
     return total
 
 
+def _bare_metal_fast_arm() -> bool:
+    """Skip O(n) module walk on unified bare-metal boot — excepthook only."""
+    return os.environ.get("IG_BARE_METAL_EXEC", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def install_kernel_interceptor(*, force: bool = False) -> dict[str, Any]:
     """
     Idempotent global install — excepthook + trading/execution method matrix.
@@ -179,6 +189,22 @@ def install_kernel_interceptor(*, force: bool = False) -> dict[str, Any]:
         if _INSTALLED and not force:
             return {"installed": True, "skipped": True}
         sys.excepthook = _kernel_excepthook
+        if _bare_metal_fast_arm():
+            _INSTALLED = True
+            if _fail_closed_enabled():
+                os.environ["IG_SUPERVISED_NETWORK_TEARDOWN"] = "1"
+            summary = {
+                "installed": True,
+                "trading_wrapped": 0,
+                "execution_wrapped": 0,
+                "fail_closed": _fail_closed_enabled(),
+                "bare_metal_fast_arm": True,
+            }
+            log_engine(
+                "KernelInterceptor: bare-metal fast-arm "
+                f"(excepthook only) fail_closed={summary['fail_closed']}"
+            )
+            return summary
         trading_wrapped = _walk_and_instrument_package("trading")
         execution_wrapped = _walk_and_instrument_package("execution")
         _INSTALLED = True

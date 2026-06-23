@@ -42,16 +42,34 @@ def configure_unified_engine_env(*, cycle_sec: int = 900, api_port: int = 8080) 
     os.environ["IG_AGENT_FROM_LAUNCHER"] = "1"
     os.environ.pop("IG_ORCHESTRATOR_CHILD", None)
     os.environ.setdefault("IG_AGENT_MODE", "DEMO")
+    os.environ.setdefault("IG_PRODUCTION_EXECUTION", "0")
+    os.environ.setdefault("IG_MOCK_FEED", "0")
     try:
         from system.shutdown_cleanup import clear_manual_stop
 
         clear_manual_stop()
     except Exception as exc:
         log_guarded_exception("unified_engine_clear_manual_stop", exc)
+    try:
+        from system.agent_execution_mode import ensure_production_execution_armed_on_boot
+
+        ensure_production_execution_armed_on_boot()
+    except Exception as exc:
+        log_guarded_exception("unified_engine_production_exec", exc)
+
+
+def get_boot_context() -> Any:
+    return _BOOT_CONTEXT
 
 
 def _shadow_coprocessor_loop() -> None:
     """Thread A — racing feeds, archive bake, ring-buffer publish, failover watch."""
+    from system.bootstrap_phase_barrier import wait_bootstrap_phase_barrier
+
+    if not wait_bootstrap_phase_barrier(role="thread-a", timeout_sec=120.0):
+        log_engine("UnifiedEngine Thread-A: bootstrap barrier timeout — withheld")
+        return
+
     from system.ipc.ring_buffer import get_alpha_ring_buffer
 
     ring = get_alpha_ring_buffer()
@@ -67,9 +85,15 @@ def _shadow_coprocessor_loop() -> None:
         log_guarded_exception("unified_thread_a_multi_feed", exc)
         try:
             from feeder.yahoo_quote_poller import start_yahoo_quote_poller
+            from system.feeds.multi_feed_hub import yahoo_route_bypassed
 
-            start_yahoo_quote_poller()
-            log_engine("UnifiedEngine Thread-A: Yahoo fallback poller started")
+            if not yahoo_route_bypassed():
+                start_yahoo_quote_poller()
+                log_engine("UnifiedEngine Thread-A: Yahoo fallback poller started")
+            else:
+                log_engine(
+                    "UnifiedEngine Thread-A: Yahoo fallback suppressed — WS feeds primary"
+                )
         except Exception as yexc:
             log_guarded_exception("unified_thread_a_yahoo_fallback", yexc)
 
@@ -107,15 +131,35 @@ def _shadow_coprocessor_loop() -> None:
 
             report = compile_prebaked_alpha_matrix(stride=8)
             seg = get_alpha_matrix_segment(create=False)
+            try:
+                from system.config_loader import get_config
+
+                cfg = get_config()
+            except Exception:
+                cfg = None
             ring.write_matrix_generation(
                 seg.matrix.copy(),
                 vector_density=report.cells_populated,
+                cfg=cfg,
             )
         except Exception as exc:
             log_guarded_exception("unified_thread_a_compile", exc)
 
         now = time.monotonic()
         if now - last_calib >= 1.0:
+            try:
+                from system.config_loader import get_config
+
+                cfg = get_config()
+                signal_thr = float(getattr(cfg, "signal_threshold", 52.5) or 52.5)
+                atr_mult = float(
+                    getattr(cfg, "adaptive_atr_risk_multiple", None)
+                    or getattr(cfg, "atr_multiplier", None)
+                    or 2.5
+                )
+            except Exception:
+                signal_thr = 52.5
+                atr_mult = 2.5
             ring.write_recency_calibration(
                 rsi_bias=0.0,
                 atr_bias=0.0,
@@ -148,6 +192,14 @@ def unified_thread_state() -> dict[str, Any]:
 def _live_execution_loop() -> None:
     """Thread B — ring-buffer quote ingest → bare-metal alpha dispatch (no API/logging)."""
     global _BOOT_CONTEXT
+
+    from system.bootstrap_phase_barrier import wait_bootstrap_phase_barrier
+
+    if not wait_bootstrap_phase_barrier(role="thread-b", timeout_sec=120.0):
+        log_engine("UnifiedEngine Thread-B: bootstrap barrier timeout — withheld")
+        return
+
+    _STATE["thread_b_alive"] = True
 
     from data.models import Quote
 

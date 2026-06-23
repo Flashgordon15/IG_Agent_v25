@@ -97,6 +97,56 @@ def clear_shared_rest_client() -> None:
         _cred_key = None
 
 
+def evict_mock_shared_session() -> None:
+    """Purge MockIGRest from the process-wide REST cache."""
+    global _client, _cred_key
+    try:
+        from ig_api.mock_clients import MockIGRest
+    except Exception:
+        return
+    with _lock:
+        if isinstance(_client, MockIGRest):
+            _client = None
+            _cred_key = None
+    try:
+        import feeder.mock_feed_engine as mfe
+
+        mfe._MOCK_ACTIVE = False  # noqa: SLF001
+    except Exception:
+        pass
+
+
+def force_authenticated_ig_rest_client() -> Any:
+    """
+    Production override — always return a real IGRestClient (never MockIGRest).
+    """
+    from ig_api.mock_clients import MockIGRest
+    from ig_api.rest_client import IG_DEMO_GATEWAY, IG_LIVE_GATEWAY, IGRestClient
+    from system.credentials_holder import get_credentials_holder
+
+    evict_mock_shared_session()
+    holder = get_credentials_holder()
+    credentials = holder.credentials
+    if credentials is None:
+        raise RuntimeError(
+            "Authentic IG broker requires config/credentials/credentials.json"
+        )
+    client = ensure_shared_authenticated(credentials)
+    if isinstance(client, MockIGRest):
+        clear_shared_rest_client()
+        client = ensure_shared_authenticated(credentials)
+    if not isinstance(client, IGRestClient):
+        raise RuntimeError(
+            f"IG REST bind failed — expected IGRestClient, got {type(client).__name__}"
+        )
+    gateway = IG_DEMO_GATEWAY if credentials.account_type == "DEMO" else IG_LIVE_GATEWAY
+    log_engine(
+        f"IG DEMO EXECUTION: IGRestClient armed account={credentials.masked_account_id()} "
+        f"type={credentials.account_type} gateway={gateway}"
+    )
+    return client
+
+
 def shutdown_shared_ig_session() -> None:
     """Logout IG REST session and drop the shared client."""
     global _client

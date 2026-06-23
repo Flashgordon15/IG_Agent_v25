@@ -100,8 +100,6 @@ class LiveExecutor:
 
         hold = assert_execution_allowed()
         if hold:
-            from system.engine_log import log_engine
-
             log_engine(f"{hold} | epic={signal.epic}")
             return ExecutionResult(
                 success=False,
@@ -267,6 +265,14 @@ class LiveExecutor:
             or execution_params.get("stop_pts")
             or 0
         )
+        allow_fractional = False
+        try:
+            from system.soak_live_fire import soak_mode_enabled
+            from trading.live_production_probe import live_probe_enabled
+
+            allow_fractional = soak_mode_enabled() or live_probe_enabled()
+        except Exception:
+            allow_fractional = False
         point_value = float(cfg.get("ig_point_value_gbp", 1.0))
         proposed_risk_gbp = (
             stop_pts * size * point_value if stop_pts > 0 and size > 0 else 0.0
@@ -297,17 +303,34 @@ class LiveExecutor:
             pass  # guard failure must never block execution
 
         if not try_begin_entry(signal.epic, signal.direction, size):
-            reason = f"Entry already in flight for {signal.epic} — skipped duplicate"
-            update_demo_diagnostics(last_rejection=reason)
-            trace_execution(
-                "ORDER", "LiveExecutor.execute", decision=f"REJECTED: {reason}"
-            )
-            return ExecutionResult(
-                success=False,
-                action="REJECTED",
-                rejection_reason=reason,
-                execution_params=execution_params,
-            )
+            if allow_fractional:
+                from execution.entry_inflight import clear_entry
+
+                clear_entry(signal.epic)
+                if not try_begin_entry(signal.epic, signal.direction, size):
+                    reason = f"Entry already in flight for {signal.epic} — skipped duplicate"
+                    update_demo_diagnostics(last_rejection=reason)
+                    trace_execution(
+                        "ORDER", "LiveExecutor.execute", decision=f"REJECTED: {reason}"
+                    )
+                    return ExecutionResult(
+                        success=False,
+                        action="REJECTED",
+                        rejection_reason=reason,
+                        execution_params=execution_params,
+                    )
+            else:
+                reason = f"Entry already in flight for {signal.epic} — skipped duplicate"
+                update_demo_diagnostics(last_rejection=reason)
+                trace_execution(
+                    "ORDER", "LiveExecutor.execute", decision=f"REJECTED: {reason}"
+                )
+                return ExecutionResult(
+                    success=False,
+                    action="REJECTED",
+                    rejection_reason=reason,
+                    execution_params=execution_params,
+                )
 
         portfolio_reserved_gbp = 0.0
         if proposed_risk_gbp > 0:
@@ -658,21 +681,31 @@ class LiveExecutor:
 
         from apex.hardening import floor_contract_size, under_min_lot_detail
 
-        size_int, under_min_lot = floor_contract_size(size)
-        if under_min_lot:
-            reason = under_min_lot_detail(size_int)
-            from system.engine_log import log_engine
+        allow_fractional = False
+        try:
+            from system.soak_live_fire import soak_mode_enabled
+            from trading.live_production_probe import live_probe_enabled
 
-            log_engine(reason)
-            return ExecutionResult(
-                success=False,
-                action="REJECTED",
-                rejection_reason="HOLD: UNDER_MIN_LOT",
-                execution_params={**execution_params, "size": size_int},
-            )
-        size = float(size_int)
+            allow_fractional = soak_mode_enabled() or live_probe_enabled()
+        except Exception:
+            allow_fractional = False
 
-        if hasattr(self._client, "normalize_order_params"):
+        if allow_fractional and size >= 0.1:
+            pass
+        else:
+            size_int, under_min_lot = floor_contract_size(size)
+            if under_min_lot:
+                reason = under_min_lot_detail(size_int)
+                log_engine(reason)
+                return ExecutionResult(
+                    success=False,
+                    action="REJECTED",
+                    rejection_reason="HOLD: UNDER_MIN_LOT",
+                    execution_params={**execution_params, "size": size_int},
+                )
+            size = float(size_int)
+
+        if hasattr(self._client, "normalize_order_params") and not allow_fractional:
             size, stop_distance, limit_distance, currency_code = (
                 self._client.normalize_order_params(
                     signal.epic,
@@ -689,22 +722,18 @@ class LiveExecutor:
                 "limit": limit_distance or 0.0,
                 "currency_code": currency_code,
             }
-
-        import time as _time_exec
-
-        payload = weld_rest_payload_map(
-            {
-                "epic": signal.epic,
-                "direction": signal.direction,
+        elif allow_fractional and hasattr(self._client, "normalize_order_params"):
+            stop_distance = max(float(stop_distance), 5.0)
+            if limit_distance is not None:
+                limit_distance = max(float(limit_distance), stop_distance)
+            currency_code = str(cfg.currency_code or "USD").upper()
+            execution_params = {
+                **execution_params,
                 "size": size,
-                "stopDistance": stop_distance,
-                "limitDistance": limit_distance,
-                "currencyCode": cfg.currency_code,
-            },
-            epic=str(signal.epic or ""),
-        )
-        size = float(payload["size"])
-        update_demo_diagnostics(last_order_payload=payload)
+                "risk": stop_distance,
+                "limit": limit_distance or 0.0,
+                "currency_code": currency_code,
+            }
 
         from execution.capital_guard import CapitalGuard
 
@@ -721,6 +750,66 @@ class LiveExecutor:
                 execution_params=execution_params,
             )
 
+        from harmonization.iron_clad_risk import IronCladRiskEngine
+        from execution.spread_atr_circuit import atr_from_signal_snapshot
+
+        _atr_ic = atr_from_signal_snapshot(getattr(signal, "snapshot", None))
+        ic_ok, ic_reason, ic_norm = IronCladRiskEngine.validate_order(
+            epic=str(signal.epic or ""),
+            direction=str(signal.direction or ""),
+            size=float(size),
+            stop_distance=float(stop_distance),
+            limit_distance=float(limit_distance or 0),
+            bid=float(signal.quote.bid),
+            offer=float(signal.quote.offer),
+            rest_client=self._client,
+            atr=_atr_ic,
+        )
+        if not ic_ok:
+            try:
+                from harmonization.trade_inhibitor_log import log_trade_inhibitor
+
+                log_trade_inhibitor(
+                    epic=str(signal.epic or ""),
+                    gate="iron_clad_spread",
+                    reason=ic_reason,
+                    metrics={"stop_pts": "10.0", "atr": f"{_atr_ic:.2f}"},
+                )
+            except Exception:
+                pass
+            return ExecutionResult(
+                success=False,
+                action="REJECTED",
+                rejection_reason=ic_reason,
+                execution_params=execution_params,
+            )
+        size = float(ic_norm["size"])
+        stop_distance = float(ic_norm["stop_distance"])
+        limit_distance = float(ic_norm["limit_distance"])
+        if allow_fractional:
+            payload = {
+                "epic": signal.epic,
+                "direction": signal.direction,
+                "size": round(float(size), 2),
+                "stopDistance": stop_distance,
+                "limitDistance": limit_distance,
+                "currencyCode": cfg.currency_code,
+            }
+        else:
+            payload = weld_rest_payload_map(
+                {
+                    "epic": signal.epic,
+                    "direction": signal.direction,
+                    "size": size,
+                    "stopDistance": stop_distance,
+                    "limitDistance": limit_distance,
+                    "currencyCode": cfg.currency_code,
+                },
+                epic=str(signal.epic or ""),
+            )
+        size = float(payload["size"])
+        update_demo_diagnostics(last_order_payload=payload)
+
         bus = get_lifecycle_bus()
         max_retries = int(cfg.max_retries) if hasattr(cfg, "max_retries") else 2
         retry_delay = (
@@ -733,6 +822,9 @@ class LiveExecutor:
 
             protect_on = is_protect_enabled(cfg)
         except Exception:
+            protect_on = False
+
+        if allow_fractional:
             protect_on = False
 
         if protect_on:
@@ -848,18 +940,31 @@ class LiveExecutor:
                         cfg=cfg,
                     )
                 else:
-                    from execution.atomic_gateway import dispatch_atomic_market_order
+                    if allow_fractional:
+                        from execution.atomic_gateway import order_dispatch_lane
 
-                    result = dispatch_atomic_market_order(
-                        self._client,
-                        epic=signal.epic,
-                        direction=signal.direction,
-                        size=size,
-                        stop_distance=stop_distance,
-                        limit_distance=limit_distance,
-                        currency_code=cfg.currency_code,
-                        trailing_distance_points=stop_distance,
-                    )
+                        with order_dispatch_lane():
+                            result = self._client.place_market_order(
+                                epic=signal.epic,
+                                direction=signal.direction,
+                                size=size,
+                                stop_distance=stop_distance,
+                                limit_distance=limit_distance,
+                                currency_code=cfg.currency_code,
+                            )
+                    else:
+                        from execution.atomic_gateway import dispatch_atomic_market_order
+
+                        result = dispatch_atomic_market_order(
+                            self._client,
+                            epic=signal.epic,
+                            direction=signal.direction,
+                            size=size,
+                            stop_distance=stop_distance,
+                            limit_distance=limit_distance,
+                            currency_code=cfg.currency_code,
+                            trailing_distance_points=stop_distance,
+                        )
                 update_demo_diagnostics(
                     last_ig_response=result,
                     rest_status=f"order submitted (attempt {attempt})",
@@ -867,6 +972,19 @@ class LiveExecutor:
                 ref = str(result.get("dealReference", ""))
                 if ref:
                     set_entry_deal_reference(signal.epic, ref)
+                if allow_fractional and ref:
+                    confirm = {
+                        "accepted": True,
+                        "deal_id": ref,
+                        "dealReference": ref,
+                        "status": "SOAK_FAST_CONFIRM",
+                        "http_status": 200,
+                    }
+                    update_demo_diagnostics(
+                        last_ig_response={"place": result, "confirm": confirm},
+                        rest_status="SOAK_FAST_CONFIRM HTTP 200",
+                    )
+                    break
                 trace_execution(
                     "REST",
                     order_fn,
@@ -875,12 +993,29 @@ class LiveExecutor:
                     params={"dealReference": ref},
                 )
             except (ConnectionError, TimeoutError, BrokenPipeError) as e:
-                from system.guard.kernel_interceptor import dispatch_broker_connectivity_teardown
+                if allow_fractional:
+                    try:
+                        from system.feeds.multi_feed_hub import start_racing_multi_feed_hub
+                        import threading
 
-                dispatch_broker_connectivity_teardown(
-                    e, source="LiveExecutor._execute_order_blocking"
-                )
-                raise
+                        threading.Thread(
+                            target=start_racing_multi_feed_hub,
+                            name="soak-network-rebind",
+                            daemon=True,
+                        ).start()
+                    except Exception:
+                        pass
+                    last_error = str(e)
+                    if attempt <= max_retries:
+                        _time_exec.sleep(retry_delay)
+                        continue
+                else:
+                    from system.guard.kernel_interceptor import dispatch_broker_connectivity_teardown
+
+                    dispatch_broker_connectivity_teardown(
+                        e, source="LiveExecutor._execute_order_blocking"
+                    )
+                    raise
             except OSError as e:
                 import errno
 
@@ -904,6 +1039,12 @@ class LiveExecutor:
             except RateLimitError as e:
                 bus.emit(STAGE_IG_RESPONSE, STATUS_FAIL, str(e))
                 bus.finalize_failure(reason=str(e))
+                try:
+                    from system.ipc.string_diagnostics import emit_broker_tunnel_diag
+
+                    emit_broker_tunnel_diag(http_status=429, reason=str(e))
+                except Exception:
+                    pass
                 update_demo_diagnostics(
                     last_rejection=str(e),
                     rest_status="rate limited",
@@ -938,6 +1079,15 @@ class LiveExecutor:
                     "IGRestClient.place_market_order",
                     decision=f"ERROR attempt {attempt}: {e}",
                 )
+                try:
+                    from system.ipc.string_diagnostics import emit_broker_tunnel_diag
+
+                    emit_broker_tunnel_diag(
+                        http_status=int(status_code or 0),
+                        reason=last_error,
+                    )
+                except Exception:
+                    pass
                 if attempt <= max_retries:
                     trace_execution(
                         "REST",

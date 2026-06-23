@@ -19,6 +19,20 @@ from system.guard.runtime_guard import guard_call, log_guarded_exception
 from system.bare_metal_exec import bare_metal_hot_path_active
 
 
+def _bare_metal_shadow_force_fill() -> bool:
+    """Simulated fills only when E2E requests it — never on authentic IG DEMO broker."""
+    if os.environ.get("IG_E2E_SHADOW_FORCE_FILL", "").strip() == "1":
+        return True
+    try:
+        from system.agent_execution_mode import authentic_demo_broker_required
+
+        if authentic_demo_broker_required():
+            return False
+    except Exception:
+        pass
+    return bare_metal_hot_path_active()
+
+
 def _intercept_broker_connectivity_failure(exc: BaseException, *, subsystem: str) -> None:
     """Supervised network teardown — does not return on connectivity loss."""
     from system.guard.kernel_interceptor import dispatch_broker_connectivity_teardown
@@ -78,6 +92,8 @@ _SPOT_GOLD_EPIC = "CS.D.CFPGOLD.CFP.IP"
 _GBPUSD_FX_EPIC = "CS.D.GBPUSD.CFD.IP"
 _USD_GBP_RATE_FALLBACK = 0.78
 FLATTEN_VERIFY_WAIT_SEC = 10.0
+# Bare-metal live execution floor — hard override every tick (drops legacy 55% wall).
+LIVE_EXEC_SIGNAL_THRESHOLD = 52.5
 
 # Friday session-validation capture — IG DEMO dispatch at 42% (env: IG_SESSION_VALIDATION=1).
 SESSION_VALIDATION_CONFIDENCE_FLOOR = 42.0
@@ -510,6 +526,8 @@ class TradingLoop:
         self._watchdog_stop = threading.Event()
         self._watchdog_thread: threading.Thread | None = None
         self._silence_alert_sent = False
+        self._broker_barrier_committed = False
+        self._broker_resync_mono = 0.0
         # Market constraints cached at session level in a background thread so the
         # trading-loop tick is never blocked by a REST call to /markets/{epic}.
         self._market_constraints_cache: dict[str, Any] = {}
@@ -655,8 +673,647 @@ class TradingLoop:
         return self._run_tick()
 
     def run_bare_metal_unified_tick(self, quote: Quote) -> TickContext | None:
-        """Thread B hot path — ring quote → matrix lookup → IG dispatch (no I/O)."""
-        return self._run_tick_alpha_matrix(quote, bare_metal=True)
+        """Thread B hot path — naked frontier pointer → IG dispatch (single-string pipeline)."""
+        try:
+            from harmonization.tick_integrity import get_tick_integrity_filter
+
+            ok, reason = get_tick_integrity_filter().validate_quote(quote)
+            if not ok:
+                return TickContext(
+                    quote=quote,
+                    gates=[],
+                    all_passed=False,
+                    wait_reason=f"TICK_INTEGRITY:{reason}",
+                )
+            deferred = self._bare_metal_compilation_gate(quote)
+            if deferred is not None:
+                return deferred
+            ctx = self._run_frontier_tensor_tick(quote)
+            try:
+                self._shadow_tracer_after_tick(quote, ctx)
+            except Exception:
+                pass
+            return ctx
+        except Exception:
+            self._bare_metal_schedule_socket_rebind()
+            return TickContext(
+                quote=quote,
+                gates=[],
+                all_passed=False,
+                wait_reason="PIPELINE_REBIND",
+            )
+
+    def _bare_metal_schedule_socket_rebind(self) -> None:
+        """Silent background websocket re-bind — never crash Thread B."""
+        import threading
+
+        def _worker() -> None:
+            try:
+                from system.feeds.multi_feed_hub import start_racing_multi_feed_hub
+
+                start_racing_multi_feed_hub()
+            except Exception:
+                pass
+
+        threading.Thread(
+            target=_worker,
+            name=f"bare-metal-rebind-{self._epic}",
+            daemon=True,
+        ).start()
+
+    def _strategy_roundtrip_probe(self, ring: Any, coordinate: int) -> tuple[Any, int]:
+        """Sub-microsecond 32-byte strategy slice extraction sanity check."""
+        import time as _time
+
+        t0 = _time.perf_counter_ns()
+        strategy = ring.naked_strategy_lookup(int(coordinate))
+        elapsed_ns = _time.perf_counter_ns() - t0
+        self._last_matrix_lookup_us = float(elapsed_ns) / 1000.0
+        return strategy, elapsed_ns
+
+    def _bare_metal_compilation_gate(self, quote: Quote) -> TickContext | None:
+        """
+        Hard compilation gate — broker handle must be committed before matrix lookups.
+        Triggers internal re-synchronization instead of CLIENT_MISSING dead-spin.
+        """
+        if self._broker_handle_verified():
+            return None
+        if self._resync_broker_handle() and self._broker_handle_verified():
+            return None
+        return TickContext(
+            quote=quote,
+            gates=[],
+            all_passed=False,
+            wait_reason="BROKER_BARRIER_RESYNC",
+        )
+
+    def _run_zero_gate_frontier_tick(self, quote: Quote) -> TickContext:
+        """Legacy alias — single-string frontier tensor tick."""
+        return self._run_frontier_tensor_tick(quote)
+
+    def _broker_handle_verified(self) -> bool:
+        if not getattr(self, "_broker_barrier_committed", False):
+            return False
+        client = self._rest_client()
+        if client is None:
+            return False
+        try:
+            from system.agent_execution_mode import authentic_demo_broker_required
+
+            if authentic_demo_broker_required() or production_execution_active():
+                from ig_api.mock_clients import MockIGRest
+                from ig_api.rest_client import IGRestClient
+
+                if isinstance(client, MockIGRest) or not isinstance(client, IGRestClient):
+                    return False
+        except Exception:
+            pass
+        return hasattr(client, "validate_order_schema") or hasattr(
+            client, "place_market_order"
+        )
+
+    def _resync_broker_handle(self) -> bool:
+        import time as _time
+
+        now = _time.monotonic()
+        if now - getattr(self, "_broker_resync_mono", 0.0) < 0.05:
+            return False
+        self._broker_resync_mono = now
+        try:
+            from system.agent_execution_mode import authentic_demo_broker_required
+
+            if authentic_demo_broker_required() or production_execution_active():
+                from system.bootstrap_phase_barrier import commit_rest_client_to_trading_loop
+                from system.ig_rest_session import force_authenticated_ig_rest_client
+
+                rest = force_authenticated_ig_rest_client()
+                return commit_rest_client_to_trading_loop(self, rest)
+            from system.bootstrap_phase_barrier import resync_trading_loop_broker
+
+            return resync_trading_loop_broker(self)
+        except Exception:
+            return False
+
+    def _shadow_tracer_after_tick(self, quote: Quote, ctx: TickContext | None) -> None:
+        """Dry-run shadow pass — validate IG order schema without placement."""
+        if ctx is None:
+            return
+        from trading.shadow_tracer import execute_shadow_dry_run, shadow_tracer_enabled
+
+        if not shadow_tracer_enabled():
+            return
+
+        signal = ctx.signal
+        direction = str(getattr(signal, "signal", "WAIT") or "WAIT")
+        if direction not in ("BUY", "SELL"):
+            direction = "BUY" if float(quote.offer or 0) >= float(quote.bid or 0) else "SELL"
+
+        snap = getattr(signal, "snapshot", None) or {}
+        strategy_raw = snap.get("strategy") or {}
+        coordinate = int(snap.get("coordinate") or 0)
+        win_zone = bool(ctx.all_passed) or int((strategy_raw or {}).get("zone") or 0) == 1
+
+        trade_size = max(float((strategy_raw or {}).get("scalp_lot") or 0.1), 0.1)
+        stop_pts = max(float((strategy_raw or {}).get("trailing_stop_distance") or 1.0), 1.0)
+        limit_pts = max(float((strategy_raw or {}).get("dynamic_profit_target") or stop_pts), stop_pts)
+
+        class _StrategyView:
+            def as_dict(self) -> dict:
+                return dict(strategy_raw)
+
+        execute_shadow_dry_run(
+            loop=self,
+            quote=quote,
+            epic=self._epic,
+            market=self._market,
+            direction=direction,
+            coordinate=coordinate,
+            strategy=_StrategyView(),
+            trade_size=trade_size,
+            stop_pts=stop_pts,
+            limit_pts=limit_pts,
+            win_zone=win_zone,
+        )
+
+    def _run_frontier_tensor_tick(self, quote: Quote) -> TickContext:
+        """
+        Single-string frontier tensor pass — coordinate key → naked 32-byte strategy slice.
+
+        WIN_ZONE (1) bypasses legacy config chains; execution params are RAM-only.
+        """
+        import os
+        import time as _time
+
+        from intelligence.matrix_lookup_bridge import structural_metrics_from_quote
+        from signals.signal_engine import SignalResult
+        from system.ipc.ring_buffer import FAIL_ZONE, WIN_ZONE, get_alpha_ring_buffer
+
+        if self._alpha_matrix_lockout:
+            ctx = TickContext(
+                quote=quote,
+                gates=[],
+                all_passed=False,
+                wait_reason="MEMORY_DEATH_SWITCH: protective lockout 65%",
+            )
+            with self._lock:
+                self._last_context = ctx
+            return ctx
+
+        try:
+            self._signal_engine.add_quote(self._market, quote)
+        except Exception:
+            pass
+
+        rsi, atr, momentum, direction = structural_metrics_from_quote(
+            market=self._market,
+            epic=self._epic,
+            quote=quote,
+            signal_engine=self._signal_engine,
+            indicator_snapshot_fn=self._tick_indicator_snapshot,
+        )
+        # Zero-division geometry guard — force baseline metrics before array compile.
+        if not rsi or rsi == 0.0:
+            rsi = 50.0
+        if not atr or atr == 0.0:
+            atr = 1.5
+        coordinate = self._compute_pattern_index(
+            epic=self._epic,
+            direction=direction,
+            rsi=rsi,
+            atr=atr,
+            momentum=momentum,
+        )
+
+        from intelligence.matrix_prebaker import TOTAL_CELLS
+        from system.ipc.ring_buffer import _string_diag_view
+        from system.ipc.string_diagnostics import record_phase2, record_phase3
+
+        p2_t0 = _time.perf_counter_ns()
+        ring = get_alpha_ring_buffer()
+        cell_empty = False
+        try:
+            frontier_zone = int(ring._frontier[int(coordinate) % TOTAL_CELLS])
+            from system.ipc.ring_buffer import UNMAPPED
+
+            cell_empty = frontier_zone == UNMAPPED
+        except Exception:
+            cell_empty = True
+        diag = _string_diag_view(create=True)
+        if diag is not None:
+            record_phase2(
+                diag,
+                latency_us=int((_time.perf_counter_ns() - p2_t0) / 1000),
+                coordinate=coordinate,
+                rsi=rsi,
+                atr=atr,
+                momentum=momentum,
+                total_cells=TOTAL_CELLS,
+                cell_empty=cell_empty,
+            )
+        probe_active = False
+        soak_active = False
+        injection_payload: dict[str, Any] | None = None
+        try:
+            from trading.live_production_probe import (
+                LIVE_PROBE_PAYLOAD,
+                try_acquire_live_probe,
+            )
+
+            if try_acquire_live_probe(self._epic):
+                injection_payload = dict(LIVE_PROBE_PAYLOAD)
+                probe_active = True
+                probe_dir = str(injection_payload["action"])
+                probe_size = float(injection_payload["size"])
+                ring.stamp_recency_coordinate(
+                    coordinate,
+                    zone=WIN_ZONE,
+                    epic=str(injection_payload["epic"]),
+                    rsi=rsi,
+                    atr=atr,
+                    momentum=momentum,
+                    direction=probe_dir,
+                    scalp_lot=probe_size,
+                    trail_dist=max(float(atr) * 2.0, 5.0),
+                    dyn_target=max(float(atr) * 3.0, 8.0),
+                )
+                direction = probe_dir
+        except Exception:
+            probe_active = False
+            injection_payload = None
+
+        if not probe_active:
+            try:
+                from system.soak_live_fire import try_consume_soak_injection
+
+                soak_payload = try_consume_soak_injection(self._epic)
+                if soak_payload:
+                    injection_payload = dict(soak_payload)
+                    soak_active = True
+                    soak_dir = str(injection_payload["action"])
+                    soak_size = float(injection_payload["size"])
+                    ring.stamp_recency_coordinate(
+                        coordinate,
+                        zone=WIN_ZONE,
+                        epic=str(injection_payload["epic"]),
+                        rsi=rsi,
+                        atr=atr,
+                        momentum=momentum,
+                        direction=soak_dir,
+                        scalp_lot=soak_size,
+                        trail_dist=max(float(atr) * 2.0, 5.0),
+                        dyn_target=max(float(atr) * 3.0, 8.0),
+                    )
+                    direction = soak_dir
+                    from system.engine_log import log_engine
+
+                    log_engine(
+                        f"SOAK_LIVE_FIRE WIN_ZONE stamp seq={injection_payload.get('sequence')} "
+                        f"coord={coordinate} epic={injection_payload['epic']}"
+                    )
+            except Exception:
+                soak_active = False
+                if not probe_active:
+                    injection_payload = None
+
+        strategy, lookup_ns = self._strategy_roundtrip_probe(ring, coordinate)
+
+        if diag is not None:
+            sig_thr = 52.5
+            atr_mult = 2.5
+            try:
+                from system.ipc.ring_buffer import CockpitShmHeader, _attach_cockpit_shm
+
+                seg = _attach_cockpit_shm(create=False)
+                hdr = CockpitShmHeader.from_buffer(seg.buf)
+                if float(hdr.signal_threshold) > 0:
+                    sig_thr = float(hdr.signal_threshold)
+                if float(hdr.atr_multiplier) > 0:
+                    atr_mult = float(hdr.atr_multiplier)
+            except Exception:
+                pass
+            prior = int(getattr(self, "_string_fail_streak", 0) or 0)
+            self._string_fail_streak = record_phase3(
+                diag,
+                latency_us=int(lookup_ns / 1000),
+                zone=int(strategy.zone),
+                signal_threshold=sig_thr,
+                atr_multiplier=atr_mult,
+                prior_fail_streak=prior,
+            )
+
+        win_zone = strategy.zone == WIN_ZONE or probe_active or soak_active
+        if (probe_active or soak_active) and injection_payload:
+            direction = str(injection_payload["action"])
+        all_passed = win_zone and direction in ("BUY", "SELL")
+        injecting = False
+        wait_reason = ""
+        if probe_active or soak_active:
+            wait_reason = ""
+        elif not win_zone:
+            wait_reason = "SCANNING FRONTIER" if strategy.zone != FAIL_ZONE else "FAIL_ZONE"
+        elif direction not in ("BUY", "SELL"):
+            wait_reason = f"direction {direction}"
+
+        confidence = max(
+            strategy.win_probability * 100.0,
+            100.0 if win_zone or probe_active or soak_active else 0.0,
+        )
+        signal = SignalResult(
+            signal=direction if direction in ("BUY", "SELL") else "WAIT",
+            raw_confidence=confidence,
+            adjusted_confidence=confidence,
+            learning_delta=0.0,
+            setup_key=f"frontier|{self._epic}",
+            notes="zero_gate_strategy_tensor",
+            snapshot={
+                "atr": atr,
+                "rsi": rsi,
+                "coordinate": coordinate,
+                "strategy": strategy.as_dict(),
+            },
+        )
+
+        outcome: TickOutcome | None = None
+        if all_passed:
+            if (probe_active or soak_active) and injection_payload:
+                trade_size = float(injection_payload["size"])
+            else:
+                trade_size = max(float(strategy.scalp_lot), 0.1)
+            stop_pts = max(float(strategy.trailing_stop_distance), 1.0)
+            limit_pts = max(float(strategy.dynamic_profit_target), stop_pts)
+
+            gate_exec = {
+                "alpha_frontier": True,
+                "zero_gate": True,
+                "matrix_win_injection": True,
+                "shadow_brain_injection": True,
+                "gate_sourced": True,
+                "coordinate": coordinate,
+                "zone": WIN_ZONE if (probe_active or soak_active) else strategy.zone,
+                "lookup_ns": lookup_ns,
+                "direction": direction,
+                "size": trade_size,
+                "actual_size": trade_size,
+                "stop_points": stop_pts,
+                "limit_points": limit_pts,
+                "stop_source": "strategy_tensor",
+                "qmm_trailing_distance_points": stop_pts,
+                "qmm_trailing_trigger_points": max(stop_pts * 0.5, 1.0),
+                "qmm_breakeven_trigger_points": max(float(strategy.breakeven_buffer), 1.0),
+                "strategy_payload": strategy.as_dict(),
+            }
+            if (probe_active or soak_active) and injection_payload:
+                gate_exec["live_probe_alpha"] = probe_active
+                gate_exec["soak_live_fire"] = soak_active
+                gate_exec["signature"] = str(injection_payload.get("signature") or "")
+                gate_exec["order_type"] = str(
+                    injection_payload.get("order_type") or "MARKET"
+                ).upper()
+                gate_exec["injection_payload"] = dict(injection_payload)
+            probe_live = probe_active and injection_payload is not None
+            soak_live = soak_active and injection_payload is not None
+            injection_live = probe_live or soak_live
+            injecting = False
+            try:
+                if injection_live:
+                    from system.engine_log import log_engine
+
+                    tag = "SOAK_LIVE_FIRE" if soak_live else "LIVE_PROBE_ALPHA"
+                    log_engine(
+                        f"{tag} dispatch {injection_payload.get('action')} "
+                        f"epic={injection_payload['epic']} "
+                        f"size={injection_payload['size']} "
+                        f"signature={injection_payload.get('signature')}"
+                    )
+                if soak_live and injection_payload:
+                    self._soak_direct_broker_dispatch(
+                        injection_payload=injection_payload,
+                        coordinate=coordinate,
+                        quote=quote,
+                        trade_size=trade_size,
+                        confidence=confidence,
+                        lookup_ns=lookup_ns,
+                        direction=direction,
+                    )
+                    outcome = None
+                else:
+                    outcome = self._execution_loop.process_tick(
+                        self._market,
+                        self._epic,
+                        quote,
+                        prefetched_signal=signal,
+                        gate_execution_params=gate_exec,
+                        gate_snapshot={
+                            "alpha_frontier": True,
+                            "zero_gate": True,
+                            "live_probe_alpha": probe_live,
+                            "soak_live_fire": soak_live,
+                        },
+                        shadow_force_fill=False
+                        if injection_live
+                        else _bare_metal_shadow_force_fill(),
+                    )
+                if outcome is not None:
+                    exec_res = getattr(outcome, "execution", None)
+                    if exec_res is not None and (
+                        bool(getattr(exec_res, "success", False))
+                        or str(getattr(exec_res, "action", "") or "") == "SUBMITTED"
+                    ):
+                        injecting = True
+                if injection_live and not soak_live:
+                    from system.engine_log import log_engine
+
+                    exec_ok = (
+                        outcome is not None
+                        and outcome.execution is not None
+                        and bool(getattr(outcome.execution, "success", False))
+                    )
+                    tag = "LIVE_PROBE_ALPHA"
+                    log_engine(
+                        f"{tag} complete success={exec_ok} "
+                        f"deal={getattr(outcome.execution, 'deal_id', '') if outcome and outcome.execution else '—'}"
+                    )
+                if soak_live:
+                    pass
+                elif outcome is not None and outcome.execution is not None:
+                    exec_res = outcome.execution
+                    action = str(getattr(exec_res, "action", direction) or direction)
+                    success = bool(getattr(exec_res, "success", False))
+                    if soak_live and not success:
+                        success = bool(str(getattr(exec_res, "deal_id", "") or "").strip())
+                    entry_px = float(quote.offer if direction == "BUY" else quote.bid)
+                    exit_px = float(quote.bid if direction == "BUY" else quote.offer)
+                    pnl_gbp = float(getattr(exec_res, "pnl_gbp", 0) or 0)
+                    latency_us = float(lookup_ns) / 1000.0
+                    deal_id = str(getattr(exec_res, "deal_id", "") or "")
+
+                    if soak_live:
+                        from system.soak_live_fire import emit_soak_telemetry, record_soak_result
+
+                        emit_soak_telemetry(
+                            epic=str(injection_payload["epic"]),
+                            direction=direction,
+                            entry=entry_px,
+                            size=float(trade_size),
+                            deal_id=deal_id,
+                            coordinate=coordinate,
+                            confidence=confidence,
+                            latency_us=latency_us,
+                            success=success,
+                            sequence=int(injection_payload.get("sequence") or 0),
+                        )
+                        record_soak_result(
+                            sequence=int(injection_payload.get("sequence") or 0),
+                            success=success,
+                            deal_id=deal_id,
+                            http_status=200 if (success or deal_id) else 0,
+                        )
+                    elif probe_live:
+                        from trading.live_production_probe import emit_live_probe_telemetry
+
+                        emit_live_probe_telemetry(
+                            epic=str(injection_payload["epic"]),
+                            direction=direction,
+                            entry=entry_px,
+                            size=float(trade_size),
+                            deal_id=deal_id,
+                            coordinate=coordinate,
+                            confidence=confidence,
+                            latency_us=latency_us,
+                            success=success,
+                        )
+                    else:
+                        from system.unified_fulfillment_cache import (
+                            record_execution_performance_row,
+                        )
+
+                        result = "WIN" if success else "LOSS"
+                        status = (
+                            "OPEN" if action.upper() == "OPEN" and success else "CLOSED"
+                        )
+                        record_execution_performance_row(
+                            epic=self._epic,
+                            direction=direction,
+                            result=result,
+                            confidence=confidence,
+                            cell_index=coordinate,
+                            latency_us=latency_us,
+                            deal_id=deal_id,
+                            size=float(trade_size),
+                            entry=entry_px,
+                            exit=exit_px,
+                            pnl_gbp=pnl_gbp,
+                            status=status,
+                        )
+                elif injection_live and injection_payload:
+                    entry_px = float(quote.offer if direction == "BUY" else quote.bid)
+                    if soak_live:
+                        from system.soak_live_fire import emit_soak_telemetry, record_soak_result
+
+                        emit_soak_telemetry(
+                            epic=str(injection_payload["epic"]),
+                            direction=direction,
+                            entry=entry_px,
+                            size=float(injection_payload["size"]),
+                            deal_id="",
+                            coordinate=coordinate,
+                            confidence=confidence,
+                            latency_us=float(lookup_ns) / 1000.0,
+                            success=False,
+                            sequence=int(injection_payload.get("sequence") or 0),
+                        )
+                        record_soak_result(
+                            sequence=int(injection_payload.get("sequence") or 0),
+                            success=False,
+                            deal_id="",
+                            http_status=0,
+                        )
+                    else:
+                        from trading.live_production_probe import emit_live_probe_telemetry
+
+                        emit_live_probe_telemetry(
+                            epic=str(injection_payload["epic"]),
+                            direction=direction,
+                            entry=entry_px,
+                            size=float(injection_payload["size"]),
+                            deal_id="",
+                            coordinate=coordinate,
+                            confidence=confidence,
+                            latency_us=float(lookup_ns) / 1000.0,
+                            success=False,
+                        )
+                exec_wait = self._execution_wait_reason(outcome)
+                if exec_wait:
+                    wait_reason = exec_wait
+                    all_passed = False
+                    injecting = False
+                    if (win_zone or probe_active) and diag is not None:
+                        from system.ipc.string_diagnostics import emit_broker_tunnel_diag
+
+                        emit_broker_tunnel_diag(reason=exec_wait)
+                elif (
+                    outcome is not None
+                    and outcome.execution is not None
+                    and not bool(getattr(outcome.execution, "success", False))
+                    and (win_zone or probe_active)
+                    and diag is not None
+                ):
+                    from system.ipc.string_diagnostics import emit_broker_tunnel_diag
+
+                    emit_broker_tunnel_diag(
+                        reason=str(
+                            getattr(outcome.execution, "rejection_reason", "") or "order rejected"
+                        )
+                    )
+            except Exception as exc:
+                from system.engine_log import log_engine
+
+                log_engine(
+                    f"frontier dispatch failed epic={self._epic}: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                wait_reason = f"execution: {type(exc).__name__}: {exc}"
+                all_passed = False
+                injecting = False
+
+        ctx = TickContext(
+            quote=quote,
+            gates=[],
+            all_passed=all_passed,
+            wait_reason=wait_reason,
+            signal=signal,
+            fitness=confidence,
+            outcome=outcome,
+        )
+        with self._lock:
+            self._last_context = ctx
+
+        try:
+            from system.unified_fulfillment_cache import record_frontier_state
+
+            now = _time.monotonic()
+            last = float(getattr(self, "_last_frontier_diag_mono", 0.0) or 0.0)
+            if now - last >= 0.4:
+                self._last_frontier_diag_mono = now
+                record_frontier_state(
+                    epic=self._epic,
+                    coordinate=coordinate,
+                    zone=strategy.zone,
+                    lookup_ns=lookup_ns,
+                    direction=direction,
+                    rsi=rsi,
+                    atr=atr,
+                    momentum=momentum,
+                    win_zone=win_zone,
+                    all_passed=all_passed,
+                    injecting=injecting,
+                    wait_reason=wait_reason,
+                    feed_race_us=ring.feed_race_profile_us(),
+                    strategy=strategy.as_dict(),
+                )
+        except Exception:
+            pass
+        return ctx
 
     def _loop_thread(self) -> None:
         from system.stream_ready import wait_stream_ready
@@ -798,10 +1455,71 @@ class TradingLoop:
         except Exception as exc:
             log_guarded_exception("trading_loop", exc)
 
+    def _force_live_signal_threshold(self) -> float:
+        """Memory-isolation breaker — config + gates read one live floor (52.5%)."""
+        thr = float(LIVE_EXEC_SIGNAL_THRESHOLD)
+        try:
+            self._config.signal_threshold = thr
+        except Exception:
+            pass
+        return thr
+
+    def _dynamic_live_signal_threshold(self, *, atr: float, rsi: float) -> float:
+        """Volatility-scaled live floor — relaxes into 75–80% paradox band."""
+        base = float(LIVE_EXEC_SIGNAL_THRESHOLD)
+        try:
+            from harmonization.volatility_gate import no_trade_paradox_threshold
+
+            baseline = float(
+                getattr(self._config, "stop_distance_points", None)
+                or getattr(self._config, "adaptive_atr_risk_multiple", None)
+                or 10.0
+            )
+            thr = no_trade_paradox_threshold(
+                base,
+                atr=float(atr or 1.5),
+                atr_baseline=max(baseline, 1.0),
+                rsi=float(rsi or 50.0),
+            )
+        except Exception:
+            thr = base
+        try:
+            self._config.signal_threshold = thr
+        except Exception:
+            pass
+        return thr
+
+    def _iron_clad_fallback_gate_exec(
+        self, trade_size: float, *, atr: float = 0.0
+    ) -> dict[str, Any]:
+        """Non-bypassable stop/limit/size envelope when risk gate omits params."""
+        from execution.types import freeze_gate_execution_params
+        from harmonization.iron_clad_risk import (
+            MANDATORY_LIMIT_POINTS,
+            MANDATORY_STOP_POINTS,
+            MAX_ORDER_SIZE,
+        )
+
+        size = min(max(float(trade_size), 1.0), MAX_ORDER_SIZE)
+        stop_pts = max(float(atr or 0), MANDATORY_STOP_POINTS)
+        limit_pts = max(MANDATORY_LIMIT_POINTS, stop_pts * 2.0)
+        return freeze_gate_execution_params(
+            {
+                "actual_size": size,
+                "size": size,
+                "final_size": int(size),
+                "stop_points": stop_pts,
+                "limit_points": limit_pts,
+                "stop_source": "iron_clad_fallback",
+                "gate_sourced": True,
+            }
+        ) or {}
+
     def _run_tick(self) -> TickContext | None:
         import os
         import time
 
+        self._force_live_signal_threshold()
         self._last_tick_mono = time.monotonic()
         self._silence_alert_sent = False
         _tick_t0 = time.perf_counter()
@@ -1253,6 +1971,100 @@ class TradingLoop:
             self._shm_matrix_pointer = None
             return False
 
+    def _soak_direct_broker_dispatch(
+        self,
+        *,
+        injection_payload: dict[str, Any],
+        coordinate: int,
+        quote: Quote,
+        trade_size: float,
+        confidence: float,
+        lookup_ns: int,
+        direction: str,
+    ) -> bool:
+        """Synchronous soak harness — POST /positions/otc on order-dispatch lane."""
+        from system.engine_log import log_engine
+        from system.soak_live_fire import emit_soak_telemetry, record_soak_result
+
+        seq = int(injection_payload.get("sequence") or 0)
+        epic = str(injection_payload["epic"])
+        entry_px = float(quote.offer if direction == "BUY" else quote.bid)
+        latency_us = float(lookup_ns) / 1000.0
+
+        try:
+            from execution.atomic_gateway import assert_execution_allowed, order_dispatch_lane
+
+            hold = assert_execution_allowed()
+            if hold:
+                record_soak_result(sequence=seq, success=False, deal_id="", http_status=0)
+                emit_soak_telemetry(
+                    epic=epic,
+                    direction=direction,
+                    entry=entry_px,
+                    size=float(trade_size),
+                    deal_id="",
+                    coordinate=coordinate,
+                    confidence=confidence,
+                    latency_us=latency_us,
+                    success=False,
+                    sequence=seq,
+                )
+                log_engine(f"SOAK_LIVE_FIRE complete success=False deal=— reason={hold}")
+                return False
+
+            client = self._rest_client()
+            if client is None:
+                record_soak_result(sequence=seq, success=False, deal_id="", http_status=0)
+                log_engine("SOAK_LIVE_FIRE complete success=False deal=— reason=no_rest_client")
+                return False
+
+            from execution.entry_inflight import clear_entry, try_begin_entry
+
+            clear_entry(epic)
+            try_begin_entry(epic, direction, trade_size)
+            stop_pts = max(float(injection_payload.get("stop_points") or 10.0), 5.0)
+            with order_dispatch_lane():
+                data = client.place_market_order(
+                    epic=epic,
+                    direction=direction,
+                    size=float(trade_size),
+                    stop_distance=stop_pts,
+                    limit_distance=stop_pts * 1.5,
+                )
+            ref = str(data.get("dealReference") or "")
+            ok = bool(ref)
+            clear_entry(epic)
+            record_soak_result(
+                sequence=seq,
+                success=ok,
+                deal_id=ref,
+                http_status=200 if ok else 0,
+            )
+            emit_soak_telemetry(
+                epic=epic,
+                direction=direction,
+                entry=entry_px,
+                size=float(trade_size),
+                deal_id=ref,
+                coordinate=coordinate,
+                confidence=confidence,
+                latency_us=latency_us,
+                success=ok,
+                sequence=seq,
+            )
+            log_engine(f"SOAK_LIVE_FIRE complete success={ok} deal={ref or '—'}")
+            return ok
+        except Exception as exc:
+            record_soak_result(sequence=seq, success=False, deal_id="", http_status=0)
+            log_engine(f"SOAK_LIVE_FIRE complete success=False deal=— error={type(exc).__name__}: {exc}")
+            try:
+                from execution.entry_inflight import clear_entry
+
+                clear_entry(epic)
+            except Exception:
+                pass
+            return False
+
     def _compute_pattern_index(
         self,
         *,
@@ -1269,6 +2081,12 @@ class TradingLoop:
             quantize_momentum,
             quantize_rsi,
         )
+
+        # Phase 2 — geometry quantization guard (non-destructive baseline before vector compile).
+        if not rsi or rsi == 0.0:
+            rsi = 50.0
+        if not atr or atr == 0.0:
+            atr = 1.5
 
         return matrix_cell_index(
             epic_id=epic_slot(epic),
@@ -1291,7 +2109,13 @@ class TradingLoop:
         except Exception:
             pass
         try:
-            matrix_payload = self._shm_matrix_pointer[pattern_index]
+            from intelligence.matrix_prebaker import matrix_row_with_streaming_ffill
+
+            matrix_payload = matrix_row_with_streaming_ffill(
+                self._shm_matrix_pointer,
+                int(pattern_index),
+                epic=self._epic,
+            )
             return matrix_payload
         except (AttributeError, ValueError, FileNotFoundError, TypeError, IndexError):
             self._emergency_protective_lockout_65()
@@ -1305,8 +2129,15 @@ class TradingLoop:
         confidence: float,
         fitness: float,
         direction: str,
+        ml_probability: float | None = None,
     ) -> list[GateResult]:
         """Compact gate snapshot for dashboard telemetry — no 12-gate recompute."""
+        ml_prob = float(ml_probability if ml_probability is not None else lookup.win_probability)
+        floor = float(getattr(lookup, "live_threshold", None) or lookup.signal_floor)
+        lookup.signal_floor = floor
+        ml_passed = ml_prob >= float(lookup.ml_floor)
+        sig_passed = confidence >= floor
+        fit_passed = fitness >= float(lookup.fitness_floor)
         return [
             GateResult(
                 "alpha_matrix_lookup",
@@ -1316,34 +2147,69 @@ class TradingLoop:
                     "win_probability": lookup.win_probability,
                     "latency_us": lookup.latency_us,
                     "samples": lookup.samples,
+                    "reason": lookup.reason,
                 },
-                detail=str(lookup.reason or ""),
+                detail="" if lookup.hit else str(lookup.reason or "cell_empty"),
             ),
             GateResult(
                 "signal_confidence",
-                confidence >= float(lookup.signal_floor),
+                sig_passed,
                 value={
                     "confidence": confidence,
                     "signal": signal,
                     "direction": direction,
-                    "floor": float(lookup.signal_floor),
+                    "floor": floor,
+                    "threshold": floor,
+                    "live_threshold": floor,
                 },
-                detail="alpha_matrix_floor",
+                detail=(
+                    ""
+                    if sig_passed
+                    else (
+                        f"signal_confidence failed: conf {confidence:.2f} "
+                        f"< {floor:.2f}% custom threshold"
+                    )
+                ),
             ),
             GateResult(
                 "environment_fitness",
-                fitness >= float(lookup.fitness_floor),
+                fit_passed,
                 value={"score": fitness, "floor": float(lookup.fitness_floor)},
+                detail=(
+                    ""
+                    if fit_passed
+                    else (
+                        f"environment_fitness failed: score {fitness:.2f} "
+                        f"< floor {float(lookup.fitness_floor):.2f}"
+                    )
+                ),
             ),
             GateResult(
                 "ml_veto",
+                ml_passed,
+                value={
+                    "ml_probability": ml_prob,
+                    "floor": float(lookup.ml_floor),
+                },
+                detail=(
+                    ""
+                    if ml_passed
+                    else (
+                        f"ml_veto failed: prob {ml_prob:.3f} "
+                        f"< {float(lookup.ml_floor):.3f} custom threshold"
+                    )
+                ),
+            ),
+            GateResult(
+                "cold_start_gap",
                 True,
-                value={"ml_probability": 1.0, "floor": float(lookup.ml_floor)},
+                value={"open": True, "capped": False},
             ),
             GateResult(
                 "alpha_matrix_approved",
                 bool(lookup.approved),
                 value={"approved": bool(lookup.approved)},
+                detail="" if lookup.approved else "historical cell not winning",
             ),
         ]
 
@@ -1363,6 +2229,7 @@ class TradingLoop:
             record_lookup_latency_us,
         )
         from intelligence.matrix_lookup_bridge import structural_metrics_from_quote
+        from system.ipc.ring_buffer import get_alpha_ring_buffer
 
         hot = bare_metal or bare_metal_hot_path_active()
         if not hot:
@@ -1404,6 +2271,7 @@ class TradingLoop:
             signal_engine=self._signal_engine,
             indicator_snapshot_fn=self._tick_indicator_snapshot,
         )
+        live_thr = self._dynamic_live_signal_threshold(atr=atr, rsi=rsi)
         pattern_index = self._compute_pattern_index(
             epic=self._epic,
             direction=direction,
@@ -1450,11 +2318,18 @@ class TradingLoop:
                     log_guarded_exception("trading_loop_alpha_matrix", exc)
                 wait_reason = f"ALPHA_MATRIX: {type(exc).__name__}"
 
+        ring = get_alpha_ring_buffer()
+        effective_floor = float(signal_floor) if signal_floor > 0 else float(live_thr)
+        signal_floor = min(float(live_thr), effective_floor)
+        if fitness_floor <= 0.0 or fitness_floor > float(live_thr):
+            fitness_floor = float(live_thr)
+        matrix_win_injection = bool(lookup_approved)
+
         if hot:
             confidence = max(
                 float(win_probability) * 100.0,
-                float(signal_floor) + 0.5,
-                54.6,
+                float(signal_floor),
+                float(live_thr),
             )
             signal = SignalResult(
                 signal=direction if direction in ("BUY", "SELL") else "WAIT",
@@ -1468,7 +2343,7 @@ class TradingLoop:
         else:
             signal = self._get_gate_signal()
             confidence = float(signal.adjusted_confidence)
-        fitness = max(float(fitness_floor), 55.0)
+        fitness = float(fitness_floor)
 
         from types import SimpleNamespace
 
@@ -1483,6 +2358,7 @@ class TradingLoop:
             samples=samples,
             latency_us=latency_us,
             reason="" if lookup_hit else "cell_empty",
+            live_threshold=live_thr,
         )
         gates = self._synthetic_alpha_matrix_gates(
             lookup,
@@ -1490,9 +2366,12 @@ class TradingLoop:
             confidence=confidence,
             fitness=fitness,
             direction=direction,
+            ml_probability=float(win_probability),
         )
 
-        all_passed = bool(lookup_approved) and not self._alpha_matrix_lockout
+        all_passed = bool(lookup_hit) and not self._alpha_matrix_lockout
+        if matrix_win_injection:
+            all_passed = True
         if self._alpha_matrix_lockout:
             wait_reason = wait_reason or "MEMORY_DEATH_SWITCH: protective lockout 65%"
             all_passed = False
@@ -1501,15 +2380,31 @@ class TradingLoop:
         elif not lookup_hit:
             wait_reason = "ALPHA_MATRIX: miss (empty cell)"
             all_passed = False
-        elif not lookup_approved:
+        elif not lookup_approved and not matrix_win_injection:
             wait_reason = "ALPHA_MATRIX: historical cell not winning"
             all_passed = False
-        elif confidence < float(signal_floor):
+        elif confidence < float(signal_floor) and not matrix_win_injection:
             wait_reason = (
                 f"ALPHA_MATRIX: confidence {confidence:.1f}% "
                 f"< floor {signal_floor:.1f}%"
             )
             all_passed = False
+        elif signal.signal not in ("BUY", "SELL"):
+            wait_reason = f"ALPHA_MATRIX: direction {signal.signal}"
+            all_passed = False
+
+        if wait_reason and not all_passed:
+            try:
+                from harmonization.trade_inhibitor_log import log_trade_inhibitor
+
+                log_trade_inhibitor(
+                    epic=str(self._epic or ""),
+                    gate="alpha_matrix",
+                    reason=wait_reason,
+                    metrics={"confidence": f"{confidence:.1f}", "floor": f"{signal_floor:.1f}"},
+                )
+            except Exception:
+                pass
 
         outcome: TickOutcome | None = None
         if not hot:
@@ -1563,6 +2458,8 @@ class TradingLoop:
                 gate_exec = {
                     "alpha_matrix": True,
                     "gate_sourced": True,
+                    "matrix_win_injection": matrix_win_injection,
+                    "shadow_brain_injection": matrix_win_injection,
                     "signal_threshold_floor": float(signal_floor),
                     "fitness_min_floor": float(fitness_floor),
                     "ml_veto_min_probability": float(ml_floor),
@@ -1570,7 +2467,23 @@ class TradingLoop:
                     "size": trade_size,
                     "actual_size": trade_size,
                 }
-                shadow_force = os.environ.get("IG_E2E_SHADOW_FORCE_FILL", "").strip() == "1"
+                try:
+                    from harmonization.iron_clad_risk import (
+                        MANDATORY_LIMIT_POINTS,
+                        MANDATORY_STOP_POINTS,
+                        MAX_ORDER_SIZE,
+                    )
+
+                    trade_size = min(float(trade_size), MAX_ORDER_SIZE)
+                    stop_pts = max(MANDATORY_STOP_POINTS, 1.0)
+                    limit_pts = max(MANDATORY_LIMIT_POINTS, stop_pts * 2.0)
+                    gate_exec["stop_points"] = stop_pts
+                    gate_exec["limit_points"] = limit_pts
+                    gate_exec["stop_source"] = "iron_clad_alpha_matrix"
+                    gate_exec["actual_size"] = trade_size
+                    gate_exec["size"] = trade_size
+                except Exception as exc:
+                    log_guarded_exception("trading_loop_alpha_gate_exec", exc)
                 try:
                     outcome = self._execution_loop.process_tick(
                         self._market,
@@ -1579,7 +2492,7 @@ class TradingLoop:
                         prefetched_signal=signal,
                         gate_execution_params=gate_exec,
                         gate_snapshot=gate_snapshot,
-                        shadow_force_fill=shadow_force or hot,
+                        shadow_force_fill=_bare_metal_shadow_force_fill() if hot else False,
                     )
                     if not hot:
                         self._log_execution_outcome(outcome)
@@ -1589,18 +2502,37 @@ class TradingLoop:
                         )
 
                         exec_res = outcome.execution
-                        result = "WIN" if bool(getattr(exec_res, "success", False)) else "LOSS"
-                        if not bool(getattr(exec_res, "success", False)):
-                            result = "WIN" if win_probability >= 0.545 else "LOSS"
-                        record_execution_performance_row(
-                            epic=self._epic,
-                            direction=direction,
-                            result=result,
-                            confidence=confidence,
-                            cell_index=cell_index,
-                            latency_us=latency_us,
-                            deal_id=str(getattr(exec_res, "deal_id", "") or ""),
-                        )
+                        deal_id = str(
+                            getattr(exec_res, "deal_id", "")
+                            or getattr(exec_res, "deal_reference", "")
+                            or ""
+                        ).strip()
+                        if not deal_id:
+                            pass
+                        else:
+                            result = (
+                                "WIN" if bool(getattr(exec_res, "success", False)) else "LOSS"
+                            )
+                            entry_px = float(
+                                quote.offer if direction == "BUY" else quote.bid
+                            )
+                            exit_px = float(
+                                quote.bid if direction == "BUY" else quote.offer
+                            )
+                            pnl_gbp = float(getattr(exec_res, "pnl_gbp", 0) or 0)
+                            record_execution_performance_row(
+                                epic=self._epic,
+                                direction=direction,
+                                result=result,
+                                confidence=confidence,
+                                cell_index=cell_index,
+                                latency_us=latency_us,
+                                deal_id=deal_id,
+                                size=float(trade_size),
+                                entry=entry_px,
+                                exit=exit_px,
+                                pnl_gbp=pnl_gbp,
+                            )
                     exec_wait = self._execution_wait_reason(outcome)
                     if exec_wait:
                         wait_reason = exec_wait
@@ -1630,6 +2562,25 @@ class TradingLoop:
         else:
             with self._lock:
                 self._last_context = ctx
+            if hot:
+                try:
+                    import time as _time
+
+                    from system.unified_fulfillment_cache import record_gate_diagnostics
+
+                    now = _time.monotonic()
+                    last = float(getattr(self, "_last_gate_diag_mono", 0.0) or 0.0)
+                    if now - last >= 0.4:
+                        self._last_gate_diag_mono = now
+                        record_gate_diagnostics(
+                            epic=self._epic,
+                            gates=gates,
+                            wait_reason=wait_reason,
+                            all_passed=all_passed,
+                            tuning={"signal_threshold": float(live_thr)},
+                        )
+                except Exception:
+                    pass
         return ctx
 
     def _run_tick_core(self) -> TickContext | None:
@@ -1675,6 +2626,14 @@ class TradingLoop:
                 self._last_context = ctx
             self._sentinel_on_tick()
             return ctx
+
+        try:
+            from system.soak_live_fire import soak_armed_for_epic
+
+            if soak_armed_for_epic(self._epic):
+                return self._run_frontier_tensor_tick(quote)
+        except Exception as exc:
+            log_guarded_exception("soak_live_fire_redirect", exc)
 
         try:
             from intelligence.matrix_lookup_bridge import prebaked_alpha_matrix_live_active
@@ -1993,6 +2952,12 @@ class TradingLoop:
                 )
                 try:
                     gate_exec = self._gate_execution_params_from_gates(gates)
+                    if gate_exec is None:
+                        ind = self._tick_indicator_snapshot(quote)
+                        gate_exec = self._iron_clad_fallback_gate_exec(
+                            trade_size,
+                            atr=float(ind.get("atr") or 0),
+                        )
                     outcome = self._execution_loop.process_tick(
                         self._market,
                         self._epic,
@@ -3150,6 +4115,17 @@ class TradingLoop:
         except Exception:
             return {}
 
+    def _points_state_snapshot(self) -> dict[str, Any]:
+        """Safe points state for gate relaxation — bare-metal loops may omit _points."""
+        points = getattr(self, "_points", None)
+        if points is None:
+            return {"state": "HEALTHY", "blocked": False}
+        try:
+            return points.get_state()
+        except Exception as exc:
+            log_guarded_exception("trading_loop_points_state", exc)
+            return {"state": "HEALTHY", "blocked": False}
+
     def _effective_fitness_gate_min(self) -> float:
         fitness_min = resolve_strictness(
             self._config, signal_engine=self._signal_engine, market=self._market
@@ -3161,7 +4137,7 @@ class TradingLoop:
                 fitness_min,
                 effective_fitness_min(
                     self._epic,
-                    points_state=self._points.get_state(),
+                    points_state=self._points_state_snapshot(),
                 ),
             )
         except Exception as exc:
@@ -3505,6 +4481,20 @@ class TradingLoop:
         ooh_scale = self._out_of_hours_spread_scale(at=self._clock())
         spread_multiplier = SPREAD_NORMAL_MULTIPLIER * ooh_scale
         spread_cap = normal * spread_multiplier
+        try:
+            snap_risk = dict(self._signal_engine.last_snapshot.get(self._market) or {})
+            last_risk = snap_risk.get("last") or {}
+            _atr_risk = float(last_risk.get("atr", 0) or 0)
+            from harmonization.volatility_gate import dynamic_entry_spread_cap
+
+            spread_cap = dynamic_entry_spread_cap(
+                epic=str(self._epic or ""),
+                normal_spread=float(normal),
+                spread_multiplier=float(spread_multiplier),
+                atr=_atr_risk,
+            )
+        except Exception as exc:
+            log_guarded_exception("trading_loop_spread_cap", exc)
         spread_ok = spread <= spread_cap if normal > 0 else True
 
         tracker = self._execution_loop.execution_engine.trade_tracker
@@ -3812,6 +4802,17 @@ class TradingLoop:
                 f"({spread_multiplier:.1f}× normal {normal:.1f}, cfg {cfg_normal:.1f}"
                 f"{', OOH scale' if ooh_scale > 1.0 else ''})"
             )
+            try:
+                from harmonization.trade_inhibitor_log import log_trade_inhibitor
+
+                log_trade_inhibitor(
+                    epic=str(self._epic or ""),
+                    gate="spread_verification",
+                    reason=f"spread {spread:.2f} > cap {spread_cap:.2f}",
+                    metrics={"stop_pts": "10.0"},
+                )
+            except Exception:
+                pass
         elif not epic_slot_ok:
             detail = (
                 f"open positions {open_count} (max {max_per_epic} per epic"
@@ -4035,6 +5036,23 @@ class TradingLoop:
             self._last_probability_verdict = verdict
 
             if verdict.veto:
+                try:
+                    from harmonization.trade_inhibitor_log import log_trade_inhibitor
+
+                    log_trade_inhibitor(
+                        epic=str(getattr(self, "_epic", "") or ""),
+                        gate="ml_probability_veto",
+                        reason=(
+                            f"win_probability {verdict.win_probability:.3f} "
+                            f"< veto_floor 0.40"
+                        ),
+                        metrics={
+                            "confidence": f"{float(sig.adjusted_confidence):.1f}%",
+                            "threshold": f"{float(threshold):.1f}%",
+                        },
+                    )
+                except Exception:
+                    pass
                 try:
                     from apex.avionics_story import append_avionics_story
                     from apex.operational_transparency import record_gate_rejection
@@ -4390,6 +5408,21 @@ class TradingLoop:
                 live_state_vector["macro_regime_relief_pts"] = relief
         except Exception as exc:
             log_guarded_exception("trading_loop", exc)
+        try:
+            from harmonization.volatility_gate import no_trade_paradox_threshold
+
+            snap_thr = sig.snapshot or {}
+            last_thr = snap_thr.get("last") or self._tick_indicator_snapshot(quote)
+            _atr_thr = float(last_thr.get("atr", 0) or 0)
+            _rsi_thr = float(last_thr.get("rsi", 50) or 50)
+            threshold = no_trade_paradox_threshold(
+                threshold,
+                atr=_atr_thr,
+                atr_baseline=max(1.0, float(self._config.stop_distance_points or 10)),
+                rsi=_rsi_thr,
+            )
+        except Exception as exc:
+            log_guarded_exception("trading_loop_paradox_threshold", exc)
         passed = sig.signal in ("BUY", "SELL") and conf >= threshold
         detail, block_reason = signal_gate_explanation(sig, threshold)
         peak = _peak_confidence_from_signal(sig, conf)
@@ -4408,6 +5441,21 @@ class TradingLoop:
                     block_reason = ""
         if vol_penalty_detail and peak < HIGH_CONFIDENCE_OVERRIDE_THRESHOLD:
             detail = f"{detail} | vol soft: {vol_penalty_detail}"
+        if not passed and block_reason:
+            try:
+                from harmonization.trade_inhibitor_log import log_trade_inhibitor
+
+                log_trade_inhibitor(
+                    epic=str(getattr(self, "_epic", "") or ""),
+                    gate="signal_confidence",
+                    reason=f"Confidence {conf:.2f} < Target {threshold:.2f}",
+                    metrics={
+                        "ml_prob": f"{ml_prob:.3f}" if ml_prob is not None else "n/a",
+                        "direction": str(sig.signal),
+                    },
+                )
+            except Exception:
+                pass
         pts_state = self._points.get_state()
         if pts_state == "WARNING" and threshold >= 90.0:
             detail = f"{detail} (points {pts_state} — need >={threshold:.0f}%)"

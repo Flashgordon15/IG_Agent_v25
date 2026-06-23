@@ -46,12 +46,75 @@ def broker_demo_execution_required() -> bool:
 
 
 def mock_feed_explicitly_disabled() -> bool:
+    return production_execution_active() or os.environ.get("IG_MOCK_FEED", "").strip().lower() in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def production_execution_active() -> bool:
+    """Force authentic IGRestClient — no MockIGRest / MockFeedEngine sandbox."""
+    return os.environ.get("IG_PRODUCTION_EXECUTION", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def authentic_demo_broker_required() -> bool:
+    """Real IGRestClient on demo-api.ig.com — MockIGRest / in-memory paper forbidden."""
+    if production_execution_active():
+        return True
+    if not demo_broker_execution_active():
+        return False
     return os.environ.get("IG_MOCK_FEED", "").strip().lower() in (
         "0",
         "false",
         "no",
         "off",
     )
+
+
+def ensure_demo_broker_execution_armed_on_boot() -> None:
+    """Arm authentic IG DEMO REST — IGRestClient → demo-api.ig.com (not MockIGRest)."""
+    if production_execution_active():
+        return
+    os.environ["IG_AGENT_MODE"] = "DEMO"
+    os.environ["IG_PRODUCTION_EXECUTION"] = "0"
+    os.environ["IG_MOCK_FEED"] = "0"
+    os.environ.pop("IG_MOCK_FEED_ACTIVE", None)
+    os.environ.pop("IG_ALLOW_MOCK_TRADING", None)
+    try:
+        from system.engine_log import log_engine
+
+        log_engine(
+            "IG DEMO broker armed — IGRestClient → demo-api.ig.com "
+            "(IG_PRODUCTION_EXECUTION=0, live probe enabled)"
+        )
+    except Exception:
+        pass
+
+
+def ensure_production_execution_armed_on_boot() -> None:
+    """Arm real IG broker path before gates — shatters mock sandbox cage."""
+    if not production_execution_active():
+        return
+    os.environ["IG_AGENT_MODE"] = "DEMO"
+    os.environ["IG_MOCK_FEED"] = "0"
+    os.environ.pop("IG_MOCK_FEED_ACTIVE", None)
+    os.environ.pop("IG_ALLOW_MOCK_TRADING", None)
+    try:
+        from system.engine_log import log_engine
+
+        log_engine(
+            "IG_PRODUCTION_EXECUTION=1 — MockIGRest forbidden; "
+            "forcing IGRestClient DEMO broker tunnel"
+        )
+    except Exception:
+        pass
 
 
 def session_validation_active() -> bool:
@@ -177,6 +240,8 @@ def resolve_default_execution_mode_for_boot() -> None:
 
 def ensure_execution_plane_armed_on_boot() -> None:
     """One-shot: resolve mode then arm DEMO / session-validation unblock paths."""
+    ensure_demo_broker_execution_armed_on_boot()
+    ensure_production_execution_armed_on_boot()
     resolve_default_execution_mode_for_boot()
     ensure_demo_sandbox_execution_armed()
     ensure_session_validation_execution_armed()

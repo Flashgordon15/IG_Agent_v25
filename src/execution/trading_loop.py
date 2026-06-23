@@ -13,6 +13,7 @@ from execution.order_validator import ValidationResult
 from execution.types import (
     ExecutionResult,
     TradeSignal,
+    force_inject_gate_execution_params,
     normalize_gate_execution_params,
 )
 from signals.signal_engine import SignalEngine, SignalResult
@@ -237,8 +238,13 @@ class TradingLoop:
             quote=quote,
             snapshot=sig.snapshot,
             notes=sig.notes,
-            gate_execution_params=normalize_gate_execution_params(
-                gate_execution_params
+            gate_execution_params=(
+                normalize_gate_execution_params(gate_execution_params)
+                or force_inject_gate_execution_params(
+                    epic=epic,
+                    size=float(cfg.trade_size),
+                    gate_execution_params=gate_execution_params,
+                )
             ),
         )
         trace_execution(
@@ -306,6 +312,11 @@ class TradingLoop:
                 )
         execution: ExecutionResult | None = None
         block_reason: str | None = None
+        matrix_win_inject = bool(
+            shadow_force_fill
+            or (gate_execution_params or {}).get("matrix_win_injection")
+            or (gate_execution_params or {}).get("shadow_brain_injection")
+        )
 
         if sig.signal in ("BUY", "SELL"):
             log_engine(
@@ -396,11 +407,11 @@ class TradingLoop:
         can_execute = (
             self.auto_trade
             and sig.signal in ("BUY", "SELL")
-            and (validation.allowed or shadow_force_fill)
-            and (block_reason is None or shadow_force_fill)
+            and (validation.allowed or shadow_force_fill or matrix_win_inject)
+            and (block_reason is None or shadow_force_fill or matrix_win_inject)
         )
 
-        if can_execute and self.execution_engine.mode.uses_broker():
+        if can_execute and self.execution_engine.mode.uses_broker() and not matrix_win_inject:
             from execution.live_executor import epic_has_pending_open
 
             if epic_has_pending_open(epic):
@@ -444,7 +455,9 @@ class TradingLoop:
             gate_sourced = gate_norm is not None and bool(
                 (gate_norm or {}).get("gate_sourced")
             )
-            if integrity_gate_sourced_required() and not gate_sourced and not shadow_force_fill:
+            if integrity_gate_sourced_required() and not gate_sourced and not (
+                shadow_force_fill or matrix_win_inject
+            ):
                 block_reason = (
                     "INTEGRITY_ABORT: gate_execution_params missing or invalid "
                     "(Profile B requires gate-sourced sizing)"

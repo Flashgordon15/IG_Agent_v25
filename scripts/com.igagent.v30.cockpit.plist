@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.igagent.v30.cockpit</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>__PYTHON_BIN__</string>
+		<string>__IG_AGENT_ROOT__/scripts/desktop_cockpit.py</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>__IG_AGENT_ROOT__</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>IG_AGENT_ROOT</key>
+		<string>__IG_AGENT_ROOT__</string>
+		<key>PYTHONPATH</key>
+		<string>__IG_AGENT_ROOT__/src</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>__IG_AGENT_ROOT__/src/data/logs/cockpit_launchd.log</string>
+	<key>StandardErrorPath</key>
+	<string>__IG_AGENT_ROOT__/src/data/logs/cockpit_launchd.log</string>
+</dict>
+</plist>

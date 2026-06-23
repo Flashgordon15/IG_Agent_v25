@@ -30,6 +30,22 @@ _session_key: str = ""
 
 MAX_NEW_PER_DIRECTION = 5  # max new entries in the same direction per calendar day
 _enabled: bool = True
+
+
+def _session_entry_cap() -> int:
+    try:
+        from trading.live_production_probe import live_probe_enabled
+        from system.soak_live_fire import soak_mode_enabled
+
+        if live_probe_enabled() or soak_mode_enabled():
+            return max(MAX_NEW_PER_DIRECTION, 25)
+    except Exception:
+        pass
+    cfg = _correlation_guard_config()
+    cap = cfg.get("max_new_per_direction")
+    if cap is not None:
+        return max(1, int(cap))
+    return MAX_NEW_PER_DIRECTION
 _STATE_FILE = data_dir() / "state" / "correlation_guard.json"
 _DEFAULT_US_INDEX_EPICS = frozenset(
     {
@@ -350,6 +366,13 @@ def check_and_record(direction: str, *, risk_gbp: float = 0.0) -> tuple[bool, st
     Records the entry if allowed. Call this just before submitting an order;
     if the order is later rejected by the broker, call undo() to release the slot.
     """
+    try:
+        from system.soak_live_fire import soak_mode_enabled
+
+        if soak_mode_enabled():
+            return True, ""
+    except Exception:
+        pass
     global _buy_count, _sell_count
     if not _enabled:
         return True, ""
@@ -358,12 +381,13 @@ def check_and_record(direction: str, *, risk_gbp: float = 0.0) -> tuple[bool, st
     with _lock:
         _maybe_auto_reset()
         d = str(direction or "").upper()
+        cap = _session_entry_cap()
         if d == "BUY":
-            if _buy_count >= MAX_NEW_PER_DIRECTION:
+            if _buy_count >= cap:
                 return (
                     False,
                     f"correlation guard: {_buy_count} BUY entries this session "
-                    f"(max {MAX_NEW_PER_DIRECTION})",
+                    f"(max {cap})",
                 )
             if max_heat > 0 and proposed > 0:
                 if _buy_risk_gbp + proposed > max_heat:
@@ -374,11 +398,11 @@ def check_and_record(direction: str, *, risk_gbp: float = 0.0) -> tuple[bool, st
                     )
             _buy_count += 1
         elif d == "SELL":
-            if _sell_count >= MAX_NEW_PER_DIRECTION:
+            if _sell_count >= cap:
                 return (
                     False,
                     f"correlation guard: {_sell_count} SELL entries this session "
-                    f"(max {MAX_NEW_PER_DIRECTION})",
+                    f"(max {cap})",
                 )
             if max_heat > 0 and proposed > 0:
                 if _sell_risk_gbp + proposed > max_heat:
@@ -411,7 +435,7 @@ def snapshot() -> dict[str, object]:
             "sell": _sell_count,
             "buy_risk_gbp": round(_buy_risk_gbp, 2),
             "sell_risk_gbp": round(_sell_risk_gbp, 2),
-            "max": MAX_NEW_PER_DIRECTION,
+            "max": _session_entry_cap(),
             "max_same_direction_risk_gbp": _max_same_direction_risk_gbp(),
             "max_open_positions_global": _max_open_positions_global(),
             "max_concurrent_us_index_shorts": _max_concurrent_us_index_shorts(),

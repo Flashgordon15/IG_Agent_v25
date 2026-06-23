@@ -423,6 +423,13 @@ def perform_shutdown_cleanup(
     log_engine(f"shutdown cleanup: begin (source={source})")
 
     try:
+        from harmonization.clean_shutdown import write_crash_state
+
+        write_crash_state(source=f"shutdown_cleanup:{source}")
+    except Exception as e:
+        log_engine(f"shutdown cleanup: crash_state error (continuing): {e}")
+
+    try:
         from api.agent_control import stop_trading
 
         stop_trading()

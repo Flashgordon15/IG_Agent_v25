@@ -141,6 +141,16 @@ class ExecutionEngine:
         """Cached IG position counts for pre-entry double-check (no extra REST)."""
         self._position_sync = sync
 
+    def commit_rest_client(self, rest_client: Any) -> None:
+        """Hard-bind authenticated REST handle after bootstrap phase barrier."""
+        self._rest_client = rest_client
+        if self._validator is not None and hasattr(self._validator, "attach_rest_client"):
+            self._validator.attach_rest_client(rest_client)
+        if rest_client and self.mode.uses_broker():
+            from execution.live_executor import LiveExecutor
+
+            self._live = LiveExecutor(self.config, rest_client)
+
     def update_positions(self, market: str, epic: str, quote: Quote) -> list[str]:
         return self._trade_manager.update_from_quote(market, epic, quote)
 
@@ -375,11 +385,33 @@ class ExecutionEngine:
         come from risk_validation (no duplicate points/risk-band size recompute).
         """
         from execution.size_floors import apply_operational_size_floor
-        from execution.types import normalize_gate_execution_params
+        from execution.types import (
+            force_inject_gate_execution_params,
+            normalize_gate_execution_params,
+        )
 
         gate = normalize_gate_execution_params(
             gate_execution_params or signal.gate_execution_params
         )
+        if gate is None:
+            from execution.economic_check import integrity_gate_sourced_required
+
+            if integrity_gate_sourced_required():
+                gate = normalize_gate_execution_params(
+                    force_inject_gate_execution_params(
+                        epic=str(signal.epic or ""),
+                        size=float(
+                            (gate_execution_params or {}).get("actual_size")
+                            or (gate_execution_params or {}).get("size")
+                            or (signal.gate_execution_params or {}).get("actual_size")
+                            or (signal.gate_execution_params or {}).get("size")
+                            or self.config.trade_size
+                        ),
+                        gate_execution_params=(
+                            gate_execution_params or signal.gate_execution_params
+                        ),
+                    )
+                )
         if gate is not None:
             stop_pts = float(gate["stop_points"])
             limit_pts = float(gate["limit_points"])
@@ -561,6 +593,16 @@ class ExecutionEngine:
             reason = str(
                 execution_params.get("notes") or "INTEGRITY_ABORT: gate economics"
             )
+            try:
+                from harmonization.trade_inhibitor_log import log_trade_inhibitor
+
+                log_trade_inhibitor(
+                    epic=str(signal.epic or ""),
+                    gate="integrity_abort",
+                    reason=reason,
+                )
+            except Exception:
+                pass
             bus = get_lifecycle_bus()
             bus.emit(STAGE_RISK, STATUS_FAIL, reason)
             bus.finalize_rejected(reason, stage=STAGE_RISK)

@@ -11,9 +11,17 @@ from system.guard.security_errors import FailClosedSecurityError
 from system.identity.shared_memory_bridge import resolve_parallel_track_key
 
 
+def _execution_track() -> str:
+    """Unified master process is the live execution plane."""
+    track = resolve_parallel_track_key()
+    if track == "unified":
+        return "live"
+    return track
+
+
 def enforce_live_track_or_fail(*, epic: str = "") -> None:
     """Fatal fail-closed gate — shadow track must never reach IG REST."""
-    track = resolve_parallel_track_key()
+    track = _execution_track()
     if track == "shadow":
         suffix = f" epic={epic}" if epic else ""
         raise FailClosedSecurityError(
@@ -32,7 +40,7 @@ def assert_live_track_order_transmission(*, epic: str = "") -> tuple[bool, str]:
 
     Returns ``(True, "ok")`` when the current process is permitted to transmit.
     """
-    track = resolve_parallel_track_key()
+    track = _execution_track()
     if track == "shadow":
         suffix = f" epic={epic}" if epic else ""
         return (

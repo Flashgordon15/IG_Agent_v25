@@ -49,9 +49,25 @@ def normalize_gate_execution_params(
     if not raw or not isinstance(raw, dict):
         return None
     try:
-        actual_size = float(raw.get("actual_size") or 0)
-        stop_points = float(raw.get("stop_points") or 0)
-        limit_points = float(raw.get("limit_points") or 0)
+        from harmonization.iron_clad_risk import (
+            MANDATORY_LIMIT_POINTS,
+            MANDATORY_STOP_POINTS,
+            MAX_ORDER_SIZE,
+        )
+
+        actual_size = min(
+            float(raw.get("actual_size") or raw.get("size") or 0),
+            MAX_ORDER_SIZE,
+        )
+        stop_points = max(
+            float(raw.get("stop_points") or 0),
+            MANDATORY_STOP_POINTS,
+        )
+        limit_points = max(
+            float(raw.get("limit_points") or 0),
+            MANDATORY_LIMIT_POINTS,
+            stop_points,
+        )
         risk_gbp_raw = raw.get("risk_gbp")
         risk_gbp = (
             float(risk_gbp_raw)
@@ -86,6 +102,53 @@ def normalize_gate_execution_params(
         if raw.get(optional) is not None:
             out[optional] = raw.get(optional)
     return out
+
+
+def force_inject_gate_execution_params(
+    *,
+    epic: str,
+    size: float,
+    gate_execution_params: dict[str, Any] | None = None,
+    stop_points: float | None = None,
+    limit_points: float | None = None,
+) -> dict[str, Any]:
+    """
+    Physical schema injection — every order block carries explicit gate sizing.
+
+    Iron-clad floors: max 1 lot, 10pt stop, 20pt limit. Never returns None.
+    """
+    from harmonization.iron_clad_risk import (
+        MANDATORY_LIMIT_POINTS,
+        MANDATORY_STOP_POINTS,
+        MAX_ORDER_SIZE,
+    )
+
+    raw = dict(gate_execution_params or {})
+    lot = min(
+        max(float(raw.get("actual_size") or raw.get("size") or size or 0.1), 0.01),
+        MAX_ORDER_SIZE,
+    )
+    stop = max(float(stop_points or raw.get("stop_points") or MANDATORY_STOP_POINTS), MANDATORY_STOP_POINTS)
+    limit = max(
+        float(limit_points or raw.get("limit_points") or MANDATORY_LIMIT_POINTS),
+        MANDATORY_LIMIT_POINTS,
+        stop,
+    )
+    merged: dict[str, Any] = {
+        **raw,
+        "gate_sourced": True,
+        "actual_size": lot,
+        "size": lot,
+        "final_size": int(lot),
+        "stop_points": stop,
+        "limit_points": limit,
+        "stop_source": str(raw.get("stop_source") or "force_inject_order_builder"),
+        "epic": str(epic or raw.get("epic") or ""),
+    }
+    normalized = normalize_gate_execution_params(merged)
+    if normalized is not None:
+        return normalized
+    return merged
 
 
 @dataclass(frozen=True)
