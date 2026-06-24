@@ -576,6 +576,43 @@ async def api_set_strictness(request: Request) -> JSONResponse:
     )
 
 
+@router.get("/api/v31/tune")
+def api_v31_tune_status() -> dict[str, Any]:
+    """Live starvation sentinel + manual floor override state (v31 sandbox)."""
+    from trading.dynamic_adaptation import StarvationSentinel
+
+    StarvationSentinel.ensure_started()
+    return {"ok": True, **StarvationSentinel.status_payload()}
+
+
+@router.post("/api/v31/tune")
+async def api_v31_tune(request: Request) -> JSONResponse:
+    """Manual ML / alpha floor overrides and auto-decay toggle."""
+    from trading.dynamic_adaptation import StarvationSentinel
+
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="invalid JSON body") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+
+    kwargs: dict[str, Any] = {}
+    if "ml_veto_override" in body:
+        raw = body.get("ml_veto_override")
+        kwargs["ml_veto_override"] = None if raw is None else float(raw)
+    if "alpha_seed_override" in body:
+        raw = body.get("alpha_seed_override")
+        kwargs["alpha_seed_override"] = None if raw is None else float(raw)
+    if "auto_decay_enabled" in body:
+        kwargs["auto_decay_enabled"] = bool(body.get("auto_decay_enabled"))
+    if body.get("clear_overrides"):
+        kwargs["clear_overrides"] = True
+
+    payload = StarvationSentinel.apply_tune(**kwargs)
+    return JSONResponse({"ok": True, **payload})
+
+
 @router.get("/api/replay/summary")
 def api_replay_summary() -> dict[str, Any]:
     return replay_summary()

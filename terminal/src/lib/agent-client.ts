@@ -1,13 +1,17 @@
 /** Agent REST + WebSocket base — browser uses same-origin rewrites in dev. */
 
 const AGENT_DIRECT = "http://127.0.0.1:8080";
+const AGENT_SANDBOX_DIRECT = "http://127.0.0.1:8081";
 
 export function agentHttpBase(): string {
   const explicit = process.env.NEXT_PUBLIC_AGENT_URL?.replace(/\/$/, "");
   if (explicit) return explicit;
   if (typeof window !== "undefined") {
     // Next.js :3000 cannot proxy WebSocket upgrades — talk to agent API directly.
-    if (window.location.port === "3000" || window.location.port === "3001") {
+    if (window.location.port === "3001") {
+      return AGENT_SANDBOX_DIRECT;
+    }
+    if (window.location.port === "3000") {
       return AGENT_DIRECT;
     }
     return window.location.origin;
@@ -92,13 +96,14 @@ export type FulfillmentPayload = {
   mode?: string;
   updated_at?: string;
   server_mono_ms?: number;
+  ticks_cached?: number;
+  tuning_variables?: Record<string, unknown>;
   gate_diagnostics?: { by_epic?: Record<string, GateDiagnosticRow>; last?: GateDiagnosticRow };
   alpha_frontier_tracker?: {
     by_epic?: Record<string, FrontierEpicRow>;
     last?: FrontierEpicRow;
   };
   performance_rows?: PerformanceRow[];
-  ticks_cached?: number;
   all_ready?: boolean;
   market_quotes?: Record<string, MarketQuote>;
   market_quotes_list?: MarketQuote[];
@@ -127,3 +132,19 @@ export type AgentHealth = {
   trading_healthy?: boolean;
   agent_pid?: number;
 };
+
+export type V31TunePayload = {
+  ok?: boolean;
+  ml_veto_override?: number | null;
+  alpha_seed_override?: number | null;
+  auto_decay_enabled?: boolean;
+  clear_overrides?: boolean;
+};
+
+export async function postAgentTune(body: V31TunePayload): Promise<Record<string, unknown>> {
+  return fetchAgentJson<Record<string, unknown>>("/api/v31/tune", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}

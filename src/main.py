@@ -42,10 +42,12 @@ def enforce_absolute_socket_singleton() -> None:
     if _singleton_socket_bound:
         return
     try:
+        raw_port = os.environ.get("IG_SINGLETON_PORT", "").strip()
+        singleton_port = int(raw_port) if raw_port.isdigit() else 49151
         _singleton_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         # CRITICAL HARDENING: Allow immediate local address re-binding
         _singleton_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        _singleton_socket.bind(("127.0.0.1", 49151))
+        _singleton_socket.bind(("127.0.0.1", singleton_port))
         _singleton_socket.listen(1)
         _singleton_socket_bound = True
     except OSError:
@@ -559,6 +561,9 @@ def _pre_startup_cleanup() -> None:
 
 def _ensure_watchdog_running() -> None:
     """Start scripts/watchdog.sh when absent — skip if launchd already owns supervision."""
+    if os.environ.get("IG_AGENT_NO_WATCHDOG", "").strip().lower() in ("1", "true", "yes"):
+        _log_engine("startup: watchdog skipped (IG_AGENT_NO_WATCHDOG=1)")
+        return
     from system.paths import logs_dir, project_root
 
     try:

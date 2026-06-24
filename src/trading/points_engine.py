@@ -695,8 +695,9 @@ class PointsEngine:
     def trade_confidence_threshold(self, cfg: Any) -> float:
         """Effective entry bar for CAUTION/HEALTHY.
 
-        Uses cfg.confidence_floor (configurable, default 55) as the tier floor,
-        boosted by bootstrap_wins * recovery_per_win toward CONF_MARGINAL_MIN.
+        Uses cfg.confidence_floor (configurable) and cfg.signal_threshold as the
+        operator floor pair. Legacy CONF_MARGINAL_MIN (55) applies only when the
+        configured signal threshold is at or above that band.
         """
         try:
             state = self.get_state()
@@ -704,15 +705,20 @@ class PointsEngine:
                 return 100.0
             if state == "WARNING":
                 return CONF_HIGH
+            signal_thr = float(cfg.signal_threshold)
             cfg_floor = float(getattr(cfg, "confidence_floor", CONF_MARGINAL_MIN))
             recovery = float(getattr(cfg, "confidence_floor_recovery_per_win", 1.0))
             with _lock:
                 bootstrap_wins = self._bootstrap_wins
-            # Floor rises with each win; caps at CONF_MARGINAL_MIN (55)
-            effective_floor = min(
-                cfg_floor + bootstrap_wins * recovery, CONF_MARGINAL_MIN
+            marginal_ceiling = (
+                CONF_MARGINAL_MIN
+                if signal_thr >= CONF_MARGINAL_MIN
+                else max(signal_thr, cfg_floor)
             )
-            threshold = max(effective_floor, float(cfg.signal_threshold))
+            effective_floor = min(
+                cfg_floor + bootstrap_wins * recovery, marginal_ceiling
+            )
+            threshold = max(effective_floor, signal_thr)
             prot = self.protected_signal_threshold_floor()
             if prot is not None:
                 threshold = max(threshold, prot)

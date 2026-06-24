@@ -18,10 +18,8 @@ from signals.signal_engine import SignalEngine
 from system.config import Config
 from system.engine_log import log_engine, record_engine_warning
 
-GATE_PASS_MIN = 55.0
-SAFE_DEFAULT_SCORE = (
-    55.0  # Matches GATE_PASS_MIN — scorer errors fail-open so trading continues
-)
+GATE_PASS_MIN = 55.0  # Static default — runtime uses effective_gate_pass_min(epic)
+SAFE_DEFAULT_SCORE = 55.0
 COLD_START_BAR_CAP = 2  # Pre-loaded OHLC history warms indicators; 2 live bars suffice
 GAP_CAP_MINUTES = 15
 GAP_ATR_MULTIPLE = 1.0
@@ -142,12 +140,13 @@ def score_spread_factor(current_spread: float, normal_spread: float) -> float:
     return _linear_down(ratio, 1.3, 2.0, FACTOR_SPREAD_MAX)
 
 
-def regime_label(score: float) -> str:
+def regime_label(score: float, *, gate_min: float | None = None) -> str:
+    floor = float(gate_min) if gate_min is not None else GATE_PASS_MIN
     if score >= 80:
         return "Excellent"
     if score >= 60:
         return "Good"
-    if score >= GATE_PASS_MIN:
+    if score >= floor:
         return "Marginal"
     return "WAIT"
 
@@ -427,6 +426,13 @@ class EnvironmentScorer:
         quote_df: pd.DataFrame | None = None,
     ) -> float:
         market_key = str(self._primary_market or market or "")
+        gate_min = GATE_PASS_MIN
+        try:
+            from trading.dynamic_adaptation import effective_gate_pass_min
+
+            gate_min = float(effective_gate_pass_min(self._epic or market_key))
+        except Exception:
+            pass
         try:
             factors, meta = self._compute_factors(
                 market, quote=quote, quote_df=quote_df
@@ -466,24 +472,24 @@ class EnvironmentScorer:
                 max(bars_from_candles, bars_from_clock),
             )
             if bars_since_open < COLD_START_BAR_CAP:
-                if total > GATE_PASS_MIN:
-                    total = GATE_PASS_MIN
+                if total > gate_min:
+                    total = gate_min
                 capped_cold = True
 
             gap_until = self._gap_cap_until.get(market)
             if gap_until is not None and datetime.now() < gap_until:
-                if total > GATE_PASS_MIN:
-                    total = GATE_PASS_MIN
+                if total > gate_min:
+                    total = gate_min
                 capped_gap = True
 
             total = max(0.0, min(100.0, total))
             self._last = EnvironmentScore(
                 total=total,
-                regime=regime_label(total),
+                regime=regime_label(total, gate_min=gate_min),
                 factors=dict(factors),
                 capped_cold_start=capped_cold,
                 capped_gap_open=capped_gap,
-                gate_passes=total >= GATE_PASS_MIN,
+                gate_passes=total >= gate_min,
                 session_style=session_style,
                 fallback_active=False,
             )
@@ -509,16 +515,17 @@ class EnvironmentScorer:
                     f"{SAFE_DEFAULT_SCORE:.0f}",
                 )
                 self._fallback_warned_for_market.add(market_key)
+            fallback_gate = gate_min
             self._last = EnvironmentScore(
                 total=SAFE_DEFAULT_SCORE,
-                regime=regime_label(SAFE_DEFAULT_SCORE),
+                regime=regime_label(SAFE_DEFAULT_SCORE, gate_min=fallback_gate),
                 factors={
                     "atr": SAFE_DEFAULT_SCORE * 0.3,
                     "trend": SAFE_DEFAULT_SCORE * 0.25,
                     "session": SAFE_DEFAULT_SCORE * 0.2,
                     "spread": SAFE_DEFAULT_SCORE * 0.25,
                 },
-                gate_passes=SAFE_DEFAULT_SCORE >= GATE_PASS_MIN,
+                gate_passes=SAFE_DEFAULT_SCORE >= fallback_gate,
                 fallback_active=not is_warmup,
             )
             return SAFE_DEFAULT_SCORE
@@ -553,4 +560,5 @@ class EnvironmentScorer:
         quote: Quote | None = None,
         quote_df: pd.DataFrame | None = None,
     ) -> bool:
-        return self.score(market, quote=quote, quote_df=quote_df) >= GATE_PASS_MIN
+        self.score(market, quote=quote, quote_df=quote_df)
+        return bool(self._last.gate_passes)

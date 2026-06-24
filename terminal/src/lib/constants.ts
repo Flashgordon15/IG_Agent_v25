@@ -6,6 +6,7 @@ export const EPIC_LABELS: Record<string, string> = {
   "CS.D.CRUDE.CFD.IP": "CRUDE",
   "IX.D.FTSE.IFM.IP": "FTSE",
   "IX.D.DAX.IFM.IP": "DAX",
+  "IX.D.NASDAQ.IFM.IP": "NASDAQ",
 };
 
 export const CORRELATION_EPICS = [

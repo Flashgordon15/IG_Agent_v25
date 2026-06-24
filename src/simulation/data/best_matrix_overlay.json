@@ -1,5 +1,5 @@
 {
-  "signal_threshold": 55.0,
+  "signal_threshold": 45.0,
   "rsi_buy_min": 64,
   "rsi_sell_max": 42,
   "reward_multiple": 1.4,
@@ -7,12 +7,12 @@
   "atr_volatility_multiplier": 1.0,
   "risk_points": 40.0,
   "protective_learning": {
-    "signal_threshold_floor": 55.0
+    "signal_threshold_floor": 45.0
   },
   "matrix_search": {
     "source": "calibration_chaos",
     "vector": {
-      "signal_threshold": 55.0,
+      "signal_threshold": 45.0,
       "rsi_buy_min": 64.0,
       "rsi_sell_max": 42.0,
       "reward_multiple": 1.4,

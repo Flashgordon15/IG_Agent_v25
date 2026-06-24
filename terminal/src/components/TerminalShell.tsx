@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { AdaptiveLogisticsPanel } from "@/components/AdaptiveLogisticsPanel";
 import { DeepCoreCanvas } from "@/components/DeepCoreCanvas";
 import { MacroEnginePanel } from "@/components/MacroEnginePanel";
 import { WatchlistMatrix } from "@/components/WatchlistMatrix";
@@ -57,7 +58,10 @@ export function TerminalShell() {
   const activeHistory = history[selectedEpic] ?? focusHistory;
 
   return (
-    <div className="grid h-screen grid-cols-12 gap-1 overflow-hidden bg-[#050505] p-2">
+    <div className="grid h-screen grid-rows-[auto_1fr] gap-1 overflow-hidden bg-[#050505] p-2">
+      <AdaptiveLogisticsPanel focusEpic={selectedEpic} fault={fulfillmentFault} />
+
+      <div className="grid min-h-0 grid-cols-12 gap-1">
       <div className="col-span-2 min-h-0">
         <WatchlistMatrix
           rows={watchlist}
@@ -83,6 +87,7 @@ export function TerminalShell() {
         wsState={wsState}
         tradingHealthy={tradingHealthy}
       />
+      </div>
     </div>
   );
 }

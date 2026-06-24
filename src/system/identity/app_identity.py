@@ -97,6 +97,11 @@ class RuntimeIdentity:
 
         Idempotent — safe to call on every boot.
         """
+        if os.environ.get("IG_PARALLEL_V31_SANDBOX", "").strip().lower() in ("1", "true", "yes"):
+            bind_port = int(RuntimeIdentity.resolve_api_port())
+            os.environ["IG_API_PORT"] = str(bind_port)
+            os.environ["IG_INSTANCE_LOCK_FILE"] = RuntimeIdentity.lock_basename(bind_port)
+            return _ACTIVE_LOCK_POINTER
         lock_path = RuntimeIdentity.get_lock_path()
         _GLOBAL_POINTER_DIR.mkdir(parents=True, exist_ok=True)
         _ACTIVE_LOCK_POINTER.write_text(f"{lock_path.resolve()}\n", encoding="utf-8")

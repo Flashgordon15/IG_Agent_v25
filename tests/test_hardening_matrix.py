@@ -40,7 +40,12 @@ from system.unified_fulfillment_cache import (
 )
 from execution.order_payload_builder import build_trade_signal_with_gate_params
 from execution.types import force_inject_gate_execution_params
-from harmonization.iron_clad_risk import MANDATORY_LIMIT_POINTS, MANDATORY_STOP_POINTS
+from harmonization.iron_clad_risk import (
+    MANDATORY_LIMIT_POINTS,
+    MANDATORY_STOP_POINTS,
+    mandatory_limit_points_for_epic,
+    mandatory_stop_points_for_epic,
+)
 
 
 class GateExecutionParamsTests(unittest.TestCase):
@@ -70,8 +75,8 @@ class GateExecutionParamsTests(unittest.TestCase):
         normalized = normalize_gate_execution_params(partial)
         self.assertIsNotNone(normalized)
         assert normalized is not None
-        self.assertEqual(normalized["stop_points"], 10.0)
-        self.assertEqual(normalized["limit_points"], 20.0)
+        self.assertEqual(normalized["stop_points"], 8.0)
+        self.assertEqual(normalized["limit_points"], 12.0)
 
 
 class StreamingMatrixFfillTests(unittest.TestCase):
@@ -261,8 +266,10 @@ class IntegrityAbortGuardTests(unittest.TestCase):
             norm = normalize_gate_execution_params(payload)
             self.assertIsNotNone(norm, epic)
             assert norm is not None
-            self.assertGreaterEqual(norm["stop_points"], MANDATORY_STOP_POINTS)
-            self.assertGreaterEqual(norm["limit_points"], MANDATORY_LIMIT_POINTS)
+            stop_floor = mandatory_stop_points_for_epic(epic)
+            limit_floor = mandatory_limit_points_for_epic(epic)
+            self.assertGreaterEqual(norm["stop_points"], stop_floor)
+            self.assertGreaterEqual(norm["limit_points"], limit_floor)
 
     def test_order_builder_never_emits_empty_gate(self) -> None:
         from data.models import Quote

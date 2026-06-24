@@ -18,6 +18,8 @@ from harmonization.iron_clad_risk import (
     MANDATORY_STOP_POINTS,
     MAX_ORDER_SIZE,
     IronCladRiskEngine,
+    mandatory_limit_points_for_epic,
+    mandatory_stop_points_for_epic,
 )
 from harmonization.volatility_gate import dynamic_confidence_floor
 from intelligence.matrix_prebaker import FFILL_STREAMING_EPICS
@@ -33,14 +35,19 @@ from target_reconciliation.live_fire_ledger import (
 
 class IronCladEnvelopeTests(unittest.TestCase):
     def test_mandatory_stop_limit_floors(self) -> None:
-        self.assertEqual(MANDATORY_STOP_POINTS, 10.0)
-        self.assertEqual(MANDATORY_LIMIT_POINTS, 20.0)
+        self.assertEqual(MANDATORY_STOP_POINTS, 8.0)
+        self.assertEqual(MANDATORY_LIMIT_POINTS, 12.0)
         self.assertEqual(MAX_ORDER_SIZE, 1.0)
+        self.assertEqual(mandatory_stop_points_for_epic("IX.D.DOW.IFM.IP"), 8.0)
+        self.assertEqual(mandatory_stop_points_for_epic("CS.D.CFPGOLD.CFP.IP"), 6.0)
 
     def test_validate_order_enforces_floors(self) -> None:
         IronCladRiskEngine.reset_for_tests()
+        epic = "CS.D.EURUSD.CFD.IP"
+        stop_floor = mandatory_stop_points_for_epic(epic)
+        limit_floor = mandatory_limit_points_for_epic(epic)
         ok, reason, norm = IronCladRiskEngine.validate_order(
-            epic="CS.D.EURUSD.CFD.IP",
+            epic=epic,
             direction="BUY",
             size=0.5,
             stop_distance=3.0,
@@ -50,8 +57,8 @@ class IronCladEnvelopeTests(unittest.TestCase):
             rest_client=MagicMock(),
         )
         self.assertTrue(ok, reason)
-        self.assertGreaterEqual(norm["stop_distance"], MANDATORY_STOP_POINTS)
-        self.assertGreaterEqual(norm["limit_distance"], MANDATORY_LIMIT_POINTS)
+        self.assertGreaterEqual(norm["stop_distance"], stop_floor)
+        self.assertGreaterEqual(norm["limit_distance"], limit_floor)
 
 
 class VolatilityGateTests(unittest.TestCase):

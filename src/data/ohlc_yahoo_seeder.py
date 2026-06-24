@@ -30,6 +30,11 @@ DEFAULT_PERIOD = "60d"
 MIN_BARS_REQUIRED = 100
 YAHOO_NETWORK_TIMEOUT_SEC = 20.0
 
+# Alternate Yahoo symbols when primary futures/index route is unreachable.
+EPIC_YAHOO_SYMBOL_FALLBACKS: dict[str, tuple[str, ...]] = {
+    "IX.D.NASDAQ.IFM.IP": ("^NDX", "QQQ"),
+}
+
 # IG epic → (Yahoo symbol, display market name)
 EPIC_YAHOO_MAP: dict[str, tuple[str, str]] = {
     "CS.D.EURUSD.CFD.IP": ("EURUSD=X", "EUR/USD"),
@@ -42,6 +47,19 @@ EPIC_YAHOO_MAP: dict[str, tuple[str, str]] = {
     "IX.D.NASDAQ.IFM.IP": ("NQ=F", "US Tech 100"),
     "IX.D.DAX.IFM.IP": ("^GDAXI", "Germany 40"),
 }
+
+
+def yahoo_symbols_for_epic(epic: str) -> tuple[str, ...]:
+    """Primary Yahoo symbol plus ordered fallbacks for resilient routing."""
+    key = str(epic or "").strip()
+    mapping = EPIC_YAHOO_MAP.get(key)
+    if not mapping:
+        return ()
+    symbols: list[str] = []
+    for sym in (mapping[0],) + EPIC_YAHOO_SYMBOL_FALLBACKS.get(key, ()):
+        if sym and sym not in symbols:
+            symbols.append(sym)
+    return tuple(symbols)
 
 DEFAULT_SEED_EPICS = (
     "CS.D.EURUSD.CFD.IP",
@@ -75,7 +93,7 @@ def _default_spread(yahoo_symbol: str, close: float) -> float:
         return 0.5
     if sym == "^DJI":
         return 3.0
-    if sym == "NQ=F":
+    if sym == "NQ=F" or sym == "^NDX" or sym == "QQQ":
         return 2.0
     if sym == "^N225":
         return 8.0
@@ -289,23 +307,35 @@ def fetch_yahoo_ohlc_for_epic(
             f"(min>={min_bars})"
         )
         return cached
-    try:
-        return fetch_yahoo_ohlc(
-            yahoo_symbol,
-            interval,
-            period,
-            cache_path,
-            overwrite=True,
-            network_timeout_sec=network_timeout_sec,
-        )
-    except Exception as exc:
-        if cached >= min_bars:
-            log_engine(
-                f"Yahoo OHLC network failed {key}, using cache ({cached} bars): "
-                f"{type(exc).__name__}: {exc}"
+    symbols = yahoo_symbols_for_epic(key)
+    last_exc: Exception | None = None
+    for idx, yahoo_symbol in enumerate(symbols):
+        try:
+            return fetch_yahoo_ohlc(
+                yahoo_symbol,
+                interval,
+                period,
+                cache_path,
+                overwrite=True,
+                network_timeout_sec=network_timeout_sec,
             )
-            return cached
-        raise
+        except Exception as exc:
+            last_exc = exc
+            if idx < len(symbols) - 1:
+                log_engine(
+                    f"Yahoo OHLC fallback {key}: symbol={yahoo_symbol} failed "
+                    f"({type(exc).__name__}) — trying alternate route"
+                )
+                continue
+    if cached >= min_bars:
+        log_engine(
+            f"Yahoo OHLC network failed {key}, using cache ({cached} bars): "
+            f"{type(last_exc).__name__ if last_exc else 'Error'}: {last_exc}"
+        )
+        return cached
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f"Yahoo OHLC fetch failed for {key}")
 
 
 def seed_default_instruments() -> dict[str, int]:

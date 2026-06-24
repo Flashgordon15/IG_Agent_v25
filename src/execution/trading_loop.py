@@ -540,6 +540,12 @@ class TradingLoop:
                     "Order submitted — background OrderConfirmWorker owns IG REST "
                     "(tick thread continues without blocking on POST /positions/otc)"
                 )
+                try:
+                    from trading.dynamic_adaptation import StarvationSentinel
+
+                    StarvationSentinel.record_trade_execution(source="submitted")
+                except Exception:
+                    pass
             elif execution is not None and not execution.success:
                 update_demo_diagnostics(
                     last_rejection=execution.rejection_reason or execution.action

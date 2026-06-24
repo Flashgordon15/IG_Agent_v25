@@ -679,6 +679,76 @@ class LiveExecutor:
         stop_distance = float(execution_params.get("risk", cfg.stop_distance_points))
         limit_distance = float(execution_params.get("limit", cfg.limit_distance_points))
 
+        from execution.broker_rulebook import BrokerRulebookGuard
+
+        rb = BrokerRulebookGuard.apply(
+            epic=str(signal.epic or ""),
+            size=size,
+            stop_distance=stop_distance,
+            limit_distance=limit_distance,
+            rest_client=self._client,
+        )
+        if rb.vetoed:
+            execution_params = {
+                **execution_params,
+                "size": float(rb.size),
+                "risk": float(rb.baseline_stop),
+                "limit": limit_distance or 0.0,
+                "broker_rulebook": {
+                    "overrides": list(rb.overrides),
+                    "vetoed": True,
+                    "veto_reason": rb.veto_reason,
+                    "risk_balancer": {
+                        "risk_budget_gbp": rb.risk_budget_gbp,
+                        "baseline_size": rb.baseline_size,
+                        "baseline_stop": rb.baseline_stop,
+                    },
+                },
+            }
+            return ExecutionResult(
+                success=False,
+                action="REJECTED",
+                rejection_reason="HOLD: SANDBOX_VETO_RISK_BUDGET_MISMATCH",
+                execution_params=execution_params,
+            )
+        size = float(rb.size)
+        stop_distance = float(rb.stop_distance)
+        limit_distance = float(rb.limit_distance)
+        execution_params = {
+            **execution_params,
+            "size": size,
+            "risk": stop_distance,
+            "limit": limit_distance or 0.0,
+            "broker_rulebook": {
+                "overrides": list(rb.overrides),
+                "fractional_micro_lot": rb.fractional_micro_lot,
+                "constraints": {
+                    k: rb.constraints.get(k)
+                    for k in (
+                        "epic",
+                        "min_deal_size",
+                        "min_stop_distance",
+                        "min_step_distance",
+                    )
+                    if k in rb.constraints
+                },
+                "risk_balancer": {
+                    "risk_budget_gbp": rb.risk_budget_gbp,
+                    "baseline_size": rb.baseline_size,
+                    "baseline_stop": rb.baseline_stop,
+                    "balanced_stop": stop_distance,
+                    "balanced_size": size,
+                },
+            },
+        }
+        if size <= 0:
+            return ExecutionResult(
+                success=False,
+                action="REJECTED",
+                rejection_reason="HOLD: BROKER_RULEBOOK_ZERO_SIZE",
+                execution_params=execution_params,
+            )
+
         from apex.hardening import floor_contract_size, under_min_lot_detail
 
         allow_fractional = False
@@ -690,7 +760,11 @@ class LiveExecutor:
         except Exception:
             allow_fractional = False
 
+        fractional_micro_lot = rb.fractional_micro_lot
+
         if allow_fractional and size >= 0.1:
+            pass
+        elif fractional_micro_lot:
             pass
         else:
             size_int, under_min_lot = floor_contract_size(size)

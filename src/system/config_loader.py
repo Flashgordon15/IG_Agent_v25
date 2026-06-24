@@ -19,6 +19,7 @@ _config_lock = threading.RLock()
 _config_file_mtime: float = 0.0  # last known mtime of active config file
 
 V29_FILE = "config_v29.json"
+V31_FILE = "config_v31.json"
 V30_FILE = "config_v30.json"
 V24_FILE = "config_v24.json"
 LEGACY_V23_FILE = "legacy_v23/config_v23.json"
@@ -35,9 +36,9 @@ _LEGACY_EXTENDS = frozenset(
 
 
 def _primary_config_path() -> Path:
-    """Resolve active config: v30 → v29 overlay (v25 merge chain blocked on v30 path)."""
+    """Resolve active config: v31 → v30 → v29 overlay (v25 merge chain blocked on v30/v31 path)."""
     cd = config_dir()
-    for rel in (V30_FILE, V29_FILE):
+    for rel in (V31_FILE, V30_FILE, V29_FILE):
         p = cd / rel
         if p.exists():
             return p
@@ -352,8 +353,8 @@ class ConfigLoader:
         return cfg.as_dict()
 
     def _load_merged_dict(self) -> dict[str, Any]:
-        # v30 active path: no v22 base scaffold — clean overlay chain only.
-        skip_v22_base = self._path.name == V30_FILE
+        # v30/v31 active path: no v22 base scaffold — clean overlay chain only.
+        skip_v22_base = self._path.name in (V30_FILE, V31_FILE)
         base: dict[str, Any] = {}
         if not skip_v22_base and self._v22_path.exists():
             with open(self._v22_path, "r", encoding="utf-8") as f:

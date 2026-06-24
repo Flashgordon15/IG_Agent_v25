@@ -109,8 +109,8 @@ _SPOT_GOLD_EPIC = "CS.D.CFPGOLD.CFP.IP"
 _GBPUSD_FX_EPIC = "CS.D.GBPUSD.CFD.IP"
 _USD_GBP_RATE_FALLBACK = 0.78
 FLATTEN_VERIFY_WAIT_SEC = 10.0
-# Bare-metal live execution floor — hard override every tick (drops legacy 55% wall).
-LIVE_EXEC_SIGNAL_THRESHOLD = 52.5
+# Bare-metal live execution fallback — merged config.signal_threshold takes precedence each tick.
+LIVE_EXEC_SIGNAL_THRESHOLD = 45.0
 
 # Friday session-validation capture — IG DEMO dispatch at 42% (env: IG_SESSION_VALIDATION=1).
 SESSION_VALIDATION_CONFIDENCE_FLOOR = 42.0
@@ -1474,17 +1474,18 @@ class TradingLoop:
             log_guarded_exception("trading_loop", exc)
 
     def _force_live_signal_threshold(self) -> float:
-        """Memory-isolation breaker — config + gates read one live floor (52.5%)."""
-        thr = float(LIVE_EXEC_SIGNAL_THRESHOLD)
+        """Live floor from merged config; fallback constant only when config is unset."""
         try:
-            self._config.signal_threshold = thr
-        except Exception:
-            pass
+            thr = float(getattr(self._config, "signal_threshold", LIVE_EXEC_SIGNAL_THRESHOLD))
+        except (TypeError, ValueError):
+            thr = float(LIVE_EXEC_SIGNAL_THRESHOLD)
+        if thr <= 0:
+            thr = float(LIVE_EXEC_SIGNAL_THRESHOLD)
         return thr
 
     def _dynamic_live_signal_threshold(self, *, atr: float, rsi: float) -> float:
         """Volatility-scaled live floor — relaxes into 75–80% paradox band."""
-        base = float(LIVE_EXEC_SIGNAL_THRESHOLD)
+        base = self._force_live_signal_threshold()
         try:
             from harmonization.volatility_gate import no_trade_paradox_threshold
 
@@ -1520,10 +1521,17 @@ class TradingLoop:
         """
         from execution.types import force_inject_gate_execution_params
         from execution.epic_normalizer import normalize_night_matrix_epic
+        from harmonization.iron_clad_risk import (
+            mandatory_limit_points_for_epic,
+            mandatory_stop_points_for_epic,
+            MAX_ORDER_SIZE,
+        )
         from trading.micro_lot_verification import clamp_micro_lot_size, micro_lot_verification_enabled
 
         raw = dict(gate_exec or {})
         epic_norm = normalize_night_matrix_epic(self._epic)
+        stop_floor = mandatory_stop_points_for_epic(epic_norm)
+        limit_floor = mandatory_limit_points_for_epic(epic_norm)
         if epic_norm in _NIGHT_MATRIX_FORCE_GATE_EPICS or micro_lot_verification_enabled():
             default_size = clamp_micro_lot_size(
                 float(trade_size or raw.get("actual_size") or raw.get("size") or 1.0)
@@ -1532,8 +1540,8 @@ class TradingLoop:
                 epic=epic_norm,
                 size=default_size,
                 gate_execution_params=raw,
-                stop_points=10.0,
-                limit_points=20.0,
+                stop_points=stop_floor,
+                limit_points=limit_floor,
             )
         if raw:
             from execution.types import normalize_gate_execution_params
@@ -1549,9 +1557,15 @@ class TradingLoop:
         """Non-bypassable stop/limit/size envelope when risk gate omits params."""
         from execution.epic_normalizer import normalize_night_matrix_epic
         from execution.types import force_inject_gate_execution_params
+        from harmonization.iron_clad_risk import (
+            mandatory_limit_points_for_epic,
+            mandatory_stop_points_for_epic,
+        )
         from trading.micro_lot_verification import clamp_micro_lot_size, micro_lot_verification_enabled
 
         epic_norm = normalize_night_matrix_epic(self._epic)
+        stop_floor = mandatory_stop_points_for_epic(epic_norm)
+        limit_floor = mandatory_limit_points_for_epic(epic_norm)
         if micro_lot_verification_enabled():
             size = clamp_micro_lot_size(float(trade_size))
         else:
@@ -1559,8 +1573,8 @@ class TradingLoop:
         return force_inject_gate_execution_params(
             epic=epic_norm,
             size=size,
-            stop_points=10.0,
-            limit_points=20.0,
+            stop_points=stop_floor,
+            limit_points=limit_floor,
         )
 
     def _run_tick(self) -> TickContext | None:
@@ -2320,6 +2334,20 @@ class TradingLoop:
             indicator_snapshot_fn=self._tick_indicator_snapshot,
         )
         live_thr = self._dynamic_live_signal_threshold(atr=atr, rsi=rsi)
+        try:
+            from trading.dynamic_adaptation import DynamicAdaptationEngine
+
+            base_thr = self._force_live_signal_threshold()
+            DynamicAdaptationEngine.refresh_for_epic(
+                self._epic,
+                base_signal=base_thr,
+            )
+            live_thr = DynamicAdaptationEngine.effective_signal_threshold(
+                self._epic,
+                live_thr,
+            )
+        except Exception as exc:
+            log_guarded_exception("trading_loop_dynamic_adapt", exc)
         pattern_index = self._compute_pattern_index(
             epic=self._epic,
             direction=direction,
@@ -2395,6 +2423,17 @@ class TradingLoop:
         signal_floor = min(float(live_thr), effective_floor)
         if fitness_floor <= 0.0 or fitness_floor > float(live_thr):
             fitness_floor = float(live_thr)
+        try:
+            from trading.dynamic_adaptation import StarvationSentinel
+
+            StarvationSentinel.capture_baseline_floors(
+                signal_floor, fitness_floor, ml_floor
+            )
+            signal_floor, fitness_floor, ml_floor = StarvationSentinel.apply_floor_overrides(
+                signal_floor, fitness_floor, ml_floor
+            )
+        except Exception as exc:
+            log_guarded_exception("trading_loop_starvation_sentinel", exc)
         matrix_win_injection = bool(lookup_approved)
 
         if hot:
@@ -2540,15 +2579,19 @@ class TradingLoop:
                     "actual_size": trade_size,
                 }
                 try:
+                    from execution.epic_normalizer import normalize_night_matrix_epic
                     from harmonization.iron_clad_risk import (
-                        MANDATORY_LIMIT_POINTS,
-                        MANDATORY_STOP_POINTS,
+                        mandatory_limit_points_for_epic,
+                        mandatory_stop_points_for_epic,
                         MAX_ORDER_SIZE,
                     )
 
+                    epic_key = normalize_night_matrix_epic(self._epic)
+                    stop_floor = mandatory_stop_points_for_epic(epic_key)
+                    limit_floor = mandatory_limit_points_for_epic(epic_key)
                     trade_size = min(float(trade_size), MAX_ORDER_SIZE)
-                    stop_pts = max(MANDATORY_STOP_POINTS, 1.0)
-                    limit_pts = max(MANDATORY_LIMIT_POINTS, stop_pts * 2.0)
+                    stop_pts = max(stop_floor, 1.0)
+                    limit_pts = max(limit_floor, stop_pts * 2.0)
                     gate_exec["stop_points"] = stop_pts
                     gate_exec["limit_points"] = limit_pts
                     gate_exec["stop_source"] = "iron_clad_alpha_matrix"
@@ -4228,6 +4271,15 @@ class TradingLoop:
             log_guarded_exception("trading_loop", exc)
         if session_validation_capture_active():
             return min(float(fitness_min), SESSION_VALIDATION_CONFIDENCE_FLOOR)
+        try:
+            from trading.dynamic_adaptation import DynamicAdaptationEngine
+
+            fitness_min = DynamicAdaptationEngine.effective_fitness_min(
+                self._epic,
+                float(fitness_min),
+            )
+        except Exception as exc:
+            log_guarded_exception("trading_loop_dynamic_adapt_fitness", exc)
         return float(fitness_min)
 
     def _gate_environment_fitness(self, quote: Quote) -> GateResult:
@@ -4638,10 +4690,10 @@ class TradingLoop:
                 sizing_conf = (
                     entry_confidence_floor()
                     if bands_enabled()
-                    else max(CONF_MARGINAL_MIN, threshold_floor)
+                    else threshold_floor
                 )
             except Exception:
-                sizing_conf = max(CONF_MARGINAL_MIN, threshold_floor)
+                sizing_conf = threshold_floor
         planning_conf = max(threshold_floor, sizing_conf)
 
         snapshot = dict(self._signal_engine.last_snapshot.get(self._market) or {})

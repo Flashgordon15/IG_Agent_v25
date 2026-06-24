@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IG v31 Sandbox Cockpit</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #050508;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+    #deck {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      cursor: crosshair;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="deck" aria-label="IG Agent v31 Sandbox Command Deck"></canvas>
+  <script>
+(function () {
+  "use strict";
+
+  /* ── Constants (frozen) ───────────────────────────────────────────── */
+  const WS_URL = "ws://127.0.0.1:8081/state/stream";
+  const FPS = 60;
+  const FRAME_MS = 1000 / FPS;
+  const FRAME_BYTES = 256;
+  const MAGIC = 0x31544643; /* 'CFT1' little-endian */
+  const KILL_BYTE = 0xff;
+  const EQUITY_LEN = 512;
+  const INV_ROWS = 8;
+  const LED_ROWS = 12;
+  const LED_COLS = 8;
+
+  const COL_BG = "#050508";
+  const COL_PANEL = "#0c0e14";
+  const COL_BORDER = "#1e2433";
+  const COL_TEXT = "#c8d0e0";
+  const COL_DIM = "#5a6478";
+  const COL_ACCENT = "#34d399";
+  const COL_WARN = "#fbbf24";
+  const COL_DANGER = "#f43f5e";
+
+  /* Lifecycle palette: 0=W 1=L 2=O 3=S 4=T */
+  const LIFE_COLORS = [
+    "#64748b", /* W wait */
+    "#22c55e", /* L live */
+    "#f59e0b", /* O open */
+    "#3b82f6", /* S scan */
+    "#ef4444", /* T trip */
+  ];
+
+  /* ── Pre-allocated memory (zero alloc in rAF) ───────────────────── */
+  const canvas = document.getElementById("deck");
+  const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
+
+  const decodeBuf = new ArrayBuffer(FRAME_BYTES);
+  const decodeView = new DataView(decodeBuf);
+  const killPacket = new Uint8Array([KILL_BYTE]);
+
+  const nicLatencyUs = new Uint32Array(1);
+  const temps = new Uint8Array(4); /* cpu, gpu, nic, ambient */
+  const linkFlags = new Uint8Array(1);
+  const sessionEquity = new Float32Array(1);
+  const dailyPnl = new Float32Array(1);
+  const ticksCached = new Uint32Array(1);
+  const lifecycle = new Uint8Array(LED_ROWS * LED_COLS);
+  const equityCurve = new Float32Array(EQUITY_LEN);
+  let equityHead = 0;
+  let equityCount = 0;
+
+  const invEpic = new Array(INV_ROWS);
+  const invDir = new Array(INV_ROWS);
+  const invSize = new Float32Array(INV_ROWS);
+  const invPnl = new Float32Array(INV_ROWS);
+
+  const ledEpic = new Array(INV_ROWS);
+  const ledResult = new Array(INV_ROWS);
+  const ledPnl = new Float32Array(INV_ROWS);
+
+  for (let i = 0; i < INV_ROWS; i++) {
+    invEpic[i] = "";
+    invDir[i] = "";
+    ledEpic[i] = "";
+    ledResult[i] = "";
+  }
+
+  const connState = { ws: 0, lastFrameMs: 0, frames: 0, err: "" };
+  let ws = null;
+  let reconnectTimer = 0;
+  let lastDrawMs = 0;
+  let killFlashUntil = 0;
+
+  const panelRects = [
+    { x: 0, y: 0, w: 0, h: 0, id: 0 },
+    { x: 0, y: 0, w: 0, h: 0, id: 1 },
+    { x: 0, y: 0, w: 0, h: 0, id: 2 },
+    { x: 0, y: 0, w: 0, h: 0, id: 3 },
+    { x: 0, y: 0, w: 0, h: 0, id: 4 },
+  ];
+
+  const killBtn = { x: 0, y: 0, w: 0, h: 0 };
+
+  /* String scratch (written only on WS ingest, never in rAF) */
+  const strScratch = new Array(32);
+  for (let s = 0; s < 32; s++) strScratch[s] = "";
+
+  /* ── Layout ─────────────────────────────────────────────────────── */
+  function layoutPanels() {
+    const dpr = window.devicePixelRatio || 1;
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    canvas.width = Math.floor(w * dpr);
+    canvas.height = Math.floor(h * dpr);
+    canvas.style.width = w + "px";
+    canvas.style.height = h + "px";
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    const pad = 8;
+    const gap = 6;
+    const topH = Math.floor((h - pad * 2 - gap * 2) * 0.42);
+    const botH = h - pad * 2 - gap - topH;
+    const leftW = Math.floor((w - pad * 2 - gap * 2) * 0.34);
+    const midW = Math.floor((w - pad * 2 - gap * 2) * 0.33);
+    const rightW = w - pad * 2 - gap * 2 - leftW - midW;
+
+    panelRects[0].x = pad;
+    panelRects[0].y = pad;
+    panelRects[0].w = leftW;
+    panelRects[0].h = topH;
+
+    panelRects[1].x = pad + leftW + gap;
+    panelRects[1].y = pad;
+    panelRects[1].w = midW;
+    panelRects[1].h = topH;
+
+    panelRects[2].x = pad + leftW + gap + midW + gap;
+    panelRects[2].y = pad;
+    panelRects[2].w = rightW;
+    panelRects[2].h = topH;
+
+    panelRects[3].x = pad;
+    panelRects[3].y = pad + topH + gap;
+    panelRects[3].w = Math.floor((w - pad * 2 - gap) * 0.72);
+    panelRects[3].h = botH;
+
+    panelRects[4].x = pad + panelRects[3].w + gap;
+    panelRects[4].y = pad + topH + gap;
+    panelRects[4].w = w - pad * 2 - gap - panelRects[3].w;
+    panelRects[4].h = botH;
+
+    killBtn.x = panelRects[4].x + 12;
+    killBtn.y = panelRects[4].y + panelRects[4].h - 56;
+    killBtn.w = panelRects[4].w - 24;
+    killBtn.h = 44;
+  }
+
+  /* ── Binary decode (fixed 256-byte frame) ───────────────────────── */
+  function readAscii(view, offset, len, slot) {
+    let out = "";
+    for (let i = 0; i < len; i++) {
+      const c = view.getUint8(offset + i);
+      if (c === 0) break;
+      out += String.fromCharCode(c);
+    }
+    strScratch[slot] = out;
+    return strScratch[slot];
+  }
+
+  function ingestBinary(buffer) {
+    if (!buffer || buffer.byteLength < 64) return;
+    const src = buffer.byteLength >= FRAME_BYTES ? buffer : decodeBuf;
+    if (src !== decodeBuf) {
+      new Uint8Array(decodeBuf).set(new Uint8Array(buffer, 0, Math.min(buffer.byteLength, FRAME_BYTES)));
+    }
+    const v = decodeView;
+    if (v.getUint32(0, true) !== MAGIC && buffer.byteLength < 32) return;
+
+  if (v.getUint32(0, true) === MAGIC) {
+      nicLatencyUs[0] = v.getUint32(8, true);
+      temps[0] = v.getUint8(12);
+      temps[1] = v.getUint8(13);
+      temps[2] = v.getUint8(14);
+      temps[3] = v.getUint8(15);
+      linkFlags[0] = v.getUint8(16);
+      sessionEquity[0] = v.getFloat32(20, true);
+      dailyPnl[0] = v.getFloat32(24, true);
+      ticksCached[0] = v.getUint32(28, true);
+      let li = 0;
+      for (let r = 0; r < LED_ROWS; r++) {
+        for (let c = 0; c < LED_COLS; c++) {
+          lifecycle[li++] = v.getUint8(32 + r * LED_COLS + c) % 5;
+        }
+      }
+      let off = 128;
+      for (let i = 0; i < INV_ROWS; i++) {
+        invEpic[i] = readAscii(v, off, 16, i);
+        invDir[i] = readAscii(v, off + 16, 4, i + 8);
+        invSize[i] = v.getFloat32(off + 20, true);
+        invPnl[i] = v.getFloat32(off + 24, true);
+        off += 28;
+      }
+      off = 128 + INV_ROWS * 28;
+      for (let j = 0; j < INV_ROWS; j++) {
+        ledEpic[j] = readAscii(v, off, 16, j + 16);
+        ledResult[j] = readAscii(v, off + 16, 6, j + 24);
+        ledPnl[j] = v.getFloat32(off + 22, true);
+        off += 28;
+      }
+    }
+
+    const eq = sessionEquity[0];
+    if (Number.isFinite(eq)) {
+      equityCurve[equityHead] = eq;
+      equityHead = (equityHead + 1) % EQUITY_LEN;
+      if (equityCount < EQUITY_LEN) equityCount++;
+    }
+    connState.lastFrameMs = performance.now();
+    connState.frames++;
+  }
+
+  /* JSON → pre-allocated buffers (ingest only) */
+  function ingestJson(text) {
+    let j;
+    try { j = JSON.parse(text); } catch (e) { return; }
+    if (!j || typeof j !== "object") return;
+
+    const metrics = j.metrics || j.boot_metrics || {};
+    nicLatencyUs[0] = (metrics.lookup_ns || metrics.e2e_latency_ns || 0) / 1000 >>> 0;
+    temps[0] = 42;
+    temps[1] = 38;
+    temps[2] = 40;
+    temps[3] = 36;
+    linkFlags[0] = (connState.ws ? 1 : 0) | (j.trading_healthy ? 2 : 0) | (j.quotes_fresh ? 4 : 0);
+
+    sessionEquity[0] = Number(j.balance_gbp || j.daily_pnl_gbp || 0);
+    dailyPnl[0] = Number(j.daily_pnl_gbp || j.realized_daily_pnl_gbp || 0);
+    ticksCached[0] = Number(metrics.ticks_cached || j.ticks_cached || 0) >>> 0;
+
+    const stage = String((j.boot_metrics && j.boot_metrics.stage) || j.system_state || "W");
+    const code = stage === "ready" ? 1 : stage === "g4" ? 2 : stage === "g5" ? 3 : 0;
+    for (let i = 0; i < lifecycle.length; i++) lifecycle[i] = code;
+
+    const positions = j.positions || [];
+    for (let i = 0; i < INV_ROWS; i++) {
+      const p = positions[i];
+      if (!p) {
+        invEpic[i] = "";
+        invDir[i] = "";
+        invSize[i] = 0;
+        invPnl[i] = 0;
+        continue;
+      }
+      invEpic[i] = String(p.epic || p.market || "").slice(0, 16);
+      invDir[i] = String(p.direction || p.side || "").slice(0, 4);
+      invSize[i] = Number(p.size || 0);
+      invPnl[i] = Number(p.unrealized_pnl_gbp || p.pnl_gbp || 0);
+    }
+
+    const closed = j.closed_trades || j.recent_trades || [];
+    for (let k = 0; k < INV_ROWS; k++) {
+      const t = closed[k];
+      if (!t) {
+        ledEpic[k] = "";
+        ledResult[k] = "";
+        ledPnl[k] = 0;
+        continue;
+      }
+      ledEpic[k] = String(t.epic || "").slice(0, 16);
+      ledResult[k] = String(t.result || t.status || "").slice(0, 6);
+      ledPnl[k] = Number(t.pnl_gbp || t.net_pnl_gbp || 0);
+    }
+
+    const eq = sessionEquity[0] + dailyPnl[0];
+    sessionEquity[0] = eq;
+    equityCurve[equityHead] = eq;
+    equityHead = (equityHead + 1) % EQUITY_LEN;
+    if (equityCount < EQUITY_LEN) equityCount++;
+    connState.lastFrameMs = performance.now();
+    connState.frames++;
+  }
+
+  /* ── WebSocket ──────────────────────────────────────────────────── */
+  function connectWs() {
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+    connState.err = "";
+    try {
+      ws = new WebSocket(WS_URL);
+    } catch (e) {
+      connState.err = "WS ctor fail";
+      scheduleReconnect();
+      return;
+    }
+    ws.binaryType = "arraybuffer";
+    ws.onopen = function () {
+      connState.ws = 1;
+      connState.err = "";
+    };
+    ws.onclose = function () {
+      connState.ws = 0;
+      scheduleReconnect();
+    };
+    ws.onerror = function () {
+      connState.err = "WS error";
+    };
+    ws.onmessage = function (ev) {
+      if (ev.data instanceof ArrayBuffer) {
+        ingestBinary(ev.data);
+        return;
+      }
+      if (typeof ev.data === "string") {
+        ingestJson(ev.data);
+      }
+    };
+  }
+
+  function scheduleReconnect() {
+    if (reconnectTimer) return;
+    reconnectTimer = window.setTimeout(function () {
+      reconnectTimer = 0;
+      connectWs();
+    }, 2000);
+  }
+
+  function sendKill() {
+    killFlashUntil = performance.now() + 400;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try { ws.send(killPacket.buffer); } catch (e) { /* ignore */ }
+    }
+  }
+
+  /* ── Draw helpers (no allocations) ─────────────────────────────── */
+  function drawPanelFrame(p, title) {
+    ctx.fillStyle = COL_PANEL;
+    ctx.fillRect(p.x, p.y, p.w, p.h);
+    ctx.strokeStyle = COL_BORDER;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(p.x + 0.5, p.y + 0.5, p.w - 1, p.h - 1);
+    ctx.fillStyle = COL_DIM;
+    ctx.font = "10px ui-monospace, monospace";
+    ctx.fillText(title, p.x + 10, p.y + 16);
+  }
+
+  function drawPanel1(p) {
+    drawPanelFrame(p, "PANEL 1 · NIC / THERMAL / LINKS");
+    ctx.fillStyle = COL_TEXT;
+    ctx.font = "12px ui-monospace, monospace";
+    let y = p.y + 36;
+    const latMs = (nicLatencyUs[0] / 1000).toFixed(3);
+    ctx.fillText("NIC latency: " + latMs + " ms", p.x + 10, y); y += 18;
+    ctx.fillText(
+      "TEMP cpu=" + temps[0] + "C gpu=" + temps[1] + "C nic=" + temps[2] + "C amb=" + temps[3] + "C",
+      p.x + 10, y
+    ); y += 18;
+    const lf = linkFlags[0];
+    ctx.fillText(
+      "LINK ws=" + ((lf & 1) ? "UP" : "DN") +
+      " trade=" + ((lf & 2) ? "OK" : "--") +
+      " quotes=" + ((lf & 4) ? "OK" : "--"),
+      p.x + 10, y
+    ); y += 18;
+    ctx.fillStyle = connState.ws ? COL_ACCENT : COL_DANGER;
+    ctx.fillText(
+      "STREAM " + WS_URL + "  frames=" + connState.frames +
+      (connState.err ? "  err=" + connState.err : ""),
+      p.x + 10, y
+    ); y += 18;
+    ctx.fillStyle = COL_DIM;
+    ctx.fillText("ticks_cached=" + ticksCached[0], p.x + 10, y);
+  }
+
+  function drawPanel2(p) {
+    drawPanelFrame(p, "PANEL 2 · ENGINE LIFECYCLE (0=W 1=L 2=O 3=S 4=T)");
+    const cell = Math.min(
+      Math.floor((p.w - 20) / LED_COLS),
+      Math.floor((p.h - 36) / LED_ROWS)
+    );
+    const gridW = cell * LED_COLS;
+    const ox = p.x + Math.floor((p.w - gridW) / 2);
+    const oy = p.y + 28;
+    let idx = 0;
+    for (let r = 0; r < LED_ROWS; r++) {
+      for (let c = 0; c < LED_COLS; c++) {
+        const code = lifecycle[idx++] || 0;
+        ctx.fillStyle = LIFE_COLORS[code] || LIFE_COLORS[0];
+        ctx.fillRect(ox + c * cell, oy + r * cell, cell - 1, cell - 1);
+      }
+    }
+  }
+
+  function drawPanel3(p) {
+    drawPanelFrame(p, "PANEL 3 · INVENTORY + LEDGER");
+    ctx.font = "11px ui-monospace, monospace";
+    let y = p.y + 32;
+    ctx.fillStyle = COL_ACCENT;
+    ctx.fillText("OPEN", p.x + 10, y);
+    y += 14;
+    for (let i = 0; i < INV_ROWS; i++) {
+      if (!invEpic[i]) continue;
+      ctx.fillStyle = COL_TEXT;
+      ctx.fillText(
+        invEpic[i] + "  " + invDir[i] + "  sz=" + invSize[i].toFixed(2) +
+        "  pnl=" + invPnl[i].toFixed(2),
+        p.x + 10, y
+      );
+      y += 13;
+    }
+    y += 6;
+    ctx.fillStyle = COL_WARN;
+    ctx.fillText("CLOSED", p.x + 10, y);
+    y += 14;
+    for (let j = 0; j < INV_ROWS; j++) {
+      if (!ledEpic[j]) continue;
+      ctx.fillStyle = ledPnl[j] >= 0 ? COL_ACCENT : COL_DANGER;
+      ctx.fillText(
+        ledEpic[j] + "  " + ledResult[j] + "  " + ledPnl[j].toFixed(2),
+        p.x + 10, y
+      );
+      y += 13;
+    }
+  }
+
+  function drawPanel4(p) {
+    drawPanelFrame(p, "PANEL 4 · SESSION EQUITY VECTOR");
+    const padX = 12;
+    const padY = 28;
+    const w = p.w - padX * 2;
+    const h = p.h - padY - 12;
+    const x0 = p.x + padX;
+    const y0 = p.y + padY;
+
+    ctx.strokeStyle = COL_BORDER;
+    ctx.beginPath();
+    ctx.moveTo(x0, y0);
+    ctx.lineTo(x0, y0 + h);
+    ctx.lineTo(x0 + w, y0 + h);
+    ctx.stroke();
+
+    if (equityCount < 2) {
+      ctx.fillStyle = COL_DIM;
+      ctx.fillText("Awaiting equity samples…", x0 + 8, y0 + 24);
+      return;
+    }
+
+    let minV = equityCurve[0];
+    let maxV = equityCurve[0];
+  for (let i = 0; i < equityCount; i++) {
+      const idx = (equityHead - equityCount + i + EQUITY_LEN) % EQUITY_LEN;
+      const val = equityCurve[idx];
+      if (val < minV) minV = val;
+      if (val > maxV) maxV = val;
+    }
+    const span = maxV - minV || 1;
+
+    ctx.strokeStyle = COL_ACCENT;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (let n = 0; n < equityCount; n++) {
+      const idx = (equityHead - equityCount + n + EQUITY_LEN) % EQUITY_LEN;
+      const val = equityCurve[idx];
+      const px = x0 + (n / (equityCount - 1)) * w;
+      const py = y0 + h - ((val - minV) / span) * h;
+      if (n === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+
+    ctx.fillStyle = COL_TEXT;
+    ctx.font = "11px ui-monospace, monospace";
+    ctx.fillText(
+      "eq=" + sessionEquity[0].toFixed(2) + "  day=" + dailyPnl[0].toFixed(2),
+      x0 + 4, p.y + p.h - 8
+    );
+  }
+
+  function drawPanel5(p) {
+    drawPanelFrame(p, "PANEL 5 · COMMAND");
+    ctx.fillStyle = COL_TEXT;
+    ctx.font = "11px ui-monospace, monospace";
+    ctx.fillText("Raw pipe kill byte: 0xFF", p.x + 10, p.y + 36);
+
+    const flash = performance.now() < killFlashUntil;
+    ctx.fillStyle = flash ? "#7f1d1d" : "#450a0a";
+    ctx.fillRect(killBtn.x, killBtn.y, killBtn.w, killBtn.h);
+    ctx.strokeStyle = flash ? COL_DANGER : "#991b1b";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(killBtn.x + 0.5, killBtn.y + 0.5, killBtn.w - 1, killBtn.h - 1);
+    ctx.fillStyle = flash ? "#fecaca" : COL_DANGER;
+    ctx.font = "bold 13px ui-monospace, monospace";
+    ctx.fillText("[ EMERGENCY KILL ]", killBtn.x + 14, killBtn.y + 28);
+  }
+
+  function render(now) {
+    if (now - lastDrawMs < FRAME_MS) return;
+    lastDrawMs = now;
+
+    ctx.fillStyle = COL_BG;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    drawPanel1(panelRects[0]);
+    drawPanel2(panelRects[1]);
+    drawPanel3(panelRects[2]);
+    drawPanel4(panelRects[3]);
+    drawPanel5(panelRects[4]);
+
+    ctx.fillStyle = COL_DIM;
+    ctx.font = "9px ui-monospace, monospace";
+    ctx.fillText("v31 SANDBOX COCKPIT · 60 FPS canvas · " + FPS + "Hz", 10, window.innerHeight - 6);
+  }
+
+  function rafLoop(now) {
+    render(now);
+    requestAnimationFrame(rafLoop);
+  }
+
+  /* ── Input ──────────────────────────────────────────────────────── */
+  canvas.addEventListener("click", function (ev) {
+    const x = ev.clientX;
+    const y = ev.clientY;
+    if (
+      x >= killBtn.x && x <= killBtn.x + killBtn.w &&
+      y >= killBtn.y && y <= killBtn.y + killBtn.h
+    ) {
+      sendKill();
+    }
+  });
+
+  window.addEventListener("resize", layoutPanels);
+
+  /* ── Boot ───────────────────────────────────────────────────────── */
+  layoutPanels();
+  connectWs();
+  requestAnimationFrame(rafLoop);
+})();
+  </script>
+</body>
+</html>

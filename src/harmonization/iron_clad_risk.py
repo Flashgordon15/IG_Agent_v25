@@ -20,8 +20,38 @@ from system.guard.runtime_guard import log_guarded_exception
 
 MAX_ORDER_SIZE = 1.0
 V2_MAX_ORDER_SIZE = 4.0
-MANDATORY_STOP_POINTS = 10.0
-MANDATORY_LIMIT_POINTS = 20.0
+
+# Asset-class execution floors — indices vs commodities (daytime speed calibration).
+_INDEX_STOP_POINTS = 8.0
+_INDEX_LIMIT_POINTS = 12.0
+_COMMODITY_STOP_POINTS = 6.0
+_COMMODITY_LIMIT_POINTS = 10.0
+
+# Module defaults: index-class fallback when epic is unknown.
+MANDATORY_STOP_POINTS = _INDEX_STOP_POINTS
+MANDATORY_LIMIT_POINTS = _INDEX_LIMIT_POINTS
+
+_COMMODITY_EPIC_MARKERS = frozenset({"CFPGOLD", "CRUDE"})
+
+
+def mandatory_stop_points_for_epic(epic: str) -> float:
+    """Per-epic iron-clad stop floor — commodities tighter than indices."""
+    key = str(epic or "").strip().upper()
+    if key.startswith("CS.D.") and any(m in key for m in _COMMODITY_EPIC_MARKERS):
+        return _COMMODITY_STOP_POINTS
+    if key.startswith("IX.D."):
+        return _INDEX_STOP_POINTS
+    return MANDATORY_STOP_POINTS
+
+
+def mandatory_limit_points_for_epic(epic: str) -> float:
+    """Per-epic iron-clad limit floor — commodities tighter than indices."""
+    key = str(epic or "").strip().upper()
+    if key.startswith("CS.D.") and any(m in key for m in _COMMODITY_EPIC_MARKERS):
+        return _COMMODITY_LIMIT_POINTS
+    if key.startswith("IX.D."):
+        return _INDEX_LIMIT_POINTS
+    return MANDATORY_LIMIT_POINTS
 MAX_DAILY_DRAWDOWN_PCT = 0.015
 MAX_SLIPPAGE_POINTS = 1.5
 ENTRY_SPREAD_BUFFER_MIN = 1.5
@@ -143,7 +173,8 @@ class IronCladRiskEngine:
             return (
                 False,
                 f"IronClad: spread {spread:.2f}pts exceeds slip tolerance "
-                f"{slip_tol:.1f}pts (entry buffer; stop={MANDATORY_STOP_POINTS:.0f}pt)",
+                f"{slip_tol:.1f}pts (entry buffer; stop="
+                f"{mandatory_stop_points_for_epic(epic):.0f}pt)",
                 {},
             )
 
@@ -156,10 +187,12 @@ class IronCladRiskEngine:
                 {},
             )
 
-        stop = max(float(stop_distance), MANDATORY_STOP_POINTS)
-        limit = max(float(limit_distance or 0), MANDATORY_LIMIT_POINTS)
+        stop_floor = mandatory_stop_points_for_epic(epic)
+        limit_floor = mandatory_limit_points_for_epic(epic)
+        stop = max(float(stop_distance), stop_floor)
+        limit = max(float(limit_distance or 0), limit_floor)
         if limit < stop:
-            limit = MANDATORY_LIMIT_POINTS
+            limit = limit_floor
 
         breached, dd_detail = cls._evaluate_rolling_drawdown(rest_client)
         if breached:

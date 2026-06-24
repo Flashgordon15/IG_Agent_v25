@@ -49,8 +49,8 @@ def normalize_gate_execution_params(
     """
     from execution.epic_normalizer import normalize_night_matrix_epic
     from harmonization.iron_clad_risk import (
-        MANDATORY_LIMIT_POINTS,
-        MANDATORY_STOP_POINTS,
+        mandatory_limit_points_for_epic,
+        mandatory_stop_points_for_epic,
         MAX_ORDER_SIZE,
     )
 
@@ -79,12 +79,15 @@ def normalize_gate_execution_params(
         limit_points = 0.0
         risk_gbp = None
 
+    epic_key = str(raw.get("epic") or "").strip()
+    stop_floor = mandatory_stop_points_for_epic(epic_key)
+    limit_floor = mandatory_limit_points_for_epic(epic_key)
     if actual_size <= 0:
         actual_size = min(1.0, MAX_ORDER_SIZE)
-    stop_points = max(float(stop_points), MANDATORY_STOP_POINTS)
+    stop_points = max(float(stop_points), stop_floor)
     limit_points = max(
-        float(limit_points) if limit_points > 0 else MANDATORY_LIMIT_POINTS,
-        MANDATORY_LIMIT_POINTS,
+        float(limit_points) if limit_points > 0 else limit_floor,
+        limit_floor,
         stop_points,
     )
 
@@ -130,8 +133,8 @@ def force_inject_gate_execution_params(
     Iron-clad floors: max 1 lot, 10pt stop, 20pt limit. Never returns None.
     """
     from harmonization.iron_clad_risk import (
-        MANDATORY_LIMIT_POINTS,
-        MANDATORY_STOP_POINTS,
+        mandatory_limit_points_for_epic,
+        mandatory_stop_points_for_epic,
         MAX_ORDER_SIZE,
     )
 
@@ -143,10 +146,12 @@ def force_inject_gate_execution_params(
         max(float(raw.get("actual_size") or raw.get("size") or size or 0.1), 0.01),
         MAX_ORDER_SIZE,
     )
-    stop = max(float(stop_points or raw.get("stop_points") or MANDATORY_STOP_POINTS), MANDATORY_STOP_POINTS)
+    stop_floor = mandatory_stop_points_for_epic(epic_key)
+    limit_floor = mandatory_limit_points_for_epic(epic_key)
+    stop = max(float(stop_points or raw.get("stop_points") or stop_floor), stop_floor)
     limit = max(
-        float(limit_points or raw.get("limit_points") or MANDATORY_LIMIT_POINTS),
-        MANDATORY_LIMIT_POINTS,
+        float(limit_points or raw.get("limit_points") or limit_floor),
+        limit_floor,
         stop,
     )
     merged: dict[str, Any] = {

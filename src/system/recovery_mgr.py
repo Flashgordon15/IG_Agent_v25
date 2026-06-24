@@ -201,6 +201,8 @@ class V2DisasterRecoveryManager:
         from harmonization.iron_clad_risk import (
             MANDATORY_LIMIT_POINTS,
             MANDATORY_STOP_POINTS,
+            mandatory_limit_points_for_epic,
+            mandatory_stop_points_for_epic,
         )
 
         local_deals: set[str] = set()
@@ -244,8 +246,8 @@ class V2DisasterRecoveryManager:
             gate = force_inject_gate_execution_params(
                 epic=epic,
                 size=min(size, 1.0),
-                stop_points=MANDATORY_STOP_POINTS,
-                limit_points=MANDATORY_LIMIT_POINTS,
+                stop_points=mandatory_stop_points_for_epic(epic),
+                limit_points=mandatory_limit_points_for_epic(epic),
             )
             stop_level = float(position.get("stopLevel") or 0)
             limit_level = float(position.get("limitLevel") or 0)

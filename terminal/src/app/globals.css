@@ -27,4 +27,16 @@
   .cq-mono {
     @apply font-mono tabular-nums;
   }
+  .cq-marquee {
+    animation: cq-marquee 40s linear infinite;
+  }
+}
+
+@keyframes cq-marquee {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(-50%);
+  }
 }

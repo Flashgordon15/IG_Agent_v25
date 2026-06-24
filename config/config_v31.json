@@ -1,0 +1,122 @@
+{
+  "$schema": "./config_schema.json",
+  "$extends": "config_v30.json",
+  "version": "31.0.0",
+  "app_version": "v31.0",
+  "_note": "v31 nimble scalping overlay — 5s eval, 45% ML floors, daytime asset-class stops (sandbox)",
+  "refresh_seconds": 5,
+  "signal_threshold": 45.0,
+  "confidence_floor": 45.0,
+  "session_validation": {
+    "confidence_floor_pct": 42.0
+  },
+  "protective_learning": {
+    "signal_threshold_floor": 45.0,
+    "fitness_min_floor": 45.0
+  },
+  "correlation_guard": {
+    "max_new_per_direction": 50
+  },
+  "dynamic_adaptation": {
+    "enabled": true,
+    "lookback_sec": 900,
+    "flat_atr_ratio_max": 0.55,
+    "flat_signal_floor": 38.0,
+    "flat_fitness_floor": 38.0,
+    "performance_min_trades": 8,
+    "pf_tighten_below": 1.0,
+    "pf_loosen_above": 1.6,
+    "starvation_sentinel": {
+      "enabled": true,
+      "idle_minutes": 60,
+      "decay_interval_minutes": 15,
+      "decay_step_pct": 2.5,
+      "hard_floor_pct": 35.0
+    }
+  },
+  "trailing_stop": {
+    "enabled": true,
+    "activation_distance_points": 1.5,
+    "trail_step_points": 0.5,
+    "force_break_even_at_points": 1.5,
+    "_note": "Micro-lock scalping: activate trail at +1.5pt MFE; step stop every 0.5pt; force BE+0.5pt at activation to protect limit targets"
+  },
+  "v31_active_assets": {
+    "epics": [
+      "IX.D.DOW.IFM.IP",
+      "IX.D.NASDAQ.IFM.IP",
+      "CS.D.CFPGOLD.CFP.IP"
+    ],
+    "note": "Daytime speed calibration — indices 8pt/12pt; gold 6pt/10pt (38% dynamic floor)"
+  },
+  "entry_protection": {
+    "premium_overnight": {
+      "epics": [
+        "CS.D.CFPGOLD.CFP.IP",
+        "CS.D.EURUSD.CFD.IP",
+        "IX.D.NIKKEI.IFM.IP",
+        "IX.D.DOW.IFM.IP",
+        "IX.D.NASDAQ.IFM.IP",
+        "CS.D.CRUDE.CFD.IP",
+        "IX.D.FTSE.IFM.IP",
+        "IX.D.DAX.IFM.IP"
+      ]
+    }
+  },
+  "instruments": {
+    "wall_street": {
+      "enabled": true,
+      "epic": "IX.D.DOW.IFM.IP",
+      "signal_threshold": 45.0,
+      "stop_distance_points": 8,
+      "limit_distance_points": 12,
+      "adaptive_min_risk_points": 6,
+      "adaptive_max_risk_points": 12,
+      "trading_session_whitelist": [
+        "london_morning",
+        "london_us_overlap",
+        "us_afternoon",
+        "late",
+        "asia_early"
+      ]
+    },
+    "nasdaq_100": {
+      "enabled": true,
+      "epic": "IX.D.NASDAQ.IFM.IP",
+      "signal_threshold": 45.0,
+      "stop_distance_points": 8,
+      "limit_distance_points": 12,
+      "adaptive_min_risk_points": 6,
+      "adaptive_max_risk_points": 12,
+      "ig_point_value_gbp": 14.94,
+      "trade_size": 0.25,
+      "execution_priority": 72,
+      "trading_session_whitelist": [
+        "london_morning",
+        "london_us_overlap",
+        "us_afternoon",
+        "late",
+        "asia_early"
+      ]
+    },
+    "gold": {
+      "enabled": true,
+      "epic": "CS.D.CFPGOLD.CFP.IP",
+      "name": "Spot Gold",
+      "signal_threshold": 45.0,
+      "stop_distance_points": 6,
+      "limit_distance_points": 10,
+      "adaptive_min_risk_points": 5,
+      "adaptive_max_risk_points": 10,
+      "ig_point_value_gbp": 0.79,
+      "trade_size": 6.0,
+      "execution_priority": 100,
+      "trading_session_whitelist": [
+        "london_morning",
+        "london_us_overlap",
+        "us_afternoon",
+        "late"
+      ]
+    }
+  }
+}
