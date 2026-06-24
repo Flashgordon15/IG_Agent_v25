@@ -294,6 +294,19 @@ def reset_session(*, key: str | None = None) -> None:
     log_engine(f"correlation_guard: session reset key={_session_key}")
 
 
+def force_purge_session_correlation_counters(
+    *, reason: str = "operator_override"
+) -> dict[str, Any]:
+    """Thread-safe executive override — instant 0/5 session BUY/SELL caps."""
+    reset_session()
+    snap = snapshot()
+    log_engine(
+        f"correlation_guard: force purge ({reason}) "
+        f"buy={snap.get('buy')} sell={snap.get('sell')} max={snap.get('max')}"
+    )
+    return snap
+
+
 def _maybe_auto_reset() -> None:
     global _buy_count, _sell_count, _buy_risk_gbp, _sell_risk_gbp, _session_key
     today = _session_date_key()

@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# IG Apex Cockpit — Next.js Quantum Terminal (:3000). Finder-safe PATH + blocking UI boot.
+set -euo pipefail
+
+REPO_ROOT="/Users/chrisgordon/Projects/IG_Agent_v25"
+COCKPIT_UI_URL="http://127.0.0.1:3000"
+CURL="/usr/bin/curl"
+LOG_FILE="${REPO_ROOT}/src/data/logs/apex_cockpit_launch.log"
+
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+export HOME="${HOME:-$(/usr/bin/id -un 2>/dev/null || echo "$USER")}"
+
+mkdir -p "$(dirname "$LOG_FILE")"
+log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*" >>"$LOG_FILE"; }
+
+notify_fail() {
+  /usr/bin/osascript -e "display alert \"IG Apex Cockpit\" message \"$1\" as warning" 2>/dev/null || true
+}
+
+log "launch start COCKPIT_UI_URL=${COCKPIT_UI_URL} PATH=${PATH}"
+
+ui_ready() {
+  local code
+  code="$("$CURL" -s -o /dev/null -w '%{http_code}' "${COCKPIT_UI_URL}/" 2>/dev/null || echo 000)"
+  [[ "$code" == "200" ]]
+}
+
+if ! ui_ready; then
+  log "UI offline — starting background Next.js daemon"
+  if [[ -x "${REPO_ROOT}/scripts/start_ui_background.sh" ]]; then
+    if ! "${REPO_ROOT}/scripts/start_ui_background.sh" >>"$LOG_FILE" 2>&1; then
+      log "start_ui_background FAILED"
+      notify_fail "Next.js failed to start on port 3000. See apex_cockpit_launch.log"
+      exit 1
+    fi
+  else
+    notify_fail "Missing start_ui_background.sh in repo."
+    exit 1
+  fi
+fi
+
+ready=0
+for _i in $(seq 1 90); do
+  if ui_ready; then
+    ready=1
+    log "UI ready HTTP 200 (attempt ${_i})"
+    break
+  fi
+  sleep 1
+done
+
+if [[ "$ready" -ne 1 ]]; then
+  log "UI never became ready after 90s"
+  notify_fail "Quantum Terminal did not respond on port 3000 within 90 seconds."
+  exit 1
+fi
+
+# Prefer native pywebview shell (guaranteed URL bar target); fallback to browser app window.
+VENV_PY="${REPO_ROOT}/.venv/bin/python3"
+if [[ -x "$VENV_PY" && -f "${REPO_ROOT}/scripts/desktop_cockpit.py" ]]; then
+  log "opening pywebview desktop_cockpit.py"
+  export PYTHONPATH="${REPO_ROOT}/src"
+  export IG_COCKPIT_UI_URL="${COCKPIT_UI_URL}"
+  exec "$VENV_PY" "${REPO_ROOT}/scripts/desktop_cockpit.py" --no-preflight
+fi
+
+log "opening Chrome app window"
+if [[ -d "/Applications/Google Chrome.app" ]]; then
+  exec /usr/bin/open -na "Google Chrome" --args --new-window "${COCKPIT_UI_URL}/"
+elif [[ -d "/Applications/Safari.app" ]]; then
+  exec /usr/bin/open -a Safari "${COCKPIT_UI_URL}/"
+else
+  exec /usr/bin/open "${COCKPIT_UI_URL}/"
+fi

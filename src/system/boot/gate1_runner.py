@@ -152,9 +152,15 @@ class Gate1Runner:
             raise Gate1FatalError("emergency_stop.lock present", exit_code=self.EXIT_LOCK)
 
         desktop_fast_bind = os.environ.get("IG_APEX_DESKTOP", "").strip() == "1"
-        if desktop_fast_bind:
+        try:
+            from system.boot.non_blocking_bootstrap import non_blocking_boot_enabled
+
+            non_blocking_fast_bind = non_blocking_boot_enabled()
+        except Exception:
+            non_blocking_fast_bind = False
+        if desktop_fast_bind or non_blocking_fast_bind:
             log_engine(
-                f"Gate1: Apex desktop fast-bind — :{api_port} already owned by uvicorn; "
+                f"Gate1: fast-bind — :{api_port} already owned by uvicorn; "
                 "skipping port eviction probe"
             )
         else:

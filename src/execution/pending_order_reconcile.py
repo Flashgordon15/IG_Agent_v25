@@ -28,6 +28,12 @@ def _request_save() -> None:
         request_save()
     except Exception:
         pass
+    try:
+        from system.shutdown_cleanup import notify_position_state_change
+
+        notify_position_state_change(reason="pending_order")
+    except Exception:
+        pass
 
 
 DEFAULT_PENDING_TIMEOUT_SEC = 30.0

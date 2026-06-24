@@ -2,6 +2,8 @@
 # IG Agent v30 — live-fire target factory gatekeeper.
 #
 # Reconciles broker ledger vs £1,000 / 60% win-rate targets.
+# Milestone baseline: only trades with timestamp > 2026-06-23T09:00:00Z count
+# toward +£1,000 / >60% win rate. Historical ledger rows are discarded.
 # Exit 0 only when trading_ledger.json reports targets_met=true.
 #
 # Usage:
@@ -56,12 +58,16 @@ main() {
     tmp_out="$(mktemp "${TMPDIR:-/tmp}/target_factory.XXXXXX")"
 
     log_msg "start root=${ROOT}"
+    log_msg "milestone: cutoff=2026-06-23T09:00:00Z (trades array filter)"
     log_msg "audit: reconciliation read-only — no agent restart"
 
     (
         cd "$ROOT"
         export PYTHONPATH="${ROOT}/src"
-        "$py" scripts/target_factory.py "$@"
+        export TARGET_FACTORY_MILESTONE="${TARGET_FACTORY_MILESTONE_SINCE:-2026-06-23T09:00:00Z}"
+        "$py" scripts/target_factory.py \
+            --milestone-since "${TARGET_FACTORY_MILESTONE_SINCE:-2026-06-23T09:00:00Z}" \
+            "$@"
     ) 2>&1 | tee "$tmp_out"
     exit_code="${PIPESTATUS[0]}"
 

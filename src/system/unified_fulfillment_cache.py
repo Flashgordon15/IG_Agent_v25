@@ -18,7 +18,20 @@ from typing import Any
 
 _CACHE_LOCK = threading.RLock()
 _CACHE: dict[str, Any] = {}
+_UI_STRESS_FLAG: dict[str, Any] = {}
 _PERF_ROWS: deque[dict[str, Any]] = deque(maxlen=128)
+_PHANTOM_ROW_SOURCES = frozenset(
+    {
+        "sim",
+        "simulator",
+        "test",
+        "shadow_simulator",
+        "shadow_force_fill",
+        "bare_metal_phantom",
+        "dry_run",
+        "mock",
+    }
+)
 _IG_POSITIONS_SYNCED_AT: float = 0.0
 _IG_POSITIONS_SYNC_INTERVAL_SEC = 30.0
 _REFRESH_THREAD: threading.Thread | None = None
@@ -232,11 +245,20 @@ def record_gate_diagnostics(
                 "value": _sanitize_json(value),
             }
         )
+    from system.gating_reason import resolve_gating_reason
+
+    gating_reason = resolve_gating_reason(
+        epic=str(epic),
+        wait_reason=str(wait_reason or ""),
+        all_passed=bool(all_passed),
+        gates=compact,
+    )
     row = {
         "epic": epic,
         "updated_at": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
         "all_passed": bool(all_passed),
         "wait_reason": str(wait_reason or ""),
+        "gating_reason": gating_reason,
         "gates": compact,
         "tuning": dict(tuning or {}),
     }
@@ -271,10 +293,54 @@ def _format_gate_failure(name: str, value: Any) -> str:
 
 
 def get_gate_diagnostics_payload() -> dict[str, Any]:
+    from system.gating_reason import resolve_gating_reason
+
     with _CACHE_LOCK:
         by_epic = dict(_GATE_DIAG)
         last = dict(_LAST_GATE_DIAG)
+    for epic, row in by_epic.items():
+        if not row.get("gating_reason"):
+            row["gating_reason"] = resolve_gating_reason(
+                epic=str(epic),
+                wait_reason=str(row.get("wait_reason") or ""),
+                all_passed=bool(row.get("all_passed")),
+                gates=list(row.get("gates") or []),
+            )
+    if last and not last.get("gating_reason"):
+        last["gating_reason"] = resolve_gating_reason(
+            epic=str(last.get("epic") or ""),
+            wait_reason=str(last.get("wait_reason") or ""),
+            all_passed=bool(last.get("all_passed")),
+            gates=list(last.get("gates") or []),
+        )
     return {"by_epic": by_epic, "last": last}
+
+
+def _market_quotes_from_ring(ring_tel: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for row in ring_tel.get("quote_ring") or []:
+        if not isinstance(row, dict):
+            continue
+        epic = str(row.get("epic") or "")
+        if not epic:
+            continue
+        try:
+            bid = float(row.get("bid") or 0)
+            offer = float(row.get("offer") or 0)
+            mid = float(row.get("mid") or 0)
+        except (TypeError, ValueError):
+            bid = offer = mid = 0.0
+        if mid <= 0 and bid > 0 and offer > 0:
+            mid = (bid + offer) / 2.0
+        out[epic] = {
+            "epic": epic,
+            "bid": bid,
+            "offer": offer,
+            "mid": mid,
+            "last_price": mid,
+            "source": str(row.get("source") or "ring"),
+        }
+    return out
 
 
 def record_frontier_state(
@@ -478,15 +544,15 @@ def record_execution_performance_row(
     exit: float = 0.0,
     pnl_gbp: float = 0.0,
     status: str = "CLOSED",
+    source: str = "",
 ) -> None:
     """Thread B — append execution row (in-memory only, no disk)."""
-    try:
-        from system.agent_execution_mode import authentic_demo_broker_required
-
-        if authentic_demo_broker_required() and not str(deal_id or "").strip():
-            return
-    except Exception:
-        pass
+    src = str(source or "").strip().lower()
+    if src in _PHANTOM_ROW_SOURCES:
+        return
+    deal = str(deal_id or "").strip()
+    if not deal:
+        return
     ts = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
     row = {
         "epic": epic,
@@ -504,6 +570,7 @@ def record_execution_performance_row(
         "executed_at": ts,
         "closed_at": ts if str(status).upper() == "CLOSED" else "",
         "status": str(status).upper(),
+        "source": src or "ig_rest_positions_otc",
     }
     with _CACHE_LOCK:
         _PERF_ROWS.append(row)
@@ -517,6 +584,52 @@ def record_execution_performance_row(
         pass
 
 
+def _attach_ui_stress_render(cache: dict[str, Any]) -> None:
+    """Mirror active telemetry stress burst into fulfillment payload."""
+    global _UI_STRESS_FLAG
+    try:
+        from intelligence.telemetry_daemon import ui_stress_test_active, ui_stress_test_status
+
+        if ui_stress_test_active():
+            st = ui_stress_test_status()
+            _UI_STRESS_FLAG = {
+                "active": True,
+                "hz": float(st.get("hz") or 50.0),
+                "epic": str(st.get("epic") or ""),
+                "poll_ms": 20,
+            }
+            cache["ui_stress_render"] = dict(_UI_STRESS_FLAG)
+            return
+    except Exception:
+        pass
+    if _UI_STRESS_FLAG.get("active"):
+        cache["ui_stress_render"] = dict(_UI_STRESS_FLAG)
+    else:
+        cache.pop("ui_stress_render", None)
+
+
+def patch_fulfillment_stress_flag(
+    *,
+    active: bool,
+    hz: float = 50.0,
+    epic: str = "",
+) -> None:
+    """Expose UI stress mode to the Next.js terminal (20ms kinetic poll)."""
+    global _UI_STRESS_FLAG
+    with _CACHE_LOCK:
+        if active:
+            _UI_STRESS_FLAG = {
+                "active": True,
+                "hz": float(hz),
+                "epic": str(epic or ""),
+                "poll_ms": 20,
+            }
+            _CACHE["ui_stress_render"] = dict(_UI_STRESS_FLAG)
+        else:
+            _UI_STRESS_FLAG = {}
+            _CACHE.pop("ui_stress_render", None)
+
+
 def get_fulfillment_payload() -> dict[str, Any]:
     with _CACHE_LOCK:
         if _CACHE.get("mode") == "UNIFIED_FULFILLMENT":
@@ -524,16 +637,15 @@ def get_fulfillment_payload() -> dict[str, Any]:
             merged["performance_rows"] = list(_PERF_ROWS)
             if _PERF_ROWS:
                 merged["last_performance_row"] = _PERF_ROWS[-1]
-            merged["gate_diagnostics"] = {
-                "by_epic": dict(_GATE_DIAG),
-                "last": dict(_LAST_GATE_DIAG),
-            }
+            merged["gate_diagnostics"] = get_gate_diagnostics_payload()
             merged["alpha_frontier_tracker"] = get_frontier_tracker_payload()
             merged["pulse_serial"] = int(_PULSE_SERIAL)
             merged["updated_at"] = datetime.now(timezone.utc).isoformat(
                 timespec="milliseconds"
             )
             merged["server_mono_ms"] = int(time.monotonic() * 1000)
+            merged = _attach_live_market_quotes(merged)
+            _attach_ui_stress_render(merged)
             return merged
     snap = _build_fulfillment_snapshot()
     _write_pulse_snapshot(snap)
@@ -543,7 +655,36 @@ def get_fulfillment_payload() -> dict[str, Any]:
         publish_cockpit_shm(snap)
     except Exception:
         pass
+    _attach_ui_stress_render(snap)
     return snap
+
+
+def _attach_live_market_quotes(payload: dict[str, Any]) -> dict[str, Any]:
+    """Refresh quote ring + gate diagnostics — never return a quote-starved envelope."""
+    out = dict(payload)
+    try:
+        from system.ipc.ring_buffer import get_alpha_ring_buffer
+
+        ring_tel = get_alpha_ring_buffer().telemetry()
+        quotes = _market_quotes_from_ring(ring_tel)
+        if quotes:
+            out["market_quotes"] = quotes
+            out["market_quotes_list"] = [
+                {"epic": epic, **row} for epic, row in quotes.items()
+            ]
+        else:
+            out.setdefault("market_quotes", {})
+            out.setdefault("market_quotes_list", [])
+    except Exception:
+        out.setdefault("market_quotes", {})
+        out.setdefault("market_quotes_list", [])
+    try:
+        gate = out.get("gate_diagnostics")
+        if not isinstance(gate, dict):
+            out["gate_diagnostics"] = get_gate_diagnostics_payload()
+    except Exception:
+        out["gate_diagnostics"] = {"by_epic": {}, "last": {}}
+    return out
 
 
 def _ingestion_stage(feed: dict[str, Any]) -> dict[str, Any]:
@@ -677,6 +818,7 @@ def _build_fulfillment_snapshot() -> dict[str, Any]:
         "tuning_variables": tuning,
         "alpha_frontier_tracker": frontier,
         "gate_diagnostics": gate_payload,
+        "market_quotes": _market_quotes_from_ring(ring_tel),
         "memory_alignment": "TRUE SYNC" if bool(ring_tel.get("thread_aligned")) else "WARMING",
     }
 
@@ -811,6 +953,7 @@ def _refresh_loop() -> None:
                 _CACHE["performance_rows"] = perf
                 if perf:
                     _CACHE["last_performance_row"] = perf[-1]
+                _attach_ui_stress_render(_CACHE)
                 pulse = dict(_CACHE)
                 pulse["gate_diagnostics"] = gate_keep
             _write_pulse_snapshot(pulse)
@@ -892,6 +1035,37 @@ def force_cockpit_feed_heal(*, reason: str = "operator") -> dict[str, Any]:
         "write_seq_hint": "republished",
         "agent_pid": os.getpid(),
     }
+
+
+def heal_epic_execution_gateway(epic: str) -> bool:
+    """Clear stale overdue execution blocks from fulfillment gate diagnostics."""
+    key = str(epic or "").strip()
+    if not key:
+        return False
+    healed = False
+    with _CACHE_LOCK:
+        row = _GATE_DIAG.get(key)
+        if isinstance(row, dict):
+            wait = str(row.get("wait_reason") or "").lower()
+            if "overdue" in wait or "confirmation" in wait or "in progress" in wait:
+                patched = dict(row)
+                patched["wait_reason"] = ""
+                patched["accepting_ticks"] = True
+                patched["healed_at"] = datetime.now(timezone.utc).isoformat(
+                    timespec="milliseconds"
+                )
+                _GATE_DIAG[key] = patched
+                healed = True
+        frontier = _CACHE.get(key)
+        if isinstance(frontier, dict):
+            wait = str(frontier.get("wait_reason") or "").lower()
+            if "overdue" in wait or "confirmation" in wait:
+                patched = dict(frontier)
+                patched["wait_reason"] = ""
+                patched["accepting_ticks"] = True
+                _CACHE[key] = patched
+                healed = True
+    return healed
 
 
 def reset_fulfillment_cache_for_tests() -> None:

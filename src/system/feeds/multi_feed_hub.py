@@ -99,6 +99,9 @@ _EPIC_FINNHUB: dict[str, str] = {
     "IX.D.DOW.IFM.IP": "OANDA:US30_USD",
     "IX.D.NIKKEI.IFM.IP": "OANDA:JP225_USD",
     "CS.D.EURUSD.CFD.IP": "OANDA:EUR_USD",
+    "CS.D.CRUDE.CFD.IP": "OANDA:WTICO_USD",
+    "IX.D.FTSE.IFM.IP": "OANDA:UK100_GBP",
+    "IX.D.DAX.IFM.IP": "OANDA:DE30_EUR",
 }
 
 _EPIC_TWELVE_DATA: dict[str, str] = {
@@ -106,6 +109,9 @@ _EPIC_TWELVE_DATA: dict[str, str] = {
     "IX.D.DOW.IFM.IP": "DJI",
     "IX.D.NIKKEI.IFM.IP": "N225",
     "CS.D.EURUSD.CFD.IP": "EUR/USD",
+    "CS.D.CRUDE.CFD.IP": "WTI/USD",
+    "IX.D.FTSE.IFM.IP": "FTSE",
+    "IX.D.DAX.IFM.IP": "DAX",
 }
 
 _HUB_THREAD: threading.Thread | None = None

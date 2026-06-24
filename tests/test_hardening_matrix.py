@@ -61,13 +61,17 @@ class GateExecutionParamsTests(unittest.TestCase):
         self.assertEqual(normalized["limit_points"], 20.0)
         self.assertTrue(normalized.get("gate_sourced"))
 
-    def test_missing_stop_points_rejected(self) -> None:
-        bad = {
+    def test_missing_stop_points_gets_iron_clad_floors(self) -> None:
+        partial = {
             "gate_sourced": True,
             "actual_size": 1.0,
             "size": 1.0,
         }
-        self.assertIsNone(normalize_gate_execution_params(bad))
+        normalized = normalize_gate_execution_params(partial)
+        self.assertIsNotNone(normalized)
+        assert normalized is not None
+        self.assertEqual(normalized["stop_points"], 10.0)
+        self.assertEqual(normalized["limit_points"], 20.0)
 
 
 class StreamingMatrixFfillTests(unittest.TestCase):

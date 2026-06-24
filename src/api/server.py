@@ -357,6 +357,8 @@ def _cors_allow_origins() -> list[str]:
         "http://127.0.0.1:9090",
         "http://localhost:9191",
         "http://127.0.0.1:9191",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
     ]
     try:
         from system.node_profile import get_node_profile

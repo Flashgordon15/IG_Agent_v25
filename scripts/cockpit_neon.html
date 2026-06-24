@@ -22,7 +22,8 @@
     --kill-hover: #b22222;
     --font: "SF Mono", "Menlo", "Consolas", monospace;
   }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
+  .gate-open { color: #00f5d4; text-shadow: 0 0 10px rgba(0,245,212,.45); }
+  .gate-block { color: #ff2244; text-shadow: 0 0 10px rgba(255,34,68,.45); }
   html, body { height: 100%; background: var(--bg); color: var(--white); font-family: var(--font); }
   body { display: flex; flex-direction: column; padding: 14px 16px 10px; gap: 10px; overflow: hidden; }
   header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
@@ -109,7 +110,7 @@
 <div class="panel markets" style="min-height:100px;">
   <div class="panel-head">MARKET GATE STATUS (live assessment)</div>
   <table>
-    <thead><tr><th>Market</th><th>Zone</th><th>Dir</th><th>Gate status</th><th>Conf</th></tr></thead>
+    <thead><tr><th>Market</th><th>Zone</th><th>Dir</th><th>Gate reason</th><th>Conf</th></tr></thead>
     <tbody id="marketsBody"><tr><td colspan="5">loading gate diagnostics…</td></tr></tbody>
   </table>
 </div>
@@ -126,6 +127,13 @@
 
 <script>
   const STALL_SEC = 3;
+  window.__shmQueue = [];
+  window.__cockpitReady = false;
+
+  // Pre-ready stub: queue SHM payloads until pywebview binds the real handler.
+  window.updateFromShm = function(payload) {
+    window.__shmQueue.push(payload);
+  };
 
   function feedStalled(payload, v) {
     if (payload && payload.feed_guardian) {
@@ -176,15 +184,23 @@
       const row = byEpic[epic] || {};
       const zone = row.zone_label || "—";
       const zCls = zone === "WIN_ZONE" ? "zone-win" : (zone === "FAIL_ZONE" ? "zone-fail" : "zone-scan");
-      const wait = row.wait_reason || (row.all_passed ? "PASS" : "—");
+      const reason = row.gating_reason || row.wait_reason || (row.all_passed ? "[EXEC_ROUTE_OPEN]" : "—");
+      const rCls = reason === "[EXEC_ROUTE_OPEN]" ? "gate-open" : "gate-block";
       const conf = row.strategy && row.strategy.win_probability != null
         ? (Number(row.strategy.win_probability) * 100).toFixed(1) + "%"
         : "—";
-      return `<tr><td>${EPIC_LABEL[epic] || epic}</td><td class="${zCls}">${zone}</td><td>${row.direction || "—"}</td><td>${wait}</td><td>${conf}</td></tr>`;
+      return `<tr><td>${EPIC_LABEL[epic] || epic}</td><td class="${zCls}">${zone}</td><td>${row.direction || "—"}</td><td class="${rCls}">${reason}</td><td>${conf}</td></tr>`;
     }).join("");
   }
 
-  window.updateFromShm = function(payload) {
+  window.addEventListener("pywebviewready", function() {
+    window.__cockpitReady = true;
+    console.log("[STATUS] WebKit native API window bridge successfully bound.");
+
+    window.updateFromShm = function(data) {
+      if (!data) return;
+      const payload = data;
+      console.log("SHM Packet Received:", payload);
     const link = (payload && payload.link) || {};
     const state = link.state || (payload && payload.ok ? "LIVE" : "AGENT_OFFLINE");
     const hp = document.getElementById("healthPanel");
@@ -296,7 +312,16 @@
     const src = (payload.link && payload.link.state === "API_ONLY") || (payload.feed_guardian && payload.feed_guardian.force_api) ? "api+gate" : "shm+gate";
     document.getElementById("statusBar").textContent =
       `source=${src} · 500ms · valve=${valve} · markets=${gateCount} · rows=${(v.performance_rows||[]).length} · ${v.memory_alignment||"SYNC"}`;
-  };
+    };
+
+    window.__bootCockpitUi = function() {
+      while (window.__shmQueue.length) {
+        const payload = window.__shmQueue.shift();
+        if (payload) window.updateFromShm(payload);
+      }
+    };
+    window.__bootCockpitUi();
+  });
 
   document.getElementById("killBtn").onclick = () => {
     if (window.pywebview && window.pywebview.api) window.pywebview.api.emergency_stop();

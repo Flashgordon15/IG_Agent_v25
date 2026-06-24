@@ -19,6 +19,7 @@ from system.engine_log import log_engine
 from system.guard.runtime_guard import log_guarded_exception
 
 MAX_ORDER_SIZE = 1.0
+V2_MAX_ORDER_SIZE = 4.0
 MANDATORY_STOP_POINTS = 10.0
 MANDATORY_LIMIT_POINTS = 20.0
 MAX_DAILY_DRAWDOWN_PCT = 0.015
@@ -51,6 +52,18 @@ class IronCladRiskEngine:
     _tripped: bool = False
 
     @staticmethod
+    def effective_max_order_size() -> float:
+        try:
+            from platform_v2 import platform_v2_enabled
+            from platform_v2.compound_profit_escalation import v2_max_order_size
+
+            if platform_v2_enabled():
+                return float(v2_max_order_size())
+        except Exception as exc:
+            log_guarded_exception("iron_clad_v2_size", exc)
+        return MAX_ORDER_SIZE
+
+    @staticmethod
     def entry_spread_tolerance_points(
         epic: str,
         *,
@@ -59,6 +72,23 @@ class IronCladRiskEngine:
         offer: float = 0.0,
     ) -> float:
         """Volatility-adjusted entry spread buffer — stop distance unchanged."""
+        try:
+            from platform_v2 import platform_v2_enabled
+
+            if platform_v2_enabled():
+                from platform_v2.adaptive_volatility_scalping import dynamic_slip_tolerance
+
+                spread = abs(float(offer) - float(bid)) if bid and offer else 0.0
+                gateway = dynamic_slip_tolerance(
+                    epic=str(epic or ""),
+                    atr_live=float(atr or 0),
+                    bid=float(bid),
+                    offer=float(offer),
+                    spread=spread,
+                )
+                return float(gateway.slip_tolerance)
+        except Exception as exc:
+            log_guarded_exception("iron_clad_v2_slip", exc)
         try:
             from intelligence.matrix_backtuner import DEFAULT_EPIC_STOP
 
@@ -118,10 +148,11 @@ class IronCladRiskEngine:
             )
 
         lot = float(size)
-        if lot <= 0 or lot > MAX_ORDER_SIZE:
+        max_lot = cls.effective_max_order_size()
+        if lot <= 0 or lot > max_lot:
             return (
                 False,
-                f"IronClad: size {lot:.4f} outside (0, {MAX_ORDER_SIZE:.1f}]",
+                f"IronClad: size {lot:.4f} outside (0, {max_lot:.1f}]",
                 {},
             )
 
@@ -137,7 +168,7 @@ class IronCladRiskEngine:
 
         mid = (float(bid) + float(offer)) / 2.0
         return True, "ok", {
-            "size": min(lot, MAX_ORDER_SIZE),
+            "size": min(lot, max_lot),
             "stop_distance": stop,
             "limit_distance": limit,
             "spread_points": spread,

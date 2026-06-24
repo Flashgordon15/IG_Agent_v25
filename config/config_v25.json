@@ -174,7 +174,7 @@
       ]
     },
     "us_oil": {
-      "enabled": false,
+      "enabled": true,
       "execution_priority": 60,
       "epic": "CS.D.CRUDE.CFD.IP",
       "name": "US Oil WTI",
@@ -241,8 +241,8 @@
       ]
     },
     "germany_40": {
-      "enabled": false,
-      "_note": "Disabled: IG DEMO Lightstreamer rejects IX.D.DAX.IFM.IP \u2014 verify epic on account before enabling",
+      "enabled": true,
+      "_note": "DAX 40 cash — IG epic IX.D.DAX.IFM.IP (REST poll / Yahoo reference on DEMO)",
       "name": "Germany 40",
       "epic": "IX.D.DAX.IFM.IP",
       "best_session": "08:00-16:30 BST",
@@ -261,6 +261,27 @@
       "risk_cap_gbp": 500,
       "stale_threshold_seconds": 15,
       "execution_priority": 65
+    },
+    "ftse_100": {
+      "enabled": true,
+      "execution_priority": 68,
+      "epic": "IX.D.FTSE.IFM.IP",
+      "name": "FTSE 100",
+      "signal_threshold": 55,
+      "max_spread_pts": 8,
+      "stop_distance_points": 50,
+      "adaptive_min_risk_points": 20,
+      "adaptive_max_risk_points": 120,
+      "min_atr_points": 15,
+      "ig_point_value_gbp": 1.0,
+      "trade_size": 1,
+      "risk_cap_gbp": 150,
+      "stale_threshold_seconds": 15,
+      "best_session": "08:00-16:30 BST",
+      "trading_session_whitelist": [
+        "london_morning",
+        "london_us_overlap"
+      ]
     },
     "nasdaq_100": {
       "enabled": true,

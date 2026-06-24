@@ -59,6 +59,20 @@ def start_post_ready_services(context: BootContext) -> None:
         log_engine("post-ready: harness fast-path — skipping non-essential daemons")
         return
 
+    try:
+        from system.guard.kernel_interceptor import install_kernel_interceptor
+
+        summary = install_kernel_interceptor()
+        log_engine(
+            "post-ready: KernelInterceptor armed "
+            f"(trading_wrapped={summary.get('trading_wrapped')} "
+            f"execution_wrapped={summary.get('execution_wrapped')})"
+        )
+    except Exception as exc:
+        log_engine(
+            f"post-ready: KernelInterceptor deferred — {type(exc).__name__}: {exc}"
+        )
+
     cfg = context.config
     rest = context.rest_client
 
@@ -82,9 +96,24 @@ def start_post_ready_services(context: BootContext) -> None:
             start_alpha_matrix_compiler_async,
         )
 
-        fast_bootstrap_alpha_matrix_if_empty(stride=48)
-        start_alpha_matrix_compiler_async()
-        log_engine("post-ready: AlphaMatrixPrebaker fast bootstrap + async compiler started")
+        def _alpha_matrix_bootstrap() -> None:
+            try:
+                fast_bootstrap_alpha_matrix_if_empty(stride=48)
+                start_alpha_matrix_compiler_async()
+                log_engine(
+                    "post-ready: AlphaMatrixPrebaker fast bootstrap + async compiler started"
+                )
+            except Exception as exc:
+                log_engine(
+                    f"post-ready: alpha matrix prebaker failed: {type(exc).__name__}: {exc}"
+                )
+
+        threading.Thread(
+            target=_alpha_matrix_bootstrap,
+            name="post-ready-alpha-matrix",
+            daemon=True,
+        ).start()
+        log_engine("post-ready: AlphaMatrixPrebaker bootstrap scheduled (background)")
     except Exception as e:
         log_engine(f"post-ready: alpha matrix prebaker skipped: {type(e).__name__}: {e}")
 

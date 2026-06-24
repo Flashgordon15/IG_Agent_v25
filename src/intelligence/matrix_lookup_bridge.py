@@ -128,6 +128,22 @@ def lookup_alpha_decision(
                 reason="matrix_not_ready",
             )
 
+        try:
+            from platform_v2 import platform_v2_enabled
+
+            if platform_v2_enabled():
+                from intelligence.matrix_prebaker import calibrate_live_tick_features
+
+                rsi, atr, momentum, _drift_meta = calibrate_live_tick_features(
+                    epic,
+                    rsi,
+                    atr,
+                    momentum,
+                    matrix=segment.matrix,
+                )
+        except Exception as exc:
+            log_guarded_exception("alpha_matrix_drift_cal", exc)
+
         rsi_q = quantize_rsi(rsi)
         atr_q = quantize_atr(atr, epic=epic)
         mom_q = quantize_momentum(momentum)

@@ -44,30 +44,29 @@ def normalize_gate_execution_params(
     """
     Immutable, float-cast gate sizing payload for order submission.
 
-    Returns None when required fields are missing or non-numeric.
+    Epic aliases are canonicalized before validation. Applies iron-clad floors
+    so night-matrix payloads never fail on legacy epic strings alone.
     """
-    if not raw or not isinstance(raw, dict):
-        return None
-    try:
-        from harmonization.iron_clad_risk import (
-            MANDATORY_LIMIT_POINTS,
-            MANDATORY_STOP_POINTS,
-            MAX_ORDER_SIZE,
-        )
+    from execution.epic_normalizer import normalize_night_matrix_epic
+    from harmonization.iron_clad_risk import (
+        MANDATORY_LIMIT_POINTS,
+        MANDATORY_STOP_POINTS,
+        MAX_ORDER_SIZE,
+    )
 
+    if not raw or not isinstance(raw, dict):
+        raw = {}
+    raw = dict(raw)
+    if raw.get("epic"):
+        raw["epic"] = normalize_night_matrix_epic(str(raw["epic"]))
+
+    try:
         actual_size = min(
             float(raw.get("actual_size") or raw.get("size") or 0),
             MAX_ORDER_SIZE,
         )
-        stop_points = max(
-            float(raw.get("stop_points") or 0),
-            MANDATORY_STOP_POINTS,
-        )
-        limit_points = max(
-            float(raw.get("limit_points") or 0),
-            MANDATORY_LIMIT_POINTS,
-            stop_points,
-        )
+        stop_points = float(raw.get("stop_points") or 0)
+        limit_points = float(raw.get("limit_points") or 0)
         risk_gbp_raw = raw.get("risk_gbp")
         risk_gbp = (
             float(risk_gbp_raw)
@@ -75,9 +74,20 @@ def normalize_gate_execution_params(
             else None
         )
     except (TypeError, ValueError):
-        return None
-    if actual_size <= 0 or stop_points <= 0:
-        return None
+        actual_size = 0.0
+        stop_points = 0.0
+        limit_points = 0.0
+        risk_gbp = None
+
+    if actual_size <= 0:
+        actual_size = min(1.0, MAX_ORDER_SIZE)
+    stop_points = max(float(stop_points), MANDATORY_STOP_POINTS)
+    limit_points = max(
+        float(limit_points) if limit_points > 0 else MANDATORY_LIMIT_POINTS,
+        MANDATORY_LIMIT_POINTS,
+        stop_points,
+    )
+
     out: dict[str, Any] = {
         "actual_size": actual_size,
         "stop_points": stop_points,
@@ -85,6 +95,8 @@ def normalize_gate_execution_params(
         "stop_source": raw.get("stop_source"),
         "gate_sourced": True,
     }
+    if raw.get("epic"):
+        out["epic"] = raw["epic"]
     if risk_gbp is not None:
         out["risk_gbp"] = risk_gbp
     for optional in ("risk_band", "risk_cap_gbp", "sizing_confidence"):
@@ -124,6 +136,9 @@ def force_inject_gate_execution_params(
     )
 
     raw = dict(gate_execution_params or {})
+    from execution.epic_normalizer import normalize_night_matrix_epic
+
+    epic_key = normalize_night_matrix_epic(str(epic or raw.get("epic") or ""))
     lot = min(
         max(float(raw.get("actual_size") or raw.get("size") or size or 0.1), 0.01),
         MAX_ORDER_SIZE,
@@ -143,7 +158,7 @@ def force_inject_gate_execution_params(
         "stop_points": stop,
         "limit_points": limit,
         "stop_source": str(raw.get("stop_source") or "force_inject_order_builder"),
-        "epic": str(epic or raw.get("epic") or ""),
+        "epic": epic_key,
     }
     normalized = normalize_gate_execution_params(merged)
     if normalized is not None:

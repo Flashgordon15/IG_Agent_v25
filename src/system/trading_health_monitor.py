@@ -21,9 +21,30 @@ def _check_once() -> None:
     try:
         from api.agent_control import is_trading_running
         from api.agent_health import refresh_health_cache
+        from system.system_state import get_system_state
 
         if not is_trading_running():
-            _UNHEALTHY_STREAK = 0
+            boot_ready = False
+            try:
+                boot_ready = bool(get_system_state().snapshot_model().ready)
+            except Exception:
+                pass
+            if boot_ready:
+                from system.trading_plane_readiness import (
+                    describe_trading_plane,
+                    repair_trading_plane_if_stuck,
+                )
+
+                plane = describe_trading_plane()
+                detail = ", ".join(str(b) for b in plane.get("blockers") or []) or "unknown"
+                _UNHEALTHY_STREAK += 1
+                log_engine(
+                    f"trading_health_monitor: PLANE DOWN streak={_UNHEALTHY_STREAK} "
+                    f"({detail})"
+                )
+                if _UNHEALTHY_STREAK in (1, 3, 5):
+                    repair_trading_plane_if_stuck(reason="health_monitor")
+            _UNHEALTHY_STREAK = max(_UNHEALTHY_STREAK, 0)
             return
 
         status = refresh_health_cache()

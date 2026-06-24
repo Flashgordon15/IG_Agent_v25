@@ -4,6 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export PYTHONPATH=src
+export IG_COCKPIT_UI_URL="${IG_COCKPIT_UI_URL:-http://localhost:3000}"
 
 # Preflight: ensure trading agent is up before opening GUI (skip with --no-preflight).
 if [[ "${1:-}" != "--no-preflight" ]]; then

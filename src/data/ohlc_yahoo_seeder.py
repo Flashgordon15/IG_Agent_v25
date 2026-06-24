@@ -38,6 +38,7 @@ EPIC_YAHOO_MAP: dict[str, tuple[str, str]] = {
     "CS.D.GBPUSD.CFD.IP": ("GBPUSD=X", "GBP/USD"),
     "CS.D.CRUDE.CFD.IP": ("CL=F", "US Oil WTI"),
     "IX.D.DOW.IFM.IP": ("^DJI", "Wall Street"),
+    "IX.D.FTSE.IFM.IP": ("^FTSE", "FTSE 100"),
     "IX.D.NASDAQ.IFM.IP": ("NQ=F", "US Tech 100"),
     "IX.D.DAX.IFM.IP": ("^GDAXI", "Germany 40"),
 }

@@ -312,11 +312,7 @@ class TradingLoop:
                 )
         execution: ExecutionResult | None = None
         block_reason: str | None = None
-        matrix_win_inject = bool(
-            shadow_force_fill
-            or (gate_execution_params or {}).get("matrix_win_injection")
-            or (gate_execution_params or {}).get("shadow_brain_injection")
-        )
+        matrix_win_inject = False
 
         if sig.signal in ("BUY", "SELL"):
             log_engine(
@@ -407,11 +403,11 @@ class TradingLoop:
         can_execute = (
             self.auto_trade
             and sig.signal in ("BUY", "SELL")
-            and (validation.allowed or shadow_force_fill or matrix_win_inject)
-            and (block_reason is None or shadow_force_fill or matrix_win_inject)
+            and validation.allowed
+            and block_reason is None
         )
 
-        if can_execute and self.execution_engine.mode.uses_broker() and not matrix_win_inject:
+        if can_execute and self.execution_engine.mode.uses_broker():
             from execution.live_executor import epic_has_pending_open
 
             if epic_has_pending_open(epic):
@@ -455,9 +451,7 @@ class TradingLoop:
             gate_sourced = gate_norm is not None and bool(
                 (gate_norm or {}).get("gate_sourced")
             )
-            if integrity_gate_sourced_required() and not gate_sourced and not (
-                shadow_force_fill or matrix_win_inject
-            ):
+            if integrity_gate_sourced_required() and not gate_sourced:
                 block_reason = (
                     "INTEGRITY_ABORT: gate_execution_params missing or invalid "
                     "(Profile B requires gate-sourced sizing)"
@@ -523,7 +517,7 @@ class TradingLoop:
                     trade_signal,
                     prevalidated=True,
                     gate_snapshot=gate_snapshot,
-                    shadow_force_fill=shadow_force_fill,
+                    shadow_force_fill=False,
                 )
             else:
                 execution = None

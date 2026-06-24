@@ -1599,6 +1599,16 @@ class IGRestClient:
                     currency_code=currency_code,
                 )
             )
+
+        from execution.ig_rest_traffic_governor import consume_positions_otc_transmit_slot
+
+        allowed, governor_reason = consume_positions_otc_transmit_slot(
+            epic=epic,
+            label="POST /v1/positions/otc — place_market_order",
+        )
+        if not allowed:
+            raise IGOrderError(governor_reason, status_code=429)
+
         payload: dict[str, Any] = {
             "epic": epic,
             "expiry": "-",
@@ -1689,6 +1699,16 @@ class IGRestClient:
                 currency_code=currency_code,
             )
         )
+
+        from execution.ig_rest_traffic_governor import consume_positions_otc_transmit_slot
+
+        allowed, governor_reason = consume_positions_otc_transmit_slot(
+            epic=epic,
+            label="POST /v1/positions/otc — atomic limit entry",
+        )
+        if not allowed:
+            raise IGOrderError(governor_reason, status_code=429)
+
         payload: dict[str, Any] = {
             "epic": epic,
             "expiry": "-",

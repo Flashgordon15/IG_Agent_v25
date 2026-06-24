@@ -44,16 +44,10 @@ def is_paused() -> bool:
 
 
 def is_trading_running() -> bool:
-    """True when the orchestrator loop is active and not API-paused."""
-    with _lock:
-        loop = _loop
-        paused = _paused
-    if loop is None or paused:
-        return False
-    try:
-        return bool(loop.is_running())
-    except Exception:
-        return False
+    """True when real TradingLoop threads are active (not API-paused)."""
+    from system.trading_plane_readiness import is_trading_plane_live
+
+    return is_trading_plane_live()
 
 
 def enrich_tick_runtime(tick: dict[str, Any]) -> dict[str, Any]:

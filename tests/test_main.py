@@ -16,6 +16,13 @@ from tests.test_config_validator import _full_config
 
 
 class MainStartupTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._singleton_patch = patch("main.enforce_absolute_socket_singleton")
+        self._singleton_patch.start()
+
+    def tearDown(self) -> None:
+        self._singleton_patch.stop()
+
     def test_lock_present_exits(self) -> None:
         with patch("main.emergency_stop_lock_present", return_value=True):
             code = main_mod.run_preflight()

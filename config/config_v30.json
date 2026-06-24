@@ -18,18 +18,61 @@
     "bypass_min_atr": true,
     "_note": "Armed when IG_SESSION_VALIDATION=1 (apex_launch.sh)"
   },
+  "allow_live_trading": true,
+  "demo_only_deployment": false,
+  "micro_lot_verification": {
+    "enabled": true,
+    "contract_size": 0.1,
+    "_note": "Phase 5 — all entries clamped to 0.1 micro-contracts; 10pt stop / 20pt limit unchanged"
+  },
   "apex_demo_execution": {
-    "default_agent_mode": "DEMO",
+    "default_agent_mode": "LIVE",
     "require_ig_credentials": true,
     "mock_feed_allowed": false,
     "allow_live_trading_locked": false,
-    "demo_only_deployment_locked": true,
-    "_note": "Gate 7 → LiveExecutor IG DEMO REST when IG_AGENT_MODE=DEMO"
+    "demo_only_deployment_locked": false,
+    "_note": "allow_live_trading_locked:true BLOCKS live per config_loader — keep false for production routing"
   },
   "signal_threshold": 52.5,
+  "exposure_expansion": {
+    "alpha_matrix_confidence_relief_pct": 15,
+    "epic": "CS.D.EURUSD.CFD.IP",
+    "_note": "15% lower alpha-matrix confidence / win-probability floor for EUR/USD recovery session"
+  },
   "protective_learning": {
     "signal_threshold_floor": 52.5,
     "fitness_min_floor": 52.5
+  },
+  "platform_v2": {
+    "enabled": true,
+    "adaptive_volatility": {
+      "atr_window": 30,
+      "breakout_slip_mult": 2.5,
+      "lull_slip_mult": 0.65,
+      "volume_surge_spread_mult": 1.8
+    },
+    "compound_escalation": {
+      "profit_step_gbp": 200,
+      "tiers": [1.0, 1.5, 2.5, 4.0],
+      "drawdown_reset_pct": 0.015,
+      "floor_size": 1.0,
+      "max_size": 4.0
+    },
+    "feature_drift": {
+      "sigma_threshold": 2.0,
+      "max_pull_fraction": 0.35
+    },
+    "_note": "Stage 2 — adaptive vol gateway, compound sizing, feature drift calibration"
+  },
+  "data_isolation_gasket": {
+    "enabled": true,
+    "poll_hz_per_epic": 1.0,
+    "_note": "V2TelemetryDaemon — exclusive 1Hz/epic Yahoo ingress; matrix + quote ring; offline replicator"
+  },
+  "learning_demo_mode": {
+    "enabled": true,
+    "require_gate_sourced_submit": false,
+    "_note": "v30 production workspace — epic normalize + live quotes; gate-sourced integrity relaxed"
   },
   "intelligence_layer": {
     "cockpit": {

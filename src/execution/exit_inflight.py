@@ -17,6 +17,12 @@ def _request_save() -> None:
         request_save()
     except Exception:
         pass
+    try:
+        from system.shutdown_cleanup import notify_position_state_change
+
+        notify_position_state_change(reason="exit_inflight")
+    except Exception:
+        pass
 
 DEFAULT_EXIT_TIMEOUT_SEC = 30.0
 _DUPLICATE_LOG_INTERVAL_SEC = 60.0

@@ -115,12 +115,29 @@ class TestSessionBlackout(unittest.TestCase):
         blocked, reason = check_session_blackout(GOLD, cfg, now=at)
         self.assertFalse(blocked, reason)
 
-    def test_weekday_2001_blocks(self) -> None:
+    def test_weekday_2001_night_matrix_allowed(self) -> None:
+        """Gold is night-matrix — legacy 20:00 weekday curfew deleted (v29.1)."""
         cfg = _cfg()
         at = _london_dt(2026, 6, 15, 20, 1)
         blocked, reason = check_session_blackout(GOLD, cfg, now=at)
+        self.assertFalse(blocked, reason)
+
+    def test_rollover_2200_blocks_gold(self) -> None:
+        cfg = _cfg(
+            entry_protection={
+                "premium_overnight": {
+                    "enabled": True,
+                    "lockdown_permanent": True,
+                    "epics": [GOLD],
+                    "rollover_lock_start": "21:58",
+                    "rollover_lock_end": "22:05",
+                }
+            }
+        )
+        at = _london_dt(2026, 6, 15, 22, 0)
+        blocked, reason = check_session_blackout(GOLD, cfg, now=at)
         self.assertTrue(blocked)
-        self.assertIn("blackout", reason.lower())
+        self.assertIn("rollover lock", reason.lower())
 
     def test_monday_1218_allowed(self) -> None:
         cfg = _cfg()
@@ -128,17 +145,17 @@ class TestSessionBlackout(unittest.TestCase):
         blocked, reason = check_session_blackout(GOLD, cfg, now=at, market="Gold")
         self.assertFalse(blocked, reason)
 
-    def test_friday_2005_blocked(self) -> None:
+    def test_friday_2005_night_matrix_allowed(self) -> None:
         cfg = _cfg()
         at = _london_dt(2026, 6, 19, 20, 5)
         blocked, _ = check_session_blackout(GOLD, cfg, now=at, market="Gold")
-        self.assertTrue(blocked)
+        self.assertFalse(blocked)
 
-    def test_monday_0559_blocked(self) -> None:
+    def test_monday_0559_night_matrix_allowed(self) -> None:
         cfg = _cfg()
         at = _london_dt(2026, 6, 15, 5, 59)
         blocked, _ = check_session_blackout(GOLD, cfg, now=at, market="Gold")
-        self.assertTrue(blocked)
+        self.assertFalse(blocked)
 
     def test_monday_0601_allowed(self) -> None:
         cfg = _cfg()

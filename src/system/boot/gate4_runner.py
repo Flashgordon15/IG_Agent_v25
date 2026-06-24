@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import threading
 from typing import Any
 
 from system.boot.context import BootContext
@@ -49,7 +48,45 @@ class Gate4Runner:
         if cfg is None or rest is None:
             raise RuntimeError("Gate 4 requires config and rest_client from prior gates")
 
+        try:
+            from system.recovery_mgr import run_v62_pre_loop_disaster_recovery
+
+            run_v62_pre_loop_disaster_recovery(
+                rest_client=rest,
+                config=cfg,
+                system_state=self._state,
+                boot_context=self._context,
+            )
+            log_engine("Gate4: V6.2 disaster recovery handshake complete (pre-loop)")
+        except Exception as exc:
+            log_engine(
+                f"Gate4: V6.2 disaster recovery skipped: {type(exc).__name__}: {exc}"
+            )
+
         from runtime.agent_bootstrap import build_market_orchestrator
+
+        try:
+            from runtime.market_orchestrator import preflight_v6_instant_bootstrap
+
+            preflight_v6_instant_bootstrap(config=cfg)
+            log_engine("Gate4: V6 instant preflight memory bound")
+        except Exception as exc:
+            log_engine(
+                f"Gate4: V6 instant preflight skipped: {type(exc).__name__}: {exc}"
+            )
+
+        try:
+            from intelligence.telemetry_daemon import start_v2_telemetry_daemon
+
+            start_v2_telemetry_daemon(config=cfg)
+            from intelligence.telemetry_daemon import maybe_arm_ui_stress_render_from_env
+
+            maybe_arm_ui_stress_render_from_env(delay_sec=10.0)
+            log_engine("Gate4: V4MicroReactor armed pre-orchestrator (memory-bound ingress)")
+        except Exception as exc:
+            log_engine(
+                f"Gate4: V4MicroReactor early arm skipped: {type(exc).__name__}: {exc}"
+            )
 
         orch = build_market_orchestrator(
             cfg,
@@ -89,7 +126,9 @@ class Gate4Runner:
         if not harness_mode:
             from apex.microkernel import schedule_array_warmup
 
-            schedule_array_warmup(rest, loops, cfg)
+            # V6: array warmup runs inside coroutine handoff after loop materialization.
+            if not getattr(orch, "_v6_skeleton_mode", False):
+                schedule_array_warmup(rest, loops, cfg)
         else:
             log_engine("Gate4: harness fast-path — skipping microkernel array warmup")
 
@@ -104,23 +143,10 @@ class Gate4Runner:
                     f"Gate4: harness orchestrator start error: {type(exc).__name__}: {exc}"
                 )
         else:
-            def _start_orchestrator() -> None:
-                try:
-                    orch.start()
-                    log_engine(
-                        f"Gate4: {total} dormant loop thread(s) online "
-                        "(paused_at_boot=True)"
-                    )
-                except Exception as exc:
-                    log_engine(
-                        f"Gate4: orchestrator start error: {type(exc).__name__}: {exc}"
-                    )
-
-            threading.Thread(
-                target=_start_orchestrator,
-                name="gate4-orchestrator-start",
-                daemon=True,
-            ).start()
+            log_engine(
+                f"Gate4: V6 skeleton registered — {total} loop(s); "
+                "materialization deferred to Gate5 blocking handoff"
+            )
 
         self._state.update_state(
             BootPhase.G4,

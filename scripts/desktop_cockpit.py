@@ -41,6 +41,9 @@ COCKPIT_SHM_NAME = "ig_agent_v30_shm"
 FULFILLMENT_URL = "http://127.0.0.1:8080/api/unified/fulfillment"
 HEALTH_URL = "http://127.0.0.1:8080/api/health"
 HEAL_URL = "http://127.0.0.1:8080/api/cockpit/heal"
+COCKPIT_UI_URL = os.environ.get("IG_COCKPIT_UI_URL", "http://127.0.0.1:3000").strip()
+if ":3000" not in COCKPIT_UI_URL:
+    COCKPIT_UI_URL = "http://127.0.0.1:3000"
 AGENT_START_SCRIPT = _ROOT / "scripts" / "start_agent_background.sh"
 FLIGHT_DECK_SCRIPT = _ROOT / "flight_deck_launch.sh"
 
@@ -332,8 +335,24 @@ def _shm_poll_loop() -> None:
     watch = FeedWatchState()
     force_api = False
     last_heal_result: dict[str, Any] | None = None
+    last_reconnect_seq = 0
 
     while _RUNNING.is_set():
+        try:
+            from system.ipc.ring_buffer import read_cockpit_shm_reconnect_generation
+
+            reconnect_seq = read_cockpit_shm_reconnect_generation()
+            if reconnect_seq and reconnect_seq != last_reconnect_seq:
+                last_reconnect_seq = reconnect_seq
+                watch = FeedWatchState()
+                force_api = False
+                print(
+                    f"[COCKPIT] SHM reconnect signal seq={reconnect_seq} — rebinding reader",
+                    flush=True,
+                )
+        except Exception:
+            pass
+
         view, err = _safe_read_shm()
         gate = _gate_snapshot()
         health = _fetch_health()
@@ -419,7 +438,17 @@ def _shm_poll_loop() -> None:
                 },
             }
 
-        js = f"window.updateFromShm({json.dumps(payload)});"
+        js = (
+            "(() => {"
+            f"const p = {json.dumps(payload)};"
+            "if (typeof window.updateFromShm === 'function') {"
+            "  window.updateFromShm(p);"
+            "} else {"
+            "  window.__shmQueue = window.__shmQueue || [];"
+            "  window.__shmQueue.push(p);"
+            "}"
+            "})();"
+        )
         try:
             win = _WINDOW or (webview.windows[0] if webview.windows else None)
             if win is not None:
@@ -431,6 +460,20 @@ def _shm_poll_loop() -> None:
 
 
 def _on_loaded() -> None:
+    def _prime_js_bridge() -> None:
+        import webview  # noqa: WPS433
+
+        time.sleep(0.35)
+        try:
+            win = _WINDOW or (webview.windows[0] if webview.windows else None)
+            if win is not None:
+                win.evaluate_js(
+                    "if (window.__bootCockpitUi) window.__bootCockpitUi();"
+                )
+        except Exception as exc:
+            print(f"[COCKPIT] js bridge prime: {exc}", flush=True)
+
+    threading.Thread(target=_prime_js_bridge, name="cockpit-js-prime", daemon=True).start()
     threading.Thread(target=_gate_poll_loop, name="cockpit-gate-poll", daemon=True).start()
     threading.Thread(target=_shm_poll_loop, name="cockpit-shm-poll", daemon=True).start()
 
@@ -509,16 +552,15 @@ def run_gui() -> int:
 
     global _WINDOW
     api = CockpitApi()
-    html = _load_html()
 
     _WINDOW = webview.create_window(
-        WINDOW_TITLE,
-        html=html,
-        width=1140,
-        height=780,
-        min_size=(920, 640),
-        background_color="#121214",
+        "Cockpit v30",
+        COCKPIT_UI_URL,
         js_api=api,
+        width=1280,
+        height=800,
+        min_size=(1024, 768),
+        background_color="#121214",
     )
     _WINDOW.events.loaded += _on_loaded
     try:

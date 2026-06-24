@@ -293,6 +293,22 @@ def build_market_orchestrator(
         raise ValueError("No enabled instruments in config")
 
     _harness_boot = boot_mode and os.environ.get("IG_TEST_HARNESS", "").strip() == "1"
+    _v6_instant_boot = boot_mode and defer_ohlc and not _harness_boot
+
+    if _v6_instant_boot:
+        from runtime.market_orchestrator import build_market_orchestrator_instant
+
+        orch = build_market_orchestrator_instant(
+            cfg,
+            rest_client=rest_client,
+            paused_at_boot=paused_at_boot,
+        )
+        log_engine(
+            f"market_orchestrator built: {len(orch.loops)} skeleton markets (V6 instant)"
+        )
+        return orch
+
+    _v5_async_boot = boot_mode and defer_ohlc and not _harness_boot
 
     store = LearningStore(str(cfg.learning_db))
     points_engine = PointsEngine(store)
@@ -313,6 +329,7 @@ def build_market_orchestrator(
         except Exception as e:
             log_engine(f"v29.1 upgrade skipped: {type(e).__name__}: {e}")
 
+    if not _harness_boot and not _v5_async_boot:
         try:
             from execution.portfolio_hooks import rehydrate_risk_guards_from_store
 
@@ -353,11 +370,51 @@ def build_market_orchestrator(
                 log_engine(format_report(coherence))
         except Exception as e:
             log_engine(f"gate coherence audit skipped: {type(e).__name__}: {e}")
+    elif _v5_async_boot:
+        log_engine(
+            "build_market_orchestrator: V5 async boot — gate coherence deferred to background"
+        )
+
+        def _deferred_gate_coherence() -> None:
+            try:
+                from execution.portfolio_hooks import rehydrate_risk_guards_from_store
+
+                rehydrate_risk_guards_from_store(store, cfg=cfg)
+            except Exception as e:
+                log_engine(f"phase_b risk rehydrate skipped: {type(e).__name__}: {e}")
+            try:
+                from system.gate_coherence import (
+                    audit_trading_readiness,
+                    format_report,
+                    write_coherence_snapshot,
+                )
+
+                pts_state = points_engine.get_state()
+                coherence = audit_trading_readiness(
+                    cfg, store, points_state=pts_state, repair_db=True, per_market=True
+                )
+                write_coherence_snapshot(coherence)
+                for issue in coherence.critical:
+                    log_engine(f"GATE COHERENCE CRITICAL [{issue.code}]: {issue.message}")
+                for issue in coherence.warnings:
+                    log_engine(f"GATE COHERENCE WARN [{issue.code}]: {issue.message}")
+                if coherence.warnings and not coherence.critical:
+                    log_engine(format_report(coherence))
+            except Exception as e:
+                log_engine(f"gate coherence audit skipped: {type(e).__name__}: {e}")
+
+        import threading
+
+        threading.Thread(
+            target=_deferred_gate_coherence,
+            name="v5-gate-coherence",
+            daemon=True,
+        ).start()
     else:
         log_engine("build_market_orchestrator: harness turbo — skipped upgrade/coherence")
 
     # Quick self-test — run deployed-fixes regression suite to catch stale code
-    if not boot_mode:
+    if not boot_mode and not _v5_async_boot:
         try:
             import subprocess
             import sys
@@ -448,12 +505,13 @@ def build_market_orchestrator(
     try:
         from system.ml_filter_overrides import load_filter_overrides
 
-        load_filter_overrides(force=True)
+        if not _v5_async_boot:
+            load_filter_overrides(force=True)
     except Exception as e:
         log_engine(f"ml_filter_overrides init log failed: {type(e).__name__}: {e}")
 
     position_sync = None
-    if rest_client is not None and not _harness_boot:
+    if rest_client is not None and not _harness_boot and not _v5_async_boot:
         from execution.trade_tracker import TradeTracker
         from runtime.ig_transaction_sync import (
             IgTransactionSync,
@@ -540,6 +598,10 @@ def build_market_orchestrator(
             transaction_sync=txn_sync,
         )
         start_order_reconciler_worker(rest_client, config=cfg)
+    elif rest_client is not None and _v5_async_boot:
+        log_engine(
+            "build_market_orchestrator: V5 async — IG txn/position sync deferred post-build"
+        )
 
     loops: list[AgentTradingLoop] = []
     for iid, inst in enabled:
@@ -653,6 +715,78 @@ def build_market_orchestrator(
         enabled_epics=enabled_epics,
         instrument_meta=instrument_meta,
     )
+    if defer_ohlc:
+        orch.configure_v5_autonomic_bootstrap(rest_client=rest_client, defer_ohlc=True)
+    if _v5_async_boot and rest_client is not None:
+
+        def _v5_arm_broker_sync() -> None:
+            try:
+                from system.ml_filter_overrides import load_filter_overrides
+
+                load_filter_overrides(force=True)
+            except Exception as exc:
+                log_engine(f"V5 deferred ml_filter_overrides: {type(exc).__name__}")
+            try:
+                from execution.trade_tracker import TradeTracker
+                from runtime.ig_transaction_sync import (
+                    IgTransactionSync,
+                    _set_transaction_sync_instance,
+                )
+
+                tracker = TradeTracker(store, prefer_ig=True)
+                managed_epics = frozenset(
+                    str(inst.get("epic") or "").strip()
+                    for _iid, inst in enabled
+                    if str(inst.get("epic") or "").strip()
+                )
+                txn_sync: Any | None = None
+                try:
+                    txn_sync = IgTransactionSync(
+                        rest_client,
+                        store,
+                        interval_seconds=float(
+                            getattr(cfg, "transaction_sync_seconds", 300.0)
+                        ),
+                        min_gap_seconds=float(
+                            getattr(cfg, "transaction_sync_min_gap_seconds", 120.0)
+                        ),
+                        history_days=int(getattr(cfg, "transaction_history_days", 2)),
+                        display_hours=24.0,
+                    )
+                    txn_sync.start()
+                    _set_transaction_sync_instance(txn_sync)
+                    log_engine("V5 deferred: IG transaction sync started")
+                except Exception as exc:
+                    log_engine(f"V5 deferred txn sync: {type(exc).__name__}")
+                sync = start_ig_position_sync(
+                    rest_client,
+                    store,
+                    tracker,
+                    epic="",
+                    interval_seconds=float(cfg.position_sync_seconds),
+                    points_engine=points_engine,
+                    managed_epics=managed_epics,
+                    transaction_sync=txn_sync,
+                )
+                if sync is not None:
+                    for loop in loops:
+                        try:
+                            eng = loop._execution_loop.execution_engine
+                            eng._trade_tracker.attach_sync(sync)  # noqa: SLF001
+                            eng.attach_position_sync(sync)
+                        except Exception:
+                            pass
+                start_order_reconciler_worker(rest_client, config=cfg)
+            except Exception as exc:
+                log_engine(f"V5 deferred broker sync failed: {type(exc).__name__}: {exc}")
+
+        import threading
+
+        threading.Thread(
+            target=_v5_arm_broker_sync,
+            name="v5-broker-sync",
+            daemon=True,
+        ).start()
     if len(loops) > 1:
         attach_snapshot_handlers(orch)
     log_engine(

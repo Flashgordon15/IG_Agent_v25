@@ -9,12 +9,15 @@ Thread B performs a naked pointer read and extracts the full pre-baked payload.
 from __future__ import annotations
 
 import ctypes
+import json
 import os
 import struct
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from multiprocessing import shared_memory
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -29,6 +32,7 @@ from intelligence.matrix_prebaker import (
     TOTAL_CELLS,
     apply_streaming_ffill_to_matrix,
     matrix_row_with_streaming_ffill,
+    secure_fill_matrix_update,
 )
 from system.market_data_hub import NIGHT_MATRIX_EPICS
 from system.engine_log import log_engine
@@ -205,6 +209,18 @@ class UnifiedAlphaRingBuffer:
                 ticks_before=ticks_before,
                 ticks_after=int(self._live_ticks_cached),
             )
+        try:
+            from trading.cache_reaper import govern_live_tick_ingest
+
+            govern_live_tick_ingest(
+                epic,
+                bid=bid,
+                offer=offer,
+                mid=mid,
+                source=str(int(source_id)),
+            )
+        except Exception:
+            pass
         return True
 
     def read_quote_for_epic(self, epic: str) -> tuple[float, float, int] | None:
@@ -430,7 +446,8 @@ class UnifiedAlphaRingBuffer:
         except Exception:
             pass
         working = np.array(source, copy=True, order="C")
-        apply_streaming_ffill_to_matrix(working)
+        prior = np.array(self._matrix, copy=True, order="C")
+        secure_fill_matrix_update(working, prior=prior)
         self._matrix[:] = working
         win_n = self.rebuild_frontier_tensor()
         self.compile_strategy_tensor_from_matrix(cfg)
@@ -768,6 +785,45 @@ def cockpit_shm_map_status() -> dict[str, Any]:
     }
 
 
+def _cockpit_reconnect_signal_path() -> Path:
+    from system.paths import data_dir
+
+    return data_dir() / "state" / "cockpit_shm_reconnect.json"
+
+
+def broadcast_cockpit_shm_reconnect(*, reason: str = "pid_restart") -> int:
+    """Signal passive readers (desktop cockpit) to drop stale mmap handles."""
+    path = _cockpit_reconnect_signal_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    seq = 1
+    try:
+        prev = json.loads(path.read_text(encoding="utf-8"))
+        seq = int(prev.get("seq") or 0) + 1
+    except Exception:
+        pass
+    payload = {
+        "seq": seq,
+        "reason": str(reason),
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    try:
+        from system.engine_log import log_engine
+
+        log_engine(f"CockpitSHM: reconnect broadcast seq={seq} reason={reason}")
+    except Exception:
+        pass
+    return seq
+
+
+def read_cockpit_shm_reconnect_generation() -> int:
+    try:
+        raw = json.loads(_cockpit_reconnect_signal_path().read_text(encoding="utf-8"))
+        return int(raw.get("seq") or 0)
+    except Exception:
+        return 0
+
+
 def _evict_zombie_cockpit_shm(name: str) -> None:
     """Remove orphaned POSIX segment when publisher PID is dead or restarted."""
     try:
@@ -780,6 +836,7 @@ def _evict_zombie_cockpit_shm(name: str) -> None:
         if hdr.magic != COCKPIT_SHM_MAGIC:
             try:
                 probe.unlink()
+                broadcast_cockpit_shm_reconnect(reason="invalid_magic")
             except Exception:
                 pass
             return
@@ -800,8 +857,12 @@ def _evict_zombie_cockpit_shm(name: str) -> None:
             pass
         try:
             probe.unlink()
+            broadcast_cockpit_shm_reconnect(
+                reason="publisher dead" if stale_pid else f"pid_restart_{pid}_{current}"
+            )
         except Exception:
             pass
+        _close_cockpit_shm_singleton(unlink=False)
     finally:
         probe.close()
 
@@ -849,6 +910,9 @@ def _attach_cockpit_shm(*, create: bool) -> shared_memory.SharedMemory:
         hdr.header_bytes = ctypes.sizeof(CockpitShmHeader)
         hdr.memory_aligned = 1
     if create:
+        hdr.agent_pid = int(os.getpid()) & 0xFFFFFFFF
+        hdr.pulse_serial = int(hdr.pulse_serial or 0) + 1
+        broadcast_cockpit_shm_reconnect(reason=f"publisher_attach_pid={os.getpid()}")
         try:
             from system.engine_log import log_engine
 

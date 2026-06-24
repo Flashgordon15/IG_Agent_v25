@@ -180,9 +180,18 @@ def _shadow_coprocessor_loop() -> None:
 
 
 def unified_thread_state() -> dict[str, Any]:
+    b_thread = bool(_THREAD_B and _THREAD_B.is_alive())
+    micro_bridge = False
+    try:
+        from intelligence.telemetry_daemon import is_v4_execution_bridge_alive
+
+        micro_bridge = is_v4_execution_bridge_alive()
+    except Exception:
+        micro_bridge = False
     return {
         "a_alive": bool(_THREAD_A and _THREAD_A.is_alive()),
-        "b_alive": bool(_THREAD_B and _THREAD_B.is_alive()),
+        "b_alive": b_thread or micro_bridge,
+        "micro_reactor_bridge": micro_bridge,
         "master_pid": os.getpid(),
         "multi_feed_hub": bool(_STATE.get("multi_feed_hub")),
         "running": bool(_STATE.get("running")),

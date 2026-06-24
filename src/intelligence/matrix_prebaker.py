@@ -9,6 +9,7 @@ memory ``ig_agent_v30_alpha_matrix`` for zero-latency live lookup.
 
 from __future__ import annotations
 
+import os
 import struct
 import threading
 import time
@@ -60,6 +61,8 @@ EPIC_TO_SLOT: dict[str, int] = {
     "CS.D.EURUSD.CFD.IP": 3,
     "IX.D.NASDAQ.IFM.IP": 4,
     "IX.D.FTSE.IFM.IP": 5,
+    "CS.D.CRUDE.CFD.IP": 6,
+    "IX.D.DAX.IFM.IP": 7,
 }
 
 SLOT_TO_EPIC: dict[int, str] = {v: k for k, v in EPIC_TO_SLOT.items()}
@@ -71,6 +74,9 @@ FFILL_STREAMING_EPICS: frozenset[str] = frozenset(
         "IX.D.DOW.IFM.IP",
         "IX.D.NIKKEI.IFM.IP",
         "CS.D.EURUSD.CFD.IP",
+        "CS.D.CRUDE.CFD.IP",
+        "IX.D.FTSE.IFM.IP",
+        "IX.D.DAX.IFM.IP",
     }
 )
 
@@ -82,7 +88,7 @@ LATENCY_PACKET_FFILL_EPICS: frozenset[str] = frozenset(
     }
 )
 
-_COMPILE_LOCK = threading.Lock()
+_COMPILE_LOCK = threading.RLock()
 _COMPILER_THREAD: threading.Thread | None = None
 _TELEMETRY: dict[str, Any] = {
     "status": "idle",
@@ -278,6 +284,89 @@ def apply_streaming_ffill_to_matrix(matrix: np.ndarray) -> int:
     for epic in LATENCY_PACKET_FFILL_EPICS:
         filled += _apply_slot_bfill(matrix, epic=epic)
     return filled
+
+
+def _bootstrap_empty_epic_slots(matrix: np.ndarray) -> int:
+    """Seed wholly empty night-matrix slots so WebKit never reads NaN/zero blocks."""
+    seeded = 0
+    fallback = default_matrix_fallback_row()
+    for epic in FFILL_STREAMING_EPICS:
+        slot = epic_slot(epic)
+        if _epic_slot_has_samples(matrix, slot):
+            continue
+        for dir_slot in (0, 1):
+            direction = "BUY" if dir_slot == 0 else "SELL"
+            for rsi_q in range(RSI_BINS):
+                for atr_q in range(ATR_BINS):
+                    for mom_q in range(MOM_BINS):
+                        idx = matrix_cell_index(
+                            epic_id=slot,
+                            direction=direction,
+                            rsi_q=rsi_q,
+                            atr_q=atr_q,
+                            mom_q=mom_q,
+                        )
+                        matrix[idx] = fallback
+                        seeded += 1
+    return seeded
+
+
+def calibrate_live_tick_features(
+    epic: str,
+    rsi: float,
+    atr: float,
+    momentum: float,
+    *,
+    matrix: np.ndarray | None = None,
+) -> tuple[float, float, float, dict[str, Any]]:
+    """V2 drift calibration — re-align live features before alpha / ML inference."""
+    try:
+        from platform_v2 import platform_v2_enabled
+
+        if not platform_v2_enabled():
+            return float(rsi), float(atr), float(momentum), {}
+        from platform_v2.feature_drift_calibration import calibrate_live_features
+
+        result = calibrate_live_features(
+            epic=str(epic or ""),
+            rsi=float(rsi),
+            atr=float(atr),
+            momentum=float(momentum),
+            matrix=matrix,
+        )
+        meta = {
+            "drifted": result.drifted,
+            "max_z": result.max_z,
+            "scale_multiplier": result.scale_multiplier,
+            **result.details,
+        }
+        return result.rsi, result.atr, result.momentum, meta
+    except Exception as exc:
+        log_guarded_exception("matrix_prebaker_drift", exc)
+        return float(rsi), float(atr), float(momentum), {}
+
+
+def secure_fill_matrix_update(
+    matrix: np.ndarray,
+    *,
+    prior: np.ndarray | None = None,
+) -> int:
+    """
+    Secure matrix buffer fill — NaN scrub, prior-generation restore, ffill, cold bootstrap.
+
+    When a REST polling slice returns empty metrics, forward-fill along mom_q and
+    restore the last compiled generation for still-empty cells.
+    """
+    sanitize_matrix_nan_inf(matrix)
+    restored = 0
+    if prior is not None and prior.shape == matrix.shape:
+        empty_mask = matrix[:, COL_SAMPLES] <= 0.0
+        if np.any(empty_mask):
+            matrix[empty_mask] = prior[empty_mask]
+            restored = int(np.sum(empty_mask))
+    filled = apply_streaming_ffill_to_matrix(matrix)
+    seeded = _bootstrap_empty_epic_slots(matrix)
+    return int(filled + restored + seeded)
 
 
 def sanitize_matrix_nan_inf(matrix: np.ndarray) -> None:
@@ -517,7 +606,7 @@ class AlphaMatrixSegment:
 
 
 _SEGMENT_SINGLETON: AlphaMatrixSegment | None = None
-_SEGMENT_LOCK = threading.Lock()
+_SEGMENT_LOCK = threading.RLock()
 _SHM_MAPPED = False
 _LAST_LOOKUP_LATENCY_US: float = 0.0
 _LOOKUP_LATENCY_SAMPLES: list[float] = []
@@ -650,6 +739,9 @@ def compile_prebaked_alpha_matrix(
 
     segment = get_alpha_matrix_segment(create=True)
     matrix = segment.matrix
+    prior_gen: np.ndarray | None = None
+    if np.any(matrix[:, COL_SAMPLES] > 0.0):
+        prior_gen = np.array(matrix, copy=True, order="C")
     matrix.fill(0.0)
 
     patterns = 0
@@ -717,7 +809,7 @@ def compile_prebaked_alpha_matrix(
             if samples == 1.0:
                 populated += 1
 
-    apply_streaming_ffill_to_matrix(matrix)
+    secure_fill_matrix_update(matrix, prior=prior_gen)
     populated = int(np.sum(matrix[:, COL_SAMPLES] > 0.0))
 
     compile_ms = (time.perf_counter() - t0) * 1000.0
@@ -810,19 +902,86 @@ def _compiler_loop(*, interval_sec: float) -> None:
 def fast_bootstrap_alpha_matrix_if_empty(*, stride: int = 48) -> bool:
     """Synchronous fast compile when SHM is empty — unblocks live matrix lookups."""
     try:
-        if alpha_matrix_mapped():
-            segment = get_alpha_matrix_segment(create=False)
-            if int(np.sum(segment.matrix[:, COL_SAMPLES] > 0)) > 64:
-                return False
-        report = compile_prebaked_alpha_matrix(stride=max(8, int(stride)))
+        with _COMPILE_LOCK:
+            if alpha_matrix_mapped():
+                segment = get_alpha_matrix_segment(create=False)
+                if int(np.sum(segment.matrix[:, COL_SAMPLES] > 0)) > 64:
+                    return False
+            _TELEMETRY["status"] = "compiling"
+            report = compile_prebaked_alpha_matrix(stride=max(8, int(stride)))
         log_engine(
             f"AlphaMatrixPrebaker: fast bootstrap cells={report.cells_populated} "
             f"ms={report.compile_ms:.0f}"
         )
         return report.cells_populated > 0
     except Exception as exc:
+        _TELEMETRY["status"] = "error"
+        _TELEMETRY["last_error"] = str(exc)
         log_guarded_exception("alpha_matrix_fast_bootstrap", exc)
         return False
+
+
+_COMPILE_API_THREAD: threading.Thread | None = None
+_COMPILE_API_LOCK = threading.Lock()
+
+
+def schedule_inprocess_alpha_compile(
+    *,
+    stride: int = 48,
+    force: bool = True,
+) -> dict[str, Any]:
+    """
+    Queue alpha-matrix compile on the live agent process (no external lock contention).
+    Returns immediately; compile runs on a daemon thread inside this PID.
+    """
+    global _COMPILE_API_THREAD
+
+    stride = max(8, min(int(stride), 256))
+    with _COMPILE_API_LOCK:
+        if _COMPILE_API_THREAD is not None and _COMPILE_API_THREAD.is_alive():
+            return {
+                "ok": False,
+                "accepted": False,
+                "error": "compile already in progress",
+                "telemetry": matrix_compiler_telemetry(),
+                "mapped": alpha_matrix_mapped(),
+            }
+
+        def _worker() -> None:
+            try:
+                with _COMPILE_LOCK:
+                    _TELEMETRY["status"] = "compiling"
+                    if force:
+                        report = compile_prebaked_alpha_matrix(stride=stride)
+                        log_engine(
+                            "AlphaMatrixPrebaker: in-process API compile "
+                            f"cells={report.cells_populated} ms={report.compile_ms:.0f}"
+                        )
+                    else:
+                        fast_bootstrap_alpha_matrix_if_empty(stride=stride)
+            except Exception as exc:
+                _TELEMETRY["status"] = "error"
+                _TELEMETRY["last_error"] = str(exc)
+                log_guarded_exception("alpha_matrix_inprocess_compile", exc)
+
+        _COMPILE_API_THREAD = threading.Thread(
+            target=_worker,
+            name="inprocess-alpha-compile",
+            daemon=True,
+        )
+        _COMPILE_API_THREAD.start()
+
+    return {
+        "ok": True,
+        "accepted": True,
+        "agent_pid": os.getpid(),
+        "force": force,
+        "stride": stride,
+        "memory_bytes": _SHM_TOTAL_BYTES,
+        "slots": TOTAL_CELLS,
+        "mapped": alpha_matrix_mapped(),
+        "telemetry": matrix_compiler_telemetry(),
+    }
 
 
 def start_alpha_matrix_compiler_async(*, interval_sec: float = 300.0) -> None:

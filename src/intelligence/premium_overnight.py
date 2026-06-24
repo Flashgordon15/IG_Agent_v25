@@ -28,6 +28,9 @@ NIGHT_MATRIX_EPICS = frozenset(
         "IX.D.DOW.IFM.IP",  # Wall Street
         "IX.D.NIKKEI.IFM.IP",  # Japan 225
         "CS.D.EURUSD.CFD.IP",  # EUR/USD
+        "CS.D.CRUDE.CFD.IP",  # Brent / WTI CFD
+        "IX.D.FTSE.IFM.IP",  # FTSE 100
+        "IX.D.DAX.IFM.IP",  # DAX 40
     }
 )
 

@@ -246,6 +246,12 @@ class LearningStore:
             (float(record.size), trade_id),
         )
         self.conn.commit()
+        try:
+            from system.shutdown_cleanup import notify_position_state_change
+
+            notify_position_state_change(reason="trade_open")
+        except Exception:
+            pass
         return trade_id
 
     @_locked
@@ -262,6 +268,12 @@ class LearningStore:
             (stop, note, trade_id),
         )
         self.conn.commit()
+        try:
+            from system.shutdown_cleanup import notify_position_state_change
+
+            notify_position_state_change(reason="stop_modify")
+        except Exception:
+            pass
 
     @_locked
     def update_target(self, trade_id: int, target: float, note: str) -> None:
@@ -337,6 +349,12 @@ class LearningStore:
                 ),
             )
         self.conn.commit()
+        try:
+            from system.shutdown_cleanup import notify_position_state_change
+
+            notify_position_state_change(reason="trade_close")
+        except Exception:
+            pass
         self._rebuild_stats_for(row["setup_key"])
         try:
             from feeder.event_bus import emit_fill_close

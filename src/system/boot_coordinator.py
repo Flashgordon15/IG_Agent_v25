@@ -70,6 +70,11 @@ class BootCoordinator:
 
         G1 must complete before the API is considered ready for Gate 2 onward.
         """
+        from system.boot.non_blocking_bootstrap import (
+            non_blocking_boot_enabled,
+            run_gate_with_exponential_backoff,
+        )
+
         logger.info("BootCoordinator: pipeline started")
         try:
             if not self._state.gate_complete("G1"):
@@ -91,7 +96,22 @@ class BootCoordinator:
                         error=f"Gatekeeper: {previous} not complete",
                     )
                     return
-                self._run_gate(gate_id)
+                if non_blocking_boot_enabled() and gate_id in ("G2", "G3"):
+                    runner = self._gate_runners.get(gate_id)
+                    if runner is None:
+                        raise RuntimeError(f"No runner registered for {gate_id}")
+                    ok = run_gate_with_exponential_backoff(
+                        gate_id,
+                        lambda g=gate_id: self._run_gate(g),
+                    )
+                    if not ok:
+                        self._state.mark_gate_failed(
+                            gate_id,
+                            error=f"{gate_id} hydration exhausted retries",
+                        )
+                        return
+                else:
+                    self._run_gate(gate_id)
                 if self._pipeline_failed():
                     logger.info(
                         "BootCoordinator: pipeline halted at %s (%s)",
@@ -173,10 +193,28 @@ async def boot_lifespan(app: Any) -> AsyncIterator[dict[str, Any]]:
         except Gate1FatalError:
             logger.exception("BootCoordinator: Gate 1 failed during lifespan")
 
-    pipeline_task = asyncio.create_task(
-        asyncio.to_thread(coordinator.run_pipeline),
-        name="boot-coordinator-pipeline",
+    from system.boot.non_blocking_bootstrap import (
+        non_blocking_boot_enabled,
+        start_background_gate_hydration,
     )
+
+    if non_blocking_boot_enabled():
+
+        async def _await_hydration_worker() -> None:
+            worker = start_background_gate_hydration(coordinator)
+            thread = worker._thread
+            while thread is not None and thread.is_alive():
+                await asyncio.sleep(0.25)
+
+        pipeline_task = asyncio.create_task(
+            _await_hydration_worker(),
+            name="boot-coordinator-pipeline",
+        )
+    else:
+        pipeline_task = asyncio.create_task(
+            asyncio.to_thread(coordinator.run_pipeline),
+            name="boot-coordinator-pipeline",
+        )
 
     app.state.boot_coordinator = coordinator
     app.state.system_state = coordinator.state

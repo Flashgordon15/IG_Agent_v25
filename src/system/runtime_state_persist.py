@@ -88,7 +88,7 @@ def _collect_state() -> dict[str, Any]:
 
 
 def request_save() -> None:
-    """Persist current state. Throttled to avoid excessive writes during bursts."""
+    """Persist current state to volatile RAM (live) or disk (pytest)."""
     global _last_save_ts
     now = time.time()
     with _lock:
@@ -97,22 +97,59 @@ def request_save() -> None:
         _last_save_ts = now
     try:
         data = _collect_state()
+        from trading.cache_reaper import (
+            _volatile_mode_active,
+            refresh_fulfillment_cache_from_engine,
+            volatile_runtime_state_set,
+        )
+
+        if _volatile_mode_active():
+            volatile_runtime_state_set(data)
+            refresh_fulfillment_cache_from_engine()
+            return
         _atomic_write_json(_path(), data)
     except Exception as e:
         log_engine(f"runtime_state_persist save failed: {type(e).__name__}: {e}")
 
 
 def flush_save() -> None:
-    """Ignore throttle and write now."""
+    """Sync state to volatile RAM (live) or disk immediately (pytest)."""
     global _last_save_ts
     try:
         data = _collect_state()
-        _atomic_write_json(_path(), data)
+        from trading.cache_reaper import (
+            _volatile_mode_active,
+            refresh_fulfillment_cache_from_engine,
+            volatile_runtime_state_set,
+        )
+
+        if _volatile_mode_active():
+            volatile_runtime_state_set(data)
+            refresh_fulfillment_cache_from_engine()
+        else:
+            _atomic_write_json(_path(), data)
     except Exception as e:
         log_engine(f"runtime_state_persist flush failed: {type(e).__name__}: {e}")
         return
     with _lock:
         _last_save_ts = time.time()
+
+
+def flush_disk_on_shutdown() -> None:
+    """Shutdown hook — single atomic disk write from volatile RAM mirrors."""
+    try:
+        data = _collect_state()
+        from trading.cache_reaper import (
+            flush_volatile_caches_to_disk,
+            refresh_fulfillment_cache_from_engine,
+            volatile_runtime_state_set,
+        )
+
+        volatile_runtime_state_set(data)
+        refresh_fulfillment_cache_from_engine()
+        flush_volatile_caches_to_disk(runtime_path=_path())
+    except Exception as e:
+        log_engine(f"runtime_state_persist shutdown flush failed: {type(e).__name__}: {e}")
 
 
 def load_state() -> bool:
@@ -152,6 +189,12 @@ def load_state() -> bool:
         load_exit_state(data.get("exit") or {})
         load_pending_state(data.get("pending") or {})
         load_daily_risk_state(data.get("daily_risk") or {})
+        try:
+            from trading.cache_reaper import volatile_runtime_state_set
+
+            volatile_runtime_state_set(data)
+        except Exception:
+            pass
         return True
     except Exception as e:
         log_engine(

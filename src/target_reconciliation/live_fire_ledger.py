@@ -21,6 +21,9 @@ TARGET_NET_PNL_GBP = 1000.0
 TARGET_WIN_RATE = 0.60
 LEDGER_PATH = data_dir() / "state" / "trading_ledger.json"
 
+# Production milestone baseline — target factory tracks P&L from this instant only.
+MILESTONE_BASELINE_UTC = datetime(2026, 6, 23, 9, 0, tzinfo=timezone.utc)
+
 _PHANTOM_SOURCES = frozenset(
     {
         "shadow_simulator",
@@ -91,6 +94,40 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _parse_row_timestamp(row: dict[str, Any]) -> datetime | None:
+    """Best-effort closed/executed timestamp for milestone filtering."""
+    for key in ("closed_at", "executed_at", "exit_timestamp", "timestamp", "updated_at"):
+        raw = str(row.get(key) or "").strip()
+        if not raw:
+            continue
+        try:
+            if raw.endswith("Z"):
+                raw = raw[:-1] + "+00:00"
+            dt = datetime.fromisoformat(raw)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def _filter_rows_since(
+    rows: list[dict[str, Any]], *, since: datetime | None
+) -> list[dict[str, Any]]:
+    if since is None:
+        return list(rows)
+    cutoff = since.astimezone(timezone.utc)
+    kept: list[dict[str, Any]] = []
+    for row in rows:
+        ts = _parse_row_timestamp(row)
+        if ts is None:
+            continue
+        if ts >= cutoff:
+            kept.append(row)
+    return kept
+
+
 def write_trading_ledger(payload: dict[str, Any]) -> Path:
     LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
     payload["updated_at"] = _utc_now()
@@ -123,6 +160,7 @@ def audit_architecture() -> dict[str, Any]:
     code, out = _run_pytest(
         "tests/test_hardening_matrix.py",
         "tests/test_target_factory.py",
+        "tests/test_platform_v2.py",
     )
     issues: list[str] = []
     if code != 0:
@@ -348,14 +386,30 @@ def _ledger_metrics(closed_rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def reconcile_trading_ledger(*, hours: float = 720.0) -> dict[str, Any]:
+def reconcile_trading_ledger(
+    *,
+    hours: float = 720.0,
+    milestone_since: datetime | None = None,
+) -> dict[str, Any]:
     """Build authoritative ledger snapshot and evaluate profit / win-rate targets."""
+    effective_milestone = milestone_since
+    if effective_milestone is None and os.environ.get("TARGET_FACTORY_MILESTONE"):
+        try:
+            raw = os.environ["TARGET_FACTORY_MILESTONE"].strip()
+            if raw and raw.lower() != "none":
+                effective_milestone = datetime.fromisoformat(
+                    raw.replace("Z", "+00:00")
+                ).astimezone(timezone.utc)
+        except Exception:
+            effective_milestone = MILESTONE_BASELINE_UTC
     arch = audit_architecture()
     gate_blockers = _fetch_gate_blockers()
-    closed_rows = _broker_closed_rows(hours=hours)
+    closed_rows_all = _broker_closed_rows(hours=hours)
+    closed_rows = _filter_rows_since(closed_rows_all, since=effective_milestone)
     open_rows = _broker_open_rows()
     phantoms = _detect_phantom_rows(closed_rows + open_rows)
     metrics = _ledger_metrics(closed_rows)
+    metrics_all_time = _ledger_metrics(closed_rows_all)
 
     integrity_blockers = [
         b for b in gate_blockers if "INTEGRITY_ABORT" in str(b.get("reason") or "")
@@ -381,17 +435,29 @@ def reconcile_trading_ledger(*, hours: float = 720.0) -> dict[str, Any]:
     if gate_blockers and not integrity_blockers:
         blockers.append({"kind": "gate_wait", "rows": gate_blockers[:20]})
 
+    milestone_label = (
+        effective_milestone.astimezone(timezone.utc).isoformat()
+        if effective_milestone is not None
+        else None
+    )
     payload: dict[str, Any] = {
         "mode": "LIVE_FIRE_RECONCILIATION",
+        "milestone": {
+            "since_utc": milestone_label,
+            "baseline_net_pnl_gbp": 0.0,
+            "tracking": "post_milestone_only",
+        },
         "targets": {
             "net_pnl_gbp": TARGET_NET_PNL_GBP,
             "win_rate": TARGET_WIN_RATE,
         },
         "metrics": metrics,
+        "metrics_all_time": metrics_all_time,
         "architecture": arch,
         "blockers": blockers,
         "open_positions": open_rows,
         "closed_trades": closed_rows[-128:],
+        "closed_trades_all_time_count": len(closed_rows_all),
         "targets_met": targets_met,
         "broker_source": "ig_rest_positions_otc_and_transactions",
     }

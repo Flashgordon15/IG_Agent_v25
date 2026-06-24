@@ -190,7 +190,10 @@
         "CS.D.CFPGOLD.CFP.IP",
         "CS.D.EURUSD.CFD.IP",
         "IX.D.NIKKEI.IFM.IP",
-        "IX.D.DOW.IFM.IP"
+        "IX.D.DOW.IFM.IP",
+        "CS.D.CRUDE.CFD.IP",
+        "IX.D.FTSE.IFM.IP",
+        "IX.D.DAX.IFM.IP"
       ],
       "rollover_lock_start": "21:58",
       "rollover_lock_end": "22:05",
@@ -260,17 +263,48 @@
       ]
     },
     "us_oil": {
-      "enabled": false,
-      "_note": "Disabled 2026-06-11: no OHLC cache + no Lightstreamer ticks — blocked trading_healthy and watchdog restarts. Re-enable after seed_ohlc.",
+      "enabled": true,
+      "_note": "Exposure expansion — Brent/WTI CFD polling + execution enabled",
       "reward_multiple": 3.0,
       "trading_session_whitelist": [
         "london_us_overlap",
-        "us_afternoon"
+        "us_afternoon",
+        "late"
+      ]
+    },
+    "ftse_100": {
+      "enabled": true,
+      "epic": "IX.D.FTSE.IFM.IP",
+      "name": "FTSE 100",
+      "signal_threshold": 55,
+      "reward_multiple": 3.0,
+      "trade_size": 1,
+      "adaptive_min_trade_size": 1,
+      "stop_distance_points": 50,
+      "max_spread_pts": 8,
+      "adaptive_min_risk_points": 20,
+      "adaptive_max_risk_points": 120,
+      "min_atr_points": 15,
+      "ig_point_value_gbp": 1.0,
+      "risk_cap_gbp": 150,
+      "stale_threshold_seconds": 15,
+      "execution_priority": 68,
+      "trading_session_whitelist": [
+        "london_morning",
+        "london_us_overlap",
+        "late"
       ]
     },
     "germany_40": {
-      "enabled": false,
-      "_note": "Night session — DAX cash closed; re-enable at London open when OHLC/stream available on DEMO"
+      "enabled": true,
+      "epic": "IX.D.DAX.IFM.IP",
+      "name": "Germany 40",
+      "signal_threshold": 55,
+      "execution_priority": 65,
+      "trading_session_whitelist": [
+        "london_morning",
+        "london_us_overlap"
+      ]
     }
   }
 }

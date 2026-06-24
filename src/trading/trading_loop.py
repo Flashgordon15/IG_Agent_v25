@@ -20,17 +20,34 @@ from system.bare_metal_exec import bare_metal_hot_path_active
 
 
 def _bare_metal_shadow_force_fill() -> bool:
-    """Simulated fills only when E2E requests it — never on authentic IG DEMO broker."""
-    if os.environ.get("IG_E2E_SHADOW_FORCE_FILL", "").strip() == "1":
-        return True
-    try:
-        from system.agent_execution_mode import authentic_demo_broker_required
+    """E2E-only simulated fills — never on production integration paths."""
+    return os.environ.get("IG_E2E_SHADOW_FORCE_FILL", "").strip() == "1"
 
-        if authentic_demo_broker_required():
-            return False
-    except Exception:
-        pass
-    return bare_metal_hot_path_active()
+
+_NIGHT_MATRIX_FORCE_GATE_EPICS: frozenset[str] = frozenset(
+    {
+        "CS.D.CFPGOLD.CFP.IP",  # Gold — 1 micro-lot, 10pt stop, 20pt limit
+        "IX.D.DOW.IFM.IP",  # Wall St — canonical night-matrix dispatch epic
+    }
+)
+
+_correlation_purge_lock = threading.Lock()
+
+
+def force_reset_session_correlation_counters(
+    *, reason: str = "trading_loop_coordinator"
+) -> dict[str, Any]:
+    """Purge session correlation BUY/SELL counters to 0/5 (thread-safe coordinator hook)."""
+    from execution.correlation_guard import force_purge_session_correlation_counters
+    from system.engine_log import log_engine
+
+    with _correlation_purge_lock:
+        snap = force_purge_session_correlation_counters(reason=reason)
+    log_engine(
+        f"trading_loop: correlation override applied ({reason}) "
+        f"buy={snap.get('buy')} sell={snap.get('sell')}"
+    )
+    return snap
 
 
 def _intercept_broker_connectivity_failure(exc: BaseException, *, subsystem: str) -> None:
@@ -1097,6 +1114,9 @@ class TradingLoop:
                     )
                     outcome = None
                 else:
+                    gate_exec = self._finalize_gate_execution_params(
+                        gate_exec, trade_size=trade_size
+                    )
                     outcome = self._execution_loop.process_tick(
                         self._market,
                         self._epic,
@@ -1109,9 +1129,7 @@ class TradingLoop:
                             "live_probe_alpha": probe_live,
                             "soak_live_fire": soak_live,
                         },
-                        shadow_force_fill=False
-                        if injection_live
-                        else _bare_metal_shadow_force_fill(),
+                        shadow_force_fill=False,
                     )
                 if outcome is not None:
                     exec_res = getattr(outcome, "execution", None)
@@ -1489,31 +1507,61 @@ class TradingLoop:
             pass
         return thr
 
+    def _finalize_gate_execution_params(
+        self,
+        gate_exec: dict[str, Any] | None,
+        *,
+        trade_size: float | None = None,
+    ) -> dict[str, Any]:
+        """
+        Gold / Wall St order assembly — non-null gate_execution_params envelope.
+
+        Forces micro-lot (0.1), 10pt stop, 20pt limit for night-matrix dispatch epics.
+        """
+        from execution.types import force_inject_gate_execution_params
+        from execution.epic_normalizer import normalize_night_matrix_epic
+        from trading.micro_lot_verification import clamp_micro_lot_size, micro_lot_verification_enabled
+
+        raw = dict(gate_exec or {})
+        epic_norm = normalize_night_matrix_epic(self._epic)
+        if epic_norm in _NIGHT_MATRIX_FORCE_GATE_EPICS or micro_lot_verification_enabled():
+            default_size = clamp_micro_lot_size(
+                float(trade_size or raw.get("actual_size") or raw.get("size") or 1.0)
+            )
+            return force_inject_gate_execution_params(
+                epic=epic_norm,
+                size=default_size,
+                gate_execution_params=raw,
+                stop_points=10.0,
+                limit_points=20.0,
+            )
+        if raw:
+            from execution.types import normalize_gate_execution_params
+
+            normalized = normalize_gate_execution_params(raw)
+            if normalized is not None:
+                return normalized
+        return raw
+
     def _iron_clad_fallback_gate_exec(
         self, trade_size: float, *, atr: float = 0.0
     ) -> dict[str, Any]:
         """Non-bypassable stop/limit/size envelope when risk gate omits params."""
-        from execution.types import freeze_gate_execution_params
-        from harmonization.iron_clad_risk import (
-            MANDATORY_LIMIT_POINTS,
-            MANDATORY_STOP_POINTS,
-            MAX_ORDER_SIZE,
-        )
+        from execution.epic_normalizer import normalize_night_matrix_epic
+        from execution.types import force_inject_gate_execution_params
+        from trading.micro_lot_verification import clamp_micro_lot_size, micro_lot_verification_enabled
 
-        size = min(max(float(trade_size), 1.0), MAX_ORDER_SIZE)
-        stop_pts = max(float(atr or 0), MANDATORY_STOP_POINTS)
-        limit_pts = max(MANDATORY_LIMIT_POINTS, stop_pts * 2.0)
-        return freeze_gate_execution_params(
-            {
-                "actual_size": size,
-                "size": size,
-                "final_size": int(size),
-                "stop_points": stop_pts,
-                "limit_points": limit_pts,
-                "stop_source": "iron_clad_fallback",
-                "gate_sourced": True,
-            }
-        ) or {}
+        epic_norm = normalize_night_matrix_epic(self._epic)
+        if micro_lot_verification_enabled():
+            size = clamp_micro_lot_size(float(trade_size))
+        else:
+            size = 1.0 if epic_norm in _NIGHT_MATRIX_FORCE_GATE_EPICS else float(trade_size)
+        return force_inject_gate_execution_params(
+            epic=epic_norm,
+            size=size,
+            stop_points=10.0,
+            limit_points=20.0,
+        )
 
     def _run_tick(self) -> TickContext | None:
         import os
@@ -2294,6 +2342,12 @@ class TradingLoop:
         if not self._bind_shm_matrix_pointer():
             self._emergency_protective_lockout_65()
             wait_reason = "ALPHA_MATRIX: shm unmapped"
+            try:
+                from system.gate_activity import record_gate_evaluation
+
+                record_gate_evaluation(self._epic)
+            except Exception as exc:
+                log_guarded_exception("trading_loop", exc)
         else:
             try:
                 import time as _time
@@ -2311,6 +2365,24 @@ class TradingLoop:
                 fitness_floor = float(matrix_payload[COL_FITNESS_FLOOR])
                 ml_floor = float(matrix_payload[COL_ML_FLOOR])
                 win_probability = float(matrix_payload[COL_WIN_PROB])
+                try:
+                    exp = (
+                        (self._config.as_dict().get("exposure_expansion") or {})
+                        if self._config
+                        else {}
+                    )
+                    relief_pct = float(exp.get("alpha_matrix_confidence_relief_pct") or 0)
+                    relief_epic = str(exp.get("epic") or "CS.D.EURUSD.CFD.IP")
+                    if relief_pct > 0 and str(self._epic).strip() == relief_epic:
+                        relief_mult = max(0.5, 1.0 - relief_pct / 100.0)
+                        signal_floor *= relief_mult
+                        ml_floor *= relief_mult
+                        lookup_approved = lookup_hit and (
+                            float(matrix_payload[COL_APPROVED]) >= 0.5
+                            or float(win_probability) >= (0.5 * relief_mult)
+                        )
+                except Exception:
+                    pass
             except (AttributeError, ValueError, FileNotFoundError, TypeError, IndexError):
                 wait_reason = "MEMORY_DEATH_SWITCH: pointer fault"
             except Exception as exc:
@@ -2484,6 +2556,9 @@ class TradingLoop:
                     gate_exec["size"] = trade_size
                 except Exception as exc:
                     log_guarded_exception("trading_loop_alpha_gate_exec", exc)
+                gate_exec = self._finalize_gate_execution_params(
+                    gate_exec, trade_size=trade_size
+                )
                 try:
                     outcome = self._execution_loop.process_tick(
                         self._market,
@@ -2492,7 +2567,7 @@ class TradingLoop:
                         prefetched_signal=signal,
                         gate_execution_params=gate_exec,
                         gate_snapshot=gate_snapshot,
-                        shadow_force_fill=_bare_metal_shadow_force_fill() if hot else False,
+                        shadow_force_fill=False,
                     )
                     if not hot:
                         self._log_execution_outcome(outcome)
@@ -2581,6 +2656,12 @@ class TradingLoop:
                         )
                 except Exception:
                     pass
+        try:
+            from system.gate_activity import record_gate_evaluation
+
+            record_gate_evaluation(self._epic)
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
         return ctx
 
     def _run_tick_core(self) -> TickContext | None:
@@ -2958,6 +3039,9 @@ class TradingLoop:
                             trade_size,
                             atr=float(ind.get("atr") or 0),
                         )
+                    gate_exec = self._finalize_gate_execution_params(
+                        gate_exec, trade_size=trade_size
+                    )
                     outcome = self._execution_loop.process_tick(
                         self._market,
                         self._epic,
@@ -4481,6 +4565,7 @@ class TradingLoop:
         ooh_scale = self._out_of_hours_spread_scale(at=self._clock())
         spread_multiplier = SPREAD_NORMAL_MULTIPLIER * ooh_scale
         spread_cap = normal * spread_multiplier
+        v2_spread_meta: dict[str, Any] = {}
         try:
             snap_risk = dict(self._signal_engine.last_snapshot.get(self._market) or {})
             last_risk = snap_risk.get("last") or {}
@@ -4493,6 +4578,25 @@ class TradingLoop:
                 spread_multiplier=float(spread_multiplier),
                 atr=_atr_risk,
             )
+            try:
+                from platform_v2 import platform_v2_enabled
+
+                if platform_v2_enabled():
+                    from platform_v2.adaptive_volatility_scalping import (
+                        apply_v2_entry_gateway,
+                    )
+
+                    spread_cap, v2_spread_meta = apply_v2_entry_gateway(
+                        epic=str(self._epic or ""),
+                        normal_spread=float(normal),
+                        spread_multiplier=float(spread_multiplier),
+                        atr=_atr_risk,
+                        live_spread=spread,
+                        bid=float(quote.bid),
+                        offer=float(quote.offer),
+                    )
+            except Exception as exc:
+                log_guarded_exception("trading_loop_v2_spread", exc)
         except Exception as exc:
             log_guarded_exception("trading_loop_spread_cap", exc)
         spread_ok = spread <= spread_cap if normal > 0 else True
@@ -4597,6 +4701,29 @@ class TradingLoop:
                 base_size * size_mult,
             ),
         )
+        v2_escalation_meta: dict[str, Any] = {}
+        try:
+            from platform_v2 import platform_v2_enabled
+
+            if platform_v2_enabled():
+                from platform_v2.compound_profit_escalation import (
+                    apply_compound_escalation,
+                )
+
+                esc = apply_compound_escalation(
+                    effective_size,
+                    session_equity_gbp=session_equity_gbp,
+                )
+                effective_size = esc.size
+                v2_escalation_meta = {
+                    "tier_multiplier": esc.tier_multiplier,
+                    "net_profit_gbp": esc.net_profit_gbp,
+                    "profit_step": esc.profit_step,
+                    "defensive_reset": esc.defensive_reset,
+                    "reason": esc.reason,
+                }
+        except Exception as exc:
+            log_guarded_exception("trading_loop_v2_escalation", exc)
         constraints = self._fetch_market_constraints()
         ig_min_raw = constraints.get("min_deal_size", effective_size)
         try:
@@ -4643,7 +4770,9 @@ class TradingLoop:
             log_guarded_exception("trading_loop", exc)
 
         from execution.size_floors import apply_operational_size_floor
+        from trading.micro_lot_verification import clamp_micro_lot_size
 
+        actual_size = clamp_micro_lot_size(actual_size)
         actual_size = apply_operational_size_floor(actual_size, self._epic)
 
         atr_pts = 0.0
@@ -4913,6 +5042,8 @@ class TradingLoop:
                     for k, v in atr_meta.items()
                     if str(k).startswith("atr_protect_")
                 },
+                "platform_v2_spread": v2_spread_meta,
+                "platform_v2_escalation": v2_escalation_meta,
             },
             detail=detail,
         )

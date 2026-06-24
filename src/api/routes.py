@@ -4,6 +4,7 @@ HTTP routes — dashboard API (Section 4.5 Steps 8 + 13).
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import sqlite3
@@ -214,6 +215,18 @@ def api_reconcile_trades() -> dict[str, Any]:
 @router.get("/api/signals")
 def api_signals(limit: int = 50) -> dict[str, Any]:
     return {"signals": get_signal_log(limit=min(100, max(1, limit)))}
+
+
+@router.post("/api/admin/reset-correlation-guard")
+def api_admin_reset_correlation_guard() -> JSONResponse:
+    """Reset session BUY/SELL entry counters to 0/5 (opens execution gateway)."""
+    from execution.correlation_guard import reset_session, snapshot
+    from system.engine_log import log_engine
+
+    reset_session()
+    snap = snapshot()
+    log_engine(f"admin: correlation guard reset — buy={snap.get('buy')} sell={snap.get('sell')}")
+    return JSONResponse({"ok": True, "snapshot": snap})
 
 
 @router.post("/api/admin/force-close")
@@ -687,15 +700,54 @@ def api_unified_fulfillment() -> JSONResponse:
     """Decoupled 500ms fulfillment snapshot — zero hot-path cost, no browser cache."""
     from system.unified_fulfillment_cache import get_fulfillment_payload
 
-    payload = get_fulfillment_payload()
+    baseline: dict[str, Any] = {
+        "mode": "UNIFIED_FULFILLMENT",
+        "updated_at": "",
+        "refresh_ms": 500,
+        "stages": [],
+        "market_quotes": {},
+        "market_quotes_list": [],
+        "gate_diagnostics": {"by_epic": {}, "last": {}},
+        "alpha_frontier_tracker": {"by_epic": {}, "last": {}, "ring": {}},
+        "ticks_cached": 0,
+        "all_ready": False,
+        "traffic_light_hub": {},
+    }
+    try:
+        payload = get_fulfillment_payload()
+        if not isinstance(payload, dict):
+            payload = baseline
+        payload.setdefault("market_quotes", {})
+        payload.setdefault("gate_diagnostics", {"by_epic": {}, "last": {}})
+        if not isinstance(payload.get("gate_diagnostics"), dict):
+            payload["gate_diagnostics"] = {"by_epic": {}, "last": {}}
+        gd = payload["gate_diagnostics"]
+        gd.setdefault("by_epic", {})
+        gd.setdefault("last", {})
+        content = json.loads(json.dumps(payload, default=str))
+    except Exception as exc:
+        from system.engine_log import log_engine
+
+        log_engine(f"api/unified/fulfillment serializer fallback: {type(exc).__name__}: {exc}")
+        baseline["error"] = f"{type(exc).__name__}: {exc}"
+        content = baseline
     return JSONResponse(
-        content=payload,
+        content=content,
         headers={
             "Cache-Control": "no-store, no-cache, must-revalidate",
             "Pragma": "no-cache",
             "Expires": "0",
         },
     )
+
+
+@router.post("/api/internal/ui-stress-render")
+def api_internal_ui_stress_render() -> dict[str, Any]:
+    """Arm temporary 50Hz Gold UI stress burst (5 min, no broker orders)."""
+    from intelligence.telemetry_daemon import execute_ui_stress_test_render
+
+    status = execute_ui_stress_test_render()
+    return {"ok": True, **status}
 
 
 @router.post("/api/internal/live-tolerance")
@@ -980,6 +1032,30 @@ def _trigger_shutdown(source: str = "api") -> None:
         os.kill(os.getpid(), signal.SIGTERM)
 
     threading.Thread(target=_exit, name="shutdown-trigger", daemon=True).start()
+
+
+@router.post("/api/v1/alpha/compile")
+async def api_v1_alpha_compile(request: Request) -> JSONResponse:
+    """
+    In-process alpha matrix compile — allocates ``ig_agent_v30_alpha_matrix`` SHM
+    inside the live agent PID (no external compile lock contention).
+    """
+    body: dict[str, Any] = {}
+    try:
+        raw = await request.json()
+        if isinstance(raw, dict):
+            body = raw
+    except Exception:
+        pass
+
+    stride = int(body.get("stride") or 48)
+    force = bool(body.get("force", True))
+
+    from intelligence.matrix_prebaker import schedule_inprocess_alpha_compile
+
+    result = schedule_inprocess_alpha_compile(stride=stride, force=force)
+    status = 200 if result.get("ok") else 409
+    return JSONResponse(result, status_code=status)
 
 
 @router.post("/api/clear_inflight/{epic}")

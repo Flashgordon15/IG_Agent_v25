@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import json
 import os
 import signal
@@ -10,10 +11,13 @@ import socket
 import stat
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 from system.engine_log import log_engine
 from system.guard.runtime_guard import log_guarded_exception
@@ -38,6 +42,14 @@ _SUPERVISION_UTILITY_REL_PATHS: tuple[str, ...] = (
 _cleanup_done = False
 _MANUAL_STOP_FILE = data_dir() / "state" / "manual_stop.json"
 _MANUAL_STOP_MAX_AGE_SEC = 600.0
+_TRADING_LEDGER_PATH = data_dir() / "state" / "trading_ledger.json"
+_STATE_SYNC_THREAD_NAME = "ig-v6.1-ledger-sync"
+_STATE_SYNC_DEBOUNCE_SEC = 0.75
+_state_sync_lock = threading.Lock()
+_state_sync_event: threading.Event | None = None
+_state_sync_thread: threading.Thread | None = None
+_state_sync_started = False
+_last_position_fingerprint: str | None = None
 
 
 def reset_shutdown_verify_state() -> None:
@@ -97,6 +109,214 @@ def manual_stop_active(*, max_age_sec: float = _MANUAL_STOP_MAX_AGE_SEC) -> bool
         return age >= 0 and age < max_age_sec
     except Exception:
         return True
+
+
+def _position_state_fingerprint() -> str:
+    """Stable hash of open positions + protective stops + inflight orders."""
+    try:
+        from system.runtime_state_persist import _collect_state
+
+        blob = _collect_state()
+    except Exception:
+        blob = {}
+    open_rows: list[dict[str, Any]] = []
+    try:
+        from system.config_loader import get_config
+        from data.learning_store import LearningStore
+
+        store = LearningStore(str(get_config().learning_db))
+        for row in store.active_trades() or []:
+            d = dict(row)
+            open_rows.append(
+                {
+                    "deal_id": d.get("ig_deal_id") or d.get("deal_id"),
+                    "epic": d.get("epic"),
+                    "size": d.get("size"),
+                    "stop_level": d.get("stop_level") or d.get("stop"),
+                    "limit_level": d.get("limit_level") or d.get("limit"),
+                    "direction": d.get("direction"),
+                }
+            )
+    except Exception:
+        pass
+    payload = {
+        "runtime": blob,
+        "open_positions": sorted(
+            open_rows,
+            key=lambda r: str(r.get("deal_id") or r.get("epic") or ""),
+        ),
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _build_trading_ledger_snapshot() -> dict[str, Any]:
+    from datetime import datetime, timezone
+
+    from system.runtime_state_persist import _collect_state
+
+    runtime = _collect_state()
+    open_rows: list[dict[str, Any]] = []
+    closed_rows: list[dict[str, Any]] = []
+    try:
+        from system.config_loader import get_config
+        from data.learning_store import LearningStore
+
+        store = LearningStore(str(get_config().learning_db))
+        for row in store.active_trades() or []:
+            open_rows.append(dict(row))
+        closed_rows = store.recent_closed_trades(limit=128)
+    except Exception:
+        pass
+    existing: dict[str, Any] = {}
+    if _TRADING_LEDGER_PATH.is_file():
+        try:
+            loaded = json.loads(_TRADING_LEDGER_PATH.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                existing = loaded
+        except Exception:
+            pass
+    payload = dict(existing)
+    payload.update(
+        {
+            "mode": payload.get("mode") or "V6_1_VOLATILE_STATE_SYNC",
+            "sync_source": "position_state_change",
+            "runtime_state": runtime,
+            "open_positions": open_rows,
+            "closed_trades": closed_rows,
+            "volatile_tick_governor": _tick_governor_snapshot(),
+        }
+    )
+    payload["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return payload
+
+
+def _tick_governor_snapshot() -> dict[str, Any]:
+    try:
+        from trading.cache_reaper import tick_governor_telemetry
+
+        return tick_governor_telemetry()
+    except Exception:
+        return {}
+
+
+def _atomic_write_ledger(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=".ledger_", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_name, path)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def _flush_trading_ledger_if_changed() -> bool:
+    global _last_position_fingerprint
+    if os.environ.get("IG_AGENT_PYTEST") == "1":
+        return False
+    fp = _position_state_fingerprint()
+    with _state_sync_lock:
+        if fp == _last_position_fingerprint:
+            return False
+    try:
+        snapshot = _build_trading_ledger_snapshot()
+        _atomic_write_ledger(_TRADING_LEDGER_PATH, snapshot)
+        with _state_sync_lock:
+            _last_position_fingerprint = fp
+        log_engine(
+            f"v6.1 state sync: trading_ledger.json flushed "
+            f"(open={len(snapshot.get('open_positions') or [])})"
+        )
+        return True
+    except Exception as exc:
+        log_guarded_exception("v6.1_ledger_sync_flush", exc)
+        return False
+
+
+def _state_sync_worker() -> None:
+    global _state_sync_event
+    event = _state_sync_event
+    if event is None:
+        return
+    while True:
+        if event.wait(timeout=30.0):
+            event.clear()
+            deadline = time.time() + _STATE_SYNC_DEBOUNCE_SEC
+            while time.time() < deadline:
+                time.sleep(0.05)
+            _flush_trading_ledger_if_changed()
+
+
+def start_state_synchronization_pipeline() -> None:
+    """Low-priority background worker — disk flush only on position mutations."""
+    global _state_sync_started, _state_sync_event, _state_sync_thread
+    if os.environ.get("IG_AGENT_PYTEST") == "1":
+        return
+    with _state_sync_lock:
+        if _state_sync_started:
+            return
+        _state_sync_event = threading.Event()
+        _state_sync_thread = threading.Thread(
+            target=_state_sync_worker,
+            name=_STATE_SYNC_THREAD_NAME,
+            daemon=True,
+        )
+        _state_sync_thread.start()
+        _state_sync_started = True
+    log_engine("v6.1 state sync pipeline armed (position-change ledger flush)")
+
+
+def force_flush_trading_ledger_checkpoint(snapshot: dict[str, Any]) -> bool:
+    """Public API for V6.2 recovery — atomic ledger write with pre-built snapshot."""
+    try:
+        _atomic_write_ledger(_TRADING_LEDGER_PATH, snapshot)
+        with _state_sync_lock:
+            global _last_position_fingerprint
+            _last_position_fingerprint = _position_state_fingerprint()
+        return True
+    except Exception as exc:
+        log_guarded_exception("v6.2_force_ledger_flush", exc)
+        return False
+
+
+def notify_position_state_change(*, reason: str = "") -> None:
+    """Signal the ledger sync worker after open / stop modify / close events."""
+    if os.environ.get("IG_AGENT_PYTEST") == "1":
+        try:
+            from system.recovery_mgr import get_disaster_recovery_manager
+
+            get_disaster_recovery_manager().notify_transaction_state_change(reason=reason)
+        except Exception:
+            pass
+        return
+    start_state_synchronization_pipeline()
+    try:
+        from system.recovery_mgr import get_disaster_recovery_manager
+
+        get_disaster_recovery_manager().notify_transaction_state_change(reason=reason)
+    except Exception:
+        pass
+    event = _state_sync_event
+    if event is not None:
+        event.set()
+        if reason:
+            log_engine(f"v6.1 state sync queued: {reason}")
+
+
+def reset_state_sync_pipeline_for_tests() -> None:
+    global _state_sync_started, _state_sync_event, _state_sync_thread, _last_position_fingerprint
+    with _state_sync_lock:
+        _state_sync_started = False
+        _state_sync_event = None
+        _state_sync_thread = None
+        _last_position_fingerprint = None
 
 
 def reset_shutdown_cleanup_for_tests() -> None:
@@ -491,6 +711,19 @@ def perform_shutdown_cleanup(
         log_engine(
             f"shutdown cleanup: learning store checkpoint error (continuing): {e}"
         )
+
+    try:
+        from system.runtime_state_persist import flush_disk_on_shutdown
+
+        flush_disk_on_shutdown()
+        log_engine("shutdown cleanup: volatile runtime caches flushed to disk")
+    except Exception as e:
+        log_engine(f"shutdown cleanup: volatile cache flush error (continuing): {e}")
+
+    try:
+        _flush_trading_ledger_if_changed()
+    except Exception as e:
+        log_engine(f"shutdown cleanup: trading ledger sync error (continuing): {e}")
 
     try:
         from system.ig_rest_session import shutdown_shared_ig_session

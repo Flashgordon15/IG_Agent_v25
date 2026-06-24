@@ -17,6 +17,12 @@ def _request_save() -> None:
         request_save()
     except Exception:
         pass
+    try:
+        from system.shutdown_cleanup import notify_position_state_change
+
+        notify_position_state_change(reason="entry_inflight")
+    except Exception:
+        pass
 
 DEFAULT_ENTRY_TIMEOUT_SEC = 30.0
 _DUPLICATE_LOG_INTERVAL_SEC = 60.0
@@ -140,6 +146,12 @@ def set_entry_deal_reference(epic: str, deal_reference: str) -> None:
             broker_deal_reference=str(deal_reference or "").strip(),
         )
     _request_save()
+
+
+def list_entries_for_reaper() -> list[InFlightEntry]:
+    """Snapshot of all in-flight entries (V2 cache reaper)."""
+    with _lock:
+        return list(_entries.values())
 
 
 def clear_entry(epic: str) -> None:

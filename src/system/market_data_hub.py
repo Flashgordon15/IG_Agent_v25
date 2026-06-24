@@ -61,6 +61,9 @@ NIGHT_MATRIX_EPICS: tuple[str, ...] = (
     "IX.D.DOW.IFM.IP",
     "IX.D.NIKKEI.IFM.IP",
     "CS.D.EURUSD.CFD.IP",
+    "CS.D.CRUDE.CFD.IP",
+    "IX.D.FTSE.IFM.IP",
+    "IX.D.DAX.IFM.IP",
 )
 
 
@@ -376,6 +379,15 @@ class MarketDataHub:
         min_interval: minimum seconds between API calls for this epic.
         max_age: if set, return cache without fetch when younger than this.
         """
+        try:
+            from intelligence.telemetry_daemon import gasket_fetch_if_stale
+
+            gasket_snap = gasket_fetch_if_stale(epic, max_age=max_age)
+            if gasket_snap is not None:
+                return gasket_snap
+        except Exception as exc:
+            log_guarded_exception("telemetry_gasket_fetch", exc, epic=epic)
+
         if self.is_in_maintenance(epic):
             cached = self.get_snapshot(epic)
             rescue_age = 90.0
