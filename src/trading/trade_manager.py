@@ -473,6 +473,16 @@ class TradeManager:
                 messages.extend(ext_msgs)
 
             if broker_managed:
+                if not self._broker_trailing_preflight(
+                    ig_deal,
+                    epic=epic,
+                    side=side,
+                    entry=entry,
+                    size=size,
+                    quote=quote,
+                    trade_id=trade_id,
+                ):
+                    continue
                 tol = self._stop_tolerance(epic)
                 stop_moved = abs(stop - prev_stop) >= tol
                 limit_moved = abs(target - prev_target) >= tol
@@ -1827,6 +1837,72 @@ class TradeManager:
             return round(float(level), 5)
         return round(float(level), 1)
 
+    def _broker_trailing_preflight(
+        self,
+        deal_id: str,
+        *,
+        epic: str,
+        side: str,
+        entry: float,
+        size: float,
+        quote: Quote,
+        trade_id: int,
+        ledger: Any | None = None,
+    ) -> bool:
+        """Closed-loop GET /positions/otc audit — blocks trailing on broker mismatch."""
+        from runtime.strategy_kill_switch import is_strategy_kill_active
+        from runtime.trade_manager import (
+            PreflightVerdict,
+            preflight_trailing_cycle,
+        )
+
+        if is_strategy_kill_active():
+            return False
+        if not deal_id or not self._rest:
+            return False
+
+        result = preflight_trailing_cycle(
+            rest_client=self._rest,
+            deal_id=str(deal_id),
+            epic=str(epic),
+            side=str(side),
+            entry=float(entry),
+            size=float(size),
+            quote=quote,
+            ledger=ledger,
+            trade_id=int(trade_id),
+            flush_callback=self._reconcile_flush_zombie,
+        )
+        if result.verdict == PreflightVerdict.MISSING_ON_BROKER:
+            return False
+        if result.verdict == PreflightVerdict.DRIFT_FATAL:
+            return False
+        if result.verdict == PreflightVerdict.LEDGER_UNAVAILABLE:
+            return False
+        return True
+
+    def _reconcile_flush_zombie(
+        self,
+        *,
+        deal_id: str,
+        epic: str = "",
+        trade_id: int | None = None,
+    ) -> None:
+        if trade_id is not None:
+            row = self.store.conn.execute(
+                "SELECT side FROM trades WHERE id=?", (int(trade_id),)
+            ).fetchone()
+            side = str(row["side"] if row else "BUY")
+            self._close_local_trade_position_gone(
+                trade_id=int(trade_id),
+                deal_id=str(deal_id),
+                side=side,
+                epic=str(epic),
+            )
+        elif deal_id:
+            self._gone_deals.add(str(deal_id))
+            self._last_ig_stop.pop(f"{deal_id}:", None)
+
     def _ig_position_levels(self, deal_id: str) -> tuple[float | None, float | None]:
         client = self._rest
         if client is None:
@@ -1981,6 +2057,17 @@ class TradeManager:
         """
         if not self._rest or not deal_id:
             return False
+        from runtime.strategy_kill_switch import is_strategy_kill_active
+        from runtime.trade_manager import (
+            PreflightVerdict,
+            fetch_broker_ledger_sync,
+            forensic_put_404_recovery,
+            handle_critical_state_mismatch,
+            preflight_trailing_cycle,
+        )
+
+        if is_strategy_kill_active():
+            return False
         cache_key = f"{deal_id}:{trade_id}"
         limit_cache_key = f"{deal_id}:{trade_id}:limit"
         try:
@@ -1990,13 +2077,25 @@ class TradeManager:
             get_rate_limit_manager().check_rest_allowed()
             if not hasattr(self._rest, "update_position_stops"):
                 return False
-            if not self._ig_position_open(deal_id):
-                self._close_local_trade_position_gone(
-                    trade_id=trade_id,
-                    deal_id=deal_id,
-                    side=side,
-                    epic=epic,
-                )
+
+            ledger = fetch_broker_ledger_sync(self._rest)
+            preflight = preflight_trailing_cycle(
+                rest_client=self._rest,
+                deal_id=str(deal_id),
+                epic=str(epic),
+                side=str(side),
+                entry=0.0,
+                size=0.0,
+                quote=None,
+                ledger=ledger,
+                trade_id=int(trade_id),
+                flush_callback=self._reconcile_flush_zombie,
+            )
+            if preflight.verdict in (
+                PreflightVerdict.MISSING_ON_BROKER,
+                PreflightVerdict.DRIFT_FATAL,
+                PreflightVerdict.LEDGER_UNAVAILABLE,
+            ):
                 return False
 
             if new_limit is not None:
@@ -2024,11 +2123,16 @@ class TradeManager:
             log_engine(f"IG stop update skipped — rate limit: {e}")
         except IGAPIError as e:
             if getattr(e, "status_code", None) == 404:
-                self._close_local_trade_position_gone(
-                    trade_id=trade_id,
-                    deal_id=deal_id,
-                    side=side,
-                    epic=epic,
+                forensic_put_404_recovery(
+                    rest_client=self._rest,
+                    deal_id=str(deal_id),
+                    payload_keys=sorted(kwargs.keys()),
+                )
+                handle_critical_state_mismatch(
+                    deal_id=str(deal_id),
+                    epic=str(epic),
+                    trade_id=int(trade_id),
+                    flush_callback=self._reconcile_flush_zombie,
                 )
             else:
                 log_engine(

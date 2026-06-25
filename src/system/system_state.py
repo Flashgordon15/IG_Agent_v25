@@ -56,6 +56,7 @@ class StreamingSnapshot:
     first_tick_epic: str | None = None
     first_tick_at: str | None = None
     market_closed_exempt: bool = False
+    hydration_mode: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

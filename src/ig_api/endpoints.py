@@ -40,13 +40,13 @@ def positions() -> str:
 
 
 def position_otc() -> str:
-    """POST — open OTC position (market order) via gateway/deal/v1/positions/otc."""
-    return "/v1/positions/otc"
+    """POST — open OTC position (market order) via gateway/deal/positions/otc."""
+    return "/positions/otc"
 
 
 def position_otc_list() -> str:
     """GET — list OTC open positions."""
-    return "/v1/positions/otc"
+    return "/positions/otc"
 
 
 def confirm(deal_reference: str) -> str:

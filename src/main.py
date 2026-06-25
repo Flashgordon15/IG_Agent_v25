@@ -1314,7 +1314,11 @@ def _install_signal_handlers(runtime: AgentRuntime) -> None:
 
 
 def main() -> None:
-    # Step 0 — kernel singleton lock (must be first; SO_REUSEADDR for TIME_WAIT recovery)
+    # Step 0 — evict stale port listeners + SHM before singleton lock or heavy boot
+    from system.identity.process_orchestrator import os_surface_cleanse
+
+    os_surface_cleanse()
+    # Step 1 — kernel singleton lock (SO_REUSEADDR for TIME_WAIT recovery)
     enforce_absolute_socket_singleton()
     os.environ.setdefault("IG_NON_BLOCKING_BOOT", "1")
     harness_ticks = _parse_harness_ticks()

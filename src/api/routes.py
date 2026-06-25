@@ -82,31 +82,14 @@ def health() -> dict[str, Any]:
 
 
 @router.get("/api/health")
-async def api_health() -> dict[str, Any]:
-    """Operational health — served from a background-refreshed cache (non-blocking)."""
-    from system.boot_metrics import get_boot_metrics
+async def api_health() -> JSONResponse:
+    """Gate-aware health — HTTP 200 only after Gate 3 completes."""
+    from api.gate_health_matrix import build_gate_health_response
 
-    boot = get_boot_metrics()
-    if str(boot.get("stage") or "") == "warming" or boot.get("warming"):
-        warm = boot.get("warming") if isinstance(boot.get("warming"), dict) else {}
-        return {
-            "status": "warming",
-            "ok": True,
-            "ready": False,
-            "warming": True,
-            "progress": int(boot.get("percent") or warm.get("percent") or 0),
-            "bars_compiled": int(warm.get("bars_compiled") or 0),
-            "bars_target": int(warm.get("bars_target") or 256),
-            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
-            "snapshot_age_s": snapshot_age_s_fast(),
-        }
-
-    status = get_cached_health_status()
-    return {
-        **status,
-        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
-        "snapshot_age_s": snapshot_age_s_fast(),
-    }
+    code, body = build_gate_health_response(include_extended=True)
+    body["ts"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    body["snapshot_age_s"] = snapshot_age_s_fast()
+    return JSONResponse(status_code=code, content=body)
 
 
 @router.get("/api/time")
@@ -608,6 +591,32 @@ def api_v30_cert() -> dict[str, Any]:
     from api.v30_cert import build_v30_cert_payload
 
     return build_v30_cert_payload()
+
+
+@router.post("/api/v31/orders/fulfill", status_code=202)
+async def api_v31_orders_fulfill(request: Request) -> dict[str, Any]:
+    """v31 production-plane synthetic breakout intake → async 202 + background IG REST."""
+    from api.v31_orders import accept_v31_breakout_order
+
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="invalid JSON body") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+    boot_ctx = getattr(request.app.state, "boot_context", None)
+    try:
+        return await accept_v31_breakout_order(body, boot_context=boot_ctx)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        from ig_api.exceptions import IGAPIError, IGOrderError
+
+        if isinstance(exc, (IGOrderError, IGAPIError)):
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise
 
 
 @router.get("/api/trades/triage-ledger")

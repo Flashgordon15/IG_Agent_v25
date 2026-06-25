@@ -6,6 +6,7 @@ import sqlite3
 import time
 from typing import Any
 
+from analytics.triage_db import connect_triage_sqlite
 from system.paths import triage_db_path
 
 
@@ -17,7 +18,7 @@ def fetch_triage_ledger(*, limit: int = 50) -> dict[str, Any]:
         return {"rows": [], "stats": stats, "source": str(path)}
 
     try:
-        conn = sqlite3.connect(str(path))
+        conn = connect_triage_sqlite(path)
         conn.row_factory = sqlite3.Row
         cur = conn.execute(
             """
@@ -87,7 +88,7 @@ def fetch_triage_stats() -> dict[str, Any]:
     try:
         path = triage_db_path()
         if path.is_file():
-            conn = sqlite3.connect(str(path))
+            conn = connect_triage_sqlite(path)
             conn.row_factory = sqlite3.Row
             cur = conn.execute(
                 """

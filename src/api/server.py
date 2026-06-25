@@ -73,28 +73,17 @@ def _register_bootstrap_routes(app: FastAPI) -> None:
         }
 
     @app.get("/api/health", include_in_schema=False)
-    def bootstrap_api_health() -> dict[str, Any]:
+    def bootstrap_api_health() -> JSONResponse:
         from datetime import datetime, timezone
 
-        from api.agent_health import get_cached_health_status
+        from api.gate_health_matrix import build_gate_health_response
         from api.snapshot_store import snapshot_age_s_fast
+        from fastapi.responses import JSONResponse
 
-        status = get_cached_health_status()
-        if isinstance(status.get("ok"), bool):
-            return {
-                **status,
-                "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
-                + "Z",
-                "snapshot_age_s": snapshot_age_s_fast(),
-            }
-        if getattr(app.state, "deferred_routes_registered", False):
-            return {
-                **status,
-                "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
-                + "Z",
-                "snapshot_age_s": snapshot_age_s_fast(),
-            }
-        return bootstrap_health()
+        code, body = build_gate_health_response(include_extended=True)
+        body["ts"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        body["snapshot_age_s"] = snapshot_age_s_fast()
+        return JSONResponse(status_code=code, content=body)
 
     @app.get("/api/startup/status", include_in_schema=False)
     def bootstrap_startup_status() -> dict[str, Any]:

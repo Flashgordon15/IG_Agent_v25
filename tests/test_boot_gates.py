@@ -383,14 +383,25 @@ class Gate5RunnerTests(HermeticBootMixin, unittest.TestCase):
         SystemState.reset_singleton_for_tests()
         self._stop_hermetic_env()
 
+    @patch(
+        "system.trading_plane_readiness.describe_trading_plane",
+        return_value={"live": True, "blockers": [], "v6_materialized": True},
+    )
+    @patch("system.boot.gate5_runner._gate5_ensure_trading_plane_live")
+    @patch("system.boot.gate5_runner._gate5_fast_stream_hydration")
     @patch("system.boot.gate5_runner._spawn_background_deploy_verify")
     @patch("system.boot.post_ready_services.start_post_ready_services")
     def test_gate5_sets_ready_and_unpauses(
         self,
         post_ready_mock: MagicMock,
         _bg_verify: MagicMock,
+        hydration_mock: MagicMock,
+        ensure_live_mock: MagicMock,
+        _plane_mock: MagicMock,
     ) -> None:
+        hydration_mock.return_value = {"mode": "STREAM", "first_tick_epic": "CS.D.EURUSD.CFD.IP"}
         orch = MagicMock()
+        orch._v6_materialized = True
         ctx = BootContext()
         ctx.orchestrator = orch
         get_system_state().update_state(
@@ -404,6 +415,8 @@ class Gate5RunnerTests(HermeticBootMixin, unittest.TestCase):
 
         Gate5Runner(get_system_state(), ctx).run()
 
+        hydration_mock.assert_called_once()
+        ensure_live_mock.assert_called_once()
         orch.unpause_from_boot.assert_called_once()
         post_ready_mock.assert_called_once_with(ctx)
         snap = get_system_state().snapshot()

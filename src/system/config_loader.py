@@ -35,7 +35,16 @@ _LEGACY_EXTENDS = frozenset(
 
 
 def _primary_config_path() -> Path:
-    """Resolve active config: v30 → v29 overlay (v25 merge chain blocked on v30 path)."""
+    """Resolve active config: IG_AGENT_CONFIG override → v30 → v29."""
+    import os
+
+    override = os.environ.get("IG_AGENT_CONFIG", "").strip()
+    if override:
+        p = Path(override)
+        if not p.is_absolute():
+            p = resolve_path(override)
+        if p.is_file():
+            return p.resolve()
     cd = config_dir()
     for rel in (V30_FILE, V29_FILE):
         p = cd / rel

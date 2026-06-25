@@ -1,0 +1,16 @@
+{
+  "$schema": "./config_schema.json",
+  "$extends": "config_v30.json",
+  "version": "31.0.0",
+  "app_version": "v31.0",
+  "_note": "v31 production plane — extends v30 Apex monolith; DEMO/LIVE routing via credentials + operating_mode",
+  "execution": {
+    "max_deal_size": 0.5,
+    "max_daily_risk_loss": 400.0,
+    "trailing_stop_distance": 45.0,
+    "_note": "Production defaults — override in config_v31_live_canary.json for real-money smoke tests"
+  },
+  "max_deal_size": 0.5,
+  "max_daily_risk_loss": 400.0,
+  "trailing_stop_distance": 45.0
+}

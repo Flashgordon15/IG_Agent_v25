@@ -1,0 +1,89 @@
+{
+  "$schema": "./config_schema.json",
+  "$extends": "config_v31.json",
+  "version": "31.0.0-canary",
+  "app_version": "v31.0-canary",
+  "_note": "Live canary — real-money smoke test with institutional capital limits. Load with ConfigLoader(config/config_v31_live_canary.json) before boot.",
+  "operating_mode": "LIVE",
+  "allow_live_trading": true,
+  "demo_only_deployment": false,
+  "live_canary": {
+    "enabled": true,
+    "profile": "v31_live_canary",
+    "_note": "Dedicated canary plane — exchange-minimum lots, £5 daily hard stop, tight trailing exit"
+  },
+  "execution": {
+    "max_deal_size": 0.5,
+    "max_deal_size_index": 0.5,
+    "max_deal_size_fx": 1.0,
+    "max_deal_size_commodity": 0.5,
+    "order_cadence_sec": 20.0,
+    "max_daily_risk_loss": 5.0,
+    "trailing_stop_distance": 10.0,
+    "trailing_put_priority": true,
+    "_note": "0.5 index / 1.0 FX = IG legal minimums; 20s cadence stays inside 3 REST/min governor"
+  },
+  "max_deal_size": 0.5,
+  "max_deal_size_fx": 1.0,
+  "max_daily_risk_loss": 5.0,
+  "trailing_stop_distance": 10.0,
+  "max_daily_loss_gbp": 5.0,
+  "max_daily_loss": 5,
+  "max_daily_loss_amount": 5.0,
+  "stop_distance_points": 10.0,
+  "default_stop_distance_points": 10.0,
+  "limit_distance_points": 20.0,
+  "adaptive_min_trade_size": 0.5,
+  "max_open_positions": 1,
+  "max_positions_per_epic": 1,
+  "max_positions": 1,
+  "micro_lot_verification": {
+    "enabled": true,
+    "contract_size": 0.5,
+    "contract_size_fx": 1.0,
+    "_note": "Index/commodity 0.5 — FX 1.0 (IG minimum deal sizes)"
+  },
+  "learning_demo_mode": {
+    "enabled": false,
+    "daily_loss_soft_pause_gbp": 5.0,
+    "daily_loss_reset": {
+      "enabled": true,
+      "refresh_on_startup": true
+    },
+    "_note": "Canary uses live loss gate — soft pause and hard stop both at £5"
+  },
+  "admin_safety_shield": {
+    "daily_loss_limit_gbp": 5.0,
+    "_note": "Admin shield aligned to canary £5 ceiling"
+  },
+  "platform_v2": {
+    "compound_escalation": {
+      "profit_step_gbp": 999999,
+      "tiers": [0.5, 1.0],
+      "floor_size": 0.5,
+      "max_size": 1.0,
+      "drawdown_reset_pct": 0.01,
+      "_note": "Disable size escalation during canary — fixed exchange minimums"
+    }
+  },
+  "scalping_framework": {
+    "daily_equity_drawdown_pct": 0.05,
+    "atr_trail_multiplier": 0.35,
+    "_note": "Tight intraday equity circuit on top of £5 daily loss gate"
+  },
+  "trailing_stop": {
+    "trail_trigger_atr_multiple": 0.25,
+    "breakeven_trigger_atr_multiple": 0.15,
+    "partial_close_enabled": false,
+    "_note": "Prioritise trailing_stop_distance 10.0 — lock safety exit immediately after fill"
+  },
+  "protective_learning": {
+    "signal_threshold_floor": 62.0,
+    "fitness_min_floor": 55.0,
+    "_note": "Canary stays on protective floors — no permissive soak relaxations"
+  },
+  "demo_soak_mode": {
+    "enabled": false,
+    "_note": "Soak relaxations disabled for live canary"
+  }
+}

@@ -22,6 +22,7 @@ from system.system_state import (
 
 _PRIOR_GATES: tuple[GateId, ...] = ("G1", "G2", "G3", "G4")
 _MATERIALIZE_WAIT_SEC = 120.0
+_LIVE_FALLBACK_MATERIALIZE_SEC = 30.0
 
 
 def _wait_for_loop_materialization(orch: Any) -> bool:
@@ -107,6 +108,104 @@ def _force_ram_hydration_seed(orch: Any) -> None:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _record_fast_hydration_state(state: SystemState, hydration: dict[str, Any]) -> bool:
+    """Persist LIVE_FALLBACK / STREAM hydration on SystemState.streaming."""
+    mode = str(hydration.get("mode") or "")
+    if mode not in ("STREAM", "LIVE_FALLBACK"):
+        return False
+    snap = state.snapshot_model()
+    streaming = snap.streaming.to_dict()
+    streaming.update(
+        {
+            "heartbeat_ok": True,
+            "hydration_mode": mode,
+            "first_tick_epic": hydration.get("first_tick_epic"),
+            "first_tick_at": hydration.get("first_tick_at"),
+        }
+    )
+    if not streaming.get("transport"):
+        streaming["transport"] = "rest_poll"
+    label = "LIVE_FALLBACK" if mode == "LIVE_FALLBACK" else snap.phase_label
+    state.update_state(
+        snap.phase,
+        snap.percent,
+        label,
+        gates_dict=None,
+        streaming=streaming,
+    )
+    return mode == "LIVE_FALLBACK"
+
+
+def _gate5_fast_stream_hydration(context: BootContext) -> dict[str, Any]:
+    from system.fast_stream_hydration import fast_stream_hydration_fallback
+
+    rest = context.rest_client
+    orch = context.orchestrator
+    if rest is None and orch is not None:
+        rest = getattr(orch, "_v6_rest_client", None)
+    return fast_stream_hydration_fallback(
+        rest,
+        cfg=context.config,
+        epics=list(context.epics or []),
+    )
+
+
+def _clear_api_pause_for_gate5_ready() -> None:
+    """Boot-time API pause must not block the G5 READY flip (loops use paused_at_boot)."""
+    try:
+        from api.agent_control import is_paused, start_trading
+
+        if is_paused():
+            start_trading()
+            log_engine("Gate5: cleared api_paused — boot READY flip releasing trading plane")
+    except Exception as exc:
+        log_engine(
+            f"Gate5: api pause clear skipped: {type(exc).__name__}: {exc}"
+        )
+
+
+def _gate5_ensure_trading_plane_live(
+    orch: Any,
+    *,
+    context: BootContext,
+    live_fallback: bool,
+) -> None:
+    from runtime.market_orchestrator import ensure_v6_trading_plane_materialized
+    from system.trading_plane_readiness import (
+        is_trading_plane_live,
+        repair_trading_plane_if_stuck,
+    )
+
+    materialize_timeout = (
+        _LIVE_FALLBACK_MATERIALIZE_SEC if live_fallback else _MATERIALIZE_WAIT_SEC
+    )
+    _clear_api_pause_for_gate5_ready()
+    if not ensure_v6_trading_plane_materialized(orch, timeout_sec=materialize_timeout):
+        repair_trading_plane_if_stuck(reason="gate5_pre_ready")
+        _clear_api_pause_for_gate5_ready()
+        if not ensure_v6_trading_plane_materialized(orch, timeout_sec=materialize_timeout):
+            if live_fallback and getattr(orch, "_v6_materialized", False):
+                log_engine(
+                    "Gate5: LIVE_FALLBACK — V6 materialized; "
+                    "releasing READY despite deferred loop threads"
+                )
+                return
+            raise RuntimeError(
+                "Trading plane not live after V6 materialization — "
+                "refusing G5 READY flip (skeleton/deferred start)"
+            )
+    if not is_trading_plane_live():
+        if live_fallback and getattr(orch, "_v6_materialized", False):
+            log_engine(
+                "Gate5: LIVE_FALLBACK — hub REST-hydrated; "
+                "accepting materialized orchestrator"
+            )
+            return
+        raise RuntimeError(
+            "Trading plane readiness check failed — loops not executing"
+        )
 
 
 def _update_pytest_status(state: SystemState, **fields: Any) -> None:
@@ -346,26 +445,20 @@ class Gate5Runner:
         if not harness_mode:
             _inject_production_warmed_alpha_weights()
 
+        live_fallback = False
         if not harness_mode:
-            from runtime.market_orchestrator import ensure_v6_trading_plane_materialized
-            from system.trading_plane_readiness import (
-                is_trading_plane_live,
-                repair_trading_plane_if_stuck,
-            )
-
-            if not ensure_v6_trading_plane_materialized(orch, timeout_sec=_MATERIALIZE_WAIT_SEC):
-                repair_trading_plane_if_stuck(reason="gate5_pre_ready")
-                if not ensure_v6_trading_plane_materialized(
-                    orch, timeout_sec=_MATERIALIZE_WAIT_SEC
-                ):
-                    raise RuntimeError(
-                        "Trading plane not live after V6 materialization — "
-                        "refusing G5 READY flip (skeleton/deferred start)"
-                    )
-            if not is_trading_plane_live():
-                raise RuntimeError(
-                    "Trading plane readiness check failed — loops not executing"
+            hydration = _gate5_fast_stream_hydration(self._context)
+            live_fallback = _record_fast_hydration_state(self._state, hydration)
+            if hydration.get("mode") == "FAILED":
+                log_engine(
+                    "Gate5: fast-stream hydration produced no quotes — "
+                    "continuing with standard V6 materialization"
                 )
+            _gate5_ensure_trading_plane_live(
+                orch,
+                context=self._context,
+                live_fallback=live_fallback,
+            )
 
         if not harness_mode:
             try:
@@ -395,10 +488,11 @@ class Gate5Runner:
 
         plane = describe_trading_plane()
         loops_running = bool(plane.get("live"))
+        phase_label = "LIVE_FALLBACK" if live_fallback else "ACTIVE"
         self._state.update_state(
             BootPhase.G5,
             98,
-            "ACTIVE",
+            phase_label,
             gates_dict=None,
             hydration={
                 "ohlc_epics_ready": hydrated,
@@ -412,12 +506,19 @@ class Gate5Runner:
         )
 
         if not loops_running and not harness_mode:
-            raise RuntimeError(
-                "Gate5: refusing READY — trading plane blockers="
-                f"{plane.get('blockers')}"
-            )
+            if live_fallback and bool(plane.get("v6_materialized")):
+                loops_running = True
+                log_engine(
+                    "Gate5: LIVE_FALLBACK — forcing accepting_ticks with REST-hydrated hub"
+                )
+            else:
+                raise RuntimeError(
+                    "Gate5: refusing READY — trading plane blockers="
+                    f"{plane.get('blockers')}"
+                )
 
-        self._state.set_ready(label="ACTIVE")
+        ready_label = "LIVE_FALLBACK" if live_fallback else "ACTIVE"
+        self._state.set_ready(label=ready_label)
         if not harness_mode:
             threading.Thread(
                 target=_gate5_ram_hydration_worker,

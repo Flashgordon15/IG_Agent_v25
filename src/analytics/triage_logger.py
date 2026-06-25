@@ -384,14 +384,12 @@ def analyze_broker_fill_slippage(
 
 def bootstrap_triage_db_wal(path: Path | None = None) -> None:
     """Boot-time WAL truncate — clears frozen journal residue from prior kills."""
-    import sqlite3
+    from analytics.triage_db import connect_triage_sqlite
 
     db_path = path or resolve_triage_db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path), timeout=30.0)
+    conn = connect_triage_sqlite(db_path)
     try:
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA busy_timeout=30000;")
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
         conn.commit()
     finally:
@@ -545,10 +543,14 @@ class TriageLogger:
     async def _worker_main(self) -> None:
         import aiosqlite
 
+        from analytics.triage_db import TRIAGE_BUSY_TIMEOUT_MS, TRIAGE_CONNECT_TIMEOUT_SEC
+
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        async with aiosqlite.connect(str(self._db_path), timeout=30.0) as db:
+        async with aiosqlite.connect(
+            str(self._db_path), timeout=TRIAGE_CONNECT_TIMEOUT_SEC
+        ) as db:
             await db.execute("PRAGMA journal_mode=WAL;")
-            await db.execute("PRAGMA busy_timeout=30000;")
+            await db.execute(f"PRAGMA busy_timeout={TRIAGE_BUSY_TIMEOUT_MS};")
             await db.execute("PRAGMA wal_checkpoint(TRUNCATE);")
             await db.execute("PRAGMA synchronous=NORMAL;")
             await db.execute("PRAGMA wal_autocheckpoint=1000;")
@@ -860,16 +862,14 @@ def log_trade_settlement(
 
 def read_triage_meta(key: str) -> str | None:
     """Synchronous meta read for optimization worker weight bootstrap."""
+    from analytics.triage_db import connect_triage_sqlite
+
     path = resolve_triage_db_path()
     if not path.is_file():
         return None
     try:
-        import sqlite3
-
-        conn = sqlite3.connect(str(path), timeout=30.0)
+        conn = connect_triage_sqlite(path)
         try:
-            conn.execute("PRAGMA journal_mode=WAL;")
-            conn.execute("PRAGMA busy_timeout=30000;")
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
             row = conn.execute(
                 "SELECT value FROM triage_meta WHERE key = ? LIMIT 1", (str(key),)

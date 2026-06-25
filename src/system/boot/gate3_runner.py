@@ -231,10 +231,39 @@ class Gate3Runner:
         deadline = time.monotonic() + self._timeout_sec
         first_tick_epic: str | None = None
         first_tick_at: str | None = None
+        fast_hydration_deadline = time.monotonic() + 5.0
+        fast_hydration_tried = False
 
         while time.monotonic() < deadline:
             heartbeat_ok = _stream_heartbeat_ok(client)
             tick_epic = _first_live_tick_epic(open_epics if open_epics else epics)
+
+            if (
+                not fast_hydration_tried
+                and tick_epic is None
+                and not market_closed_exempt
+                and time.monotonic() >= fast_hydration_deadline
+            ):
+                fast_hydration_tried = True
+                try:
+                    from system.fast_stream_hydration import fast_stream_hydration_fallback
+
+                    hydration = fast_stream_hydration_fallback(
+                        rest,
+                        cfg=cfg,
+                        epics=epics,
+                    )
+                    if hydration.get("first_tick_epic"):
+                        tick_epic = str(hydration.get("first_tick_epic"))
+                        log_engine(
+                            f"Gate3: fast-stream hydration mode={hydration.get('mode')} "
+                            f"epic={tick_epic}"
+                        )
+                except Exception as exc:
+                    log_engine(
+                        f"Gate3: fast-stream hydration skipped: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
 
             self._state.update_state(
                 BootPhase.G3_STREAMING,

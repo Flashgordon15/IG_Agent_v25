@@ -37,6 +37,103 @@ NIGHT_MATRIX_EPICS: tuple[str, ...] = (
     "CS.D.EURUSD.CFD.IP",
 )
 
+_SHM_SUFFIXES: tuple[str, ...] = (
+    "live_state",
+    "shadow_state",
+    "weight_xfer",
+    "shm",
+    "alpha_matrix",
+    "alpha_frontier",
+)
+_SHM_PREFIXES: tuple[str, ...] = ("ig_agent_v31_", "ig_agent_v30_")
+
+
+def _resolve_cleanse_api_port() -> int:
+    raw = os.environ.get("IG_API_PORT", "").strip()
+    if raw.isdigit():
+        return int(raw)
+    return _LIVE_PORT
+
+
+def _sigkill_port_listeners(port: int) -> list[int]:
+    """SIGKILL any foreign LISTEN pid on *port* — os_surface_cleanse uses kill -9 only."""
+    own = {os.getpid(), os.getppid()}
+    killed: list[int] = []
+    try:
+        result = subprocess.run(
+            ["lsof", "-iTCP", f":{int(port)}", "-sTCP:LISTEN", "-t"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        for pid_str in result.stdout.strip().splitlines():
+            clean = pid_str.strip()
+            if not clean.isdigit():
+                continue
+            pid = int(clean)
+            if pid in own:
+                continue
+            try:
+                os.kill(pid, signal.SIGKILL)
+                killed.append(pid)
+            except ProcessLookupError:
+                continue
+            except OSError:
+                continue
+    except Exception:
+        pass
+    return killed
+
+
+def _unlink_shm_segment(name: str) -> bool:
+    try:
+        from multiprocessing import shared_memory
+
+        seg = shared_memory.SharedMemory(name=name, create=False)
+        seg.close()
+        seg.unlink()
+        return True
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return False
+
+
+def _evict_versioned_shm_partitions() -> list[str]:
+    """Force-unlink lingering Apex shared-memory segments (v31 + v30 namespaces)."""
+    removed: list[str] = []
+    for prefix in _SHM_PREFIXES:
+        for suffix in _SHM_SUFFIXES:
+            name = f"{prefix}{suffix}"
+            if _unlink_shm_segment(name):
+                removed.append(name)
+    return removed
+
+
+def os_surface_cleanse(*, api_port: int | None = None) -> dict[str, Any]:
+    """
+    Native OS surface cleanse at ``main()`` entry — before locks and heavy imports.
+
+    Evicts foreign API port listeners via SIGKILL and unlinks stale SHM partitions.
+    """
+    port = int(api_port) if api_port is not None else _resolve_cleanse_api_port()
+    killed = _sigkill_port_listeners(port)
+    shm_removed = _evict_versioned_shm_partitions()
+    summary = {
+        "api_port": port,
+        "killed_pids": killed,
+        "shm_removed": shm_removed,
+    }
+    if killed or shm_removed:
+        try:
+            log_engine(
+                "os_surface_cleanse: "
+                f"port=:{port} killed={killed} shm_removed={len(shm_removed)}"
+            )
+        except Exception:
+            pass
+    return summary
+
 
 def _project_root() -> Path:
     from system.paths import project_root

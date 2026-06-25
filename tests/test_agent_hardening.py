@@ -85,7 +85,18 @@ class ApiHealthTests(unittest.TestCase):
             sd.register_deferred_route_tables(self.client.app)
             self.client.app.state.deferred_routes_registered = True
             from api.agent_health import refresh_health_cache
+            from system.system_state import BootPhase, GateSnapshot, GateStatus, SystemState
 
+            SystemState.get().update_state(
+                phase=BootPhase.READY,
+                percent=100,
+                label="Ready",
+                gates_dict={
+                    gid: GateSnapshot(status=GateStatus.COMPLETE)
+                    for gid in ("G1", "G2", "G3", "G4", "G5")
+                },
+                ready=True,
+            )
             refresh_health_cache()
         except Exception:
             pass
@@ -114,6 +125,8 @@ class ApiHealthTests(unittest.TestCase):
         )
         self.assertEqual(r.status_code, 200)
         body = r.json()
+        self.assertEqual(body.get("status"), "OPERATIONAL")
+        self.assertTrue(body.get("ready"))
         for key in (
             "ok",
             "agent_alive",

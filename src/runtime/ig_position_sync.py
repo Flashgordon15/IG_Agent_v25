@@ -1046,6 +1046,19 @@ class IgPositionSync:
             )
             changed = True
 
+        try:
+            from runtime.active_lifecycle_trades import reconcile_active_lifecycle_trades
+
+            reconcile_active_lifecycle_trades(
+                self._store,
+                ig_positions,
+                source="ig_position_sync",
+            )
+        except Exception as e:
+            log_engine(
+                f"active_lifecycle reconcile skipped: {type(e).__name__}: {e}"
+            )
+
         if self._txn_sync_pending and self._txn_sync:
             try:
                 self._txn_sync.request_sync(force=True, reason="position_close")

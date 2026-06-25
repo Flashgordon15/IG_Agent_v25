@@ -112,6 +112,39 @@ class ContinuousOptimizationWorker:
             )
         self._save_weights()
 
+    def on_certification_cycle_closed(
+        self,
+        cycle: int,
+        *,
+        win: bool,
+        epic: str = "",
+        net_pnl: float = 0.0,
+    ) -> float:
+        """
+        Certification harness hook — shift entry Z-score proxy (bias) from cycle feedback.
+        """
+        target = 1.0 if win or float(net_pnl) > 0 else 0.0
+        with self._lock:
+            pred = float(1.0 / (1.0 + np.exp(-self._bias)))
+            error = target - pred
+            self._bias += _LEARNING_RATE * error
+            self._bias = float(max(-2.0, min(2.0, self._bias)))
+            z_threshold = float(0.5 - self._bias * 0.15)
+            z_threshold = max(0.35, min(0.95, z_threshold))
+        self._save_weights()
+        try:
+            from analytics.triage_logger import write_triage_meta
+
+            write_triage_meta("entry_z_score_threshold", json.dumps(z_threshold))
+        except Exception:
+            pass
+        log_engine(
+            f"[ML OPTIMIZER SHIFT] Cycle {int(cycle)} closed. "
+            f"Updating entry Z-Score threshold to {z_threshold:.3f} "
+            f"based on learning feedback."
+        )
+        return z_threshold
+
     def _gradient_descent_step(self, vector: np.ndarray, *, target: float) -> None:
         vec = np.asarray(vector, dtype=_FLOAT64).reshape(-1)
         with self._lock:

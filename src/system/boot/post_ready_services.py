@@ -143,6 +143,31 @@ def start_post_ready_services(context: BootContext) -> None:
                 f"banned={summary.get('banned_count')} "
                 f"gate={'on' if summary.get('enabled') else 'off'}"
             )
+            if rest is not None:
+                def _boot_lifecycle() -> None:
+                    try:
+                        from runtime.active_lifecycle_trades import (
+                            boot_reconcile_active_trades,
+                        )
+
+                        counts = boot_reconcile_active_trades(rest, store)
+                        log_engine(
+                            "post-ready: active lifecycle boot reconcile "
+                            f"adopted={counts.get('adopted', 0)} "
+                            f"synced={counts.get('synced', 0)} "
+                            f"broker_open={counts.get('synced', 0) + counts.get('adopted', 0)}"
+                        )
+                    except Exception as exc:
+                        log_engine(
+                            f"post-ready: active lifecycle boot failed: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+
+                threading.Thread(
+                    target=_boot_lifecycle,
+                    name="active-lifecycle-boot",
+                    daemon=True,
+                ).start()
         except Exception as e:
             log_engine(
                 f"post-ready: setup_registry refresh skipped: {type(e).__name__}: {e}"

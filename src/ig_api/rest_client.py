@@ -1579,9 +1579,17 @@ class IGRestClient:
             from system.soak_live_fire import soak_mode_enabled
             from trading.live_production_probe import live_probe_enabled
 
-            micro_lot = (soak_mode_enabled() or live_probe_enabled()) and float(size) >= 0.1
+            micro_lot = (
+                soak_mode_enabled()
+                or live_probe_enabled()
+                or os.environ.get("IG_V31_FORCE_DEMO_TRADE", "").strip() in ("1", "true", "yes")
+            ) and float(size) >= 0.1
         except Exception:
-            micro_lot = False
+            micro_lot = os.environ.get("IG_V31_FORCE_DEMO_TRADE", "").strip() in (
+                "1",
+                "true",
+                "yes",
+            )
 
         if micro_lot:
             size = float(size)
@@ -2309,8 +2317,15 @@ class IGRestClient:
         limit_level: float | None = None,
         stop_distance: float | None = None,
         limit_distance: float | None = None,
+        budget_priority: bool | None = None,
     ) -> dict[str, Any]:
         self.ensure_session()
+        if budget_priority is None:
+            budget_priority = os.environ.get("IG_TORTURE_TRAIL_PRIORITY", "").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+            )
         payload: dict[str, Any] = {}
         if stop_level is not None:
             payload["stopLevel"] = stop_level
@@ -2320,17 +2335,63 @@ class IGRestClient:
             payload["stopDistance"] = stop_distance
         if limit_distance is not None:
             payload["limitDistance"] = limit_distance
-        r = self.request(
-            "PUT",
-            update_position(deal_id),
-            headers=self._auth_headers("2"),
-            json=payload,
-        )
-        if r.status_code not in (200, 201):
+        if not payload:
+            raise IGAPIError("Update stops failed: empty payload", status_code=400)
+
+        paths = [update_position(deal_id)]
+        alt = f"/positions/otc/{deal_id}"
+        if paths[0] != alt:
+            paths.append(alt)
+
+        last_status = 0
+        last_body = ""
+        for path in paths:
+            try:
+                r = self.request(
+                    "PUT",
+                    path,
+                    headers=self._auth_headers("2"),
+                    json=payload,
+                    budget_priority=bool(budget_priority),
+                )
+            except Exception as exc:
+                log_engine(
+                    f"update_position_stops: request error deal={deal_id} path={path}: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                raise
+            last_status = int(r.status_code)
+            last_body = (r.text or "")[:400]
+            if r.status_code in (200, 201):
+                return r.json()
+            if r.status_code == 404:
+                continue
             raise IGAPIError(
-                f"Update stops failed: HTTP {r.status_code}", status_code=r.status_code
+                f"Update stops failed: HTTP {r.status_code}",
+                status_code=r.status_code,
             )
-        return r.json()
+
+        log_engine(
+            f"update_position_stops: PUT 404 forensic deal={deal_id} "
+            f"paths_tried={paths} payload_keys={sorted(payload.keys())} "
+            f"body={last_body!r}"
+        )
+        try:
+            from runtime.trade_manager import forensic_put_404_recovery
+
+            forensic_put_404_recovery(
+                rest_client=self,
+                deal_id=str(deal_id),
+                payload_keys=sorted(payload.keys()),
+            )
+        except Exception as exc:
+            log_engine(
+                f"update_position_stops: forensic recovery failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+        raise IGAPIError(
+            f"Update stops failed: HTTP {last_status}", status_code=last_status
+        )
 
     def _auth_headers(self, version: str = "3") -> dict[str, str]:
         return self._auth.authenticated_headers(version, account_id=self.account_id)
