@@ -8,6 +8,7 @@ Local cache or SQLite rows alone are never sufficient to authorize stop modifica
 from __future__ import annotations
 
 import os
+import threading
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -334,3 +335,213 @@ def forensic_put_404_recovery(
     except OSError as exc:
         log_engine(f"broker_reconcile: lock clear failed: {exc}")
     return fetch_broker_ledger_sync(rest_client)
+
+
+# ── Dual-core parallel scalper track (ENGINE_B_MICRO_SCALPER) ─────────────────
+
+
+class DualCoreCoordinator:
+    """
+    Non-blocking secondary execution track — mean-reversion micro scalper
+    parallel to Macro Breakout Sentinel. Runs on a dedicated daemon thread
+    with async order dispatch via a single-worker executor (REST-budget aware).
+    """
+
+    def __init__(
+        self,
+        *,
+        rest_client: Any,
+        config: Any | None = None,
+        poll_interval_sec: float = 0.5,
+        order_cadence_sec: float | None = None,
+    ) -> None:
+        self._rest = rest_client
+        self._cfg = config
+        self._poll_interval_sec = max(0.5, float(poll_interval_sec))
+        if order_cadence_sec is None and config is not None:
+            try:
+                exec_raw = config.get("execution", {}) if hasattr(config, "get") else {}
+                order_cadence_sec = float(
+                    exec_raw.get("order_cadence_sec", 20.0)
+                    if isinstance(exec_raw, dict)
+                    else 20.0
+                )
+            except Exception:
+                order_cadence_sec = 20.0
+        self._order_cadence_sec = max(5.0, float(order_cadence_sec or 20.0))
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._last_order_at: dict[str, float] = {}
+        from concurrent.futures import ThreadPoolExecutor
+
+        self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="micro-scalper")
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._loop,
+            name="dual-core-micro-scalper",
+            daemon=True,
+        )
+        self._thread.start()
+        log_engine(
+            f"DualCoreCoordinator: ENGINE_B_MICRO_SCALPER track started "
+            f"(poll={self._poll_interval_sec}s cadence={self._order_cadence_sec}s)"
+        )
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._executor.shutdown(wait=False, cancel_futures=True)
+
+    def _loop(self) -> None:
+        from runtime.dual_core_execution import get_stacked_snapshots, refresh_stacked_dual_assets
+
+        while not self._stop.is_set():
+            try:
+                refresh_stacked_dual_assets()
+                for _epic, snap in get_stacked_snapshots().items():
+                    if snap.core_b_micro_active:
+                        self._scan_micro_entries(snap)
+            except Exception as exc:
+                log_engine(
+                    f"DualCoreCoordinator: loop error {type(exc).__name__}: {exc}"
+                )
+            self._stop.wait(self._poll_interval_sec)
+
+    def _scan_micro_entries(self, snap: Any) -> None:
+        from runtime.dual_core_execution import evaluate_micro_scalp_signal
+        from system.market_data_hub import get_market_data_hub
+
+        hub = get_market_data_hub()
+        quote = hub.get_snapshot(snap.epic)
+        if quote is None or quote.bid <= 0 or quote.offer <= 0:
+            return
+        direction = evaluate_micro_scalp_signal(
+            epic=snap.epic,
+            bid=float(quote.bid),
+            offer=float(quote.offer),
+            snap=snap,
+        )
+        if direction is None:
+            return
+        from runtime.dual_core_execution import is_core_b_satellite_uncoupled, set_last_gate_suppression_reason
+
+        if not is_core_b_satellite_uncoupled():
+            from runtime.dual_core_execution import macro_15min_trend_allows_direction
+
+            if not macro_15min_trend_allows_direction(direction, snap.epic):
+                set_last_gate_suppression_reason("15m_macro_trend_lock")
+                return
+        else:
+            set_last_gate_suppression_reason("")
+        now = time.time()
+        last = self._last_order_at.get(snap.epic, 0.0)
+        if now - last < self._order_cadence_sec:
+            return
+        self._last_order_at[snap.epic] = now
+        self._executor.submit(self._dispatch_micro_order, snap.epic, direction)
+
+    def _dispatch_micro_order(self, epic: str, direction: str) -> None:
+        from runtime.dual_core_execution import (
+            ENGINE_B_MICRO_SCALPER,
+            canary_lot_size,
+            resolve_micro_stop_limit_points,
+            set_last_gate_suppression_reason,
+        )
+        from runtime.strategy_kill_switch import is_strategy_kill_active
+        from system.qmm_process_supervisor import process_entry_blocked
+
+        if is_strategy_kill_active():
+            set_last_gate_suppression_reason("BROKER_STATE_MISMATCH")
+            return
+        blocked, reason = process_entry_blocked()
+        if blocked:
+            set_last_gate_suppression_reason(reason or "process_entry_blocked")
+            return
+        try:
+            from api.agent_control import is_paused
+
+            if is_paused():
+                set_last_gate_suppression_reason("api_trading_paused")
+                return
+        except Exception:
+            pass
+        if self._rest is None:
+            set_last_gate_suppression_reason("rest_client_unavailable")
+            return
+        try:
+            if self._rest.has_open_position(epic):
+                set_last_gate_suppression_reason("position_already_open")
+                return
+        except Exception:
+            pass
+        try:
+            from system.rest_api_budget import RestBudgetPausedError, get_rest_api_budget
+
+            get_rest_api_budget().acquire(label="micro_scalper_place")
+        except RestBudgetPausedError:
+            set_last_gate_suppression_reason("rest_budget_preemptive_pause")
+            log_engine(f"DualCoreCoordinator: REST budget pause — micro scalp deferred epic={epic}")
+            return
+        except Exception as exc:
+            log_engine(
+                f"DualCoreCoordinator: REST acquire failed epic={epic}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return
+
+        size = canary_lot_size(epic, self._cfg)
+        tp_pts, sl_pts = resolve_micro_stop_limit_points(self._rest, epic)
+        deal_ref = f"MICRO-{epic[-8:]}-{int(time.time())}"
+        log_engine(
+            f"DualCoreCoordinator: {ENGINE_B_MICRO_SCALPER} {direction} epic={epic} "
+            f"size={size} tp={tp_pts} sl={sl_pts} z-mode=compressed"
+        )
+        try:
+            self._rest.place_market_order(
+                epic=epic,
+                direction=direction,
+                size=size,
+                stop_distance=sl_pts,
+                limit_distance=tp_pts,
+            )
+        except Exception as exc:
+            set_last_gate_suppression_reason(f"micro_order_failed:{type(exc).__name__}")
+            log_engine(
+                f"DualCoreCoordinator: micro order failed epic={epic}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return
+        set_last_gate_suppression_reason("")
+
+
+_coordinator: DualCoreCoordinator | None = None
+_coordinator_lock = threading.Lock()
+
+
+def start_dual_core_coordinator(
+    rest_client: Any,
+    *,
+    config: Any | None = None,
+) -> DualCoreCoordinator | None:
+    """Attach parallel micro-scalper track (idempotent)."""
+    global _coordinator
+    if rest_client is None:
+        return None
+    with _coordinator_lock:
+        if _coordinator is not None:
+            return _coordinator
+        _coordinator = DualCoreCoordinator(rest_client=rest_client, config=config)
+        _coordinator.start()
+        return _coordinator
+
+
+def stop_dual_core_coordinator() -> None:
+    global _coordinator
+    with _coordinator_lock:
+        if _coordinator is not None:
+            _coordinator.stop()
+            _coordinator = None
+

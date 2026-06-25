@@ -242,3 +242,26 @@ def start_post_ready_services(context: BootContext) -> None:
         start_self_healing_supervisor()
     except Exception as e:
         log_engine(f"post-ready: self-healing supervisor skipped: {type(e).__name__}: {e}")
+
+    if rest is not None:
+        try:
+            from cockpit.emergency import clear_emergency_cockpit_override
+
+            clear_emergency_cockpit_override(resume_trading=True)
+            log_engine("post-ready: COCKPIT_EMERGENCY_OVERRIDE purged — Gate 5 valve open")
+        except Exception as e:
+            log_engine(f"post-ready: cockpit override purge skipped: {type(e).__name__}: {e}")
+
+        try:
+            from runtime.trade_manager import start_dual_core_coordinator
+
+            start_dual_core_coordinator(rest, config=cfg)
+            log_engine("post-ready: DualCoreCoordinator ENGINE_B_MICRO_SCALPER armed")
+            from runtime.dual_core_execution import start_stacked_dual_asset_tracks
+
+            start_stacked_dual_asset_tracks()
+            log_engine("post-ready: StackedDualAsset parallel tracks armed (Wall St + Gold)")
+        except Exception as e:
+            log_engine(
+                f"post-ready: dual-core coordinator skipped: {type(e).__name__}: {e}"
+            )

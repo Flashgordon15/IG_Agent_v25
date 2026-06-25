@@ -126,6 +126,11 @@ def stop_ig_position_sync(sync: Any | None = None) -> None:
         _position_sync = None
 
 
+def get_ig_position_sync() -> Any | None:
+    """Return the process-wide IgPositionSync instance when attached."""
+    return _position_sync
+
+
 def start_order_reconciler_worker(
     rest_client: Any,
     *,

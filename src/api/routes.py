@@ -4,6 +4,7 @@ HTTP routes — dashboard API (Section 4.5 Steps 8 + 13).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import signal
@@ -158,6 +159,17 @@ def api_stop() -> dict[str, Any]:
     result = stop_trading()
     if not result.get("ok"):
         raise HTTPException(status_code=503, detail=result.get("error", "stop failed"))
+    return result
+
+
+@router.post("/api/operational/unblock")
+def api_operational_unblock() -> dict[str, Any]:
+    """Clear cockpit emergency override, manual stop, and execution blocks."""
+    from cockpit.emergency import clear_emergency_cockpit_override
+    from api.v31_telemetry import resolve_risk_tracking_fields
+
+    result = clear_emergency_cockpit_override(resume_trading=True)
+    result.update(resolve_risk_tracking_fields())
     return result
 
 
@@ -591,6 +603,38 @@ def api_v30_cert() -> dict[str, Any]:
     from api.v30_cert import build_v30_cert_payload
 
     return build_v30_cert_payload()
+
+
+@router.get("/api/v31/telemetry")
+async def api_v31_telemetry() -> dict[str, Any]:
+    """Core night-matrix quotes, IG account capital, transport RTT, gate stack."""
+    from api.v31_telemetry import build_v31_telemetry
+
+    return await asyncio.to_thread(build_v31_telemetry)
+
+
+@router.get("/api/v31/gate-stack")
+async def api_v31_gate_stack() -> dict[str, Any]:
+    """Core B live gate boolean matrix — stream / macro / risk netting."""
+    from runtime.dual_core_execution import resolve_core_b_gate_stack
+
+    return await asyncio.to_thread(resolve_core_b_gate_stack)
+
+
+@router.get("/api/v31/positions")
+async def api_v31_positions() -> dict[str, Any]:
+    """Live open contracts from IgPositionSync."""
+    from api.v31_telemetry import build_v31_positions
+
+    return await asyncio.to_thread(build_v31_positions)
+
+
+@router.get("/api/v31/history")
+async def api_v31_history(limit: int = 10) -> dict[str, Any]:
+    """Latest closed trade outcomes from triage_v31.db."""
+    from api.v31_telemetry import build_v31_history
+
+    return await asyncio.to_thread(build_v31_history, limit=limit)
 
 
 @router.post("/api/v31/orders/fulfill", status_code=202)

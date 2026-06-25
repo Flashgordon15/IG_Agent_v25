@@ -797,6 +797,13 @@ def _build_fulfillment_snapshot() -> dict[str, Any]:
     frontier = get_frontier_tracker_payload()
     traffic = _traffic_light_hub(feed, ring_tel, frontier, threads, data_velocity)
     traffic, stages = _apply_velocity_overrides(traffic, data_velocity, stages)
+    try:
+        from runtime.dual_core_execution import dual_core_status_dict, refresh_dual_core_from_hub
+
+        refresh_dual_core_from_hub()
+        dual_core = dual_core_status_dict()
+    except Exception:
+        dual_core = {}
     return {
         "mode": "UNIFIED_FULFILLMENT",
         "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -820,6 +827,9 @@ def _build_fulfillment_snapshot() -> dict[str, Any]:
         "gate_diagnostics": gate_payload,
         "market_quotes": _market_quotes_from_ring(ring_tel),
         "memory_alignment": "TRUE SYNC" if bool(ring_tel.get("thread_aligned")) else "WARMING",
+        "execution_mode": dual_core.get("execution_mode"),
+        "volatility_z_score": dual_core.get("volatility_z_score"),
+        "dual_core_status": dual_core,
     }
 
 

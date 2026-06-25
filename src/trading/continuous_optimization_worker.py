@@ -145,6 +145,42 @@ class ContinuousOptimizationWorker:
         )
         return z_threshold
 
+    def seize_strategy_sovereignty(
+        self,
+        epic: str,
+        *,
+        spread: float,
+        volatility_z: float,
+    ) -> dict[str, Any]:
+        """ML seizes strategy lead — dynamic Z/TP/SL from live spread volatility."""
+        from runtime.dual_core_execution import (
+            MICRO_SL_POINTS,
+            MICRO_TP_POINTS,
+            MICRO_Z_THRESHOLD,
+            apply_ml_cognitive_overrides,
+            epic_display_name,
+        )
+
+        spread_norm = min(1.0, max(0.0, float(spread)))
+        with self._lock:
+            entry_z = float(0.5 - self._bias * 0.2 + float(volatility_z) * 0.08)
+            entry_z = max(0.35, min(float(MICRO_Z_THRESHOLD), entry_z))
+        tp_pts = max(1.0, float(MICRO_TP_POINTS) * (1.0 + spread_norm * 0.5))
+        sl_pts = max(1.5, float(MICRO_SL_POINTS) * (1.0 + spread_norm * 0.35))
+        overrides = {
+            "micro_z_threshold": round(entry_z, 4),
+            "micro_tp_points": round(tp_pts, 3),
+            "micro_sl_points": round(sl_pts, 3),
+            "spread_volatility_norm": round(spread_norm, 4),
+        }
+        apply_ml_cognitive_overrides(epic, overrides)
+        label = epic_display_name(epic)
+        log_engine(
+            f"[ML COGNITIVE CONTROLLER] Seizing strategy lead for asset {label}. "
+            f"Dynamically adjusting entry parameter thresholds."
+        )
+        return overrides
+
     def _gradient_descent_step(self, vector: np.ndarray, *, target: float) -> None:
         vec = np.asarray(vector, dtype=_FLOAT64).reshape(-1)
         with self._lock:

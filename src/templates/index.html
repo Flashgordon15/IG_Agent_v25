@@ -1,377 +1,489 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="h-full">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>IG Agent — Traffic-Light Console</title>
+  <title>IG Agent — Neon Quant Cockpit</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            neon: { cyan: '#00f5ff', green: '#39ff14', pink: '#ff006e', purple: '#bf00ff' },
+            void: { 950: '#020408', 900: '#050a12', 800: '#0a1220' }
+          },
+          fontFamily: { mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'Consolas', 'monospace'] },
+          animation: { pulseNeon: 'pulseNeon 1.4s ease-in-out infinite', scan: 'scan 3s linear infinite' },
+          keyframes: {
+            pulseNeon: { '0%,100%': { boxShadow: '0 0 8px #00f5ff, 0 0 16px #00f5ff44' }, '50%': { boxShadow: '0 0 22px #00f5ff, 0 0 40px #00f5ff88' } },
+            scan: { '0%': { transform: 'translateY(-100%)' }, '100%': { transform: 'translateY(100vh)' } }
+          }
+        }
+      }
+    };
+  </script>
   <style>
-    :root {
-      --bg: #040507;
-      --panel: #0a0d12;
-      --border: #1a1f27;
-      --fg: #e8edf4;
-      --muted: #7d8590;
-      --green: #3fb950;
-      --blue: #58a6ff;
-      --fire: #ff7b47;
-      --crimson: #ff3b30;
-      --crimson-bg: #3d0a0a;
-      --dim: #484f58;
-      --win: #3fb950;
-      --loss: #f85149;
+    body { background: #020408; overflow-x: hidden; }
+    #bg-canvas { position: fixed; inset: 0; z-index: 0; pointer-events: none; }
+    .cockpit { position: relative; z-index: 1; }
+    .glass { background: rgba(5, 10, 18, 0.82); border: 1px solid rgba(0, 245, 255, 0.18); backdrop-filter: blur(8px); }
+    .neon-text-cyan { color: #00f5ff; text-shadow: 0 0 8px #00f5ff88; }
+    .neon-text-green { color: #39ff14; text-shadow: 0 0 8px #39ff1488; }
+    .scanline::after {
+      content: ''; position: absolute; inset: 0; pointer-events: none;
+      background: linear-gradient(transparent 50%, rgba(0,245,255,0.03) 50%);
+      background-size: 100% 4px;
     }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      background: var(--bg);
-      color: var(--fg);
-      min-height: 100vh;
-      padding: 0 0 2rem;
-    }
-    .stall-banner {
-      display: none;
-      width: 100%;
-      background: var(--crimson-bg);
-      border-bottom: 2px solid var(--crimson);
-      color: #fff;
-      text-align: center;
-      font-size: 0.95rem;
-      font-weight: 700;
-      letter-spacing: 0.06em;
-      padding: 0.85rem 1rem;
-      animation: stall-flash 1s ease-in-out infinite;
-    }
-    .stall-banner.visible { display: block; }
-    @keyframes stall-flash {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.72; }
-    }
-    .page-body { padding: 1.5rem 1.25rem 0; }
-    h1 {
-      font-size: 0.7rem;
-      letter-spacing: 0.2em;
-      text-transform: uppercase;
-      color: var(--muted);
-      text-align: center;
-      margin-bottom: 1.5rem;
-    }
-    .lights {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 0.75rem;
-      margin-bottom: 1.5rem;
-      max-width: 960px;
-      margin-left: auto;
-      margin-right: auto;
-    }
-    .light {
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 1.25rem 1rem;
-      text-align: center;
-      min-height: 140px;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      gap: 0.5rem;
-    }
-    .light .icon { font-size: 2.2rem; line-height: 1; }
-    .light .name {
-      font-size: 0.58rem;
-      color: var(--muted);
-      text-transform: uppercase;
-      letter-spacing: 0.1em;
-    }
-    .light .value {
-      font-size: 0.85rem;
-      font-weight: 600;
-      line-height: 1.35;
-    }
-    .light.green .value { color: var(--green); }
-    .light.blue .value { color: var(--blue); font-size: 1.6rem; font-variant-numeric: tabular-nums; }
-    .light.fire .value { color: var(--fire); }
-    .light.crimson { border-color: var(--crimson); background: #1a0808; }
-    .light.crimson .value { color: var(--crimson); }
-    .light.neutral .value { color: var(--muted); }
-    .light.blue .value.shift { animation: coord-pulse 1s ease-in-out infinite; }
-    @keyframes coord-pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.55; }
-    }
-    .fills-wrap {
-      max-width: 960px;
-      margin: 0 auto;
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      overflow: hidden;
-    }
-    .fills-wrap h2 {
-      font-size: 0.62rem;
-      color: var(--muted);
-      text-transform: uppercase;
-      letter-spacing: 0.12em;
-      padding: 0.75rem 1rem;
-      border-bottom: 1px solid var(--border);
-    }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 0.72rem;
-    }
-    th {
-      text-align: left;
-      color: var(--muted);
-      font-weight: 500;
-      padding: 0.55rem 0.75rem;
-      border-bottom: 1px solid var(--border);
-      font-size: 0.58rem;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-    }
-    td {
-      padding: 0.55rem 0.75rem;
-      border-bottom: 1px solid var(--border);
-      font-variant-numeric: tabular-nums;
-    }
-    tr:last-child td { border-bottom: none; }
-    .outcome-win { color: var(--win); }
-    .outcome-loss { color: var(--loss); }
-    .status-open { color: var(--blue); }
-    .status-closed { color: var(--muted); }
-    .empty-row td {
-      text-align: center;
-      color: var(--dim);
-      padding: 1.5rem;
-    }
-    .sync {
-      text-align: center;
-      margin-top: 1rem;
-      font-size: 0.55rem;
-      color: var(--dim);
-    }
-    @media (max-width: 720px) {
-      .lights { grid-template-columns: 1fr; }
-    }
+    .trail-bar { height: 6px; border-radius: 3px; background: #1a2535; overflow: hidden; }
+    .trail-fill { height: 100%; background: linear-gradient(90deg, #00f5ff, #39ff14); transition: width 0.3s ease; }
+    .badge-scalper-active { animation: pulseNeon 1.4s ease-in-out infinite; }
+    .gate-pass { color: #39ff14; }
+    .gate-wait { color: #fbbf24; }
+    .gate-block { color: #f87171; }
+    .gate-uncouple { color: #00f5ff; text-shadow: 0 0 6px #00f5ff66; }
+    .gate-muted { color: #94a3b8; }
+    .neon-text-amber { color: #ffb020; text-shadow: 0 0 8px #ffb02088; }
   </style>
 </head>
-<body>
-  <div class="stall-banner" id="stall-banner">
-    ⚠️ CRITICAL STALL: DATA STREAM DISCONNECTED - TRADING PAUSED
-  </div>
+<body class="h-full font-mono text-slate-200 min-h-screen">
+  <canvas id="bg-canvas"></canvas>
 
-  <div class="page-body">
-    <h1>Visual Verification Dashboard</h1>
+  <div class="cockpit min-h-screen p-3 md:p-5 scanline">
+    <!-- Header -->
+    <header class="flex flex-wrap items-center justify-between gap-3 mb-4">
+      <div>
+        <h1 class="text-xs tracking-[0.35em] uppercase text-slate-500">IG Agent v31 · Quant Cockpit</h1>
+        <p id="header-status" class="text-[11px] text-neon-cyan mt-1">syncing…</p>
+      </div>
+      <div id="core-b-badge" class="hidden px-4 py-2 rounded-lg border border-neon-cyan/60 bg-neon-cyan/10 text-neon-cyan text-xs font-bold tracking-widest badge-scalper-active">
+        ⚡ CORE_B: SCALPER_ACTIVE
+      </div>
+      <div class="text-right text-[10px] text-slate-500 space-y-0.5">
+        <div>BALANCE <span id="account-balance" class="text-neon-green neon-text-green font-bold">—</span></div>
+        <div>MARGIN <span id="account-margin" class="text-neon-cyan neon-text-cyan font-bold">—</span></div>
+        <div>TICKS <span id="ticks-processed" class="text-neon-green neon-text-green">—</span></div>
+        <div>Z(20) <span id="live-z" class="text-neon-cyan">—</span></div>
+      </div>
+    </header>
 
-    <div class="lights">
-      <div class="light neutral" id="light-ingestion">
-        <div class="icon" id="icon-ingestion">⚪</div>
-        <div class="name">Ingestion Health</div>
-        <div class="value" id="val-ingestion">—</div>
+    <div id="stacked-lock-banner" class="mb-4 px-4 py-3 rounded-xl border border-neon-cyan/50 bg-neon-cyan/10 text-center text-sm font-bold tracking-wide badge-scalper-active">
+      🏛️ STACKED DUAL-ASSET LOCK: <span class="neon-text-cyan">Wall Street</span> + <span class="neon-text-amber">Gold</span> <span class="text-slate-400">[PARALLEL TRACKS]</span>
+    </div>
+
+    <!-- Stacked neon tick charts -->
+    <div class="space-y-4 mb-4">
+      <div class="glass rounded-xl p-3 relative border border-neon-cyan/30">
+        <div class="flex justify-between items-center mb-2">
+          <div id="z-chart-title-wall" class="text-[10px] uppercase tracking-widest text-neon-cyan">Neon Tick Stream · Wall Street · PRIMARY</div>
+          <div id="z-live-wall" class="text-[10px] text-neon-cyan font-bold">Z —</div>
+        </div>
+        <div class="h-48 md:h-52"><canvas id="z-chart-wall"></canvas></div>
       </div>
-      <div class="light blue" id="light-matrix">
-        <div class="icon">🔵</div>
-        <div class="name">Live Matrix Coordinates</div>
-        <div class="value shift" id="val-matrix">—</div>
-      </div>
-      <div class="light neutral" id="light-exec">
-        <div class="icon" id="icon-exec">⚪</div>
-        <div class="name">Master Execution Valve</div>
-        <div class="value" id="val-exec">⚪ SCANNING FRONTIER</div>
+      <div class="glass rounded-xl p-3 relative border border-amber-500/30">
+        <div class="flex justify-between items-center mb-2">
+          <div id="z-chart-title-gold" class="text-[10px] uppercase tracking-widest text-amber-400">Neon Tick Stream · Gold · SECONDARY</div>
+          <div id="z-live-gold" class="text-[10px] text-amber-400 font-bold">Z —</div>
+        </div>
+        <div class="h-48 md:h-52"><canvas id="z-chart-gold"></canvas></div>
       </div>
     </div>
 
-    <div class="fills-wrap">
-      <h2>Real-Time Execution Performance</h2>
-      <table>
-        <thead>
-          <tr>
-            <th>Timestamp (UTC)</th>
-            <th>Epic</th>
-            <th>Action</th>
-            <th>Entry</th>
-            <th>Status</th>
-            <th>Outcome</th>
-          </tr>
-        </thead>
-        <tbody id="fills-body">
-          <tr class="empty-row"><td colspan="6">No executions yet</td></tr>
-        </tbody>
-      </table>
+    <div class="grid grid-cols-1 xl:grid-cols-3 gap-4 mb-4">
+      <div class="xl:col-span-2 hidden"></div>
+      <div class="glass rounded-xl p-3">
+        <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">Cognitive ML Risk Shift</div>
+        <div class="h-56 md:h-64 flex items-center justify-center"><canvas id="radar-chart"></canvas></div>
+        <div class="text-center text-sm mt-1">α <span id="ml-alpha" class="neon-text-cyan font-bold">—</span></div>
+      </div>
     </div>
 
-    <div class="sync" id="sync-line">sync —</div>
+    <!-- Gate stack matrix (center diagnostic bar) -->
+    <div class="glass rounded-xl p-3 mb-4">
+      <div class="text-[9px] uppercase tracking-widest text-slate-500 mb-2">Core B Gate Stack Matrix</div>
+      <div id="gate-stack" class="space-y-1.5 font-mono text-[11px] leading-relaxed">
+        <div class="text-slate-600">awaiting gate diagnostics…</div>
+      </div>
+      <div id="gate-suppress-summary" class="text-[10px] text-slate-500 mt-2 truncate">—</div>
+    </div>
+
+    <!-- Real-life transport telemetry ticker -->
+    <div id="transport-ticker" class="glass rounded-lg px-3 py-2 mb-4 overflow-hidden border border-neon-cyan/20">
+      <div class="text-[9px] uppercase tracking-[0.25em] text-neon-cyan mb-1">⚡ REAL-LIFE TRANSPORT TELEMETRY</div>
+      <div class="flex flex-wrap gap-x-6 gap-y-1 text-[11px] font-mono">
+        <span>BROKER RTT <span id="broker-rtt" class="text-neon-green font-bold">—</span><span class="text-slate-500">ms</span></span>
+        <span>LOCAL THREAD <span id="local-latency" class="text-neon-cyan font-bold">—</span><span class="text-slate-500">ms</span></span>
+        <span class="text-slate-600">demo-api.ig.com · event-loop slice</span>
+      </div>
+    </div>
+
+    <!-- Metrics strip -->
+    <div class="grid grid-cols-2 md:grid-cols-3 gap-3 mb-4">
+      <div class="glass rounded-lg p-3 text-center">
+        <div class="text-[9px] uppercase text-slate-500 tracking-wider">Execution Mode</div>
+        <div id="exec-mode" class="text-xs mt-1 text-neon-green truncate">—</div>
+      </div>
+      <div class="glass rounded-lg p-3 text-center">
+        <div class="text-[9px] uppercase text-slate-500 tracking-wider">15m Macro (telemetry)</div>
+        <div id="macro-trend" class="text-xs mt-1">—</div>
+      </div>
+      <div class="glass rounded-lg p-3 text-center">
+        <div class="text-[9px] uppercase text-slate-500 tracking-wider">Core B Armed</div>
+        <div id="core-b-state" class="text-xs mt-1">—</div>
+      </div>
+    </div>
+
+    <!-- Position ledger -->
+    <div class="glass rounded-xl p-3 mb-4">
+      <div class="flex justify-between items-center mb-3">
+        <div class="text-[10px] uppercase tracking-widest text-slate-500">Transaction Position Ledger</div>
+        <div class="text-[10px] text-slate-500">open <span id="open-count" class="text-neon-cyan">0</span></div>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-[11px]">
+          <thead>
+            <tr class="text-slate-500 border-b border-slate-800">
+              <th class="text-left py-2 pr-2">Time</th>
+              <th class="text-left py-2 pr-2">Epic</th>
+              <th class="text-left py-2 pr-2">Dir</th>
+              <th class="text-right py-2 pr-2">Entry</th>
+              <th class="text-right py-2 pr-2">PnL</th>
+              <th class="text-left py-2 pr-2 min-w-[140px]">Step Trail</th>
+              <th class="text-right py-2">Pts→Trail</th>
+            </tr>
+          </thead>
+          <tbody id="ledger-body">
+            <tr><td colspan="7" class="py-6 text-center text-slate-600">awaiting live positions…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Closed history -->
+    <div class="glass rounded-xl p-3">
+      <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">Recent Closes</div>
+      <div id="history-rows" class="text-[11px] text-slate-400 space-y-1">—</div>
+    </div>
+
+    <p id="sync-line" class="text-[9px] text-slate-600 text-center mt-4">sync —</p>
   </div>
 
   <script>
     const $ = (id) => document.getElementById(id);
-    const STALL_ALERT = "⚠️ CRITICAL STALL: DATA STREAM DISCONNECTED - TRADING PAUSED";
-    const STALL_SEC = 5;
+    const MACRO_Z = 2.45;
+    const FORCE_Z_MIN = -2.0;
+    const FORCE_Z_MAX = 2.0;
 
-    // 5-second data velocity watchdog (client-side frame tracker)
-    const velocityTracker = {
-      lastTicksCached: null,
-      lastLiveRamTicks: null,
-      lastChangeMs: Date.now(),
-      stalled: false,
-    };
-
-    function setLight(el, color) {
-      el.className = "light " + color;
+    function makeZChart(canvasId, color, fillAlpha) {
+      const labels = [];
+      const data = [];
+      const chart = new Chart($(canvasId), {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [{
+            label: 'Z (20-tick)',
+            data,
+            borderColor: color,
+            backgroundColor: fillAlpha,
+            borderWidth: 2,
+            pointRadius: 0,
+            tension: 0.35,
+            fill: true
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: false,
+          scales: {
+            x: { display: false },
+            y: {
+              min: -3,
+              max: 3,
+              grid: { color: 'rgba(100,116,139,0.12)' },
+              ticks: { color: '#64748b', font: { size: 9 } }
+            }
+          },
+          plugins: { legend: { display: false } }
+        },
+        plugins: [{
+          id: 'thresholdLines',
+          afterDraw(ch) {
+            const { ctx, chartArea, scales } = ch;
+            if (!chartArea) return;
+            const yScale = scales.y;
+            [
+              [FORCE_Z_MAX, color, 'EXEC +2.00'],
+              [FORCE_Z_MIN, color, 'EXEC -2.00'],
+              [MACRO_Z, '#39ff14', 'MACRO 2.45']
+            ].forEach(([val, col, lbl]) => {
+              const y = yScale.getPixelForValue(val);
+              if (y < chartArea.top || y > chartArea.bottom) return;
+              ctx.save();
+              ctx.strokeStyle = col;
+              ctx.lineWidth = 1;
+              ctx.setLineDash([5, 4]);
+              ctx.beginPath();
+              ctx.moveTo(chartArea.left, y);
+              ctx.lineTo(chartArea.right, y);
+              ctx.stroke();
+              ctx.fillStyle = col;
+              ctx.font = '9px monospace';
+              ctx.fillText(lbl, chartArea.left + 4, y - 3);
+              ctx.restore();
+            });
+          }
+        }]
+      });
+      return { chart, labels, data };
     }
 
-    function fmtTs(iso) {
-      if (!iso) return "—";
-      try {
-        const d = new Date(iso);
-        return d.toISOString().replace("T", " ").replace("Z", " UTC");
-      } catch (_) { return iso; }
-    }
+    const wallStream = makeZChart('z-chart-wall', '#00f5ff', 'rgba(0,245,255,0.08)');
+    const goldStream = makeZChart('z-chart-gold', '#ffb020', 'rgba(255,176,32,0.10)');
 
-    function updateVelocityWatchdog(data) {
-      const dv = data.data_velocity || {};
-      const ticksCached = Number(dv.ticks_cached ?? data.ticks_cached ?? 0);
-      const liveRamTicks = Number(dv.live_ram_ticks ?? dv.watchdog_metric ?? 0);
-      const now = Date.now();
-
-      if (
-        velocityTracker.lastTicksCached !== null &&
-        velocityTracker.lastTicksCached === ticksCached &&
-        velocityTracker.lastLiveRamTicks === liveRamTicks
-      ) {
-        // frozen — keep lastChangeMs
-      } else if (velocityTracker.lastTicksCached !== null) {
-        velocityTracker.lastChangeMs = now;
+    function pushStackedStream(streamState, stream, liveZ) {
+      const pts = Array.isArray(stream) && stream.length ? stream : (liveZ != null ? [liveZ] : []);
+      if (!pts.length) return;
+      const { chart, labels, data } = streamState;
+      if (pts.length > 1 && pts.length >= data.length) {
+        labels.length = 0;
+        data.length = 0;
+        pts.forEach((v, i) => { labels.push(String(i)); data.push(Number(v)); });
       } else {
-        velocityTracker.lastChangeMs = now;
+        labels.push(String(labels.length));
+        data.push(Number(pts[pts.length - 1]));
+        if (labels.length > 90) { labels.shift(); data.shift(); }
       }
+      chart.update('none');
+    }
+    (function initCanvas() {
+      const c = $('bg-canvas');
+      const ctx = c.getContext('2d');
+      let w, h, t = 0;
+      const particles = Array.from({ length: 48 }, () => ({
+        x: Math.random(), y: Math.random(), vx: (Math.random() - 0.5) * 0.0004, vy: Math.random() * 0.0006 + 0.0002, s: Math.random() * 2 + 0.5
+      }));
+      function resize() { w = c.width = innerWidth; h = c.height = innerHeight; }
+      resize();
+      addEventListener('resize', resize);
+      function frame() {
+        t += 0.016;
+        ctx.fillStyle = 'rgba(2,4,8,0.35)';
+        ctx.fillRect(0, 0, w, h);
+        ctx.strokeStyle = 'rgba(0,245,255,0.04)';
+        const gs = 40;
+        for (let x = 0; x < w; x += gs) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke(); }
+        for (let y = (t * 20) % gs; y < h; y += gs) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke(); }
+        particles.forEach(p => {
+          p.x += p.vx; p.y -= p.vy;
+          if (p.y < 0) p.y = 1;
+          if (p.x < 0 || p.x > 1) p.vx *= -1;
+          ctx.fillStyle = 'rgba(0,245,255,0.5)';
+          ctx.beginPath();
+          ctx.arc(p.x * w, p.y * h, p.s, 0, Math.PI * 2);
+          ctx.fill();
+        });
+        requestAnimationFrame(frame);
+      }
+      requestAnimationFrame(frame);
+    })();
 
-      velocityTracker.lastTicksCached = ticksCached;
-      velocityTracker.lastLiveRamTicks = liveRamTicks;
+    const radarChart = new Chart($('radar-chart'), {
+      type: 'radar',
+      data: {
+        labels: ['Alpha', 'Adj Score', 'RSI', 'ATR Ratio'],
+        datasets: [{
+          label: 'ML Shift',
+          data: [0.5, 0.5, 0.5, 0.5],
+          borderColor: '#bf00ff',
+          backgroundColor: 'rgba(191,0,255,0.15)',
+          borderWidth: 2,
+          pointRadius: 3,
+          pointBackgroundColor: '#ff006e'
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: {
+          r: {
+            beginAtZero: true,
+            max: 1,
+            grid: { color: 'rgba(191,0,255,0.15)' },
+            angleLines: { color: 'rgba(191,0,255,0.2)' },
+            pointLabels: { color: '#94a3b8', font: { size: 9 } },
+            ticks: { display: false }
+          }
+        },
+        plugins: { legend: { display: false } }
+      }
+    });
 
-      const frozenMs = now - velocityTracker.lastChangeMs;
-      const clientStall =
-        velocityTracker.lastTicksCached !== null && frozenMs >= STALL_SEC * 1000;
-      const serverStall = Boolean(dv.stall_active || data.trading_paused);
-
-      velocityTracker.stalled = clientStall || serverStall;
-      return {
-        stalled: velocityTracker.stalled,
-        frozenSec: Math.floor(frozenMs / 1000),
-        ticksCached,
-        liveRamTicks,
-      };
+    function shortEpic(epic) {
+      const e = String(epic || '');
+      if (e.includes('CFPGOLD')) return 'GOLD';
+      if (e.includes('DOW')) return 'DOW';
+      if (e.includes('NIKKEI')) return 'NIKKEI';
+      if (e.includes('EURUSD')) return 'EUR/USD';
+      return e.split('.').slice(-3, -2)[0] || e || '—';
     }
 
-    function renderFills(rows) {
-      const body = $("fills-body");
-      if (!rows || !rows.length) {
-        body.innerHTML = '<tr class="empty-row"><td colspan="6">No executions yet</td></tr>';
+    function renderStackedCharts(telem) {
+      const channels = telem.stacked_asset_channels || [];
+      channels.forEach(ch => {
+        const epic = String(ch.epic || '');
+        const z = Number(ch.live_calculated_zscore ?? ch.volatility_z_score ?? 0);
+        const stream = ch.z_score_stream || [];
+        if (epic.includes('DOW')) {
+          $('z-live-wall').textContent = 'Z ' + z.toFixed(4) + (ch.core_b_micro_active ? ' · ARMED' : '');
+          pushStackedStream(wallStream, stream, z);
+        } else if (epic.includes('CFPGOLD') || epic.includes('GOLD')) {
+          $('z-live-gold').textContent = 'Z ' + z.toFixed(4) + (ch.core_b_micro_active ? ' · ARMED' : '');
+          pushStackedStream(goldStream, stream, z);
+        }
+      });
+    }
+
+    function updateRadar(axes) {
+      const a = axes || {};
+      radarChart.data.datasets[0].data = [
+        Number(a.alpha_weight ?? 0.5),
+        Number(a.adjusted_score ?? 0.5),
+        Number(a.rsi ?? 0.5),
+        Number(a.atr_ratio ?? 0.5)
+      ];
+      radarChart.update('none');
+    }
+
+    function renderLedger(positions) {
+      const body = $('ledger-body');
+      const rows = Array.isArray(positions) ? positions : [];
+      $('open-count').textContent = String(rows.length);
+      if (!rows.length) {
+        body.innerHTML = '<tr><td colspan="7" class="py-6 text-center text-slate-600">flat — scanning for micro fills…</td></tr>';
         return;
       }
-      body.innerHTML = rows.slice().reverse().map((r) => {
-        const ts = fmtTs(r.executed_at || r.closed_at);
-        const epic = r.epic || "—";
-        const action = r.action || r.direction || "—";
-        const entry = r.entry != null ? Number(r.entry).toFixed(2) : "—";
-        const status = (r.status || "CLOSED").toUpperCase();
-        const result = (r.result || "—").toUpperCase();
-        const pnl = Number(r.pnl_gbp || 0);
-        const outcomeCls = result === "WIN" ? "outcome-win" : (result === "LOSS" ? "outcome-loss" : "");
-        const statusCls = status === "OPEN" ? "status-open" : "status-closed";
-        const outcomeText = result + (pnl !== 0 ? " (" + (pnl > 0 ? "+" : "") + pnl.toFixed(2) + " GBP)" : "");
-        return `<tr>
-          <td>${ts}</td>
-          <td>${epic}</td>
-          <td>${action}</td>
-          <td>${entry}</td>
-          <td class="${statusCls}">${status}</td>
-          <td class="${outcomeCls}">${outcomeText}</td>
+      body.innerHTML = rows.map(p => {
+        const pct = Math.min(100, Math.max(0, Number(p.trail_progress_pct ?? 0)));
+        const pts = Number(p.points_to_trail ?? 0).toFixed(2);
+        const pnl = Number(p.pnl ?? p.pnl_gbp ?? 0);
+        const pnlCls = pnl >= 0 ? 'text-neon-green' : 'text-red-400';
+        return `<tr class="border-b border-slate-800/80 hover:bg-slate-900/40">
+          <td class="py-2 pr-2 text-slate-500">${String(p.timestamp || p.opened_at || '—').slice(0, 19)}</td>
+          <td class="py-2 pr-2">${shortEpic(p.epic)}</td>
+          <td class="py-2 pr-2 ${p.direction === 'BUY' ? 'text-neon-green' : 'text-red-400'}">${p.direction || '—'}</td>
+          <td class="py-2 pr-2 text-right">${p.entry != null ? Number(p.entry).toFixed(2) : '—'}</td>
+          <td class="py-2 pr-2 text-right ${pnlCls}">${pnl.toFixed(2)}</td>
+          <td class="py-2 pr-2"><div class="trail-bar"><div class="trail-fill" style="width:${pct}%"></div></div><span class="text-[9px] text-slate-500">${pct.toFixed(0)}%</span></td>
+          <td class="py-2 text-right text-neon-cyan">${pts}</td>
         </tr>`;
-      }).join("");
+      }).join('');
     }
 
-    function render(data) {
-      const vel = updateVelocityWatchdog(data);
-      const stalled = vel.stalled;
-      const alertText =
-        data.critical_alert ||
-        (data.data_velocity && data.data_velocity.critical_alert) ||
-        STALL_ALERT;
-
-      const banner = $("stall-banner");
-      if (stalled) {
-        banner.textContent = alertText;
-        banner.classList.add("visible");
-      } else {
-        banner.classList.remove("visible");
-      }
-
-      const hub = stalled
-        ? {
-            ingestion: {
-              color: "crimson",
-              icon: "🔴",
-              detail: `CRIMSON — ticks_cached frozen ${vel.frozenSec}s`,
-            },
-            matrix: (data.traffic_light_hub || {}).matrix || {},
-            execution: {
-              color: "crimson",
-              icon: "🔴",
-              detail: "TRADING PAUSED — DATA STREAM DISCONNECTED",
-            },
-          }
-        : (data.traffic_light_hub || {});
-
-      const ing = hub.ingestion || {};
-      const mat = hub.matrix || {};
-      const ex = hub.execution || {};
-
-      $("icon-ingestion").textContent = ing.icon || "⚪";
-      $("val-ingestion").textContent = ing.detail || ing.label || "—";
-      if (stalled || ing.color === "crimson") {
-        setLight($("light-ingestion"), "crimson");
-      } else {
-        setLight($("light-ingestion"), ing.color === "green" ? "green" : "neutral");
-      }
-
-      const coord = mat.coordinate;
-      $("val-matrix").textContent =
-        coord != null
-          ? String(coord) + " / " + (mat.total_cells || 131072) +
-            " · cached " + vel.ticksCached.toLocaleString()
-          : "—";
-
-      $("icon-exec").textContent = ex.icon || "⚪";
-      $("val-exec").textContent = ex.detail || ex.label || "⚪ SCANNING FRONTIER";
-      if (stalled || ex.color === "crimson") {
-        setLight($("light-exec"), "crimson");
-      } else {
-        const exColor = ex.color === "fire" ? "fire" : (ex.color === "green" ? "green" : "neutral");
-        setLight($("light-exec"), exColor);
-      }
-
-      renderFills(data.performance_rows || []);
-
-      $("sync-line").textContent =
-        "pulse " + (data.pulse_serial ?? "—") +
-        " · ticks_cached " + vel.ticksCached +
-        " · live_ram " + vel.liveRamTicks +
-        (stalled ? " · STALL " + vel.frozenSec + "s" : "") +
-        " · " + (data.updated_at || "—");
+    function fmtGbp(v) {
+      if (v == null || Number.isNaN(Number(v))) return '—';
+      return '£' + Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     }
 
-    async function poll() {
+    function gateStatusClass(status) {
+      const s = String(status || '').toUpperCase();
+      if (s === 'PASSED') return 'gate-pass';
+      if (s === 'UNCOUPLED') return 'gate-uncouple';
+      if (s === 'WAITING') return 'gate-wait';
+      if (s === 'MUTED') return 'gate-muted';
+      if (s === 'BLOCKING') return 'gate-block';
+      return 'text-slate-400';
+    }
+
+    function renderGateStack(telem, health) {
+      const matrix = telem.gate_stack_matrix || {};
+      const gates = matrix.gates || [];
+      const el = $('gate-stack');
+      if (!gates.length) {
+        el.innerHTML = '<div class="text-slate-600">gate stack unavailable</div>';
+        return;
+      }
+      el.innerHTML = gates.map(g => {
+        const cls = gateStatusClass(g.status);
+        return `<div class="flex flex-wrap gap-x-2 gap-y-0.5">
+          <span class="text-slate-500">Gate ${g.gate}</span>
+          <span class="text-slate-300">(${g.name}):</span>
+          <span class="${cls} font-bold">${g.status}</span>
+          <span class="text-slate-600 text-[10px]">${g.detail || ''}</span>
+        </div>`;
+      }).join('');
+      const block = String(
+        telem.last_gate_suppression_reason || health.block_reason || ''
+      ).trim();
+      const uncoupled = matrix.core_b_satellite_uncoupled;
+      let summary = block || (matrix.all_clear ? 'execution valve open' : 'gate hold active');
+      if (uncoupled && block === '15m_macro_trend_lock') summary = 'legacy lock cleared — satellite uncoupled';
+      $('gate-suppress-summary').textContent = summary;
+    }
+
+    function renderHistory(hist) {
+      const rows = (hist && hist.rows) || [];
+      if (!rows.length) { $('history-rows').textContent = 'no closed trades yet'; return; }
+      $('history-rows').innerHTML = rows.slice(0, 8).map(r => {
+        const pnl = Number(r.pnl_gbp ?? r.net_pnl ?? 0);
+        const cls = pnl >= 0 ? 'text-neon-green' : 'text-red-400';
+        return `<div class="flex justify-between gap-2"><span>${shortEpic(r.epic)} ${r.direction} · ${r.result || ''}</span><span class="${cls}">${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}</span></div>`;
+      }).join('');
+    }
+
+    async function pollTelemetry() {
       try {
-        const r = await fetch("/api/unified/fulfillment?_=" + Date.now(), { cache: "no-store" });
-        if (r.ok) render(await r.json());
+        const qs = '?_=' + Date.now();
+        const [healthR, telemR, histR] = await Promise.all([
+          fetch('/api/health' + qs, { cache: 'no-store' }),
+          fetch('/api/v31/telemetry' + qs, { cache: 'no-store' }),
+          fetch('/api/v31/history' + qs, { cache: 'no-store' })
+        ]);
+        const health = healthR.ok ? await healthR.json() : {};
+        const telem = telemR.ok ? await telemR.json() : {};
+        const hist = histR.ok ? await histR.json() : {};
+
+        const block = String(health.block_reason || telem.last_gate_suppression_reason || '').trim();
+        const gate = health.boot_gate;
+        $('header-status').textContent = (gate != null ? 'BOOT G' + gate : 'OPERATIONAL') +
+          (block ? ' · BLOCK: ' + block : ' · valve open');
+
+        const liveZ = telem.live_calculated_zscore ?? telem.volatility_z_score ?? 0;
+        $('live-z').textContent = Number(liveZ).toFixed(4);
+        $('ticks-processed').textContent = Number(telem.ticks_processed ?? 0).toLocaleString();
+        $('account-balance').textContent = fmtGbp(telem.account_balance_gbp);
+        $('account-margin').textContent = fmtGbp(telem.account_available_gbp);
+        $('broker-rtt').textContent = telem.broker_network_rtt_ms != null ? Number(telem.broker_network_rtt_ms).toFixed(1) : '—';
+        $('local-latency').textContent = telem.local_thread_latency_ms != null ? Number(telem.local_thread_latency_ms).toFixed(2) : '—';
+
+        const dc = telem.dual_core_status || {};
+        const coreB = Boolean(dc.core_b_micro_active);
+        const badge = $('core-b-badge');
+        badge.classList.toggle('hidden', !coreB);
+        $('core-b-state').textContent = coreB ? 'ARMED' : 'MUTED';
+        $('core-b-state').className = 'text-xs mt-1 ' + (coreB ? 'neon-text-cyan' : 'text-slate-500');
+
+        $('exec-mode').textContent = String(telem.execution_mode || 'NEUTRAL').replace(/_/g, ' ');
+        const trend = String(telem.live_15min_macro_trend || 'UNKNOWN').toUpperCase();
+        $('macro-trend').textContent = trend;
+        $('macro-trend').className = 'text-xs mt-1 ' + (trend === 'BULLISH' ? 'neon-text-green' : trend === 'BEARISH' ? 'text-red-400' : 'text-slate-400');
+
+        const alpha = telem.ml_alpha_weight ?? telem.ml_current_alpha_weight;
+        $('ml-alpha').textContent = alpha != null ? Number(alpha).toFixed(4) : '—';
+        renderGateStack(telem, health);
+        renderStackedCharts(telem);
+        updateRadar(telem.ml_radar_axes);
+        renderLedger(telem.active_positions);
+        renderHistory(hist);
+
+        $('sync-line').textContent = 'telemetry ' + (telem.ts || '—') + ' · poll 1s';
       } catch (_) { /* silent */ }
     }
 
-    poll();
-    setInterval(poll, 1000);
+    pollTelemetry();
+    setInterval(pollTelemetry, 1000);
   </script>
 </body>
 </html>

@@ -391,7 +391,8 @@ POLL_COUNT=0
 if agent_is_operational; then
   log "supervisor: existing agent detected — adopting monitor (no cold eviction)"
   pgrep -f "${AGENT_ROOT}/src/main.py" 2>/dev/null | head -1 > "${AGENT_PID_FILE}" || true
-  AGENT_START_EPOCH=$(date +%s)
+  # Adopted sessions are already past boot — do not reset grace (avoids false deferrals).
+  AGENT_START_EPOCH=0
 else
   start_agent
 fi

@@ -60,7 +60,11 @@ def resolve_gate_health_matrix() -> tuple[int, dict[str, Any]]:
 
 def build_gate_health_response(*, include_extended: bool = False) -> tuple[int, dict[str, Any]]:
     """Compose gate matrix payload; merge operational telemetry when requested."""
+    from api.v31_telemetry import resolve_risk_tracking_fields
+
     code, matrix = resolve_gate_health_matrix()
+    matrix.update(resolve_risk_tracking_fields())
+
     if code != 200 or not include_extended:
         return code, dict(matrix)
 
