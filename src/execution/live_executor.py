@@ -1067,6 +1067,21 @@ class LiveExecutor:
                 note_ig_order_error(e)
                 status_code = getattr(e, "status_code", None)
                 last_error = str(e)
+                try:
+                    from execution.broker_error_log import append_broker_rejection
+
+                    append_broker_rejection(
+                        source="LiveExecutor._execute_order_blocking",
+                        epic=str(signal.epic or ""),
+                        direction=str(signal.direction or ""),
+                        payload=dict(execution_params or {}),
+                        response_body=getattr(e, "body", None) or last_error,
+                        status_code=status_code,
+                        exception_type=type(e).__name__,
+                        message=last_error,
+                    )
+                except Exception:
+                    pass
                 update_demo_diagnostics(
                     last_rejection=last_error,
                     rest_status=f"order failed HTTP {status_code}"

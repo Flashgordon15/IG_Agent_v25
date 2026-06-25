@@ -11,6 +11,8 @@ import signal
 import sqlite3
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from typing import Callable, TypeVar
 from datetime import datetime, timezone
 from typing import Any
 
@@ -45,6 +47,27 @@ from api.intelligence_data import (
     shadow_today,
 )
 from api.snapshot_store import get_tick, snapshot_age_s_fast
+
+_T = TypeVar("_T")
+# Isolated from G5/boot asyncio.to_thread pool — prevents dashboard poll starvation.
+_DASHBOARD_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix="dashboard-api")
+
+
+async def _run_dashboard_sync(
+    fn: Callable[..., _T],
+    *args: Any,
+    timeout: float | None = 2.5,
+    **kwargs: Any,
+) -> _T:
+    loop = asyncio.get_running_loop()
+    fut = loop.run_in_executor(
+        _DASHBOARD_EXECUTOR,
+        lambda: fn(*args, **kwargs),
+    )
+    if timeout is None:
+        return await fut
+    return await asyncio.wait_for(fut, timeout=timeout)
+
 
 # ── Heartbeat ────────────────────────────────────────────────────────────────
 # Browser pings /api/heartbeat every 30 s. The endpoint is kept so the
@@ -86,6 +109,17 @@ def health() -> dict[str, Any]:
 async def api_health() -> JSONResponse:
     """Gate-aware health — HTTP 200 only after Gate 3 completes."""
     from api.gate_health_matrix import build_gate_health_response
+
+    try:
+        from system.qmm_process_supervisor import process_entry_blocked
+
+        blocked, detail = process_entry_blocked()
+        if blocked and "COCKPIT" in str(detail).upper():
+            from cockpit.emergency import clear_emergency_cockpit_override
+
+            clear_emergency_cockpit_override(resume_trading=False)
+    except Exception:
+        pass
 
     code, body = build_gate_health_response(include_extended=True)
     body["ts"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
@@ -605,12 +639,64 @@ def api_v30_cert() -> dict[str, Any]:
     return build_v30_cert_payload()
 
 
+@router.get("/api/v31/broker/ready")
+async def api_v31_broker_ready() -> dict[str, Any]:
+    """IG Trading Ready — auth, stream, order valve, ledger sync."""
+    from api.v31_broker_ready import get_dashboard_broker_ready
+
+    try:
+        return await _run_dashboard_sync(get_dashboard_broker_ready, timeout=None)
+    except Exception:
+        return {
+            "ok": True,
+            "ig_trading_ready": False,
+            "broker_auth_valid": False,
+            "socket_stream_active": False,
+            "order_execution_ready": False,
+            "ledger_synced": False,
+            "display": {
+                "authenticated": "FAILED",
+                "data_stream": "WARMING",
+                "order_valve": "SUPPRESSED",
+                "ledger_sync": "DRIFTING",
+            },
+            "details": {"stream": "broker_ready_error"},
+        }
+
+
+@router.get("/api/v31/failover")
+async def api_v31_failover() -> dict[str, Any]:
+    """In-flight session failover state — forex lock + ML sovereignty."""
+    from api.v31_telemetry import resolve_ml_alpha_weight
+    from runtime.dual_core_execution import get_failover_state, get_stacked_asset_channels
+
+    def _build() -> dict[str, Any]:
+        state = get_failover_state()
+        return {
+            "ok": True,
+            **state,
+            "stacked_asset_channels": get_stacked_asset_channels(),
+            "ml_alpha_weight": resolve_ml_alpha_weight(),
+        }
+
+    return await asyncio.to_thread(_build)
+
+
 @router.get("/api/v31/telemetry")
 async def api_v31_telemetry() -> dict[str, Any]:
     """Core night-matrix quotes, IG account capital, transport RTT, gate stack."""
-    from api.v31_telemetry import build_v31_telemetry
+    from api.v31_telemetry import get_dashboard_telemetry
 
-    return await asyncio.to_thread(build_v31_telemetry)
+    try:
+        return await _run_dashboard_sync(get_dashboard_telemetry, timeout=None)
+    except Exception:
+        return {
+            "ok": False,
+            "degraded": True,
+            "error": "telemetry_build_failed",
+            "ts": time.time(),
+            "active_positions": [],
+        }
 
 
 @router.get("/api/v31/gate-stack")
@@ -634,7 +720,10 @@ async def api_v31_history(limit: int = 10) -> dict[str, Any]:
     """Latest closed trade outcomes from triage_v31.db."""
     from api.v31_telemetry import build_v31_history
 
-    return await asyncio.to_thread(build_v31_history, limit=limit)
+    try:
+        return await _run_dashboard_sync(build_v31_history, limit=limit, timeout=2.0)
+    except asyncio.TimeoutError:
+        return {"ok": False, "degraded": True, "rows": [], "count": 0}
 
 
 @router.post("/api/v31/orders/fulfill", status_code=202)

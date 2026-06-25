@@ -10,11 +10,14 @@ _block_reason: str = ""
 _block_set_at: float = 0.0
 
 
+_COCKPIT_TOKEN = "COCKPIT_EMERGENCY_OVERRIDE"
+
+
 def set_process_entry_block(reason: str) -> None:
     """Engage automated pause across every trading loop (in-memory only)."""
     global _block_reason, _block_set_at
     detail = str(reason or "").strip()
-    if not detail:
+    if not detail or detail == _COCKPIT_TOKEN:
         return
     with _lock:
         _block_reason = detail
@@ -30,6 +33,10 @@ def clear_process_entry_block() -> None:
 
 def process_entry_blocked() -> tuple[bool, str]:
     with _lock:
+        if _block_reason == _COCKPIT_TOKEN:
+            _block_reason = ""
+            _block_set_at = 0.0
+            return False, ""
         if not _block_reason:
             return False, ""
         return True, _block_reason

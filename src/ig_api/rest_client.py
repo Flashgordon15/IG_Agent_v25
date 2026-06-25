@@ -1574,6 +1574,13 @@ class IGRestClient:
             return {"dealReference": deal_ref, "shadow": True, "status": "MOCK_SHADOW_ENTRY"}
 
         self.ensure_session()
+        from execution.broker_epic_resolver import resolve_account_product, resolve_order_epic
+
+        broker_epic = resolve_order_epic(epic, account_product=resolve_account_product(rest=self))
+        if broker_epic != epic:
+            log_engine(f"IGRestClient: epic remap {epic} → {broker_epic} (broker product)")
+            epic = broker_epic
+
         micro_lot = False
         try:
             from system.soak_live_fire import soak_mode_enabled
@@ -1594,8 +1601,8 @@ class IGRestClient:
         if micro_lot:
             size = float(size)
             stop_distance = max(float(stop_distance), 5.0)
-            if limit_distance is not None:
-                limit_distance = max(float(limit_distance), stop_distance)
+        if limit_distance is not None:
+            limit_distance = max(float(limit_distance), stop_distance)
             currency_code = str(currency_code or "USD").upper()
         else:
             size, stop_distance, limit_distance, currency_code = (
@@ -1607,6 +1614,12 @@ class IGRestClient:
                     currency_code=currency_code,
                 )
             )
+
+        from runtime.virtual_stop_loss import stretch_broker_stop_distance
+
+        stop_distance = stretch_broker_stop_distance(self, epic, stop_distance)
+        if limit_distance is not None and float(limit_distance) > 0:
+            limit_distance = max(float(limit_distance), stop_distance)
 
         from execution.ig_rest_traffic_governor import consume_positions_otc_transmit_slot
 
@@ -1668,12 +1681,57 @@ class IGRestClient:
                 decision=f"FAILED HTTP {r.status_code}",
                 params={"response_body": body_preview},
             )
+            parsed_body: dict[str, Any] | None = None
+            try:
+                parsed_body = r.json()
+            except Exception:
+                parsed_body = None
+            from execution.broker_error_log import append_broker_rejection
+
+            append_broker_rejection(
+                source="IGRestClient.place_market_order",
+                epic=epic,
+                direction=direction,
+                payload=payload,
+                response_body=parsed_body if parsed_body is not None else body_preview,
+                status_code=r.status_code,
+                message=f"Order failed: HTTP {r.status_code}",
+            )
+            from execution.broker_wire_handshake import append_broker_wire_handshake
+
+            append_broker_wire_handshake(
+                source="IGRestClient.place_market_order",
+                phase="place_rejected",
+                epic=epic,
+                direction=direction,
+                request_payload=payload,
+                response_text=body_preview,
+                response_json=parsed_body,
+                status_code=r.status_code,
+                ok=False,
+                message=f"HTTP {r.status_code}",
+            )
             raise IGOrderError(
                 f"Order failed: HTTP {r.status_code} — {body_preview}",
                 status_code=r.status_code,
+                body=body_preview,
             )
 
         data = r.json()
+        from execution.broker_wire_handshake import append_broker_wire_handshake
+
+        append_broker_wire_handshake(
+            source="IGRestClient.place_market_order",
+            phase="place_ok",
+            epic=epic,
+            direction=direction,
+            request_payload=payload,
+            response_text=r.text or "",
+            response_json=data if isinstance(data, dict) else None,
+            status_code=r.status_code,
+            ok=True,
+            message=str(data.get("dealReference") or "dealReference"),
+        )
         trace_execution(
             "REST",
             "IGRestClient.place_market_order",

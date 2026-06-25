@@ -396,11 +396,42 @@ class DualCoreCoordinator:
         self._executor.shutdown(wait=False, cancel_futures=True)
 
     def _loop(self) -> None:
-        from runtime.dual_core_execution import get_stacked_snapshots, refresh_stacked_dual_assets
+        from runtime.dual_core_execution import (
+            get_stacked_snapshots,
+            is_forex_failover_active,
+            refresh_stacked_dual_assets,
+        )
 
         while not self._stop.is_set():
             try:
-                refresh_stacked_dual_assets()
+                from runtime.dual_core_execution import validate_socket_heartbeat
+
+                validate_socket_heartbeat()
+                refresh_stacked_dual_assets(cfg=self._cfg)
+                if is_forex_failover_active():
+                    try:
+                        from trading.continuous_optimization_worker import (
+                            get_continuous_optimization_worker,
+                        )
+
+                        worker = get_continuous_optimization_worker()
+                        if worker.is_sovereignty_active() or is_forex_failover_active():
+                            from system.market_data_hub import get_market_data_hub
+                            from runtime.dual_core_execution import FAILOVER_TOP_EPIC
+
+                            hub = get_market_data_hub()
+                            quote = hub.get_snapshot(FAILOVER_TOP_EPIC)
+                            if quote is not None and quote.bid > 0 and quote.offer > 0:
+                                spread = float(quote.offer) - float(quote.bid)
+                                worker.run_failover_sovereignty(
+                                    epic=FAILOVER_TOP_EPIC,
+                                    spread=spread,
+                                )
+                    except Exception as exc:
+                        log_engine(
+                            f"DualCoreCoordinator: ML sovereignty cycle "
+                            f"{type(exc).__name__}: {exc}"
+                        )
                 for _epic, snap in get_stacked_snapshots().items():
                     if snap.core_b_micro_active:
                         self._scan_micro_entries(snap)
@@ -500,15 +531,55 @@ class DualCoreCoordinator:
             f"size={size} tp={tp_pts} sl={sl_pts} z-mode=compressed"
         )
         try:
-            self._rest.place_market_order(
+            hub = get_market_data_hub()
+            quote = hub.get_snapshot(epic)
+            entry_mid = (
+                (float(quote.bid) + float(quote.offer)) / 2.0
+                if quote is not None and quote.bid > 0 and quote.offer > 0
+                else 0.0
+            )
+            result = self._rest.place_market_order(
                 epic=epic,
                 direction=direction,
                 size=size,
                 stop_distance=sl_pts,
                 limit_distance=tp_pts,
             )
+            from runtime.virtual_stop_loss import register_virtual_stop
+
+            if entry_mid > 0:
+                register_virtual_stop(
+                    epic=epic,
+                    direction=direction,
+                    entry_level=entry_mid,
+                    size=size,
+                    deal_id=str(result.get("dealId") or result.get("dealReference") or ""),
+                )
         except Exception as exc:
             set_last_gate_suppression_reason(f"micro_order_failed:{type(exc).__name__}")
+            try:
+                from execution.broker_error_log import append_broker_rejection
+                from execution.broker_wire_handshake import append_broker_wire_handshake
+
+                append_broker_rejection(
+                    source="DualCoreCoordinator._dispatch_micro_order",
+                    epic=epic,
+                    direction=direction,
+                    exception_type=type(exc).__name__,
+                    message=str(exc),
+                    response_body=getattr(exc, "body", None) or str(exc),
+                )
+                append_broker_wire_handshake(
+                    source="DualCoreCoordinator._dispatch_micro_order",
+                    phase="place_exception",
+                    epic=epic,
+                    direction=direction,
+                    response_text=str(getattr(exc, "body", None) or exc),
+                    ok=False,
+                    message=str(exc),
+                )
+            except Exception:
+                pass
             log_engine(
                 f"DualCoreCoordinator: micro order failed epic={epic}: "
                 f"{type(exc).__name__}: {exc}"

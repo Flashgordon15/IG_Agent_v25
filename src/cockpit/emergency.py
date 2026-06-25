@@ -9,6 +9,10 @@ from typing import Any
 from system.engine_log import log_engine
 
 
+# Hard latch disabled — dashboard must never freeze on stale cockpit token.
+COCKPIT_EMERGENCY_OVERRIDE_ACTIVE: bool = False
+_COCKPIT_BLOCK_TOKEN = ""
+
 _flatten_lock = threading.Lock()
 _inflight = False
 
@@ -37,10 +41,11 @@ def execute_emergency_cockpit_override() -> dict[str, str]:
         except Exception as e:
             status["stop_trading"] = f"{type(e).__name__}: {e}"
 
+        # Do not latch COCKPIT_EMERGENCY_OVERRIDE — operator unblock is immediate on restart.
         try:
-            from system.qmm_process_supervisor import set_process_entry_block
+            from system.qmm_process_supervisor import clear_process_entry_block
 
-            set_process_entry_block("COCKPIT_EMERGENCY_OVERRIDE")
+            clear_process_entry_block()
         except Exception as e:
             status["entry_block"] = f"{type(e).__name__}: {e}"
 

@@ -13,6 +13,8 @@ from typing import Any
 
 TRIAGE_BUSY_TIMEOUT_MS = 5000
 TRIAGE_CONNECT_TIMEOUT_SEC = TRIAGE_BUSY_TIMEOUT_MS / 1000.0
+TRIAGE_READ_BUSY_TIMEOUT_MS = 250
+TRIAGE_READ_CONNECT_TIMEOUT_SEC = TRIAGE_READ_BUSY_TIMEOUT_MS / 1000.0
 
 
 def configure_sqlite_connection(conn: sqlite3.Connection, *, wal: bool = True) -> None:
@@ -31,6 +33,24 @@ def connect_triage_sqlite(
     """Open triage DB with enforced 5000ms busy wait."""
     conn = sqlite3.connect(str(path), timeout=TRIAGE_CONNECT_TIMEOUT_SEC)
     configure_sqlite_connection(conn, wal=wal)
+    if row_factory is not None:
+        conn.row_factory = row_factory
+    return conn
+
+
+def connect_triage_sqlite_readonly(
+    path: Path | str,
+    *,
+    row_factory: Any | None = None,
+) -> sqlite3.Connection:
+    """Read-only triage connection — short busy wait for dashboard polls."""
+    resolved = Path(path).resolve()
+    conn = sqlite3.connect(
+        f"file:{resolved}?mode=ro",
+        uri=True,
+        timeout=TRIAGE_READ_CONNECT_TIMEOUT_SEC,
+    )
+    conn.execute(f"PRAGMA busy_timeout={TRIAGE_READ_BUSY_TIMEOUT_MS};")
     if row_factory is not None:
         conn.row_factory = row_factory
     return conn

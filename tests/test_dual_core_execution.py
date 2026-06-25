@@ -8,6 +8,10 @@ import pytest
 
 from runtime.dual_core_execution import (
     ENGINE_B_MICRO_SCALPER,
+    FAILOVER_BOTTOM_EPIC,
+    FAILOVER_FOREX_STACK,
+    FAILOVER_STATE_FOREX_LOCKED,
+    FAILOVER_TOP_EPIC,
     MACRO_Z_THRESHOLD,
     MICRO_Z_THRESHOLD,
     MODE_MACRO,
@@ -16,10 +20,17 @@ from runtime.dual_core_execution import (
     PRIMARY_STACKED_EPIC,
     SECONDARY_STACKED_EPIC,
     canary_lot_size,
+    evaluate_failover_tick_health,
     evaluate_micro_scalp_signal,
+    get_active_stack_epics,
+    get_failover_state,
     get_stacked_snapshots,
     ingest_hub_mid,
+    is_forex_failover_active,
+    is_piercing_zone_z,
+    lock_forex_rotation_session,
     reset_dual_core_for_tests,
+    resolve_max_spread_pts,
 )
 
 
@@ -107,3 +118,86 @@ def test_resolve_micro_stop_floors_to_broker_min():
         tp, sl = resolve_micro_stop_limit_points(None, "IX.D.DOW.IFM.IP")
     assert tp >= 1.5
     assert sl >= 2.0
+
+
+def test_resolve_max_spread_pts_defaults():
+    assert resolve_max_spread_pts(FAILOVER_TOP_EPIC) == 3.0
+    assert resolve_max_spread_pts(FAILOVER_BOTTOM_EPIC) == 4.0
+    assert resolve_max_spread_pts(PRIMARY_STACKED_EPIC) == 12.0
+
+
+def test_piercing_zone_accepts_deep_negative_z():
+    """Z -3.4851 must pierce lower zone (<= -2.00) — not treated as out-of-bounds."""
+    assert is_piercing_zone_z(-3.4851) is True
+    assert is_piercing_zone_z(-2.0) is True
+    assert is_piercing_zone_z(-2.5) is True
+    assert is_piercing_zone_z(0.0) is True
+    assert is_piercing_zone_z(2.5) is True
+
+
+def test_forex_rotation_lock_sets_active_stack():
+    state = lock_forex_rotation_session()
+    assert is_forex_failover_active()
+    assert get_active_stack_epics() == FAILOVER_FOREX_STACK
+    assert state["forex_rotation_locked"] is True
+
+
+def test_failover_activates_on_low_tick_velocity():
+    snap = MagicMock()
+    snap.bid = 1.0850
+    snap.offer = 1.0852
+    hub = MagicMock()
+    hub.get_snapshot.return_value = snap
+
+    with patch("runtime.dual_core_execution.get_market_data_hub", return_value=hub):
+        state = evaluate_failover_tick_health()
+
+    assert is_forex_failover_active()
+    assert state["failover_state"] == FAILOVER_STATE_FOREX_LOCKED
+    assert get_active_stack_epics() == FAILOVER_FOREX_STACK
+    assert FAILOVER_TOP_EPIC in state["failover_targets"]
+
+
+def test_failover_activates_on_spread_breach():
+    snap = MagicMock()
+    snap.bid = 52000.0
+    snap.offer = 52100.0  # 100pt spread >> 12pt DOW limit
+    hub = MagicMock()
+    hub.get_snapshot.return_value = snap
+
+    with patch("runtime.dual_core_execution.get_market_data_hub", return_value=hub):
+        state = evaluate_failover_tick_health()
+
+    assert is_forex_failover_active()
+    assert state["health_breaches"]
+
+
+def test_ml_failover_sovereignty_writes_overrides():
+    from trading.continuous_optimization_worker import (
+        get_continuous_optimization_worker,
+        reset_continuous_optimization_worker_for_tests,
+    )
+
+    reset_continuous_optimization_worker_for_tests()
+    snap = MagicMock()
+    snap.bid = 1.0850
+    snap.offer = 1.0852
+    hub = MagicMock()
+    hub.get_snapshot.return_value = snap
+
+    with patch("runtime.dual_core_execution.get_market_data_hub", return_value=hub):
+        evaluate_failover_tick_health()
+
+    assert is_forex_failover_active()
+    worker = get_continuous_optimization_worker()
+    overrides = worker.run_failover_sovereignty(
+        epic=FAILOVER_TOP_EPIC,
+        spread=0.0002,
+        slippage_pts=0.0001,
+        latency_ms=42.0,
+    )
+    assert overrides.get("failover_forex_locked") is True
+    assert overrides.get("target_lot") == 1.0
+    assert "micro_z_threshold" in overrides
+    assert worker.is_sovereignty_active()
+    reset_continuous_optimization_worker_for_tests()

@@ -85,5 +85,24 @@
   "demo_soak_mode": {
     "enabled": false,
     "_note": "Soak relaxations disabled for live canary"
+  },
+  "dual_core": {
+    "forex_rotation_locked": true,
+    "broker_account_product": "auto",
+    "hot_path_epics": [
+      "CS.D.EURUSD.TODAY.IP",
+      "CS.D.GBPUSD.TODAY.IP"
+    ],
+    "hot_path_epics_cfd_fallback": [
+      "CS.D.EURUSD.CFD.IP",
+      "CS.D.GBPUSD.CFD.IP"
+    ],
+    "exclude_from_hot_path": [
+      "IX.D.DOW.IFM.IP",
+      "CS.D.CFPGOLD.CFP.IP",
+      "IX.D.NIKKEI.IFM.IP"
+    ],
+    "fx_canary_lot": 1.0,
+    "_note": "Spread-bet epics (.TODAY.IP) for IG SB accounts; set broker_account_product=CFD to use *_cfd_fallback"
   }
 }

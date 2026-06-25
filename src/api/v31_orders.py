@@ -188,6 +188,12 @@ async def accept_v31_breakout_order(
         "size": req.size,
         "signal": req.signal,
     }
+    try:
+        from execution.broker_wire_handshake import broker_wire_handshake_log_path
+
+        accepted["wire_handshake_log"] = str(broker_wire_handshake_log_path())
+    except Exception:
+        pass
 
     try:
         _ledger_write(
@@ -261,6 +267,18 @@ async def _fulfill_background(req: _FulfillRequest, *, boot_context: Any | None)
             f"V31_FULFILL background error dealReference={req.deal_reference}: "
             f"{type(exc).__name__}: {exc}"
         )
+        try:
+            from execution.broker_error_log import append_broker_rejection
+
+            append_broker_rejection(
+                source="v31_orders._fulfill_background",
+                epic=req.epic,
+                direction=req.direction,
+                exception_type=type(exc).__name__,
+                message=str(exc),
+            )
+        except Exception:
+            pass
         _ledger_write(
             deal_reference=req.deal_reference,
             deal_id=None,
@@ -300,8 +318,14 @@ async def _execute_broker_fulfill_async(
 
     rest, stop_distance, limit_distance, stop_res = await asyncio.to_thread(_prepare_sync)
 
+    from execution.broker_epic_resolver import resolve_account_product, resolve_order_epic
+
+    broker_epic = resolve_order_epic(req.epic, account_product=resolve_account_product(rest=rest))
+    if broker_epic != req.epic:
+        log_engine(f"V31_FULFILL: epic remap {req.epic} → {broker_epic}")
+
     payload: dict[str, Any] = {
-        "epic": req.epic,
+        "epic": broker_epic,
         "expiry": "-",
         "direction": req.direction.upper(),
         "size": float(req.size),
@@ -328,10 +352,52 @@ async def _execute_broker_fulfill_async(
     async with httpx.AsyncClient(timeout=timeout) as client:
         place_resp = await client.post(place_url, json=payload, headers=place_headers)
         if place_resp.status_code not in (200, 201):
-            raise RuntimeError(
-                f"place HTTP {place_resp.status_code}: {(place_resp.text or '')[:300]}"
+            body_text = (place_resp.text or "")[:2000]
+            parsed: dict[str, Any] | None = None
+            try:
+                parsed = place_resp.json()
+            except Exception:
+                parsed = None
+            from execution.broker_error_log import append_broker_rejection
+
+            append_broker_rejection(
+                source="v31_orders._execute_broker_fulfill_async",
+                epic=broker_epic,
+                direction=req.direction,
+                payload=payload,
+                response_body=parsed if parsed is not None else body_text,
+                status_code=place_resp.status_code,
+                message=f"place HTTP {place_resp.status_code}",
             )
+            from execution.broker_wire_handshake import append_broker_wire_handshake
+
+            append_broker_wire_handshake(
+                source="v31_orders._execute_broker_fulfill_async",
+                phase="place_rejected",
+                epic=broker_epic,
+                direction=req.direction,
+                request_payload=payload,
+                response_text=body_text,
+                response_json=parsed,
+                status_code=place_resp.status_code,
+                ok=False,
+            )
+            raise RuntimeError(f"place HTTP {place_resp.status_code}: {body_text[:300]}")
         place_body = place_resp.json()
+        from execution.broker_wire_handshake import append_broker_wire_handshake
+
+        append_broker_wire_handshake(
+            source="v31_orders._execute_broker_fulfill_async",
+            phase="place_ok",
+            epic=broker_epic,
+            direction=req.direction,
+            request_payload=payload,
+            response_text=place_resp.text or "",
+            response_json=place_body if isinstance(place_body, dict) else None,
+            status_code=place_resp.status_code,
+            ok=True,
+            message=str(place_body.get("dealReference") or ""),
+        )
         broker_ref = str(place_body.get("dealReference") or req.deal_reference)
 
         confirm_url = f"{base}/confirms/{broker_ref}"
@@ -339,6 +405,18 @@ async def _execute_broker_fulfill_async(
         confirm_body: dict[str, Any] = {}
         if confirm_resp.status_code == 200:
             confirm_body = confirm_resp.json()
+            append_broker_wire_handshake(
+                source="v31_orders._execute_broker_fulfill_async",
+                phase="confirm_ok",
+                epic=broker_epic,
+                direction=req.direction,
+                request_payload={"dealReference": broker_ref},
+                response_text=confirm_resp.text or "",
+                response_json=confirm_body if isinstance(confirm_body, dict) else None,
+                status_code=confirm_resp.status_code,
+                ok=str(confirm_body.get("dealStatus") or "").upper() == "ACCEPTED",
+                message=str(confirm_body.get("dealStatus") or ""),
+            )
 
     confirm_status = str(
         confirm_body.get("dealStatus") or confirm_body.get("status") or ""
@@ -350,6 +428,24 @@ async def _execute_broker_fulfill_async(
         terminal_status = "CONFIRMED"
     elif confirm_status == "REJECTED":
         terminal_status = "REJECTED"
+        try:
+            from execution.broker_error_log import append_broker_rejection
+
+            append_broker_rejection(
+                source="v31_orders.confirm_rejected",
+                epic=broker_epic,
+                direction=req.direction,
+                payload=payload,
+                response_body=confirm_body,
+                message=str(
+                    confirm_body.get("reason")
+                    or confirm_body.get("reasonCode")
+                    or confirm_body.get("errorCode")
+                    or "confirm REJECTED"
+                ),
+            )
+        except Exception:
+            pass
     elif place_body.get("dealReference"):
         terminal_status = "EXECUTED"
     else:

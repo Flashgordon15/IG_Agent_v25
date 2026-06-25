@@ -257,10 +257,30 @@ def start_post_ready_services(context: BootContext) -> None:
 
             start_dual_core_coordinator(rest, config=cfg)
             log_engine("post-ready: DualCoreCoordinator ENGINE_B_MICRO_SCALPER armed")
-            from runtime.dual_core_execution import start_stacked_dual_asset_tracks
+            from runtime.dual_core_execution import (
+                lock_forex_rotation_session,
+                start_stacked_dual_asset_tracks,
+            )
 
+            dual_cfg = (cfg.get("dual_core") or {}) if cfg is not None else {}
+            if dual_cfg.get("forex_rotation_locked"):
+                lock_forex_rotation_session(
+                    reason=str(dual_cfg.get("lock_reason") or "config_forex_rotation_locked")
+                )
+                log_engine(
+                    "post-ready: ForexRotationLock EUR/USD + GBP/USD "
+                    "(indices/metals dropped from hot path)"
+                )
             start_stacked_dual_asset_tracks()
-            log_engine("post-ready: StackedDualAsset parallel tracks armed (Wall St + Gold)")
+            log_engine("post-ready: StackedDualAsset parallel tracks armed")
+            from runtime.dual_core_execution import start_socket_heartbeat_validator
+
+            start_socket_heartbeat_validator(interval_sec=1.0)
+            log_engine("post-ready: SocketHeartbeat validator armed (5s stale → rehydrate)")
+            from runtime.virtual_stop_loss import start_virtual_stop_watchdog
+
+            start_virtual_stop_watchdog(rest)
+            log_engine("post-ready: VirtualStop 2.0pt watchdog armed (500ms)")
         except Exception as e:
             log_engine(
                 f"post-ready: dual-core coordinator skipped: {type(e).__name__}: {e}"

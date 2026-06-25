@@ -69,7 +69,10 @@
     </header>
 
     <div id="stacked-lock-banner" class="mb-4 px-4 py-3 rounded-xl border border-neon-cyan/50 bg-neon-cyan/10 text-center text-sm font-bold tracking-wide badge-scalper-active">
-      🏛️ STACKED DUAL-ASSET LOCK: <span class="neon-text-cyan">Wall Street</span> + <span class="neon-text-amber">Gold</span> <span class="text-slate-400">[PARALLEL TRACKS]</span>
+      🏛️ <span id="stack-mode-label">STACKED DUAL-ASSET LOCK</span>: <span id="stack-top-label" class="neon-text-cyan">Wall Street</span> + <span id="stack-bottom-label" class="neon-text-amber">Gold</span> <span id="stack-mode-detail" class="text-slate-400">[PARALLEL TRACKS]</span>
+    </div>
+    <div id="failover-banner" class="hidden mb-4 px-4 py-3 rounded-xl border border-neon-green/50 bg-neon-green/10 text-center text-sm font-bold tracking-wide">
+      ⚡ FOREX FAILOVER LOCK · <span class="neon-text-green">EUR/USD</span> TOP · <span class="neon-text-cyan">GBP/USD</span> BOTTOM · ML SOVEREIGNTY ACTIVE
     </div>
 
     <!-- Stacked neon tick charts -->
@@ -96,6 +99,15 @@
         <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">Cognitive ML Risk Shift</div>
         <div class="h-56 md:h-64 flex items-center justify-center"><canvas id="radar-chart"></canvas></div>
         <div class="text-center text-sm mt-1">α <span id="ml-alpha" class="neon-text-cyan font-bold">—</span></div>
+        <div class="mt-4 pt-3 border-t border-slate-800/80">
+          <div class="text-[10px] uppercase tracking-widest text-neon-cyan mb-2">📡 IG TRADING PLATFORM READY MATRIX</div>
+          <div id="broker-ready-matrix" class="space-y-1.5 text-[11px] font-mono">
+            <div class="flex justify-between"><span class="text-slate-500">AUTHENTICATED</span><span id="br-auth" class="text-slate-600">—</span></div>
+            <div class="flex justify-between"><span class="text-slate-500">DATA STREAM</span><span id="br-stream" class="text-slate-600">—</span></div>
+            <div class="flex justify-between"><span class="text-slate-500">ORDER VALVE</span><span id="br-order" class="text-slate-600">—</span></div>
+            <div class="flex justify-between"><span class="text-slate-500">LEDGER SYNC</span><span id="br-ledger" class="text-slate-600">—</span></div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -174,6 +186,9 @@
     const MACRO_Z = 2.45;
     const FORCE_Z_MIN = -2.0;
     const FORCE_Z_MAX = 2.0;
+    const PIERCE_LOWER = -2.0;
+    const CHART_Z_MIN = -5;
+    const CHART_Z_MAX = 5;
 
     function makeZChart(canvasId, color, fillAlpha) {
       const labels = [];
@@ -200,8 +215,8 @@
           scales: {
             x: { display: false },
             y: {
-              min: -3,
-              max: 3,
+              min: CHART_Z_MIN,
+              max: CHART_Z_MAX,
               grid: { color: 'rgba(100,116,139,0.12)' },
               ticks: { color: '#64748b', font: { size: 9 } }
             }
@@ -215,8 +230,9 @@
             if (!chartArea) return;
             const yScale = scales.y;
             [
-              [FORCE_Z_MAX, color, 'EXEC +2.00'],
-              [FORCE_Z_MIN, color, 'EXEC -2.00'],
+              [FORCE_Z_MAX, color, 'PIERCE +2.00'],
+              [FORCE_Z_MIN, color, 'PIERCE -2.00'],
+              [PIERCE_LOWER - 1.5, '#ff006e', 'LOWER ZONE ≤-2'],
               [MACRO_Z, '#39ff14', 'MACRO 2.45']
             ].forEach(([val, col, lbl]) => {
               const y = yScale.getPixelForValue(val);
@@ -327,20 +343,50 @@
       if (e.includes('DOW')) return 'DOW';
       if (e.includes('NIKKEI')) return 'NIKKEI';
       if (e.includes('EURUSD')) return 'EUR/USD';
+      if (e.includes('GBPUSD')) return 'GBP/USD';
       return e.split('.').slice(-3, -2)[0] || e || '—';
     }
 
     function renderStackedCharts(telem) {
       const channels = telem.stacked_asset_channels || [];
+      const failover = Boolean(telem.failover_active || telem.forex_rotation_locked);
+      $('failover-banner').classList.toggle('hidden', !failover);
+      $('stacked-lock-banner').classList.toggle('hidden', failover);
+      if (failover) {
+        $('stack-mode-label').textContent = 'FOREX ROTATION LOCK';
+        $('stack-top-label').textContent = 'EUR/USD';
+        $('stack-bottom-label').textContent = 'GBP/USD';
+        $('stack-mode-detail').textContent = '[100% EXECUTION FOCUS · 1.0 LOT FX]';
+      } else {
+        $('stack-mode-label').textContent = 'STACKED DUAL-ASSET LOCK';
+        $('stack-top-label').textContent = 'Wall Street';
+        $('stack-bottom-label').textContent = 'Gold';
+        $('stack-mode-detail').textContent = '[PARALLEL TRACKS]';
+      }
       channels.forEach(ch => {
         const epic = String(ch.epic || '');
         const z = Number(ch.live_calculated_zscore ?? ch.volatility_z_score ?? 0);
+        const pierceValid = z <= PIERCE_LOWER || (z >= FORCE_Z_MIN && z <= FORCE_Z_MAX) || z >= FORCE_Z_MAX;
         const stream = ch.z_score_stream || [];
-        if (epic.includes('DOW')) {
-          $('z-live-wall').textContent = 'Z ' + z.toFixed(4) + (ch.core_b_micro_active ? ' · ARMED' : '');
+        const role = String(ch.role || '').toUpperCase();
+        const zLabel = 'Z ' + z.toFixed(4) + (ch.core_b_micro_active ? ' · ARMED' : '') + (pierceValid ? ' · PIERCE OK' : '');
+        if (failover) {
+          if (role === 'TOP_SLOT' || epic.includes('EURUSD')) {
+            $('z-chart-title-wall').textContent = 'Neon Tick Stream · EUR/USD · TOP SLOT';
+            $('z-live-wall').textContent = zLabel;
+            pushStackedStream(wallStream, stream, z);
+          } else if (role === 'BOTTOM_SLOT' || epic.includes('GBPUSD')) {
+            $('z-chart-title-gold').textContent = 'Neon Tick Stream · GBP/USD · BOTTOM SLOT';
+            $('z-live-gold').textContent = zLabel;
+            pushStackedStream(goldStream, stream, z);
+          }
+        } else if (epic.includes('DOW')) {
+          $('z-chart-title-wall').textContent = 'Neon Tick Stream · Wall Street · PRIMARY';
+          $('z-live-wall').textContent = zLabel;
           pushStackedStream(wallStream, stream, z);
         } else if (epic.includes('CFPGOLD') || epic.includes('GOLD')) {
-          $('z-live-gold').textContent = 'Z ' + z.toFixed(4) + (ch.core_b_micro_active ? ' · ARMED' : '');
+          $('z-chart-title-gold').textContent = 'Neon Tick Stream · Gold · SECONDARY';
+          $('z-live-gold').textContent = zLabel;
           pushStackedStream(goldStream, stream, z);
         }
       });
@@ -362,15 +408,20 @@
       const rows = Array.isArray(positions) ? positions : [];
       $('open-count').textContent = String(rows.length);
       if (!rows.length) {
-        body.innerHTML = '<tr><td colspan="7" class="py-6 text-center text-slate-600">flat — scanning for micro fills…</td></tr>';
+        if (body.dataset.empty !== '1') {
+          body.innerHTML = '<tr><td colspan="7" class="py-6 text-center text-slate-600">flat — scanning for micro fills…</td></tr>';
+          body.dataset.empty = '1';
+        }
         return;
       }
-      body.innerHTML = rows.map(p => {
+      body.dataset.empty = '0';
+      const html = rows.map(p => {
         const pct = Math.min(100, Math.max(0, Number(p.trail_progress_pct ?? 0)));
         const pts = Number(p.points_to_trail ?? 0).toFixed(2);
         const pnl = Number(p.pnl ?? p.pnl_gbp ?? 0);
         const pnlCls = pnl >= 0 ? 'text-neon-green' : 'text-red-400';
-        return `<tr class="border-b border-slate-800/80 hover:bg-slate-900/40">
+        const dealKey = String(p.dealId || p.deal_id || p.epic || '');
+        return `<tr class="border-b border-slate-800/80 hover:bg-slate-900/40" data-deal="${dealKey}">
           <td class="py-2 pr-2 text-slate-500">${String(p.timestamp || p.opened_at || '—').slice(0, 19)}</td>
           <td class="py-2 pr-2">${shortEpic(p.epic)}</td>
           <td class="py-2 pr-2 ${p.direction === 'BUY' ? 'text-neon-green' : 'text-red-400'}">${p.direction || '—'}</td>
@@ -380,6 +431,23 @@
           <td class="py-2 text-right text-neon-cyan">${pts}</td>
         </tr>`;
       }).join('');
+      if (body.innerHTML !== html) body.innerHTML = html;
+      else {
+        rows.forEach(p => {
+          const dealKey = String(p.dealId || p.deal_id || p.epic || '');
+          const row = body.querySelector(`tr[data-deal="${dealKey}"]`);
+          if (!row) return;
+          const pct = Math.min(100, Math.max(0, Number(p.trail_progress_pct ?? 0)));
+          const fill = row.querySelector('.trail-fill');
+          if (fill) fill.style.width = pct + '%';
+          const pnl = Number(p.pnl ?? p.pnl_gbp ?? 0);
+          const pnlCell = row.children[4];
+          if (pnlCell) {
+            pnlCell.textContent = pnl.toFixed(2);
+            pnlCell.className = 'py-2 pr-2 text-right ' + (pnl >= 0 ? 'text-neon-green' : 'text-red-400');
+          }
+        });
+      }
     }
 
     function fmtGbp(v) {
@@ -433,22 +501,72 @@
       }).join('');
     }
 
+    function renderBrokerReady(payload) {
+      const d = payload || {};
+      const disp = d.display || {};
+      const okCls = 'neon-text-green font-bold';
+      const warnCls = 'text-amber-400 font-bold';
+      const failCls = 'text-red-400 font-bold';
+      function set(id, text, good) {
+        const el = $(id);
+        if (!el) return;
+        el.textContent = text || '—';
+        el.className = good ? okCls : (String(text || '').includes('WARMING') ? warnCls : failCls);
+      }
+      set('br-auth', disp.authenticated || (d.broker_auth_valid ? 'OK' : 'FAILED'), d.broker_auth_valid);
+      set('br-stream', disp.data_stream || (d.socket_stream_active ? 'STREAMING' : 'WARMING'), d.socket_stream_active);
+      set('br-order', disp.order_valve || (d.order_execution_ready ? 'READY' : 'SUPPRESSED'), d.order_execution_ready);
+      set('br-ledger', disp.ledger_sync || (d.ledger_synced ? 'SYNCHRONIZED' : 'DRIFTING'), d.ledger_synced);
+    }
+
+    async function fetchJson(url, timeoutMs) {
+      const ctrl = new AbortController();
+      const t = setTimeout(function() { ctrl.abort(); }, timeoutMs || 2500);
+      try {
+        const r = await fetch(url, { cache: 'no-store', signal: ctrl.signal });
+        clearTimeout(t);
+        if (!r.ok) return null;
+        return await r.json();
+      } catch (_) {
+        clearTimeout(t);
+        return null;
+      }
+    }
+
+    async function pollBrokerReady() {
+      try {
+        const d = await fetchJson('/api/v31/broker/ready?_=' + Date.now(), 2000);
+        if (d) renderBrokerReady(d);
+      } catch (_) { /* silent */ }
+    }
+
     async function pollTelemetry() {
+      if (pollTelemetry._inFlight) return;
+      pollTelemetry._inFlight = true;
       try {
         const qs = '?_=' + Date.now();
-        const [healthR, telemR, histR] = await Promise.all([
-          fetch('/api/health' + qs, { cache: 'no-store' }),
-          fetch('/api/v31/telemetry' + qs, { cache: 'no-store' }),
-          fetch('/api/v31/history' + qs, { cache: 'no-store' })
-        ]);
-        const health = healthR.ok ? await healthR.json() : {};
-        const telem = telemR.ok ? await telemR.json() : {};
-        const hist = histR.ok ? await histR.json() : {};
-
-        const block = String(health.block_reason || telem.last_gate_suppression_reason || '').trim();
+        const h = await fetchJson('/api/health' + qs, 2000);
+        const health = h || {};
         const gate = health.boot_gate;
+        const block = String(health.block_reason || '').trim();
         $('header-status').textContent = (gate != null ? 'BOOT G' + gate : 'OPERATIONAL') +
           (block ? ' · BLOCK: ' + block : ' · valve open');
+
+        const [t, hi] = await Promise.all([
+          fetchJson('/api/v31/telemetry' + qs, 2500),
+          fetchJson('/api/v31/history' + qs, 2000)
+        ]);
+        const telem = t || {};
+        const hist = hi || {};
+
+        if (!h && !t) {
+          $('header-status').textContent = 'API DEGRADED · retrying';
+        }
+
+        const blockFull = String(health.block_reason || telem.last_gate_suppression_reason || '').trim();
+        if (blockFull && gate == null) {
+          $('header-status').textContent = 'OPERATIONAL' + (blockFull ? ' · BLOCK: ' + blockFull : ' · valve open');
+        }
 
         const liveZ = telem.live_calculated_zscore ?? telem.volatility_z_score ?? 0;
         $('live-z').textContent = Number(liveZ).toFixed(4);
@@ -478,12 +596,19 @@
         renderLedger(telem.active_positions);
         renderHistory(hist);
 
-        $('sync-line').textContent = 'telemetry ' + (telem.ts || '—') + ' · poll 1s';
-      } catch (_) { /* silent */ }
+        $('sync-line').textContent =
+          'telemetry ' + (telem.ts || '—') + ' · SQL ' + (telem.positions_db_source || 'triage_v31.db') + ' · poll 1s';
+      } catch (_) {
+        $('header-status').textContent = 'API DEGRADED · retrying';
+      } finally {
+        pollTelemetry._inFlight = false;
+      }
     }
 
     pollTelemetry();
+    pollBrokerReady();
     setInterval(pollTelemetry, 1000);
+    setInterval(pollBrokerReady, 2000);
   </script>
 </body>
 </html>
