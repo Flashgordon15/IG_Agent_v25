@@ -127,6 +127,17 @@ async def api_health() -> JSONResponse:
     return JSONResponse(status_code=code, content=body)
 
 
+@router.get("/api/gui_status")
+def api_gui_status() -> dict[str, Any]:
+    """Read-only GUI polling — session identity + pipeline health indicators."""
+    from api.gui_status import build_gui_status
+    from datetime import datetime, timezone
+
+    body = build_gui_status()
+    body["ts"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    return body
+
+
 @router.get("/api/time")
 def get_agent_time() -> dict[str, Any]:
     """Agent-resolved Europe/London clock for dashboard header (display only)."""
@@ -690,13 +701,26 @@ async def api_v31_telemetry() -> dict[str, Any]:
     try:
         return await _run_dashboard_sync(get_dashboard_telemetry, timeout=None)
     except Exception:
-        return {
-            "ok": False,
-            "degraded": True,
-            "error": "telemetry_build_failed",
-            "ts": time.time(),
-            "active_positions": [],
-        }
+        try:
+            from runtime.ledger_hydration_core import get_cached_ledger_rows, ledger_hydration_state
+
+            ledger = ledger_hydration_state()
+            return {
+                "ok": False,
+                "degraded": True,
+                "error": "telemetry_build_failed",
+                "ts": time.time(),
+                "active_positions": get_cached_ledger_rows(),
+                **ledger,
+            }
+        except Exception:
+            return {
+                "ok": False,
+                "degraded": True,
+                "error": "telemetry_build_failed",
+                "ts": time.time(),
+                "active_positions": [],
+            }
 
 
 @router.get("/api/v31/gate-stack")

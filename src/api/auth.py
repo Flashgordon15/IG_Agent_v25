@@ -118,6 +118,7 @@ def path_is_public(path: str, method: str) -> bool:
         "/api/startup/status",
         "/api/health",
         "/health",
+        "/api/gui_status",
         "/api/testbed/status",
     ):
         return True

@@ -2717,9 +2717,40 @@ class TradingLoop:
             log_guarded_exception("soak_live_fire_redirect", exc)
 
         try:
+            from runtime.live_canary_guards import canary_path_a_epic_allowed
+
+            allowed, canary_reason = canary_path_a_epic_allowed(self._epic, self._config)
+            if not allowed:
+                ctx = TickContext(
+                    quote=quote,
+                    wait_reason=canary_reason,
+                    all_passed=False,
+                )
+                ctx.gates = self._offline_gates(canary_reason)
+                log_engine(
+                    f"WAIT — canary scope epic={self._epic} ({canary_reason})"
+                )
+                self._publish_snapshot(ctx)
+                with self._lock:
+                    self._last_context = ctx
+                self._sentinel_on_tick()
+                return ctx
+        except Exception as exc:
+            log_guarded_exception("live_canary_scope", exc)
+
+        try:
             from intelligence.matrix_lookup_bridge import prebaked_alpha_matrix_live_active
 
-            if prebaked_alpha_matrix_live_active():
+            bypass_alpha = False
+            try:
+                lc = self._config.get("live_canary") if self._config is not None else {}
+                if isinstance(lc, dict) and lc.get("enabled") and lc.get(
+                    "bypass_alpha_matrix"
+                ):
+                    bypass_alpha = True
+            except Exception:
+                pass
+            if not bypass_alpha and prebaked_alpha_matrix_live_active():
                 return self._run_tick_alpha_matrix(quote)
         except Exception as exc:
             log_guarded_exception("trading_loop_alpha_matrix", exc)

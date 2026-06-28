@@ -601,11 +601,20 @@ def build_health_status() -> dict[str, Any]:
             "error": None,
         }
 
+    session_fields: dict[str, Any] = {}
+    try:
+        from runtime.session_identity import build_session_identity_fields
+
+        session_fields = build_session_identity_fields()
+    except Exception:
+        pass
+
     return _apply_supervision_init_timeout(
         {
             "ok": trading_healthy and watchdog and supervision_drift.get("ok", True),
             "agent_alive": True,
             **_health_pid_fields(),
+            **session_fields,
             "trading_healthy": trading_healthy,
             "boot_metrics": boot_metrics,
             "system_status": system_status,
@@ -672,11 +681,19 @@ def _build_fast_health_status() -> dict[str, Any]:
             "stage": "ig_auth",
             "error": None,
         }
+    session_fields: dict[str, Any] = {}
+    try:
+        from runtime.session_identity import build_session_identity_fields
+
+        session_fields = build_session_identity_fields()
+    except Exception:
+        pass
     return _apply_supervision_init_timeout(
         {
             "ok": bool(loops_running and not paused),
             "agent_alive": True,
             **_health_pid_fields(),
+            **session_fields,
             "trading_healthy": bool(health["trading_healthy"]),
             "boot_metrics": boot_metrics,
             "trading_loops_running": loops_running,

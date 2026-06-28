@@ -32,6 +32,7 @@ def clear_process_entry_block() -> None:
 
 
 def process_entry_blocked() -> tuple[bool, str]:
+    global _block_reason, _block_set_at
     with _lock:
         if _block_reason == _COCKPIT_TOKEN:
             _block_reason = ""

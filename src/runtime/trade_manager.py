@@ -7,6 +7,8 @@ Local cache or SQLite rows alone are never sufficient to authorize stop modifica
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import threading
 import time
@@ -22,6 +24,58 @@ from trading.open_position_view import extract_broker_profit_and_loss, unrealize
 DRIFT_ADVISORY_PCT = 5.0
 DRIFT_FATAL_PCT = 15.0
 _TRIAGE_STATUS_ANOMALY = "CLOSED_ON_BROKER_ANOMALY"
+
+_PRODUCTION_ORDERS_DDL = """
+CREATE TABLE IF NOT EXISTS production_orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    deal_reference TEXT NOT NULL UNIQUE,
+    deal_id TEXT,
+    epic TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    size REAL NOT NULL,
+    status TEXT NOT NULL,
+    broker_payload TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_production_orders_deal_id ON production_orders(deal_id);
+CREATE INDEX IF NOT EXISTS idx_production_orders_status ON production_orders(status);
+"""
+
+
+def _persist_micro_production_order(
+    *,
+    deal_reference: str,
+    deal_id: str | None,
+    epic: str,
+    direction: str,
+    size: float,
+    status: str,
+    broker_payload: dict[str, Any],
+) -> None:
+    db = _triage_db_path()
+    db.parent.mkdir(parents=True, exist_ok=True)
+    conn = connect_triage_sqlite(db)
+    try:
+        conn.executescript(_PRODUCTION_ORDERS_DDL)
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO production_orders
+                (deal_reference, deal_id, epic, direction, size, status, broker_payload)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                deal_reference,
+                deal_id,
+                epic,
+                direction.upper(),
+                float(size),
+                status,
+                json.dumps(broker_payload, default=str),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 class PreflightVerdict(str, Enum):
@@ -368,7 +422,8 @@ class DualCoreCoordinator:
                 )
             except Exception:
                 order_cadence_sec = 20.0
-        self._order_cadence_sec = max(5.0, float(order_cadence_sec or 20.0))
+        raw_cadence = float(order_cadence_sec if order_cadence_sec is not None else 20.0)
+        self._order_cadence_sec = 0.0 if raw_cadence <= 0 else max(5.0, raw_cadence)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_order_at: dict[str, float] = {}
@@ -395,9 +450,24 @@ class DualCoreCoordinator:
         self._stop.set()
         self._executor.shutdown(wait=False, cancel_futures=True)
 
+    def apply_unlimited_order_cadence(self) -> None:
+        """Disable per-epic order spacing for the current session."""
+        self._order_cadence_sec = 0.0
+        log_engine("DualCoreCoordinator: order cadence disabled (unlimited)")
+
+    async def _async_loop(self) -> None:
+        """Coordinator arms dispatch bridge — hardened sweep runs on stacked-dual thread."""
+        while not self._stop.is_set():
+            try:
+                await asyncio.sleep(self._poll_interval_sec)
+            except asyncio.CancelledError:
+                break
+
     def _loop(self) -> None:
+        """Legacy sync entry — retained for tests; production uses _async_loop."""
         from runtime.dual_core_execution import (
             get_stacked_snapshots,
+            is_api_trading_paused,
             is_forex_failover_active,
             refresh_stacked_dual_assets,
         )
@@ -408,7 +478,7 @@ class DualCoreCoordinator:
 
                 validate_socket_heartbeat()
                 refresh_stacked_dual_assets(cfg=self._cfg)
-                if is_forex_failover_active():
+                if not is_api_trading_paused() and is_forex_failover_active():
                     try:
                         from trading.continuous_optimization_worker import (
                             get_continuous_optimization_worker,
@@ -432,9 +502,10 @@ class DualCoreCoordinator:
                             f"DualCoreCoordinator: ML sovereignty cycle "
                             f"{type(exc).__name__}: {exc}"
                         )
-                for _epic, snap in get_stacked_snapshots().items():
-                    if snap.core_b_micro_active:
-                        self._scan_micro_entries(snap)
+                if not is_api_trading_paused():
+                    for _epic, snap in get_stacked_snapshots().items():
+                        if snap.core_b_micro_active:
+                            self._scan_micro_entries(snap)
             except Exception as exc:
                 log_engine(
                     f"DualCoreCoordinator: loop error {type(exc).__name__}: {exc}"
@@ -467,14 +538,18 @@ class DualCoreCoordinator:
                 return
         else:
             set_last_gate_suppression_reason("")
-        now = time.time()
-        last = self._last_order_at.get(snap.epic, 0.0)
-        if now - last < self._order_cadence_sec:
-            return
-        self._last_order_at[snap.epic] = now
+        if self._order_cadence_sec > 0:
+            now = time.time()
+            last = self._last_order_at.get(snap.epic, 0.0)
+            if now - last < self._order_cadence_sec:
+                return
+            self._last_order_at[snap.epic] = now
         self._executor.submit(self._dispatch_micro_order, snap.epic, direction)
 
     def _dispatch_micro_order(self, epic: str, direction: str) -> None:
+        log_engine(
+            f"DualCoreCoordinator: _dispatch_micro_order enter epic={epic} dir={direction}"
+        )
         from runtime.dual_core_execution import (
             ENGINE_B_MICRO_SCALPER,
             canary_lot_size,
@@ -484,34 +559,92 @@ class DualCoreCoordinator:
         from runtime.strategy_kill_switch import is_strategy_kill_active
         from system.qmm_process_supervisor import process_entry_blocked
 
+        def _block(code: str) -> None:
+            set_last_gate_suppression_reason(code)
+            log_engine(
+                f"DualCoreCoordinator: dispatch blocked epic={epic} reason={code}"
+            )
+
+        from runtime.strategy_controller import guard_micro_dispatch
+
+        if not guard_micro_dispatch(epic):
+            _block("blocked_by_strategy_controller")
+            return
+
+        from runtime.hard_enforcement import hard_guard_micro_dispatch, is_hard_enforcement_active
+
+        if not hard_guard_micro_dispatch(epic):
+            _block("hard_blocked_by_strategy_enforcement")
+            return
+
+        from runtime.strategy_enforcement import soft_guard_micro_dispatch
+
+        if not is_hard_enforcement_active(epic) and not soft_guard_micro_dispatch(epic):
+            _block("soft_blocked_by_strategy_enforcement")
+            return
+
+        from runtime.unified_execution import unified_guard_micro_dispatch
+
+        if not unified_guard_micro_dispatch(epic):
+            _block("blocked_by_unified_execution_route")
+            return
+
         if is_strategy_kill_active():
-            set_last_gate_suppression_reason("BROKER_STATE_MISMATCH")
+            _block("BROKER_STATE_MISMATCH")
             return
         blocked, reason = process_entry_blocked()
         if blocked:
-            set_last_gate_suppression_reason(reason or "process_entry_blocked")
+            _block(reason or "process_entry_blocked")
             return
+        try:
+            from runtime.broker_reject_guard import broker_reject_dispatch_blocked
+
+            latched, latch_reason = broker_reject_dispatch_blocked()
+            if latched:
+                _block(latch_reason)
+                return
+        except Exception:
+            pass
+        try:
+            from data.learning_store import LearningStore
+            from runtime.live_canary_guards import canary_micro_dispatch_risk_ok
+
+            _db = str(getattr(self._cfg, "learning_db", "") or "")
+            _store = LearningStore(_db) if _db else None
+            risk_ok, risk_reason = canary_micro_dispatch_risk_ok(_store, self._cfg)
+            if not risk_ok:
+                _block(risk_reason)
+                return
+        except Exception:
+            pass
         try:
             from api.agent_control import is_paused
 
             if is_paused():
-                set_last_gate_suppression_reason("api_trading_paused")
+                _block("api_trading_paused")
                 return
         except Exception:
             pass
         if self._rest is None:
-            set_last_gate_suppression_reason("rest_client_unavailable")
+            _block("rest_client_unavailable")
             return
         try:
-            if self._rest.has_open_position(epic):
-                set_last_gate_suppression_reason("position_already_open")
-                return
-        except Exception:
-            pass
+            from runtime.agent_bootstrap import get_ig_position_sync
+
+            sync = get_ig_position_sync()
+            if sync is not None:
+                if sync.total_open() >= 1:
+                    _block("position_already_open")
+                    return
+        except Exception as exc:
+            log_engine(
+                f"DualCoreCoordinator: position sync check failed epic={epic}: "
+                f"{type(exc).__name__}: {exc}"
+            )
         try:
             from system.rest_api_budget import RestBudgetPausedError, get_rest_api_budget
 
-            get_rest_api_budget().acquire(label="micro_scalper_place")
+            get_rest_api_budget().acquire(label="micro_scalper_place", priority=True)
         except RestBudgetPausedError:
             set_last_gate_suppression_reason("rest_budget_preemptive_pause")
             log_engine(f"DualCoreCoordinator: REST budget pause — micro scalp deferred epic={epic}")
@@ -524,13 +657,20 @@ class DualCoreCoordinator:
             return
 
         size = canary_lot_size(epic, self._cfg)
-        tp_pts, sl_pts = resolve_micro_stop_limit_points(self._rest, epic)
+        from execution.broker_epic_resolver import resolve_account_product, resolve_order_epic
+
+        broker_product = resolve_account_product(rest=self._rest, cfg=self._cfg)
+        broker_epic = resolve_order_epic(epic, account_product=broker_product)
+        tp_pts, sl_pts = resolve_micro_stop_limit_points(self._rest, broker_epic)
         deal_ref = f"MICRO-{epic[-8:]}-{int(time.time())}"
         log_engine(
             f"DualCoreCoordinator: {ENGINE_B_MICRO_SCALPER} {direction} epic={epic} "
+            f"broker_product={broker_product} broker_epic={broker_epic} "
             f"size={size} tp={tp_pts} sl={sl_pts} z-mode=compressed"
         )
         try:
+            from system.market_data_hub import get_market_data_hub
+
             hub = get_market_data_hub()
             quote = hub.get_snapshot(epic)
             entry_mid = (
@@ -539,21 +679,80 @@ class DualCoreCoordinator:
                 else 0.0
             )
             result = self._rest.place_market_order(
-                epic=epic,
+                epic=broker_epic,
                 direction=direction,
                 size=size,
                 stop_distance=sl_pts,
                 limit_distance=tp_pts,
             )
+            ref = str(
+                result.get("dealReference")
+                or result.get("dealId")
+                or deal_ref
+            ).strip()
+            confirm: dict[str, Any] = {}
+            if ref and hasattr(self._rest, "confirm_deal"):
+                confirm = self._rest.confirm_deal(ref) or {}
+            deal_id = str(
+                confirm.get("deal_id")
+                or result.get("dealId")
+                or ""
+            ).strip() or None
+            if confirm.get("rejected"):
+                status = "REJECTED"
+                reject_reason = str(
+                    confirm.get("reason")
+                    or (confirm.get("raw") or {}).get("reason")
+                    or ""
+                ).strip()
+                try:
+                    from runtime.broker_reject_guard import record_broker_confirm_rejection
+
+                    trip = record_broker_confirm_rejection(
+                        reason=reject_reason,
+                        epic=epic,
+                        broker_epic=broker_epic,
+                    )
+                    if trip.get("tripped"):
+                        log_engine(
+                            f"DualCoreCoordinator: broker reject latch "
+                            f"reason={trip.get('reason')} epic={epic} "
+                            f"broker_epic={broker_epic}"
+                        )
+                except Exception:
+                    pass
+            elif confirm.get("accepted"):
+                status = "CONFIRMED"
+                try:
+                    from runtime.broker_reject_guard import record_broker_confirm_success
+
+                    record_broker_confirm_success()
+                except Exception:
+                    pass
+            else:
+                status = "ACCEPTED"
+            log_engine(
+                f"DualCoreCoordinator: micro order confirm epic={epic} ref={ref} "
+                f"dealId={deal_id or 'pending'} status={status}"
+            )
+            _persist_micro_production_order(
+                deal_reference=ref or deal_ref,
+                deal_id=deal_id,
+                epic=epic,
+                direction=direction,
+                size=size,
+                status=status,
+                broker_payload={"place": result, "confirm": confirm},
+            )
             from runtime.virtual_stop_loss import register_virtual_stop
 
-            if entry_mid > 0:
+            if entry_mid > 0 and status not in ("REJECTED",):
                 register_virtual_stop(
                     epic=epic,
                     direction=direction,
                     entry_level=entry_mid,
                     size=size,
-                    deal_id=str(result.get("dealId") or result.get("dealReference") or ""),
+                    deal_id=str(deal_id or ref or ""),
                 )
         except Exception as exc:
             set_last_gate_suppression_reason(f"micro_order_failed:{type(exc).__name__}")
@@ -590,6 +789,101 @@ class DualCoreCoordinator:
 
 _coordinator: DualCoreCoordinator | None = None
 _coordinator_lock = threading.Lock()
+_coordinator_missing_logged_at: float = 0.0
+
+
+def _ensure_coordinator_for_dispatch(cfg: Any | None = None) -> DualCoreCoordinator | None:
+    """Lazy attach when post-ready skipped coordinator startup."""
+    global _coordinator_missing_logged_at
+    with _coordinator_lock:
+        if _coordinator is not None:
+            return _coordinator
+    try:
+        from system.config_loader import ConfigLoader
+        from system.credentials_loader import try_load_credentials
+        from system.ig_rest_session import get_shared_rest_client
+
+        resolved_cfg = cfg
+        if resolved_cfg is None:
+            resolved_cfg = ConfigLoader().load()
+        cred = try_load_credentials()
+        if not cred.ok or cred.credentials is None:
+            now = time.time()
+            if now - _coordinator_missing_logged_at >= 60.0:
+                _coordinator_missing_logged_at = now
+                log_engine(
+                    "DualCoreCoordinator: lazy attach skipped — credentials unavailable"
+                )
+            return None
+        rest = get_shared_rest_client(cred.credentials)
+        coord = start_dual_core_coordinator(rest, config=resolved_cfg)
+        if coord is not None:
+            try:
+                from runtime.session_trade_unlimited import inject_session_unlimited_trades
+
+                inject_session_unlimited_trades()
+            except Exception:
+                pass
+            log_engine("DualCoreCoordinator: lazy attach succeeded on piercing dispatch")
+        return coord
+    except Exception as exc:
+        now = time.time()
+        if now - _coordinator_missing_logged_at >= 60.0:
+            _coordinator_missing_logged_at = now
+            log_engine(
+                f"DualCoreCoordinator: lazy attach failed: {type(exc).__name__}: {exc}"
+            )
+        return None
+
+
+def dispatch_piercing_zone_order(
+    epic: str,
+    direction: str,
+    *,
+    z_score: float = 0.0,
+    cfg: Any | None = None,
+) -> None:
+    """Master valve dispatch from async piercing-zone sweep."""
+    with _coordinator_lock:
+        coord = _coordinator
+    if coord is None:
+        coord = _ensure_coordinator_for_dispatch(cfg)
+    if coord is None:
+        try:
+            from runtime.dual_core_execution import set_last_gate_suppression_reason
+
+            set_last_gate_suppression_reason("dual_core_coordinator_missing")
+        except Exception:
+            pass
+        return
+    _ = z_score
+    if coord._order_cadence_sec > 0:
+        now = time.time()
+        last = coord._last_order_at.get(epic, 0.0)
+        if now - last < coord._order_cadence_sec:
+            try:
+                from runtime.dual_core_execution import set_last_gate_suppression_reason
+
+                set_last_gate_suppression_reason("order_cadence_throttle")
+            except Exception:
+                pass
+            return
+        coord._last_order_at[epic] = now
+    log_engine(
+        f"DualCoreCoordinator: piercing dispatch queued epic={epic} dir={direction} z={z_score:.4f}"
+    )
+    try:
+        coord._executor.submit(coord._dispatch_micro_order, epic, direction)
+    except RuntimeError:
+        from concurrent.futures import ThreadPoolExecutor
+
+        coord._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="micro-scalper")
+        coord._executor.submit(coord._dispatch_micro_order, epic, direction)
+
+
+def get_dual_core_coordinator() -> DualCoreCoordinator | None:
+    with _coordinator_lock:
+        return _coordinator
 
 
 def start_dual_core_coordinator(

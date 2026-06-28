@@ -312,11 +312,18 @@ def _trail_metrics_for_position(pos: dict[str, Any], rest_client: Any | None) ->
 
 
 def build_active_positions_array() -> list[dict[str, Any]]:
-    """Live ledger — direct SQL every poll; hub-only P&L (no blocking REST)."""
+    """Live ledger — SQL first; fall back to one-time IG history hydration cache."""
     rows = _query_live_production_ledger_sql()
     if rows:
-        rows = _enrich_positions_spot_pnl(rows, None)
-    return rows
+        return _enrich_positions_spot_pnl(rows, None)
+    try:
+        from runtime.ledger_hydration_core import get_cached_ledger_rows, ledger_cache_ready
+
+        if ledger_cache_ready():
+            return get_cached_ledger_rows()
+    except Exception:
+        pass
+    return []
 
 
 def _query_live_production_ledger_sql(*, limit: int = 50) -> list[dict[str, Any]]:
@@ -697,8 +704,14 @@ def _probe_broker_network_rtt_ms(*, min_interval_sec: float = 15.0) -> float | N
 def resolve_transport_telemetry_fields(*, loop_start: float | None = None) -> dict[str, Any]:
     """Real-world broker RTT + local telemetry thread processing delay."""
     t0 = loop_start if loop_start is not None else time.perf_counter()
-    # Dashboard poll — never block on outbound IG gateway probe; use cached RTT only.
     cached = _rtt_probe_cache.get("rtt_ms")
+    if cached is None:
+        try:
+            probed = _probe_broker_network_rtt_ms()
+            if probed is not None:
+                cached = probed
+        except Exception:
+            cached = None
     rtt = float(cached) if cached is not None else None
     local_ms = round((time.perf_counter() - t0) * 1000.0, 2)
     return {
@@ -815,6 +828,14 @@ def build_v31_telemetry_lite() -> dict[str, Any]:
     boot_gate = resolve_active_boot_gate()
     account = resolve_account_capital_fields()
     transport = resolve_transport_telemetry_fields()
+    ledger_meta: dict[str, Any] = {}
+    try:
+        from runtime.ledger_hydration_core import ledger_hydration_state
+
+        ledger_meta = ledger_hydration_state()
+    except Exception:
+        ledger_meta = {}
+    active_positions = build_active_positions_array()
     return {
         "ok": True,
         "ts": _utc_now_iso(),
@@ -829,14 +850,23 @@ def build_v31_telemetry_lite() -> dict[str, Any]:
             "execution_mode": core.execution_mode,
             "volatility_z_score": round(float(core.volatility_z_score), 4),
         },
-        "positions_db_source": f"{_triage_v31_path()}::production_orders",
-        "ledger_query": "production_orders_live_sql",
+        "positions_db_source": (
+            ledger_meta.get("ledger_hydration_source")
+            if ledger_meta.get("ledger_synced")
+            else f"{_triage_v31_path()}::production_orders"
+        ),
+        "ledger_query": (
+            "ig_history_hydration_cache"
+            if ledger_meta.get("ledger_synced")
+            else "production_orders_live_sql"
+        ),
         "live_15min_macro_trend": "UNKNOWN",
         "ml_alpha_weight": None,
         "ml_current_alpha_weight": None,
         "last_gate_suppression_reason": "",
         "ticks_processed": resolve_ticks_processed(),
-        "active_positions": [],
+        "active_positions": active_positions,
+        **ledger_meta,
         "z_score_stream": get_z_score_stream(),
         "stacked_dual_asset_mode": True,
         "stacked_asset_channels": stacked,

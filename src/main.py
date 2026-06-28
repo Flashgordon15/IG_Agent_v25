@@ -346,11 +346,31 @@ def _exchange_rollover_emergence_pause() -> None:
     )
     if not in_window:
         return
+    try:
+        from system.config_loader import ConfigLoader
+
+        cfg = ConfigLoader().load()
+        lc = cfg.get("live_canary") if hasattr(cfg, "get") else {}
+        if isinstance(lc, dict) and lc.get("enabled") and lc.get("skip_rollover_pause"):
+            _log_engine("rollover pause: skipped — live_canary.skip_rollover_pause")
+            return
+    except Exception:
+        pass
+    # Sleep only until end of window (23:03:00 London), not a fixed 240s.
+    try:
+        from zoneinfo import ZoneInfo
+
+        end = datetime.now(ZoneInfo("Europe/London")).replace(
+            hour=23, minute=3, second=0, microsecond=0
+        )
+        wait_sec = max(1, int((end - now).total_seconds()))
+    except Exception:
+        wait_sec = 240
     _log_engine(
         "rollover pause: 22:58–23:02 Europe/London — "
-        f"sleeping 240s (now {now.strftime('%H:%M:%S %Z')})"
+        f"sleeping {wait_sec}s (now {now.strftime('%H:%M:%S %Z')})"
     )
-    time.sleep(240)
+    time.sleep(wait_sec)
     _log_engine("rollover pause: complete — resuming boot")
 
 
@@ -1415,6 +1435,23 @@ def main() -> None:
     )
     load_dotenv(override=_from_launcher)
     prepare_boot_env()
+
+    from runtime.app_mode import apply_app_mode_to_environ
+    from runtime.session_lock import acquire_session_lock
+
+    try:
+        apply_app_mode_to_environ()
+    except ValueError as exc:
+        _log_engine(f"APP_MODE boot failed: {exc}")
+        sys.exit(EXIT_CONFIG)
+    except RuntimeError as exc:
+        _log_engine(f"APP_MODE LIVE gate failed: {exc}")
+        sys.exit(EXIT_CONFIG)
+
+    lock_ok, lock_msg = acquire_session_lock()
+    if not lock_ok:
+        _log_engine(f"session lock refused: {lock_msg}")
+        sys.exit(EXIT_INSTANCE)
 
     from system.boot.non_blocking_bootstrap import non_blocking_boot_enabled
 

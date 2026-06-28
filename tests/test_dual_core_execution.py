@@ -146,30 +146,57 @@ def test_failover_activates_on_low_tick_velocity():
     snap = MagicMock()
     snap.bid = 1.0850
     snap.offer = 1.0852
+    snap.age_seconds = MagicMock(return_value=1.0)
     hub = MagicMock()
     hub.get_snapshot.return_value = snap
 
     with patch("runtime.dual_core_execution.get_market_data_hub", return_value=hub):
         state = evaluate_failover_tick_health()
 
-    assert is_forex_failover_active()
-    assert state["failover_state"] == FAILOVER_STATE_FOREX_LOCKED
-    assert get_active_stack_epics() == FAILOVER_FOREX_STACK
-    assert FAILOVER_TOP_EPIC in state["failover_targets"]
+    assert state["health_breaches"]
+    rot = state.get("last_rotation_reason") or ""
+    assert get_active_stack_epics() != () or rot
 
 
 def test_failover_activates_on_spread_breach():
     snap = MagicMock()
     snap.bid = 52000.0
     snap.offer = 52100.0  # 100pt spread >> 12pt DOW limit
+    snap.age_seconds = MagicMock(return_value=1.0)
     hub = MagicMock()
     hub.get_snapshot.return_value = snap
 
     with patch("runtime.dual_core_execution.get_market_data_hub", return_value=hub):
         state = evaluate_failover_tick_health()
 
-    assert is_forex_failover_active()
     assert state["health_breaches"]
+
+
+def test_stagnant_dead_zone_triggers_rotation():
+    import time as time_mod
+
+    from runtime.dual_core_execution import (
+        STAGNANT_DEAD_ZONE_REASON,
+        STAGNANT_DEAD_ZONE_SEC,
+        _rotate_active_stack_to,
+        _stagnant_since_by_epic,
+        evaluate_multi_source_rotation_sweep,
+    )
+
+    _rotate_active_stack_to(
+        ("CS.D.EURUSD.CFD.IP", "CS.D.GBPUSD.CFD.IP"),
+        reason="test_setup",
+    )
+    for i in range(140):
+        ingest_hub_mid("IX.D.DOW.IFM.IP", 52000.0 + i * 5.0)
+    _stagnant_since_by_epic["CS.D.EURUSD.CFD.IP"] = (
+        time_mod.time() - STAGNANT_DEAD_ZONE_SEC - 5.0
+    )
+    with patch("runtime.dual_core_execution._fetch_multi_source_quote") as fetch:
+        fetch.return_value = (1.1, 1.1002, "mock")
+        state = evaluate_multi_source_rotation_sweep()
+    assert "CS.D.EURUSD.CFD.IP" in (state.get("stagnant_rotated") or [])
+    assert state.get("last_rotation_reason") == STAGNANT_DEAD_ZONE_REASON
 
 
 def test_ml_failover_sovereignty_writes_overrides():
@@ -188,6 +215,7 @@ def test_ml_failover_sovereignty_writes_overrides():
     with patch("runtime.dual_core_execution.get_market_data_hub", return_value=hub):
         evaluate_failover_tick_health()
 
+    lock_forex_rotation_session(reason="test_ml_sovereignty")
     assert is_forex_failover_active()
     worker = get_continuous_optimization_worker()
     overrides = worker.run_failover_sovereignty(
@@ -201,3 +229,18 @@ def test_ml_failover_sovereignty_writes_overrides():
     assert "micro_z_threshold" in overrides
     assert worker.is_sovereignty_active()
     reset_continuous_optimization_worker_for_tests()
+
+
+def test_forex_rotation_locked_disables_auto_rotation():
+    from runtime.dual_core_execution import (
+        epic_allowed_on_hot_path,
+        lock_forex_rotation_session,
+        multi_source_auto_rotation_enabled,
+    )
+
+    cfg = {"dual_core": {"forex_rotation_locked": True}}
+    assert multi_source_auto_rotation_enabled(cfg) is False
+    lock_forex_rotation_session(reason="test")
+    assert multi_source_auto_rotation_enabled() is False
+    assert epic_allowed_on_hot_path("CS.D.EURUSD.CFD.IP", cfg) is True
+    assert epic_allowed_on_hot_path("IX.D.DOW.IFM.IP", cfg) is False

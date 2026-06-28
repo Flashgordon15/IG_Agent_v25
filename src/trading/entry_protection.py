@@ -311,6 +311,23 @@ class EntryProtectionState:
 
 
 _STATE = EntryProtectionState()
+_SESSION_UNLIMITED_TRADES = False
+
+
+def is_session_unlimited_trades() -> bool:
+    return _SESSION_UNLIMITED_TRADES
+
+
+def inject_unlimited_trades_for_session(*, clear_counts: bool = True) -> None:
+    """Disable session/daily trade caps for the running process."""
+    global _SESSION_UNLIMITED_TRADES
+    _SESSION_UNLIMITED_TRADES = True
+    if clear_counts:
+        _STATE.session_opens.clear()
+    log_engine(
+        "[SESSION UNLIMITED] Trade caps disabled for this session"
+        + (" — session counts cleared" if clear_counts else "")
+    )
 
 
 def get_entry_protection_state() -> EntryProtectionState:
@@ -318,6 +335,8 @@ def get_entry_protection_state() -> EntryProtectionState:
 
 
 def reset_entry_protection_state() -> None:
+    global _SESSION_UNLIMITED_TRADES
+    _SESSION_UNLIMITED_TRADES = False
     _STATE.reset()
 
 
@@ -429,6 +448,8 @@ def check_session_trade_cap(
     *,
     market: str | None = None,
 ) -> tuple[bool, str]:
+    if is_session_unlimited_trades():
+        return False, ""
     if not _enabled(cfg):
         return False, ""
     cap = _session_cap(cfg)

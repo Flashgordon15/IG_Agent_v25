@@ -60,6 +60,19 @@ def start_post_ready_services(context: BootContext) -> None:
         return
 
     try:
+        from api.gui_status import warm_unified_execution_route_cache
+
+        route_count = warm_unified_execution_route_cache()
+        log_engine(
+            f"post-ready: unified execution route cache warmed ({route_count} route(s))"
+        )
+    except Exception as exc:
+        log_engine(
+            f"post-ready: unified route cache warm-up skipped: "
+            f"{type(exc).__name__}: {exc}"
+        )
+
+    try:
         from system.guard.kernel_interceptor import install_kernel_interceptor
 
         summary = install_kernel_interceptor()
@@ -257,19 +270,42 @@ def start_post_ready_services(context: BootContext) -> None:
 
             start_dual_core_coordinator(rest, config=cfg)
             log_engine("post-ready: DualCoreCoordinator ENGINE_B_MICRO_SCALPER armed")
+            try:
+                from runtime.session_trade_unlimited import inject_session_unlimited_trades
+
+                inject_session_unlimited_trades()
+                log_engine("post-ready: session trade caps and order cadence unlimited")
+            except Exception as e:
+                log_engine(
+                    f"post-ready: session unlimited trades inject skipped: "
+                    f"{type(e).__name__}: {e}"
+                )
             from runtime.dual_core_execution import (
                 lock_forex_rotation_session,
                 start_stacked_dual_asset_tracks,
             )
 
             dual_cfg = (cfg.get("dual_core") or {}) if cfg is not None else {}
+
             if dual_cfg.get("forex_rotation_locked"):
                 lock_forex_rotation_session(
-                    reason=str(dual_cfg.get("lock_reason") or "config_forex_rotation_locked")
+                    reason=str(dual_cfg.get("lock_reason") or "config_forex_rotation_locked"),
+                    cfg=cfg,
+                    rest=rest,
                 )
                 log_engine(
                     "post-ready: ForexRotationLock EUR/USD + GBP/USD "
                     "(indices/metals dropped from hot path)"
+                )
+            try:
+                from data.learning_store import LearningStore
+                from runtime.live_canary_session import reset_live_canary_session_gates
+
+                _lc_store = LearningStore(str(getattr(cfg, "learning_db", "")))
+                reset_live_canary_session_gates(_lc_store, cfg=cfg)
+            except Exception as e:
+                log_engine(
+                    f"post-ready: live_canary session reset skipped: {type(e).__name__}: {e}"
                 )
             start_stacked_dual_asset_tracks()
             log_engine("post-ready: StackedDualAsset parallel tracks armed")
@@ -281,6 +317,22 @@ def start_post_ready_services(context: BootContext) -> None:
 
             start_virtual_stop_watchdog(rest)
             log_engine("post-ready: VirtualStop 2.0pt watchdog armed (500ms)")
+            try:
+                import threading
+
+                from runtime.ledger_hydration_core import bootstrap_ledger_history_once
+
+                threading.Thread(
+                    target=bootstrap_ledger_history_once,
+                    args=(rest,),
+                    name="ledger-hydration-bootstrap",
+                    daemon=True,
+                ).start()
+                log_engine("post-ready: LedgerHydration one-time IG history sync armed")
+            except Exception as e:
+                log_engine(
+                    f"post-ready: ledger hydration bootstrap skipped: {type(e).__name__}: {e}"
+                )
         except Exception as e:
             log_engine(
                 f"post-ready: dual-core coordinator skipped: {type(e).__name__}: {e}"

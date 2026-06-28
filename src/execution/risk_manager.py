@@ -117,7 +117,13 @@ class RiskManager:
                     reason=shield_reason,
                 )
 
-        if self._store is not None and cfg.max_daily_trades > 0:
+        from trading.entry_protection import is_session_unlimited_trades
+
+        if (
+            self._store is not None
+            and cfg.max_daily_trades > 0
+            and not is_session_unlimited_trades()
+        ):
             opened_today = int(self._store.count_trades_opened_today())
             if opened_today >= cfg.max_daily_trades:
                 return RiskAssessment(

@@ -31,7 +31,7 @@ def _localhost_dashboard_bypass(request: Request) -> bool:
     token = extract_token(request)
     if token == APEX_LOCAL_SESSION_TOKEN:
         return True
-    return path in ("/api/health", "/health", "/api/startup/status")
+    return path in ("/api/health", "/health", "/api/startup/status", "/api/gui_status")
 
 
 def _supervision_health_bypass(request: Request) -> bool:

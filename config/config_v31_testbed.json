@@ -1,0 +1,20 @@
+{
+  "$schema": "./config_schema.json",
+  "$extends": "config_v31.json",
+  "version": "31.0.0-testbed",
+  "app_version": "v31.0-testbed",
+  "_note": "TESTBED overlay — mock feed, isolated data root, port 9199",
+  "operating_mode": "TEST",
+  "allow_live_trading": false,
+  "demo_only_deployment": true,
+  "testbed": {
+    "enabled": true,
+    "mock_feed": true,
+    "firewall_enabled": true
+  },
+  "streaming_transport": "mock",
+  "execution": {
+    "max_deal_size": 0.5,
+    "max_daily_risk_loss": 50.0
+  }
+}

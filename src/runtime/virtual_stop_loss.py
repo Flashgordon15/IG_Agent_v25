@@ -18,6 +18,7 @@ from system.engine_log import log_engine
 from system.pnl_math import ig_points_to_price_delta
 
 INTERNAL_RISK_CEILING_PTS = 2.0
+internal_risk_ceiling = INTERNAL_RISK_CEILING_PTS  # local virtual watchdog ceiling (pts)
 VIRTUAL_STOP_WATCHDOG_SEC = 0.5
 
 _lock = threading.Lock()

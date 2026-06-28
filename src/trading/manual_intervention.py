@@ -41,6 +41,19 @@ def shield_threshold_gbp(cfg: Any | None = None) -> float:
         except Exception:
             return 500.0
     try:
+        admin = cfg.get("admin_safety_shield") or {}
+        if isinstance(admin, dict) and admin.get("daily_loss_limit_gbp") is not None:
+            return float(admin["daily_loss_limit_gbp"])
+    except (TypeError, ValueError, AttributeError):
+        pass
+    try:
+        for attr in ("max_daily_loss_gbp", "max_daily_risk_loss", "max_daily_loss"):
+            val = getattr(cfg, attr, None)
+            if val is not None and float(val) > 0:
+                return float(val)
+    except (TypeError, ValueError, AttributeError):
+        pass
+    try:
         block = cfg.get("manual_intervention") or {}
         if isinstance(block, dict):
             for key in ("daily_drawdown_shield_gbp", "daily_loss_limit_gbp"):

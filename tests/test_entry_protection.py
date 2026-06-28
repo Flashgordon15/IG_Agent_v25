@@ -20,7 +20,10 @@ from trading.entry_protection import (
     check_daily_trade_cap,
     check_reentry_cooldown,
     check_session_blackout,
+    check_session_trade_cap,
     increment_session_trade_count,
+    inject_unlimited_trades_for_session,
+    is_session_unlimited_trades,
     ml_insufficient_data_threshold,
     record_epic_close,
     reset_entry_protection_state,
@@ -271,6 +274,25 @@ class TestSessionTradeCap(unittest.TestCase):
         self.assertEqual(session_trade_count(epic, now=open_am), 0)
         blocked, _ = check_daily_trade_cap(epic, cfg, now=open_am)
         self.assertFalse(blocked)
+
+
+class TestSessionUnlimitedTrades(unittest.TestCase):
+    def setUp(self) -> None:
+        reset_entry_protection_state()
+
+    def test_unlimited_bypasses_session_cap(self) -> None:
+        cfg = _cfg()
+        epic = GOLD
+        at = _london_dt(2026, 6, 15, 12, 0)
+        for _ in range(12):
+            increment_session_trade_count(epic, now=at)
+        blocked, _ = check_session_trade_cap(epic, cfg, now=at)
+        self.assertTrue(blocked)
+
+        inject_unlimited_trades_for_session(clear_counts=False)
+        self.assertTrue(is_session_unlimited_trades())
+        blocked, reason = check_session_trade_cap(epic, cfg, now=at)
+        self.assertFalse(blocked, reason)
 
 
 class TestMlInsufficientDataGuard(unittest.TestCase):

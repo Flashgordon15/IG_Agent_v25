@@ -1615,11 +1615,28 @@ class IGRestClient:
                 )
             )
 
-        from runtime.virtual_stop_loss import stretch_broker_stop_distance
+        from runtime.virtual_stop_loss import INTERNAL_RISK_CEILING_PTS
 
-        stop_distance = stretch_broker_stop_distance(self, epic, stop_distance)
+        # ── SEPARATE PAYLOAD FROM STRATEGY ─────────────────────────────────────
+        # Strategy may request 2.0pt internal ceiling; broker payload must match
+        # live exchange minStopOrProfitDistance at transmit time.
+        try:
+            market_metadata = self.fetch_market_constraints(epic, budget_priority=True)
+            min_allowed_stop = float(
+                market_metadata.get("min_stop_distance")
+                or market_metadata.get("minStopOrProfitDistance")
+                or INTERNAL_RISK_CEILING_PTS
+            )
+        except Exception as exc:
+            log_engine(
+                f"place_market_order: market constraints fallback epic={epic} "
+                f"{type(exc).__name__}: {exc}"
+            )
+            min_allowed_stop = INTERNAL_RISK_CEILING_PTS
+        broker_stop_distance = max(INTERNAL_RISK_CEILING_PTS, min_allowed_stop)
+        stop_distance = broker_stop_distance
         if limit_distance is not None and float(limit_distance) > 0:
-            limit_distance = max(float(limit_distance), stop_distance)
+            limit_distance = max(float(limit_distance), broker_stop_distance)
 
         from execution.ig_rest_traffic_governor import consume_positions_otc_transmit_slot
 
@@ -1639,7 +1656,7 @@ class IGRestClient:
             "guaranteedStop": False,
             "forceOpen": True,
             "currencyCode": currency_code,
-            "stopDistance": float(stop_distance),
+            "stopDistance": max(INTERNAL_RISK_CEILING_PTS, min_allowed_stop),
         }
         if limit_distance is not None and float(limit_distance) > 0:
             payload["limitDistance"] = float(limit_distance)

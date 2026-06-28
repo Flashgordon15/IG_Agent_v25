@@ -57,6 +57,59 @@ def resolve_epic_list(epics: list[str] | tuple[str, ...], *, account_product: st
     return tuple(resolve_order_epic(e, account_product=account_product) for e in epics)
 
 
+def _logical_cfd_epic(epic: str) -> str:
+    """Normalize spread-bet wire codes to canonical hub/OHLC keys."""
+    key = str(epic or "").strip()
+    if not key:
+        return key
+    if key.endswith(".TODAY.IP") or key.endswith(".DAILY.IP"):
+        return key.replace(".TODAY.IP", ".CFD.IP").replace(".DAILY.IP", ".CFD.IP")
+    return key
+
+
+def _dual_core_cfg(cfg: Any | None) -> dict[str, Any]:
+    if cfg is None:
+        return {}
+    if hasattr(cfg, "get"):
+        try:
+            dual = cfg.get("dual_core") or {}
+            if isinstance(dual, dict):
+                return dual
+        except Exception:
+            pass
+    dual = getattr(cfg, "dual_core", None) or {}
+    return dual if isinstance(dual, dict) else {}
+
+
+def _config_product_override(cfg: Any | None) -> str | None:
+    if cfg is None:
+        return None
+    dual = _dual_core_cfg(cfg)
+    candidates: list[Any] = []
+    for key in ("broker_account_product", "account_product", "ig_account_product"):
+        val = getattr(cfg, key, None)
+        if val is None and hasattr(cfg, "get"):
+            try:
+                val = cfg.get(key)
+            except Exception:
+                val = None
+        candidates.append(val)
+    candidates.append(dual.get("broker_account_product"))
+    for val in candidates:
+        if val and str(val).strip().lower() not in ("auto", ""):
+            return normalize_account_product(str(val))
+    return None
+
+
+def _account_type_from_row(acc: dict[str, Any]) -> str:
+    return str(
+        acc.get("accountType")
+        or acc.get("account_type")
+        or acc.get("productType")
+        or ""
+    ).upper()
+
+
 def detect_account_product_from_rest(rest: Any | None) -> str:
     """Read accountType from login session or GET /accounts."""
     if rest is None:
@@ -64,43 +117,61 @@ def detect_account_product_from_rest(rest: Any | None) -> str:
     auth = getattr(rest, "_auth", None)
     tokens = getattr(auth, "tokens", None) if auth else None
     raw = getattr(tokens, "raw", None) or {}
-    account_id = str(getattr(tokens, "account_id", "") or getattr(rest, "account_id", "") or "")
-    for acc in raw.get("accounts") or []:
-        if account_id and str(acc.get("accountId", "")) != account_id:
-            continue
-        at = str(acc.get("accountType") or acc.get("account_type") or "").upper()
-        if at:
-            return normalize_account_product(at)
+    account_id = str(
+        getattr(tokens, "account_id", "")
+        or getattr(rest, "account_id", "")
+        or raw.get("currentAccountId")
+        or raw.get("accountId")
+        or ""
+    )
+
+    def _pick(accounts: list[dict[str, Any]]) -> str | None:
+        if not accounts:
+            return None
+        if account_id:
+            for acc in accounts:
+                if str(acc.get("accountId", "")) == account_id:
+                    at = _account_type_from_row(acc)
+                    if at:
+                        return normalize_account_product(at)
+        spread = [
+            acc for acc in accounts if normalize_account_product(_account_type_from_row(acc)) == "SPREADBET"
+        ]
+        if len(spread) == 1:
+            return "SPREADBET"
+        for acc in accounts:
+            if acc.get("preferred") or acc.get("isPrimary"):
+                at = _account_type_from_row(acc)
+                if at:
+                    return normalize_account_product(at)
+        at = _account_type_from_row(accounts[0])
+        return normalize_account_product(at) if at else None
+
+    picked = _pick(list(raw.get("accounts") or []))
+    if picked:
+        rest._account_product_type = picked  # type: ignore[attr-defined]
+        return picked
+
     cached = getattr(rest, "_account_product_type", None)
     if cached:
         return normalize_account_product(str(cached))
     try:
         resp = rest.request("GET", "/accounts", headers=rest._auth_headers("1"), timeout=6)
         if resp.status_code == 200:
-            for acc in resp.json().get("accounts") or []:
-                if account_id and str(acc.get("accountId", "")) != account_id:
-                    continue
-                at = str(acc.get("accountType") or "").upper()
-                if at:
-                    rest._account_product_type = at  # type: ignore[attr-defined]
-                    return normalize_account_product(at)
+            picked = _pick(list(resp.json().get("accounts") or []))
+            if picked:
+                rest._account_product_type = picked  # type: ignore[attr-defined]
+                return picked
     except Exception:
         pass
     return "CFD"
 
 
 def resolve_account_product(*, rest: Any | None = None, cfg: Any | None = None) -> str:
-    """Config override → env → live REST probe → CFD default."""
-    if cfg is not None:
-        for key in ("broker_account_product", "account_product", "ig_account_product"):
-            val = getattr(cfg, key, None)
-            if val is None and hasattr(cfg, "get"):
-                try:
-                    val = cfg.get(key)
-                except Exception:
-                    val = None
-            if val and str(val).strip().lower() not in ("auto", ""):
-                return normalize_account_product(str(val))
+    """Config override (incl. dual_core) → env → live REST probe → CFD default."""
+    override = _config_product_override(cfg)
+    if override:
+        return override
     env = os.environ.get("IG_BROKER_ACCOUNT_PRODUCT", "").strip()
     if env and env.lower() != "auto":
         return normalize_account_product(env)
@@ -110,22 +181,18 @@ def resolve_account_product(*, rest: Any | None = None, cfg: Any | None = None) 
 
 
 def resolve_hot_path_epics_from_config(cfg: Any | None = None, *, rest: Any | None = None) -> tuple[str, ...]:
-    """hot_path_epics from config, broker-resolved for spread bet vs CFD."""
-    dual: dict[str, Any] = {}
-    if cfg is not None:
-        dual = getattr(cfg, "dual_core", None) or {}
-        if not isinstance(dual, dict) and hasattr(cfg, "get"):
-            try:
-                dual = cfg.get("dual_core") or {}
-            except Exception:
-                dual = {}
-    product = resolve_account_product(cfg=cfg, rest=rest)
-    if product == "CFD":
-        fallback = dual.get("hot_path_epics_cfd_fallback") or []
-        if isinstance(fallback, (list, tuple)) and fallback:
-            return tuple(str(e) for e in fallback if e)
+    """
+    Logical hub epics for hot-path stack (always canonical ``.CFD.IP`` keys).
+
+    Wire epics for POST /positions/otc are resolved at dispatch via ``resolve_order_epic``.
+    """
+    _ = rest  # reserved for future account-aware validation/logging
+    dual = _dual_core_cfg(cfg)
+    fallback = dual.get("hot_path_epics_cfd_fallback") or []
+    if isinstance(fallback, (list, tuple)) and fallback:
+        return tuple(_logical_cfd_epic(str(e)) for e in fallback if e)
     raw = dual.get("hot_path_epics") or []
-    epics = [str(e) for e in raw if e] if isinstance(raw, (list, tuple)) else []
+    epics = [_logical_cfd_epic(str(e)) for e in raw if e] if isinstance(raw, (list, tuple)) else []
     if not epics:
         epics = ["CS.D.EURUSD.CFD.IP", "CS.D.GBPUSD.CFD.IP"]
-    return resolve_epic_list(epics, account_product=product)
+    return tuple(dict.fromkeys(epics))

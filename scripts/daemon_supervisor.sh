@@ -10,8 +10,12 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AGENT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-V31_DATA="${AGENT_ROOT}/src/data/v31-production"
+V31_DATA="${IG_DATA_ROOT:-${AGENT_ROOT}/src/data/v31-production}"
 LOG_DIR="${V31_DATA}/logs"
+APP_MODE="${APP_MODE:-DEMO}"
+IG_ACCOUNT_SCOPE="${IG_ACCOUNT_SCOPE:-}"
+IG_AGENT_CONFIG="${IG_AGENT_CONFIG:-config/config_v31.json}"
+IG_BROKER_PLANE="${IG_BROKER_PLANE:-DEMO}"
 SUPERVISOR_LOG="${LOG_DIR}/supervisor.log"
 
 # Self-daemonize when launched interactively (survives parent shell exit).
@@ -37,7 +41,7 @@ POLL_INTERVAL_SEC=10
 UNHEALTHY_503_SEC=60
 MAX_CRASHES=3
 CRASH_WINDOW_SEC=600
-BOOT_GRACE_SEC=90
+BOOT_GRACE_SEC=180
 
 PY="${AGENT_ROOT}/.venv/bin/python3"
 if [[ ! -x "${PY}" ]]; then
@@ -262,14 +266,17 @@ stop_agent_graceful() {
 }
 
 start_agent_inner() {
-  export PROD_MODE=PRODUCTION
+  export APP_MODE="${APP_MODE}"
+  export IG_ACCOUNT_SCOPE="${IG_ACCOUNT_SCOPE}"
+  export IG_BROKER_PLANE="${IG_BROKER_PLANE}"
+  export IG_DATA_ROOT="${V31_DATA}"
   export IG_API_PORT="${API_PORT}"
   export IG_SHARE_ENGINE=1
-  export IG_AGENT_CONFIG=config/config_v31_live_canary.json
+  export IG_AGENT_CONFIG="${IG_AGENT_CONFIG}"
   export PYTHONPATH="${AGENT_ROOT}/src"
   export IG_AGENT_ROOT="${AGENT_ROOT}"
 
-  log "launch: starting v31.1.0 core (canary config, :${API_PORT})"
+  log "launch: starting v31.1.0 core (APP_MODE=${APP_MODE} config=${IG_AGENT_CONFIG} :${API_PORT} scope=${IG_ACCOUNT_SCOPE:-masked})"
   cd "${AGENT_ROOT}"
   nohup "${PY}" -u src/main.py >> "${LOG_DIR}/agent_stdout.log" 2>&1 &
   local agent_pid=$!
@@ -309,10 +316,9 @@ agent_process_alive() {
 agent_in_boot_grace() {
   local now_epoch
   now_epoch="$(date +%s)"
+  # Grace covers full cold boot before :8080 bind (Gate1/Gate2 hydration).
   if (( AGENT_START_EPOCH > 0 && now_epoch - AGENT_START_EPOCH < BOOT_GRACE_SEC )); then
-    if lsof -iTCP:"${API_PORT}" -sTCP:LISTEN -t >/dev/null 2>&1; then
-      return 0
-    fi
+    return 0
   fi
   return 1
 }

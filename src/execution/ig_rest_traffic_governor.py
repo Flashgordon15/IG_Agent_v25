@@ -21,6 +21,24 @@ from system.paths import data_dir, project_root
 MAX_TX_PER_60S = 3
 WINDOW_SEC = 60.0
 
+
+def _effective_max_tx_per_window() -> int:
+    """Canary/live-canary may raise the hard cap; 0 = unlimited."""
+    try:
+        from system.config_loader import get_config
+
+        cfg = get_config()
+        lc = cfg.get("live_canary") if hasattr(cfg, "get") else {}
+        if isinstance(lc, dict) and lc.get("enabled"):
+            if lc.get("bypass_traffic_governor"):
+                return 0
+            override = int(lc.get("ig_rest_max_tx_per_60s") or 0)
+            if override > 0:
+                return override
+    except Exception:
+        pass
+    return MAX_TX_PER_60S
+
 AUDIT_LOG = project_root() / "src" / "data" / "logs" / "self_healing_audit.log"
 AUDIT_LOG_PRODUCTION = data_dir() / "logs" / "self_healing_audit.log"
 
@@ -62,9 +80,10 @@ def consume_positions_otc_transmit_slot(
     Returns (allowed, reason). When not allowed the caller must drop the order.
     """
     now = time.time()
+    max_tx = _effective_max_tx_per_window()
     with _lock:
         _prune(now)
-        if len(_transmit_times) >= MAX_TX_PER_60S:
+        if max_tx > 0 and len(_transmit_times) >= max_tx:
             reason = (
                 f"IG REST traffic governor: {len(_transmit_times)} transaction payloads "
                 f"in rolling {int(WINDOW_SEC)}s — dropped excess signal"

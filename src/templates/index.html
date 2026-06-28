@@ -409,7 +409,7 @@
       $('open-count').textContent = String(rows.length);
       if (!rows.length) {
         if (body.dataset.empty !== '1') {
-          body.innerHTML = '<tr><td colspan="7" class="py-6 text-center text-slate-600">flat — scanning for micro fills…</td></tr>';
+          body.innerHTML = '<tr><td colspan="7" class="py-6 text-center text-slate-600">flat — awaiting IG ledger hydration…</td></tr>';
           body.dataset.empty = '1';
         }
         return;
@@ -516,7 +516,7 @@
       set('br-auth', disp.authenticated || (d.broker_auth_valid ? 'OK' : 'FAILED'), d.broker_auth_valid);
       set('br-stream', disp.data_stream || (d.socket_stream_active ? 'STREAMING' : 'WARMING'), d.socket_stream_active);
       set('br-order', disp.order_valve || (d.order_execution_ready ? 'READY' : 'SUPPRESSED'), d.order_execution_ready);
-      set('br-ledger', disp.ledger_sync || (d.ledger_synced ? 'SYNCHRONIZED' : 'DRIFTING'), d.ledger_synced);
+      set('br-ledger', disp.ledger_sync || (d.ledger_synced ? 'SYNCHRONIZED' : (d.ledger_hydrated ? 'HYDRATING' : 'DRIFTING')), d.ledger_synced);
     }
 
     async function fetchJson(url, timeoutMs) {
@@ -595,9 +595,12 @@
         updateRadar(telem.ml_radar_axes);
         renderLedger(telem.active_positions);
         renderHistory(hist);
+        if (telem.ledger_synced != null) {
+          renderBrokerReady({ ledger_synced: telem.ledger_synced, ledger_hydrated: telem.ledger_hydrated });
+        }
 
         $('sync-line').textContent =
-          'telemetry ' + (telem.ts || '—') + ' · SQL ' + (telem.positions_db_source || 'triage_v31.db') + ' · poll 1s';
+          'telemetry ' + (telem.ts || '—') + ' · ' + (telem.ledger_query || telem.positions_db_source || 'triage_v31.db') + ' · poll 1s';
       } catch (_) {
         $('header-status').textContent = 'API DEGRADED · retrying';
       } finally {

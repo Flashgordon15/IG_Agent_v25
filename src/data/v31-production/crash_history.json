@@ -1,0 +1,9 @@
+{
+  "crashes": [],
+  "events": [
+    {
+      "ts": 1782426432.0,
+      "reason": "HTTP 503 for >=60s"
+    }
+  ]
+}

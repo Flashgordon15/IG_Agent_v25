@@ -65,6 +65,15 @@ def build_gate_health_response(*, include_extended: bool = False) -> tuple[int, 
     code, matrix = resolve_gate_health_matrix()
     matrix.update(resolve_risk_tracking_fields())
 
+    try:
+        from runtime.session_identity import build_session_identity_fields
+
+        identity = build_session_identity_fields()
+        if identity:
+            matrix.update(identity)
+    except Exception:
+        pass
+
     if code != 200 or not include_extended:
         return code, dict(matrix)
 

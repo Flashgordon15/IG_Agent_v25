@@ -1,0 +1,143 @@
+{
+  "ok": true,
+  "generated_at": "2026-06-28T14:35:00+00:00",
+  "session_id": "e2e-trading-alignment-v31-canary",
+  "e2e_alignment": {
+    "plan": "E2E Trading Alignment (v31 Live Canary, IG DEMO)",
+    "pytest_gate": {
+      "suites": [
+        "tests/test_dual_core_execution.py",
+        "tests/test_v31_telemetry.py",
+        "tests/test_broker_epic_resolver.py",
+        "tests/test_broker_reject_guard.py",
+        "tests/test_live_canary_guards.py",
+        "tests/test_live_canary_session.py",
+        "tests/test_live_broker_order_router.py",
+        "tests/test_broker_ledger_reconciliation.py"
+      ],
+      "passed": 46,
+      "failed": 0,
+      "flags": "-p no:anyio"
+    },
+    "gaps_addressed": {
+      "G1_forex_rotation_locked": {
+        "status": "fixed",
+        "detail": "multi_source_auto_rotation_enabled() honors dual_core.forex_rotation_locked; epic_allowed_on_hot_path filters dispatch"
+      },
+      "G2_path_b_confirm_ledger": {
+        "status": "fixed",
+        "detail": "DualCoreCoordinator._dispatch_micro_order calls confirm_deal + _persist_micro_production_order triage row"
+      },
+      "G3_G4_canary_pnl_baseline": {
+        "status": "fixed",
+        "detail": "reset_live_canary_session_gates on boot; shield_threshold_gbp reads admin_safety_shield.daily_loss_limit_gbp"
+      },
+      "G5_ops_scripts": {
+        "status": "fixed",
+        "detail": "start.sh sets PATH/PYTHONPATH, pytest gate, supervisor PID + G5 poll; stop.sh kills src/main.py"
+      },
+      "G6_broker_rtt_telemetry": {
+        "status": "fixed",
+        "detail": "resolve_transport_telemetry_fields probes broker_network_rtt_ms when cache empty"
+      },
+      "G_E1_epic_product_resolution": {
+        "status": "fixed",
+        "detail": "dual_core.broker_account_product=SPREADBET; logical CFD hot stack; dispatch maps to TODAY.IP"
+      },
+      "G_E3_broker_reject_latch": {
+        "status": "fixed",
+        "detail": "broker_reject_guard trips after 3 instrument rejections"
+      },
+      "G_E5_path_a_scope": {
+        "status": "fixed",
+        "detail": "canary_path_a_epic_allowed blocks non-hot epics on Path A"
+      },
+      "G_E7_path_b_risk_parity": {
+        "status": "fixed",
+        "detail": "canary_micro_dispatch_risk_ok on Path B dispatch"
+      }
+    },
+    "path_b_acceptance_chain": [
+      "piercing dispatch",
+      "ENGINE_B_MICRO",
+      "place_market_order",
+      "dealId",
+      "CONFIRMED"
+    ],
+    "path_b_log_verification": {
+      "status": "pending_operator_soak",
+      "note": "Run ./scripts/stop.sh && ./scripts/start.sh on DEMO canary; grep supervisor.log for acceptance chain on EUR/USD or GBP/USD only"
+    },
+    "path_a_acceptance": {
+      "status": "pending_operator_soak",
+      "note": "After live_canary boot baseline, verify 12-gate pass → LiveExecutor → confirm_deal on at least one orchestrator epic"
+    },
+    "known_constraints": {
+      "max_open_positions": 1,
+      "max_daily_loss_gbp": 5,
+      "path_b_epics_when_locked": [
+        "CS.D.EURUSD.CFD.IP",
+        "CS.D.GBPUSD.CFD.IP"
+      ]
+    }
+  },
+  "total_injected_cycles": "10/10",
+  "successful_fills": [
+    {
+      "cycle": 1,
+      "deal_id": "DIAAAAXUGUMTTA6",
+      "deal_reference": "9b991a3488945a113f394f76902715e7",
+      "epic": "IX.D.DOW.IFM.IP",
+      "profile": "trend_expansion"
+    },
+    {
+      "cycle": 3,
+      "deal_id": "DIAAAAXUGU8URAU",
+      "deal_reference": "fd828d127de439852dfe9e4acdcf1f05",
+      "epic": "CS.D.EURUSD.CFD.IP",
+      "profile": "sharp_reversal"
+    },
+    {
+      "cycle": 7,
+      "deal_id": "DIAAAAXUGYW3UAH",
+      "deal_reference": "dc5500f91eff40756be5835314d50009",
+      "epic": "CS.D.EURUSD.CFD.IP",
+      "profile": "fade_exhaustion"
+    },
+    {
+      "cycle": 9,
+      "deal_id": "DIAAAAXUHVH4AAC",
+      "deal_reference": "29b8a6ad02f1f73a27ec171a2afbe636",
+      "epic": "IX.D.DOW.IFM.IP",
+      "profile": "overnight_drift"
+    }
+  ],
+  "trailing_step_modifications": 4,
+  "ml_parameter_shifts": 10,
+  "reconciliation_mismatches_purged": 0,
+  "active_risk_drift": 0,
+  "cycles": [
+    {
+      "cycle": 1,
+      "epic": "IX.D.DOW.IFM.IP",
+      "profile": "trend_expansion",
+      "ok": true,
+      "deal_id": "DIAAAAXUGUMTTA6",
+      "trailing_mods": 1,
+      "min_stop_points": 6.0,
+      "ml_z_threshold": 0.5034734422744599,
+      "error": ""
+    },
+    {
+      "cycle": 3,
+      "epic": "CS.D.EURUSD.CFD.IP",
+      "profile": "sharp_reversal",
+      "ok": true,
+      "deal_id": "DIAAAAXUGU8URAU",
+      "trailing_mods": 1,
+      "min_stop_points": 2.0,
+      "ml_z_threshold": 0.503340292991372,
+      "error": ""
+    }
+  ]
+}

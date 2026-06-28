@@ -10,18 +10,26 @@
   "live_canary": {
     "enabled": true,
     "profile": "v31_live_canary",
-    "_note": "Dedicated canary plane — exchange-minimum lots, £5 daily hard stop, tight trailing exit"
+    "bypass_alpha_matrix": true,
+    "bypass_traffic_governor": true,
+    "skip_rollover_pause": true,
+    "ig_rest_max_tx_per_60s": 12,
+    "_note": "Dedicated canary plane — bypass alpha matrix + REST tx cap for micro-scalper soak; £5 daily hard stop"
+  },
+  "max_daily_trades": 0,
+  "entry_protection": {
+    "max_trades_per_epic_per_session": 0
   },
   "execution": {
     "max_deal_size": 0.5,
     "max_deal_size_index": 0.5,
     "max_deal_size_fx": 1.0,
     "max_deal_size_commodity": 0.5,
-    "order_cadence_sec": 20.0,
+    "order_cadence_sec": 0,
     "max_daily_risk_loss": 5.0,
     "trailing_stop_distance": 10.0,
     "trailing_put_priority": true,
-    "_note": "0.5 index / 1.0 FX = IG legal minimums; 20s cadence stays inside 3 REST/min governor"
+    "_note": "0.5 index / 1.0 FX = IG legal minimums; order_cadence_sec 0 = unlimited frequency"
   },
   "max_deal_size": 0.5,
   "max_deal_size_fx": 1.0,
@@ -88,7 +96,7 @@
   },
   "dual_core": {
     "forex_rotation_locked": true,
-    "broker_account_product": "auto",
+    "broker_account_product": "SPREADBET",
     "hot_path_epics": [
       "CS.D.EURUSD.TODAY.IP",
       "CS.D.GBPUSD.TODAY.IP"

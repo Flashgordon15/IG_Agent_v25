@@ -532,6 +532,60 @@ class ExecutionEngine:
             )
 
         try:
+            from runtime.strategy_controller import guard_path_a_execution
+
+            if not guard_path_a_execution(str(getattr(signal, "epic", "") or "")):
+                return ExecutionResult(
+                    success=False,
+                    action="REJECTED",
+                    rejection_reason="blocked_by_strategy_controller",
+                    execution_params={},
+                )
+        except Exception:
+            pass
+
+        epic_str = str(getattr(signal, "epic", "") or "")
+        try:
+            from runtime.hard_enforcement import hard_guard_path_a_execution
+
+            if not hard_guard_path_a_execution(epic_str):
+                return ExecutionResult(
+                    success=False,
+                    action="REJECTED",
+                    rejection_reason="hard_blocked_by_strategy_enforcement",
+                    execution_params={},
+                )
+        except Exception:
+            pass
+
+        try:
+            from runtime.hard_enforcement import is_hard_enforcement_active
+            from runtime.strategy_enforcement import soft_guard_path_a_execution
+
+            if not is_hard_enforcement_active(epic_str) and not soft_guard_path_a_execution(epic_str):
+                return ExecutionResult(
+                    success=False,
+                    action="REJECTED",
+                    rejection_reason="soft_blocked_by_strategy_enforcement",
+                    execution_params={},
+                )
+        except Exception:
+            pass
+
+        try:
+            from runtime.unified_execution import unified_guard_path_a_execution
+
+            if not unified_guard_path_a_execution(epic_str):
+                return ExecutionResult(
+                    success=False,
+                    action="REJECTED",
+                    rejection_reason="blocked_by_unified_execution_route",
+                    execution_params={},
+                )
+        except Exception:
+            pass
+
+        try:
             get_rate_limit_manager().check_rest_allowed()
         except RateLimitError as e:
             return ExecutionResult(

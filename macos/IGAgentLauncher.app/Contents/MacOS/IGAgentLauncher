@@ -1,0 +1,14 @@
+#!/bin/bash
+set -uo pipefail
+APP_MACOS="$(cd "$(dirname "$0")" && pwd)"
+APP_CONTENTS="$(cd "${APP_MACOS}/.." && pwd)"
+APP_BUNDLE="$(cd "${APP_CONTENTS}/.." && pwd)"
+ROOT="$(cd "${APP_BUNDLE}/../.." && pwd)"
+LAUNCHER="${ROOT}/macos/launcher/launch_agent.sh"
+source "${ROOT}/macos/launcher/lib_notify.sh"
+if [[ ! -f "${LAUNCHER}" ]]; then
+  alert_launcher "launch_agent.sh not found at ${LAUNCHER}"
+  exit 1
+fi
+notify_launcher "IG Agent v31" "Launching full startup contract…"
+exec /bin/bash "${LAUNCHER}"
