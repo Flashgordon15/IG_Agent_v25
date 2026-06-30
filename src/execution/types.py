@@ -128,6 +128,9 @@ def force_inject_gate_execution_params(
     Physical schema injection — every order block carries explicit gate sizing.
 
     Iron-clad floors: max 1 lot, 10pt stop, 20pt limit. Never returns None.
+    The explicit ``size`` parameter takes priority when micro-lot verification is
+    active so the clamped micro-lot value is not silently overridden by a stale
+    ``actual_size`` field set earlier in the gate pipeline.
     """
     from harmonization.iron_clad_risk import (
         MANDATORY_LIMIT_POINTS,
@@ -139,10 +142,24 @@ def force_inject_gate_execution_params(
     from execution.epic_normalizer import normalize_night_matrix_epic
 
     epic_key = normalize_night_matrix_epic(str(epic or raw.get("epic") or ""))
-    lot = min(
-        max(float(raw.get("actual_size") or raw.get("size") or size or 0.1), 0.01),
-        MAX_ORDER_SIZE,
-    )
+
+    # When micro-lot verification is enabled the caller passes the clamped size
+    # (0.1) as the ``size`` argument.  Use it as the authoritative value rather
+    # than ``raw["actual_size"]`` which may still carry the unclamped 1.0 lot.
+    try:
+        from trading.micro_lot_verification import micro_lot_verification_enabled
+        _micro_active = micro_lot_verification_enabled()
+    except Exception:
+        _micro_active = False
+
+    if _micro_active and size > 0:
+        # Explicit size argument wins over raw fields when micro-lot is on.
+        lot = min(max(float(size), 0.01), MAX_ORDER_SIZE)
+    else:
+        lot = min(
+            max(float(raw.get("actual_size") or raw.get("size") or size or 0.1), 0.01),
+            MAX_ORDER_SIZE,
+        )
     stop = max(float(stop_points or raw.get("stop_points") or MANDATORY_STOP_POINTS), MANDATORY_STOP_POINTS)
     limit = max(
         float(limit_points or raw.get("limit_points") or MANDATORY_LIMIT_POINTS),

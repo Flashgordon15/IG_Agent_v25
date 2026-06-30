@@ -6,6 +6,7 @@ Lifecycle and observability only; does not touch trading logic.
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any
 
@@ -33,6 +34,7 @@ from runtime.hard_enforcement import build_hard_enforcement_decisions
 from runtime.strategy_enforcement import build_strategy_enforcement_decisions
 from runtime.strategy_selector import build_strategy_selector_advice
 from runtime.strategy_transition import build_strategy_transition_advice
+from api.readiness_model import build_readiness_bundle
 
 
 def _session_lock_record() -> dict[str, Any] | None:
@@ -90,50 +92,102 @@ def warm_unified_execution_route_cache() -> int:
     Runs the full advisory chain through ``build_unified_execution_routes`` so
     execution guards are active before the first dispatch. Fail-open on error.
     """
-    try:
-        payload = build_gui_status()
-        routes = payload.get("unified_execution_route") or []
-        return len(routes)
-    except Exception:
-        return 0
+    from api.endpoint_profiler import timed_section
+
+    with timed_section("routing_warmup.total", log_slow_ms=1000.0):
+        try:
+            invalidate_gui_status_cache()
+            try:
+                from runtime.unified_execution import invalidate_unified_route_cache
+
+                invalidate_unified_route_cache()
+            except Exception:
+                pass
+            with timed_section("routing_warmup.build_gui_status", log_slow_ms=1000.0):
+                fresh = build_gui_status()
+            with _GUI_STATUS_LOCK:
+                _GUI_STATUS_CACHE["ts"] = time.time()
+                _GUI_STATUS_CACHE["data"] = fresh
+            try:
+                from api.readiness_snapshot import _sync_gui_status_cache
+
+                _sync_gui_status_cache(fresh)
+            except Exception:
+                pass
+            routes = fresh.get("unified_execution_route") or []
+            return len(routes)
+        except Exception:
+            return 0
+
+
+_GUI_STATUS_CACHE: dict[str, Any] = {"ts": 0.0, "data": {}}
+_GUI_STATUS_LOCK = threading.RLock()
+_GUI_STATUS_TTL_SEC = 4.0
+
+
+def invalidate_gui_status_cache() -> None:
+    """Force next poll to rebuild (post-boot warmup, config change)."""
+    with _GUI_STATUS_LOCK:
+        _GUI_STATUS_CACHE["ts"] = 0.0
+        _GUI_STATUS_CACHE["data"] = {}
+
+
+def get_gui_status_cached(*, force_refresh: bool = False) -> dict[str, Any]:
+    """Return pre-built gui_status snapshot — never rebuilds on the request thread."""
+    from api.readiness_snapshot import get_gui_snapshot, trigger_gui_refresh_async
+
+    if force_refresh:
+        trigger_gui_refresh_async()
+    return get_gui_snapshot()
 
 
 def build_gui_status() -> dict[str, Any]:
     """Merge session identity + GUI pipeline health for /api/gui_status."""
-    identity = build_session_identity_fields()
+    from api.endpoint_profiler import timed_section
+
+    with timed_section("gui_status.full.identity"):
+        identity = build_session_identity_fields()
     record = _session_lock_record()
     paths = identity.get("engine_paths_armed") or identity.get("paths_armed") or {}
     session_status = str(identity.get("session_status") or "").upper()
     lock_present = record is not None
-    feed_health = build_api_feed_health()
-    pipeline_rows = build_trade_pipeline_health()
-    rotation_status = build_market_rotation_status()
-    governance = build_pipeline_governance(
-        trade_pipeline_health=pipeline_rows,
-        api_feed_health=feed_health,
-        market_rotation_status=rotation_status,
-    )
-    selector_advice = build_strategy_selector_advice(
-        trade_pipeline_health=pipeline_rows,
-        pipeline_governance=governance.get("pipeline_governance") or {},
-        api_feed_health=feed_health,
-        market_rotation_status=rotation_status,
-        session_governance=governance.get("session_governance") or {},
-    )
-    controller_decisions = build_strategy_controller_decisions(
-        trade_pipeline_health=pipeline_rows,
-        pipeline_governance=governance.get("pipeline_governance") or {},
-        strategy_selector_advice=selector_advice,
-    )
-    transition_advice = build_strategy_transition_advice(
+    with timed_section("gui_status.full.feeds"):
+        feed_health = build_api_feed_health()
+    with timed_section("gui_status.full.pipeline"):
+        pipeline_rows = build_trade_pipeline_health()
+    with timed_section("gui_status.full.rotation"):
+        rotation_status = build_market_rotation_status()
+    with timed_section("gui_status.full.governance"):
+        governance = build_pipeline_governance(
+            trade_pipeline_health=pipeline_rows,
+            api_feed_health=feed_health,
+            market_rotation_status=rotation_status,
+        )
+    with timed_section("gui_status.full.selector"):
+        selector_advice = build_strategy_selector_advice(
         trade_pipeline_health=pipeline_rows,
         pipeline_governance=governance.get("pipeline_governance") or {},
         api_feed_health=feed_health,
         market_rotation_status=rotation_status,
         session_governance=governance.get("session_governance") or {},
+    )
+    with timed_section("gui_status.full.controller"):
+        controller_decisions = build_strategy_controller_decisions(
+        trade_pipeline_health=pipeline_rows,
+        pipeline_governance=governance.get("pipeline_governance") or {},
         strategy_selector_advice=selector_advice,
     )
-    enforcement_decisions = build_strategy_enforcement_decisions(
+    with timed_section("gui_status.full.transition"):
+        transition_advice = build_strategy_transition_advice(
+        trade_pipeline_health=pipeline_rows,
+        pipeline_governance=governance.get("pipeline_governance") or {},
+        api_feed_health=feed_health,
+        market_rotation_status=rotation_status,
+        session_governance=governance.get("session_governance") or {},
+        strategy_selector_advice=selector_advice,
+    )
+    with timed_section("gui_status.full.enforcement"):
+        enforcement_decisions = build_strategy_enforcement_decisions(
         trade_pipeline_health=pipeline_rows,
         pipeline_governance=governance.get("pipeline_governance") or {},
         api_feed_health=feed_health,
@@ -141,7 +195,8 @@ def build_gui_status() -> dict[str, Any]:
         strategy_transition_advice=transition_advice,
         strategy_selector_advice=selector_advice,
     )
-    hard_enforcement_decisions = build_hard_enforcement_decisions(
+    with timed_section("gui_status.full.hard_enforcement"):
+        hard_enforcement_decisions = build_hard_enforcement_decisions(
         trade_pipeline_health=pipeline_rows,
         pipeline_governance=governance.get("pipeline_governance") or {},
         api_feed_health=feed_health,
@@ -150,7 +205,8 @@ def build_gui_status() -> dict[str, Any]:
         strategy_selector_advice=selector_advice,
     )
     session_uptime = _session_uptime_sec(record)
-    session_review_bundle = build_session_review_bundle(
+    with timed_section("gui_status.full.session_review"):
+        session_review_bundle = build_session_review_bundle(
         trade_pipeline_health=pipeline_rows,
         pipeline_governance=governance.get("pipeline_governance") or {},
         session_governance=governance.get("session_governance") or {},
@@ -162,7 +218,8 @@ def build_gui_status() -> dict[str, Any]:
         strategy_enforcement_decisions=enforcement_decisions,
         session_uptime_sec=session_uptime,
     )
-    adaptive_thresholds = build_adaptive_thresholds(
+    with timed_section("gui_status.full.adaptive"):
+        adaptive_thresholds = build_adaptive_thresholds(
         session_review=session_review_bundle.get("session_review"),
         loosening_advice=session_review_bundle.get("loosening_advice"),
         self_reflection=session_review_bundle.get("self_reflection"),
@@ -171,7 +228,8 @@ def build_gui_status() -> dict[str, Any]:
         strategy_controller_decisions=controller_decisions,
         hard_enforcement_decisions=hard_enforcement_decisions,
     )
-    performance_bundle = build_strategy_performance_bundle(
+    with timed_section("gui_status.full.performance"):
+        performance_bundle = build_strategy_performance_bundle(
         session_review=session_review_bundle.get("session_review"),
         self_reflection=session_review_bundle.get("self_reflection"),
         strategy_selector_advice=selector_advice,
@@ -180,7 +238,8 @@ def build_gui_status() -> dict[str, Any]:
         api_feed_health=feed_health,
         trade_pipeline_health=pipeline_rows,
     )
-    regime_bundle = build_regime_detection_bundle(
+    with timed_section("gui_status.full.regime"):
+        regime_bundle = build_regime_detection_bundle(
         trade_pipeline_health=pipeline_rows,
         pipeline_governance=governance.get("pipeline_governance") or {},
         api_feed_health=feed_health,
@@ -188,7 +247,8 @@ def build_gui_status() -> dict[str, Any]:
         strategy_selector_advice=selector_advice,
         strategy_weighting_advice=performance_bundle.get("strategy_weighting_advice"),
     )
-    regime_aware_strategy_selector = build_regime_aware_strategy_selector(
+    with timed_section("gui_status.full.regime_selector"):
+        regime_aware_strategy_selector = build_regime_aware_strategy_selector(
         regime_detection=regime_bundle.get("regime_detection"),
         regime_strategy_alignment=regime_bundle.get("regime_strategy_alignment"),
         strategy_performance_memory=performance_bundle.get("strategy_performance_memory"),
@@ -200,7 +260,8 @@ def build_gui_status() -> dict[str, Any]:
         hard_enforcement_decisions=hard_enforcement_decisions,
         trade_pipeline_health=pipeline_rows,
     )
-    regime_risk_envelope = build_regime_risk_envelope(
+    with timed_section("gui_status.full.risk_envelope"):
+        regime_risk_envelope = build_regime_risk_envelope(
         regime_detection=regime_bundle.get("regime_detection"),
         regime_strategy_alignment=regime_bundle.get("regime_strategy_alignment"),
         strategy_performance_memory=performance_bundle.get("strategy_performance_memory"),
@@ -211,7 +272,8 @@ def build_gui_status() -> dict[str, Any]:
         hard_enforcement_decisions=hard_enforcement_decisions,
         trade_pipeline_health=pipeline_rows,
     )
-    regime_sizing_advice = build_regime_sizing_advice(
+    with timed_section("gui_status.full.regime_sizing"):
+        regime_sizing_advice = build_regime_sizing_advice(
         regime_detection=regime_bundle.get("regime_detection"),
         regime_strategy_alignment=regime_bundle.get("regime_strategy_alignment"),
         regime_risk_envelope=regime_risk_envelope,
@@ -226,7 +288,8 @@ def build_gui_status() -> dict[str, Any]:
     # daily_pnl_targeting must build before unified_execution_route (route consumes it)
     # and before strategy_governance (progress_ratio history). Response order places
     # strategy_governance immediately after unified_execution_route.
-    daily_pnl_targeting = build_daily_pnl_targeting(
+    with timed_section("gui_status.full.daily_pnl"):
+        daily_pnl_targeting = build_daily_pnl_targeting(
         session_review=session_review_bundle.get("session_review"),
         regime_aware_strategy_selector=regime_aware_strategy_selector,
         regime_risk_envelope=regime_risk_envelope,
@@ -236,7 +299,8 @@ def build_gui_status() -> dict[str, Any]:
         regime_detection=regime_bundle.get("regime_detection"),
         hard_enforcement_decisions=hard_enforcement_decisions,
     )
-    unified_execution_route = build_unified_execution_routes(
+    with timed_section("gui_status.full.routing"):
+        unified_execution_route = build_unified_execution_routes(
         regime_detection=regime_bundle.get("regime_detection"),
         regime_aware_strategy_selector=regime_aware_strategy_selector,
         regime_risk_envelope=regime_risk_envelope,
@@ -250,7 +314,8 @@ def build_gui_status() -> dict[str, Any]:
         pipeline_governance=governance.get("pipeline_governance") or {},
         api_feed_health=feed_health,
     )
-    strategy_governance = build_strategy_governance(
+    with timed_section("gui_status.full.strategy_governance"):
+        strategy_governance = build_strategy_governance(
         strategy_performance_memory=performance_bundle.get("strategy_performance_memory"),
         adaptive_thresholds=adaptive_thresholds,
         regime_detection=regime_bundle.get("regime_detection"),
@@ -262,8 +327,24 @@ def build_gui_status() -> dict[str, Any]:
         hard_enforcement_decisions=hard_enforcement_decisions,
     )
 
+    from api.readiness_snapshot import resolve_gate_progression
+
+    gate_progression = resolve_gate_progression()
+    readiness = build_readiness_bundle(
+        gate_progression=gate_progression,
+        api_feed_health=feed_health,
+        unified_execution_route=unified_execution_route,
+        regime_risk_envelope=regime_risk_envelope,
+        pipeline_governance=governance.get("pipeline_governance") or {},
+        session_governance=governance.get("session_governance") or {},
+        hard_enforcement_decisions=hard_enforcement_decisions,
+        session_status=session_status,
+    )
+
     return {
         **identity,
+        **readiness,
+        "gate_progression": gate_progression,
         "gui_attach_ready": lock_present and session_status == "HEALTHY" and bool(identity.get("session_id")),
         "engine_health": _engine_health(paths),
         "api_feed_health": feed_health,
@@ -287,4 +368,5 @@ def build_gui_status() -> dict[str, Any]:
         "unified_execution_route": unified_execution_route,
         "strategy_governance": strategy_governance,
         **session_review_bundle,
+        "snapshot_tier": "full",
     }

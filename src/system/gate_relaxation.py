@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import json
+import time
 from functools import lru_cache
 from typing import Any
 
 from system.paths import project_root
+
+_RELAXATION_SNAPSHOT_CACHE: dict[str, Any] | None = None
+_RELAXATION_SNAPSHOT_AT: float = 0.0
+_RELAXATION_SNAPSHOT_TTL_SEC = 10.0
 
 
 @lru_cache(maxsize=1)
@@ -40,7 +45,10 @@ def _soak_block() -> dict[str, Any]:
 
 
 def reset_gate_relaxation_cache_for_tests() -> None:
+    global _RELAXATION_SNAPSHOT_CACHE, _RELAXATION_SNAPSHOT_AT
     _relaxation_block.cache_clear()
+    _RELAXATION_SNAPSHOT_CACHE = None
+    _RELAXATION_SNAPSHOT_AT = 0.0
 
 
 def demo_soak_enabled() -> bool:
@@ -195,6 +203,13 @@ def effective_fitness_min(epic: str, *, points_state: str) -> float:
 
 
 def relaxation_snapshot() -> dict[str, Any]:
+    global _RELAXATION_SNAPSHOT_CACHE, _RELAXATION_SNAPSHOT_AT
+    now = time.time()
+    if (
+        _RELAXATION_SNAPSHOT_CACHE is not None
+        and (now - _RELAXATION_SNAPSHOT_AT) < _RELAXATION_SNAPSHOT_TTL_SEC
+    ):
+        return dict(_RELAXATION_SNAPSHOT_CACHE)
     block = _relaxation_block()
     soak = _soak_block()
     v26_active = _v26_relaxation_active()
@@ -237,4 +252,6 @@ def relaxation_snapshot() -> dict[str, Any]:
         snap["policy_id"] = learning_demo_policy_id() if learning_demo_enabled() else ""
     except Exception:
         pass
-    return snap
+    _RELAXATION_SNAPSHOT_CACHE = snap
+    _RELAXATION_SNAPSHOT_AT = now
+    return dict(snap)

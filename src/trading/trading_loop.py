@@ -201,12 +201,18 @@ def _resolve_gate_eval_cooldown_sec() -> float:
     try:
         from system.config_loader import get_config
 
-        raw = getattr(get_config(), "gate_eval_cooldown_sec", None)
-        if raw is None:
-            return GATE_EVAL_COOLDOWN_SEC
-        return max(1.0, min(60.0, float(raw)))
+        cfg = get_config()
+        demo_tp = cfg.get("demo_throughput_mode") or {}
+        if demo_tp.get("enabled"):
+            raw = demo_tp.get("gate_eval_cooldown_sec")
+            if raw is not None:
+                return max(1.0, float(raw))
+        raw = cfg.get("gate_eval_cooldown_sec")
+        if raw is not None:
+            return max(1.0, float(raw))
     except Exception:
-        return GATE_EVAL_COOLDOWN_SEC
+        pass
+    return GATE_EVAL_COOLDOWN_SEC
 
 
 def _peak_confidence_from_signal(sig: SignalResult, conf: float) -> float:
@@ -1629,6 +1635,14 @@ class TradingLoop:
 
             cache = get_live_state_cache()
             cache.record_tick(
+                epic=str(self._epic),
+                bid=float(ctx.quote.bid),
+                offer=float(ctx.quote.offer),
+                latency_ms=float(latency_ms),
+            )
+            from api.agent_state import record_loop_tick
+
+            record_loop_tick(
                 epic=str(self._epic),
                 bid=float(ctx.quote.bid),
                 offer=float(ctx.quote.offer),

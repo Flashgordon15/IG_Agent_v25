@@ -267,13 +267,29 @@ def resolve_ml_radar_axes() -> dict[str, float]:
 
 
 def resolve_ticks_processed() -> int:
-    """Total data-matrix velocity count — hub SHM only on dashboard hot path."""
+    """Total data-matrix velocity count — hub SHM first, fallback to rotation sweep count."""
     try:
         from system.ipc.ring_buffer import read_cockpit_shm
 
         snap = read_cockpit_shm()
         if isinstance(snap, dict):
-            return int(snap.get("ticks_cached") or 0)
+            v = int(snap.get("ticks_cached") or 0)
+            if v > 0:
+                return v
+    except Exception:
+        pass
+    # Fallback: use dual_core rotation_sweep_count (proxy for total processed sweeps)
+    try:
+        from runtime.dual_core_execution import get_rotation_state, _ticks_per_minute, ROTATION_UNIVERSE
+
+        state = get_rotation_state()
+        sweep = int(state.get("rotation_sweep_count") or 0)
+        if sweep > 0:
+            return sweep
+        # Last resort: sum tpm across universe
+        tpm_sum = sum(_ticks_per_minute(epic) for epic in ROTATION_UNIVERSE)
+        if tpm_sum > 0:
+            return tpm_sum
     except Exception:
         pass
     return 0

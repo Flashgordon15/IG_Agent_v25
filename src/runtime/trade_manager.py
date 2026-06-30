@@ -556,7 +556,6 @@ class DualCoreCoordinator:
             resolve_micro_stop_limit_points,
             set_last_gate_suppression_reason,
         )
-        from runtime.strategy_kill_switch import is_strategy_kill_active
         from system.qmm_process_supervisor import process_entry_blocked
 
         def _block(code: str) -> None:
@@ -564,6 +563,16 @@ class DualCoreCoordinator:
             log_engine(
                 f"DualCoreCoordinator: dispatch blocked epic={epic} reason={code}"
             )
+
+        from execution.ig_execution_guard import ig_execution_allowed, log_execution_paused_if_needed
+
+        allowed, ig_reason = ig_execution_allowed()
+        if not allowed:
+            _block(ig_reason)
+            log_execution_paused_if_needed(ig_reason)
+            return
+
+        from runtime.strategy_kill_switch import is_strategy_kill_active
 
         from runtime.strategy_controller import guard_micro_dispatch
 
@@ -590,8 +599,15 @@ class DualCoreCoordinator:
             return
 
         if is_strategy_kill_active():
-            _block("BROKER_STATE_MISMATCH")
-            return
+            try:
+                from system.demo_execution_plane import demo_throughput_active
+
+                if not demo_throughput_active(self._cfg):
+                    _block("BROKER_STATE_MISMATCH")
+                    return
+            except Exception:
+                _block("BROKER_STATE_MISMATCH")
+                return
         blocked, reason = process_entry_blocked()
         if blocked:
             _block(reason or "process_entry_blocked")
@@ -661,13 +677,47 @@ class DualCoreCoordinator:
 
         broker_product = resolve_account_product(rest=self._rest, cfg=self._cfg)
         broker_epic = resolve_order_epic(epic, account_product=broker_product)
-        tp_pts, sl_pts = resolve_micro_stop_limit_points(self._rest, broker_epic)
         deal_ref = f"MICRO-{epic[-8:]}-{int(time.time())}"
+        from execution.ig_size_validator import pre_trade_check
+
+        check = pre_trade_check(
+            epic,
+            size,
+            direction,
+            self._cfg,
+            self._rest,
+            broker_epic=broker_epic,
+        )
+        if check.get("status") == "blocked":
+            set_last_gate_suppression_reason(f"size_validation:{check.get('reason')}")
+            log_engine(
+                f"DualCoreCoordinator: pre_trade blocked epic={epic} "
+                f"reason={check.get('reason')}"
+            )
+            return
+        size = float(check.get("adjusted_size") or size)
+        tp_pts, sl_pts = resolve_micro_stop_limit_points(
+            self._rest, broker_epic, size=size, cfg=self._cfg
+        )
         log_engine(
             f"DualCoreCoordinator: {ENGINE_B_MICRO_SCALPER} {direction} epic={epic} "
             f"broker_product={broker_product} broker_epic={broker_epic} "
             f"size={size} tp={tp_pts} sl={sl_pts} z-mode=compressed"
         )
+        try:
+            from runtime.trade_lifecycle import begin_trade, transition, LifecycleState
+            from system.unified_runtime_state import update_execution
+
+            begin_trade(
+                deal_id=deal_ref,
+                epic=epic,
+                direction=direction,
+                size=size,
+                ref=deal_ref,
+            )
+            update_execution(last_dispatch_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+        except Exception:
+            pass
         try:
             from system.market_data_hub import get_market_data_hub
 
@@ -678,49 +728,84 @@ class DualCoreCoordinator:
                 if quote is not None and quote.bid > 0 and quote.offer > 0
                 else 0.0
             )
-            result = self._rest.place_market_order(
-                epic=broker_epic,
-                direction=direction,
-                size=size,
-                stop_distance=sl_pts,
-                limit_distance=tp_pts,
-            )
-            ref = str(
-                result.get("dealReference")
-                or result.get("dealId")
-                or deal_ref
-            ).strip()
-            confirm: dict[str, Any] = {}
-            if ref and hasattr(self._rest, "confirm_deal"):
-                confirm = self._rest.confirm_deal(ref) or {}
+
+            def _place_and_confirm(order_size: float) -> tuple[dict[str, Any], dict[str, Any], str]:
+                res = self._rest.place_market_order(
+                    epic=broker_epic,
+                    direction=direction,
+                    size=order_size,
+                    stop_distance=sl_pts,
+                    limit_distance=tp_pts,
+                )
+                ref_local = str(
+                    res.get("dealReference") or res.get("dealId") or deal_ref
+                ).strip()
+                conf: dict[str, Any] = {}
+                if ref_local and hasattr(self._rest, "confirm_deal"):
+                    conf = self._rest.confirm_deal(ref_local) or {}
+                return res, conf, ref_local
+
+            result, confirm, ref = _place_and_confirm(size)
             deal_id = str(
-                confirm.get("deal_id")
-                or result.get("dealId")
-                or ""
+                confirm.get("deal_id") or result.get("dealId") or ""
             ).strip() or None
             if confirm.get("rejected"):
-                status = "REJECTED"
                 reject_reason = str(
                     confirm.get("reason")
                     or (confirm.get("raw") or {}).get("reason")
                     or ""
                 ).strip()
-                try:
-                    from runtime.broker_reject_guard import record_broker_confirm_rejection
+                from execution.ig_size_validator import classify_size_rejection
 
-                    trip = record_broker_confirm_rejection(
-                        reason=reject_reason,
-                        epic=epic,
-                        broker_epic=broker_epic,
-                    )
-                    if trip.get("tripped"):
+                retried = False
+                if classify_size_rejection(reject_reason) and float(check.get("ig_min_deal") or 0) > 0:
+                    retry_size = max(size, float(check["ig_min_deal"]))
+                    if retry_size > size:
                         log_engine(
-                            f"DualCoreCoordinator: broker reject latch "
-                            f"reason={trip.get('reason')} epic={epic} "
-                            f"broker_epic={broker_epic}"
+                            f"DualCoreCoordinator: size self-correct epic={epic} "
+                            f"{size}->{retry_size}"
                         )
-                except Exception:
-                    pass
+                        size = retry_size
+                        retried = True
+                        result, confirm, ref = _place_and_confirm(size)
+                        deal_id = str(
+                            confirm.get("deal_id") or result.get("dealId") or ""
+                        ).strip() or None
+                if confirm.get("rejected"):
+                    status = "REJECTED"
+                    try:
+                        from runtime.broker_reject_guard import record_rejection
+
+                        trip = record_rejection(
+                            epic=epic,
+                            reason=reject_reason,
+                            self_correction_attempted=retried,
+                            broker_epic=broker_epic,
+                        )
+                        if trip.get("tripped"):
+                            log_engine(
+                                f"DualCoreCoordinator: broker reject latch "
+                                f"reason={trip.get('reason')} epic={epic} "
+                                f"broker_epic={broker_epic}"
+                            )
+                    except Exception:
+                        pass
+                    try:
+                        transition(
+                            deal_ref,
+                            LifecycleState.REJECTED,
+                            message=reject_reason,
+                        )
+                    except Exception:
+                        pass
+                else:
+                    status = "CONFIRMED"
+                    try:
+                        from runtime.broker_reject_guard import record_broker_confirm_success
+
+                        record_broker_confirm_success()
+                    except Exception:
+                        pass
             elif confirm.get("accepted"):
                 status = "CONFIRMED"
                 try:
@@ -747,12 +832,44 @@ class DualCoreCoordinator:
             from runtime.virtual_stop_loss import register_virtual_stop
 
             if entry_mid > 0 and status not in ("REJECTED",):
+                lid = deal_ref
+                try:
+                    transition(
+                        lid,
+                        LifecycleState.ORDER_ACCEPTED,
+                        message=f"IG {status}",
+                        extra={"entry_level": entry_mid, "deal_id": deal_id or ref},
+                    )
+                    transition(
+                        lid,
+                        LifecycleState.TRAILING_STOP_ACTIVE,
+                        message="Virtual stop armed",
+                        extra={"entry_level": entry_mid},
+                    )
+                    transition(lid, LifecycleState.ACTIVE, message="Position tracking")
+                    from runtime.dynamic_limit_engine import register_dynamic_limit
+
+                    register_dynamic_limit(
+                        deal_id=str(deal_id or ref or lid),
+                        epic=epic,
+                        direction=direction,
+                        entry_level=entry_mid,
+                        limit_pts=float(tp_pts),
+                    )
+                except Exception:
+                    pass
+                from execution.micro_risk_profile import resolve_micro_tp_sl_for_epic
+
+                _, _, risk_profile = resolve_micro_tp_sl_for_epic(
+                    epic, size, self._cfg, volatility_z=None
+                )
                 register_virtual_stop(
                     epic=epic,
                     direction=direction,
                     entry_level=entry_mid,
                     size=size,
                     deal_id=str(deal_id or ref or ""),
+                    ceiling_pts=risk_profile.virtual_stop_ceiling_pts,
                 )
         except Exception as exc:
             set_last_gate_suppression_reason(f"micro_order_failed:{type(exc).__name__}")

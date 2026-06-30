@@ -206,8 +206,19 @@ _stagnant_since_by_epic: dict[str, float] = {}
 _last_rotation_at: float = 0.0
 _last_rotation_reason: str = ""
 _rotation_sweep_count: int = 0
+_rotation_bootstrap_complete: bool = False
 _stacked_stop = threading.Event()
 _stacked_thread: threading.Thread | None = None
+_stacked_tracks_started_at: float = 0.0
+
+# Escape hatch — triggered when all active stack epics have tpm=0 for >60s
+ESCAPE_HATCH_TPM_ZERO_SEC = 60.0
+# P1 — rehydrate feeds (no rotation) when stack tpm=0 for >30s
+TPM_ZERO_REHYDRATE_SEC = 30.0
+BOOT_GRACE_SEC = 180.0
+_escape_all_tpm_zero_since: float = 0.0
+_tpm_zero_rehydrate_since: float = 0.0
+_rotation_escape_active: bool = False
 
 # Socket heartbeat — stale stream detection + non-blocking rehydration
 SOCKET_STALE_SEC = 5.0
@@ -216,6 +227,37 @@ _socket_channel_state: dict[str, str] = {}
 _stream_reset_inflight = False
 _heartbeat_stop = threading.Event()
 _heartbeat_thread: threading.Thread | None = None
+
+
+def _record_quote_pulse(epic: str) -> None:
+    """Record a successful quote fetch into tick arrivals (unified tick counter)."""
+    key = str(epic or "").strip()
+    if not key:
+        return
+    now = time.time()
+    arrivals = _tick_arrivals.get(key)
+    if arrivals is None:
+        with _lock:
+            arrivals = _tick_arrivals.setdefault(key, deque(maxlen=256))
+    arrivals.append(now)
+
+
+def _ingest_fresh_quote(
+    epic: str,
+    bid: float,
+    offer: float,
+    *,
+    cfg: Any | None = None,
+) -> DualCoreSnapshot | None:
+    """Unified ingest — mid → Z history + tick pulse + fresh tick marker."""
+    key = str(epic or "").strip()
+    if not key or bid <= 0 or offer <= 0:
+        return None
+    mid = (float(bid) + float(offer)) / 2.0
+    snap = ingest_hub_mid(key, mid, cfg=cfg)
+    _mark_fresh_tick(key)
+    _record_quote_pulse(key)
+    return snap
 
 
 def _mark_fresh_tick(epic: str) -> None:
@@ -327,7 +369,11 @@ def validate_socket_heartbeat() -> dict[str, Any]:
             and float(quote.age_seconds()) <= 45.0
         )
         if fresh:
-            _mark_fresh_tick(epic)
+            _ingest_fresh_quote(
+                epic,
+                float(quote.bid),
+                float(quote.offer),
+            )
             continue
         last = float(_last_fresh_tick_at.get(epic) or 0.0)
         if last <= 0.0 or (now - last) > SOCKET_STALE_SEC:
@@ -336,6 +382,7 @@ def validate_socket_heartbeat() -> dict[str, Any]:
                 _socket_channel_state[epic] = "SOCKET_STALE"
     if stale_epics:
         _trigger_non_blocking_stream_rehydration(stale_epics)
+    _check_tpm_zero_rehydrate(cfg=None)
     return {"stale_epics": stale_epics, **get_socket_heartbeat_state()}
 
 
@@ -479,6 +526,85 @@ def get_rotation_state() -> dict[str, Any]:
         return get_rotation_state_locked()
 
 
+def get_active_stack_slots(cfg: Any | None = None) -> int:
+    """Configurable parallel stack depth (default 2; demo throughput may use 3)."""
+    if cfg is not None:
+        try:
+            dual = cfg.get("dual_core") or {}
+            if isinstance(dual, dict) and dual.get("active_stack_slots") is not None:
+                return max(2, min(4, int(dual["active_stack_slots"])))
+        except (TypeError, ValueError):
+            pass
+        try:
+            block = cfg.get("demo_throughput_mode") or {}
+            if isinstance(block, dict) and block.get("enabled"):
+                return max(2, int((cfg.get("dual_core") or {}).get("active_stack_slots", 3)))
+        except (TypeError, ValueError):
+            pass
+    return ACTIVE_STACK_SLOTS
+
+
+def get_rotation_eligibility(cfg: Any | None = None) -> dict[str, Any]:
+    """Per-instrument eligibility for multi-market rotation panel."""
+    with _lock:
+        return _rotation_eligibility_unlocked(cfg)
+
+
+def _rotation_eligibility_unlocked(cfg: Any | None = None) -> dict[str, Any]:
+    stack = set(get_active_stack_epics())
+    ranked = _rank_universe_by_velocity(cfg=cfg)
+    velocity_map = {epic: vel for epic, vel in ranked}
+    active: list[dict[str, Any]] = []
+    eligible: list[dict[str, Any]] = []
+    inactive: list[dict[str, Any]] = []
+    for epic in ROTATION_UNIVERSE:
+        tpm = _ticks_per_minute(epic)
+        z = 0.0
+        try:
+            snap = _snapshots.get(epic)
+            if snap is not None:
+                z = float(snap.volatility_z_score)
+        except Exception:
+            pass
+        spread_ok = True
+        try:
+            from system.market_data_hub import get_market_data_hub
+
+            q = get_market_data_hub().get_snapshot(epic)
+            if q is not None and q.bid > 0 and q.offer > 0:
+                spread_ok, _ = _channel_health_ok(epic, q.bid, q.offer, cfg=cfg)
+        except Exception:
+            pass
+        row = {
+            "epic": epic,
+            "label": epic_display_name(epic),
+            "ticks_per_minute": tpm,
+            "velocity": round(float(velocity_map.get(epic, 0.0)), 4),
+            "z_score": round(z, 4),
+            "spread_ok": spread_ok,
+        }
+        if epic in stack:
+            row["reason"] = "active_stack"
+            active.append(row)
+        elif tpm >= MIN_TICKS_PER_MINUTE and spread_ok:
+            row["reason"] = "eligible_velocity"
+            eligible.append(row)
+        else:
+            reasons = []
+            if tpm < MIN_TICKS_PER_MINUTE:
+                reasons.append("low_velocity")
+            if not spread_ok:
+                reasons.append("spread_wide")
+            row["reason"] = ",".join(reasons) or "quiet"
+            inactive.append(row)
+    return {
+        "active_instruments": active,
+        "eligible_instruments": eligible,
+        "inactive_instruments": inactive,
+        "active_stack_slots": get_active_stack_slots(cfg),
+    }
+
+
 def get_rotation_state_locked() -> dict[str, Any]:
     """Caller must hold ``_lock``."""
     stagnant: dict[str, float] = {}
@@ -495,6 +621,12 @@ def get_rotation_state_locked() -> dict[str, Any]:
         "stagnant_dead_zone_epics": stagnant,
         "stagnant_z_band": [STAGNANT_Z_MIN, STAGNANT_Z_MAX],
         "stagnant_dead_zone_sec": STAGNANT_DEAD_ZONE_SEC,
+        "rotation_escape_active": bool(_rotation_escape_active),
+        **_rotation_eligibility_unlocked(),
+        "boot_grace_active": (
+            _stacked_tracks_started_at > 0
+            and (time.time() - _stacked_tracks_started_at) < BOOT_GRACE_SEC
+        ),
     }
 
 
@@ -508,15 +640,31 @@ def _fetch_multi_source_quote(
     *,
     cfg: Any | None = None,
 ) -> tuple[float, float, str] | None:
-    """Hub (IG/stream) first, Yahoo Finance fallback — 3-source cross-market scan."""
+    """Hub (IG/stream) first, Yahoo Finance fallback — 3-source cross-market scan.
+
+    Hub age gate: if hub age >15s prefer Yahoo first (only reject at >45s).
+    """
     key = str(epic or "").strip()
     if not key:
         return None
     quote = hub.get_snapshot(key)
-    if quote is not None and float(getattr(quote, "bid", 0) or 0) > 0:
-        offer = float(getattr(quote, "offer", 0) or 0)
-        if offer > 0 and float(quote.age_seconds()) <= 45.0:
-            return float(quote.bid), offer, str(getattr(quote, "source", None) or "hub")
+    hub_age = float(quote.age_seconds()) if quote is not None else 999.0
+    hub_fresh = (
+        quote is not None
+        and float(getattr(quote, "bid", 0) or 0) > 0
+        and float(getattr(quote, "offer", 0) or 0) > 0
+        and hub_age <= 45.0
+    )
+    hub_preferred = hub_fresh and hub_age <= 15.0
+
+    if hub_preferred:
+        return (
+            float(quote.bid),
+            float(getattr(quote, "offer", 0)),
+            str(getattr(quote, "source", None) or "hub"),
+        )
+
+    # Hub stale (>15s) or missing — try Yahoo first
     try:
         from feeder.yahoo_quote_poller import fetch_yahoo_quote
 
@@ -534,6 +682,14 @@ def _fetch_multi_source_quote(
             return float(sample.bid), float(sample.offer), "yahoo"
     except Exception:
         pass
+
+    # Yahoo unavailable — fall back to hub if still within 45s
+    if hub_fresh:
+        return (
+            float(quote.bid),
+            float(getattr(quote, "offer", 0)),
+            str(getattr(quote, "source", None) or "hub"),
+        )
     if quote is not None and float(getattr(quote, "bid", 0) or 0) > 0:
         offer = float(getattr(quote, "offer", 0) or 0)
         if offer > 0:
@@ -602,29 +758,59 @@ def _rotate_to_high_velocity_stack(
 ) -> bool:
     exclude = exclude or set()
     ranked = _rank_universe_by_velocity(cfg=cfg)
-    picks = [epic for epic, _ in ranked if epic not in exclude][:ACTIVE_STACK_SLOTS]
-    if len(picks) < ACTIVE_STACK_SLOTS:
+    slots = get_active_stack_slots(cfg)
+    picks = [epic for epic, _ in ranked if epic not in exclude][:slots]
+    if len(picks) < slots:
         for epic in ROTATION_UNIVERSE:
             if epic not in picks and epic not in exclude:
                 picks.append(epic)
-            if len(picks) >= ACTIVE_STACK_SLOTS:
+            if len(picks) >= slots:
                 break
-    return _rotate_active_stack_to(tuple(picks[:ACTIVE_STACK_SLOTS]), reason=reason, cfg=cfg)
+    return _rotate_active_stack_to(tuple(picks[:slots]), reason=reason, cfg=cfg)
 
 
-def _update_stagnant_tracking(epic: str, z: float) -> bool:
-    """True when epic has floated in quiet center channel for >= STAGNANT_DEAD_ZONE_SEC."""
+def _resolve_stagnant_dead_zone_sec(cfg: Any | None = None) -> float:
+    """Demo throughput overlay may shorten dead-zone rotation (P4)."""
+    if cfg is not None:
+        try:
+            block = cfg.get("demo_throughput_mode") or {}
+            if isinstance(block, dict) and block.get("enabled"):
+                raw = block.get("stagnant_dead_zone_sec")
+                if raw is not None:
+                    return max(60.0, float(raw))
+        except (TypeError, ValueError):
+            pass
+    return float(STAGNANT_DEAD_ZONE_SEC)
+
+
+def _update_stagnant_tracking(
+    epic: str,
+    z: float,
+    *,
+    cfg: Any | None = None,
+) -> bool:
+    """True when epic has floated in quiet center channel for >= dead_zone_sec."""
     key = str(epic or "").strip()
     if not key:
         return False
     now = time.time()
+    dead_zone_sec = _resolve_stagnant_dead_zone_sec(cfg)
+    # P4 — dead Z + zero velocity: force stagnant sooner (60s)
+    if _in_quiet_center_channel(z) and _ticks_per_minute(key) == 0:
+        with _lock:
+            since = _stagnant_since_by_epic.get(key)
+            if since is None:
+                _stagnant_since_by_epic[key] = now
+                return False
+            if (now - since) >= min(60.0, dead_zone_sec):
+                return True
     with _lock:
         if _in_quiet_center_channel(z):
             since = _stagnant_since_by_epic.get(key)
             if since is None:
                 _stagnant_since_by_epic[key] = now
                 return False
-            return (now - since) >= STAGNANT_DEAD_ZONE_SEC
+            return (now - since) >= dead_zone_sec
         _stagnant_since_by_epic.pop(key, None)
         return False
 
@@ -649,7 +835,7 @@ def evaluate_multi_source_rotation_sweep(*, cfg: Any | None = None) -> dict[str,
     500ms cross-market sweep — IG hub + Yahoo Finance simultaneously.
     Evicts STAGNANT_DEAD_ZONE channels and rotates to high-velocity alternatives.
     """
-    global _rotation_sweep_count
+    global _rotation_sweep_count, _escape_all_tpm_zero_since, _rotation_escape_active
     hub = get_market_data_hub()
     stagnant_flags: list[str] = []
 
@@ -659,10 +845,7 @@ def evaluate_multi_source_rotation_sweep(*, cfg: Any | None = None) -> dict[str,
             if row is None:
                 continue
             bid, offer, _src = row
-            mid = (float(bid) + float(offer)) / 2.0
-            snap = ingest_hub_mid(epic, mid)
-            if snap is not None:
-                _mark_fresh_tick(epic)
+            _ingest_fresh_quote(epic, bid, offer, cfg=cfg)
         except Exception as exc:
             log_engine(
                 f"MultiSourceRotation: ingest guard {epic_display_name(epic)} "
@@ -672,8 +855,10 @@ def evaluate_multi_source_rotation_sweep(*, cfg: Any | None = None) -> dict[str,
     for epic in get_active_stack_epics():
         snap = _snapshots.get(epic)
         z = float(snap.live_calculated_zscore if snap is not None else 0.0)
-        if _update_stagnant_tracking(epic, z):
+        if _update_stagnant_tracking(epic, z, cfg=cfg):
             stagnant_flags.append(epic)
+
+    _check_tpm_zero_rehydrate(cfg=cfg)
 
     if stagnant_flags and multi_source_auto_rotation_enabled(cfg):
         for epic in stagnant_flags:
@@ -684,10 +869,92 @@ def evaluate_multi_source_rotation_sweep(*, cfg: Any | None = None) -> dict[str,
             cfg=cfg,
         )
 
+    # Universe escape hatch — all active stack epics have tpm=0 for >60s
+    _check_universe_escape_hatch(cfg=cfg)
+
     with _lock:
         _rotation_sweep_count += 1
+        sweep_n = _rotation_sweep_count
+
+    try:
+        from system.unified_runtime_state import update_routing
+
+        stack = get_active_stack_epics()
+        current = stack[0] if stack else ""
+        update_routing(
+            rotation_sweep_count=sweep_n,
+            current_epic=current,
+            rotation_active=True,
+        )
+    except Exception:
+        pass
+
+    try:
+        from system.gate_activity import record_gate_evaluation
+
+        for epic in get_active_stack_epics():
+            record_gate_evaluation(epic)
+    except Exception:
+        pass
 
     return get_rotation_state() | {"stagnant_rotated": stagnant_flags}
+
+
+def _check_tpm_zero_rehydrate(*, cfg: Any | None = None) -> None:
+    """P1 — rehydrate Yahoo/IG stream when all stack epics have tpm=0 for >30s."""
+    global _tpm_zero_rehydrate_since
+    stack = get_active_stack_epics()
+    if not stack:
+        _tpm_zero_rehydrate_since = 0.0
+        return
+    now = time.time()
+    all_zero = all(_ticks_per_minute(epic) == 0 for epic in stack)
+    if not all_zero:
+        _tpm_zero_rehydrate_since = 0.0
+        return
+    if _tpm_zero_rehydrate_since <= 0.0:
+        _tpm_zero_rehydrate_since = now
+        return
+    if (now - _tpm_zero_rehydrate_since) < TPM_ZERO_REHYDRATE_SEC:
+        return
+    log_engine(
+        f"TpmZeroRehydrate: stack tpm=0 for {(now - _tpm_zero_rehydrate_since):.0f}s — rehydrate"
+    )
+    _trigger_non_blocking_stream_rehydration(list(stack))
+    _tpm_zero_rehydrate_since = now
+
+
+def _check_universe_escape_hatch(*, cfg: Any | None = None) -> None:
+    """Force rehydration + rotation when all active stack epics have tpm=0 for >60s."""
+    global _escape_all_tpm_zero_since, _rotation_escape_active
+    if not multi_source_auto_rotation_enabled(cfg):
+        return
+    stack = get_active_stack_epics()
+    now = time.time()
+    all_zero = all(_ticks_per_minute(epic) == 0 for epic in stack)
+    if not all_zero:
+        _escape_all_tpm_zero_since = 0.0
+        _rotation_escape_active = False
+        return
+    if _escape_all_tpm_zero_since <= 0.0:
+        _escape_all_tpm_zero_since = now
+        return
+    elapsed = now - _escape_all_tpm_zero_since
+    if elapsed < ESCAPE_HATCH_TPM_ZERO_SEC:
+        return
+    _rotation_escape_active = True
+    log_engine(
+        f"UniverseEscapeHatch: all stack tpm=0 for {elapsed:.0f}s — forcing rehydration+rotation"
+    )
+    try:
+        _trigger_non_blocking_stream_rehydration(list(stack))
+    except Exception as exc:
+        log_engine(f"UniverseEscapeHatch: rehydration failed {type(exc).__name__}: {exc}")
+    try:
+        _rotate_to_high_velocity_stack(reason="escape_hatch_tpm_zero", cfg=cfg)
+    except Exception as exc:
+        log_engine(f"UniverseEscapeHatch: rotation failed {type(exc).__name__}: {exc}")
+    _escape_all_tpm_zero_since = now  # Reset so we retry after another 60s if still stuck
 
 
 def resolve_max_spread_pts(epic: str, cfg: Any | None = None) -> float:
@@ -723,9 +990,16 @@ def _channel_health_ok(epic: str, bid: float, offer: float, cfg: Any | None = No
     max_spread = resolve_max_spread_pts(key, cfg)
     if spread > max_spread:
         return False, f"spread_exceeds_limit({spread:.4f}>{max_spread})"
-    tpm = _ticks_per_minute(key)
-    if tpm < MIN_TICKS_PER_MINUTE:
-        return False, f"tick_velocity_low({tpm}<{MIN_TICKS_PER_MINUTE}/min)"
+    # Boot grace window — skip tpm check for first 180s after stacked tracks start
+    now = time.time()
+    in_boot_grace = (
+        _stacked_tracks_started_at > 0
+        and (now - _stacked_tracks_started_at) < BOOT_GRACE_SEC
+    )
+    if not in_boot_grace:
+        tpm = _ticks_per_minute(key)
+        if tpm < MIN_TICKS_PER_MINUTE:
+            return False, f"tick_velocity_low({tpm}<{MIN_TICKS_PER_MINUTE}/min)"
     return True, ""
 
 
@@ -1037,6 +1311,17 @@ def is_api_trading_paused() -> bool:
 
 async def _stacked_dual_async_loop(*, cfg: Any | None, interval_sec: float) -> None:
     """Hardened async execution pathway — 500ms non-blocking multi-source strategy sweep."""
+    global _rotation_bootstrap_complete
+    if not _rotation_bootstrap_complete:
+        try:
+            await asyncio.to_thread(bootstrap_stack_mid_history, cfg=cfg)
+            await asyncio.to_thread(bootstrap_multi_source_rotation_stack, cfg=cfg)
+            _rotation_bootstrap_complete = True
+            log_engine("MultiSourceRotation: async bootstrap complete")
+        except Exception as exc:
+            log_engine(
+                f"MultiSourceRotation: async bootstrap skipped {type(exc).__name__}: {exc}"
+            )
     await execute_parallel_strategy_sweep(cfg=cfg, stop_event=_stacked_stop, interval_sec=interval_sec)
 
 
@@ -1064,7 +1349,7 @@ class ParallelStrategySweepEngine:
             bid, offer, source = row
             now = time.time()
             mid = (float(bid) + float(offer)) / 2.0
-            await asyncio.to_thread(ingest_hub_mid, asset_epic, mid)
+            await asyncio.to_thread(_ingest_fresh_quote, asset_epic, float(bid), float(offer), cfg=self._cfg)
             _append_raw_tick_debug(asset_epic, float(bid), float(offer))
             return {
                 "bid": float(bid),
@@ -1097,6 +1382,16 @@ class ParallelStrategySweepEngine:
         await asyncio.to_thread(_dispatch_piercing_zone_order, asset_epic, z_score, self._cfg)
 
 
+def _resolve_pierce_thresholds(cfg: Any | None = None) -> tuple[float, float]:
+    try:
+        from system.demo_execution_plane import demo_pierce_z_threshold
+
+        z = demo_pierce_z_threshold(cfg, default=PIERCE_UPPER_Z)
+    except Exception:
+        z = PIERCE_UPPER_Z
+    return (-float(z), float(z))
+
+
 async def execute_parallel_strategy_sweep(
     *,
     cfg: Any | None = None,
@@ -1107,6 +1402,7 @@ async def execute_parallel_strategy_sweep(
     500ms hardened execution loop — multi-source feeds, piercing-zone valve, async yield.
     """
     engine = ParallelStrategySweepEngine(cfg=cfg)
+    pierce_lower, pierce_upper = _resolve_pierce_thresholds(cfg)
     while stop_event is None or not stop_event.is_set():
         try:
             await asyncio.to_thread(validate_socket_heartbeat)
@@ -1136,13 +1432,13 @@ async def execute_parallel_strategy_sweep(
                 try:
                     append_strategy_eval_log(
                         z_score=z_score,
-                        target=PIERCE_LOWER_Z,
+                        target=pierce_lower,
                         block_reason=lite_valve_block_status(),
                     )
                 except Exception:
                     pass
 
-                if z_score <= PIERCE_LOWER_Z or z_score >= PIERCE_UPPER_Z:
+                if z_score <= pierce_lower or z_score >= pierce_upper:
                     _execution_logger.info(
                         "Boundary pierced for %s: Z=%s. Opening Master Valve.",
                         asset_epic,
@@ -1281,13 +1577,85 @@ def cognitive_cascade_sweep_once() -> str | None:
     return PRIMARY_STACKED_EPIC
 
 
-def start_stacked_dual_asset_tracks() -> None:
-    global _stacked_thread, _execution_focus_target
-    stop_cognitive_cascade()
-    _execution_focus_target = PRIMARY_STACKED_EPIC
-    if _stacked_thread is not None and _stacked_thread.is_alive():
+def _resolve_short_window(cfg: Any | None = None) -> int:
+    """Demo throughput may shorten Z warm-up window."""
+    if cfg is not None:
+        try:
+            block = cfg.get("demo_throughput_mode") or {}
+            if isinstance(block, dict) and block.get("enabled"):
+                raw = block.get("z_short_window")
+                if raw is not None:
+                    return max(_MIN_SAMPLES, int(raw))
+        except (TypeError, ValueError):
+            pass
+    return _SHORT_WINDOW
+
+
+def bootstrap_stack_mid_history(cfg: Any | None = None) -> None:
+    """G5 pre-warm — seed varied mids so Z-score variance is non-zero immediately."""
+    hub = get_market_data_hub()
+    short_win = _resolve_short_window(cfg)
+    seed_count = max(short_win + 5, 35)
+    for epic in ROTATION_UNIVERSE:
+        try:
+            row = _fetch_multi_source_quote(epic, hub, cfg=cfg)
+            if row is None:
+                from feeder.yahoo_quote_poller import fetch_yahoo_quote
+
+                sample = fetch_yahoo_quote(epic)
+                if sample is None or sample.bid <= 0 or sample.offer <= 0:
+                    continue
+                bid, offer = float(sample.bid), float(sample.offer)
+            else:
+                bid, offer, _ = row
+            spread = max(float(offer) - float(bid), 1e-9)
+            mid = (float(bid) + float(offer)) / 2.0
+            for i in range(seed_count):
+                t = (i / max(seed_count - 1, 1)) - 0.5
+                ingest_hub_mid(epic, mid + t * spread, cfg=cfg)
+            _mark_fresh_tick(epic)
+            _record_quote_pulse(epic)
+            try:
+                hub.publish(epic, float(bid), float(offer), source="yahoo_prewarm")
+            except Exception:
+                pass
+            log_engine(
+                f"BootPrewarm: seeded {epic_display_name(epic)} mid={mid:.5f} "
+                f"({seed_count} varied samples)"
+            )
+        except Exception as exc:
+            log_engine(f"BootPrewarm: {epic_display_name(epic)} skipped {type(exc).__name__}: {exc}")
+
+
+def is_stacked_sweep_thread_alive() -> bool:
+    return _stacked_thread is not None and _stacked_thread.is_alive()
+
+
+def _ensure_stacked_sweep_running(*, cfg: Any | None = None) -> None:
+    """Restart stacked sweep if thread died (watchdog)."""
+    if is_stacked_sweep_thread_alive():
         return
+    log_engine("MultiSourceRotation: stacked sweep thread dead — restarting")
+    global _stacked_thread
+    _stacked_thread = None
     _stacked_stop.clear()
+    try:
+        start_stacked_dual_asset_tracks()
+    except Exception as exc:
+        log_engine(
+            f"MultiSourceRotation: stacked sweep restart failed "
+            f"{type(exc).__name__}: {exc}"
+        )
+
+
+def start_stacked_dual_asset_tracks() -> None:
+    global _stacked_thread, _execution_focus_target, _stacked_tracks_started_at
+    stop_cognitive_cascade()
+    _stacked_stop.clear()
+    _execution_focus_target = PRIMARY_STACKED_EPIC
+    if is_stacked_sweep_thread_alive():
+        return
+    _stacked_thread = None
     cfg = None
     try:
         from system.config_loader import ConfigLoader
@@ -1301,7 +1669,7 @@ def start_stacked_dual_asset_tracks() -> None:
     async def _coro() -> None:
         await _stacked_dual_async_loop(cfg=cfg_ref, interval_sec=poll_sec)
 
-    bootstrap_multi_source_rotation_stack(cfg=cfg_ref)
+    _stacked_tracks_started_at = time.time()
     _stacked_thread = _run_async_poll_loop(name="stacked-dual-asset", coro_factory=_coro)
     log_engine(
         f"MultiSourceRotation: 500ms sweep armed universe={len(ROTATION_UNIVERSE)} "
@@ -1326,7 +1694,13 @@ def reset_cognitive_cascade_for_tests() -> None:
     global _execution_focus_target, _focus_tick_velocity, _ml_sovereignty_active
     global _failover_state, _failover_active, _failover_reason, _active_stack_epics
     global _forex_rotation_locked, _stagnant_since_by_epic, _last_rotation_at
-    global _last_rotation_reason, _rotation_sweep_count
+    global _last_rotation_reason, _rotation_sweep_count, _rotation_bootstrap_complete
+    global _stacked_tracks_started_at, _escape_all_tpm_zero_since, _rotation_escape_active
+    global _tpm_zero_rehydrate_since
+    _stacked_tracks_started_at = 0.0
+    _escape_all_tpm_zero_since = 0.0
+    _tpm_zero_rehydrate_since = 0.0
+    _rotation_escape_active = False
     stop_cognitive_cascade()
     with _lock:
         _execution_focus_target = PRIMARY_STACKED_EPIC
@@ -1345,6 +1719,7 @@ def reset_cognitive_cascade_for_tests() -> None:
         _last_rotation_at = 0.0
         _last_rotation_reason = ""
         _rotation_sweep_count = 0
+        _rotation_bootstrap_complete = False
         _tick_arrivals.clear()
         for epic in ROTATION_UNIVERSE:
             _tick_arrivals[epic] = deque(maxlen=256)
@@ -1652,18 +2027,19 @@ def _z_score_from_widths(widths: deque[float], current: float) -> float:
     return (current - mean) / std
 
 
-def ingest_hub_mid(epic: str, mid: float) -> DualCoreSnapshot | None:
+def ingest_hub_mid(epic: str, mid: float, cfg: Any | None = None) -> DualCoreSnapshot | None:
     """Feed a live mid — updates volatility Z and dual-core mode (non-blocking)."""
     key = str(epic or "").strip()
     if not key or mid <= 0:
         return None
+    short_window = _resolve_short_window(cfg)
     try:
         hist = _mid_history.setdefault(key, deque(maxlen=_LONG_WINDOW))
         hist.append(float(mid))
-        if len(hist) < _SHORT_WINDOW:
+        if len(hist) < short_window:
             return None
 
-        recent = list(hist)[-_SHORT_WINDOW:]
+        recent = list(hist)[-short_window:]
         rolling = list(hist)[-Z_ROLLING_WINDOW:]
         upper = max(recent)
         lower = min(recent)
@@ -1727,27 +2103,45 @@ def _is_fx_epic(epic: str) -> bool:
 
 
 def canary_lot_size(epic: str, cfg: Any | None = None) -> float:
-    """Strict canary clamp — 0.5 Wall St index / 1.0 Gold / 1.0 FX."""
+    """Strict canary clamp — IG demo minimum deal sizes per instrument class."""
     _ = cfg
     e = str(epic or "").upper()
     if "CFPGOLD" in e or "GOLD" in e:
         return CANARY_GOLD_LOT
-    if "DOW" in e:
+    if "NIKKEI" in e:
+        return max(CANARY_INDEX_LOT, 1.0)
+    if "DOW" in e or "FTSE" in e or "DAX" in e:
         return CANARY_INDEX_LOT
     if _is_fx_epic(epic):
         return CANARY_FX_LOT
     return CANARY_INDEX_LOT
 
 
-def resolve_micro_stop_limit_points(rest_client: Any, epic: str) -> tuple[float, float]:
-    """Floor TP/SL — broker stop stretched to max(2.0, minStopOrProfitDistance)."""
+def resolve_micro_stop_limit_points(
+    rest_client: Any, epic: str, *, size: float = 1.0, cfg: Any | None = None
+) -> tuple[float, float]:
+    """TP/SL from configurable GBP risk profile + broker floors."""
     from execution.live_broker_order_router import floor_stop_distance_points
-    from runtime.virtual_stop_loss import INTERNAL_RISK_CEILING_PTS, stretch_broker_stop_distance
+    from execution.micro_risk_profile import resolve_micro_tp_sl_for_epic
+    from runtime.virtual_stop_loss import stretch_broker_stop_distance
 
-    tp_pts, sl_pts = get_effective_micro_tp_sl()
+    try:
+        snap = get_dual_core_snapshot()
+        z = float(snap.volatility_z_score) if snap.epic == epic else None
+    except Exception:
+        z = None
+    if cfg is None:
+        try:
+            from system.config_loader import get_config
+
+            cfg = get_config()
+        except Exception:
+            cfg = None
+    tp_pts, sl_pts, _profile = resolve_micro_tp_sl_for_epic(
+        epic, size, cfg, volatility_z=z
+    )
     tp = floor_stop_distance_points(rest_client, epic, tp_pts).effective_points
     sl = stretch_broker_stop_distance(rest_client, epic, sl_pts)
-    sl = max(INTERNAL_RISK_CEILING_PTS, sl)
     return float(tp), float(sl)
 
 

@@ -305,6 +305,13 @@ def _decision_for_epic(epic: str) -> dict[str, Any] | None:
 
 
 def is_path_soft_allowed(epic: str, path: ExecutionPath | str) -> tuple[bool, str]:
+    try:
+        from system.demo_execution_plane import execution_guards_relaxed
+
+        if execution_guards_relaxed(epic=epic):
+            return True, ""
+    except Exception:
+        pass
     path_value = path.value if isinstance(path, ExecutionPath) else str(path)
     row = _decision_for_epic(str(epic or ""))
     if not row:

@@ -221,3 +221,8 @@ def stop_yahoo_quote_poller() -> None:
 
 def reset_yahoo_quote_poller_for_tests() -> None:
     stop_yahoo_quote_poller()
+
+
+def yahoo_poller_active() -> bool:
+    with _POLLER_LOCK:
+        return _POLLER is not None and _POLLER.running

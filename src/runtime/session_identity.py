@@ -7,8 +7,14 @@ Lifecycle-only; does not touch trading logic.
 from __future__ import annotations
 
 import os
+import threading
 import time
 from typing import Any
+
+_IDENTITY_CACHE: dict[str, Any] = {}
+_IDENTITY_CACHE_AT: float = 0.0
+_IDENTITY_CACHE_TTL_SEC = 8.0
+_IDENTITY_LOCK = threading.Lock()
 
 from runtime.app_mode import AppMode, broker_plane_for, resolve_app_mode, resolve_data_root
 from runtime.session_lock import (
@@ -75,8 +81,8 @@ def _read_own_session_record() -> dict[str, Any] | None:
     return None
 
 
-def build_session_identity_fields() -> dict[str, Any]:
-    """Fields merged into /api/health (always safe — no raw credentials)."""
+def _build_session_identity_fields_uncached() -> dict[str, Any]:
+    """Uncached implementation — called by the TTL cache wrapper."""
     try:
         mode = resolve_app_mode()
     except ValueError:
@@ -123,3 +129,24 @@ def build_session_identity_fields() -> dict[str, Any]:
         "port": port,
         "pid": os.getpid(),
     }
+
+
+def build_session_identity_fields() -> dict[str, Any]:
+    """Fields merged into /api/health — TTL-cached to avoid repeated health_endpoint_ok calls."""
+    global _IDENTITY_CACHE, _IDENTITY_CACHE_AT
+    now = time.monotonic()
+    with _IDENTITY_LOCK:
+        if _IDENTITY_CACHE and (now - _IDENTITY_CACHE_AT) < _IDENTITY_CACHE_TTL_SEC:
+            return dict(_IDENTITY_CACHE)
+    result = _build_session_identity_fields_uncached()
+    with _IDENTITY_LOCK:
+        _IDENTITY_CACHE = result
+        _IDENTITY_CACHE_AT = now
+    return dict(result)
+
+
+def reset_session_identity_cache_for_tests() -> None:
+    global _IDENTITY_CACHE, _IDENTITY_CACHE_AT
+    with _IDENTITY_LOCK:
+        _IDENTITY_CACHE = {}
+        _IDENTITY_CACHE_AT = 0.0

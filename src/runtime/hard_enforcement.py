@@ -21,7 +21,9 @@ ROTATION_SCALP_SELECTOR_THRESHOLD = 85
 _DECISIONS_OVERRIDE: list[dict[str, Any]] | None = None
 _DECISIONS_CACHE: dict[str, dict[str, Any]] = {}
 _DECISIONS_CACHE_AT: float = 0.0
-_DECISIONS_CACHE_TTL_SEC = 1.0
+_DECISIONS_CACHE_TTL_SEC = 3.0
+_DECISIONS_REBUILD_LOCK = __import__("threading").Lock()
+_DECISIONS_REBUILDING = False
 
 _ALL_PATH_VALUES = [p.value for p in ExecutionPath]
 
@@ -337,12 +339,43 @@ def build_hard_enforcement_decisions(
     return decisions
 
 
+def _trigger_async_decisions_rebuild() -> None:
+    """Schedule advisory rebuild off the execution hot path."""
+    global _DECISIONS_REBUILDING
+    with _DECISIONS_REBUILD_LOCK:
+        if _DECISIONS_REBUILDING:
+            return
+        _DECISIONS_REBUILDING = True
+
+    def _run() -> None:
+        global _DECISIONS_REBUILDING
+        try:
+            from api.endpoint_profiler import timed_section
+
+            with timed_section("governance.hard_enforcement_rebuild"):
+                build_hard_enforcement_decisions()
+        except Exception:
+            pass
+        finally:
+            with _DECISIONS_REBUILD_LOCK:
+                _DECISIONS_REBUILDING = False
+
+    __import__("threading").Thread(
+        target=_run,
+        name="hard-enforcement-rebuild",
+        daemon=True,
+    ).start()
+
+
 def _decision_for_epic(epic: str) -> dict[str, Any] | None:
     if _DECISIONS_OVERRIDE is not None:
         return _DECISIONS_CACHE.get(epic)
     now = time.time()
-    if not _DECISIONS_CACHE or (now - _DECISIONS_CACHE_AT) > _DECISIONS_CACHE_TTL_SEC:
-        build_hard_enforcement_decisions()
+    stale = not _DECISIONS_CACHE or (now - _DECISIONS_CACHE_AT) > _DECISIONS_CACHE_TTL_SEC
+    if stale:
+        _trigger_async_decisions_rebuild()
+        if not _DECISIONS_CACHE:
+            return None
     return _DECISIONS_CACHE.get(epic)
 
 
@@ -354,6 +387,13 @@ def is_hard_enforcement_active(epic: str) -> bool:
 
 
 def is_path_hard_allowed(epic: str, path: ExecutionPath | str) -> tuple[bool, str]:
+    try:
+        from system.demo_execution_plane import execution_guards_relaxed
+
+        if execution_guards_relaxed(epic=epic):
+            return True, ""
+    except Exception:
+        pass
     path_value = path.value if isinstance(path, ExecutionPath) else str(path)
     row = _decision_for_epic(str(epic or ""))
     if not row or not row.get("active"):

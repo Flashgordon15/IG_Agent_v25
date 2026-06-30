@@ -14,7 +14,32 @@ _INTERVAL_SEC = 5.0
 
 
 def _guardian_loop() -> None:
+    _dual_core_tpm_zero_since: float = 0.0
     while not _GUARDIAN_STOP.wait(_INTERVAL_SEC):
+        try:
+            from runtime.dual_core_execution import (
+                TPM_ZERO_REHYDRATE_SEC,
+                _ticks_per_minute,
+                get_active_stack_epics,
+                _trigger_non_blocking_stream_rehydration,
+            )
+
+            stack = get_active_stack_epics()
+            if stack and all(_ticks_per_minute(e) == 0 for e in stack):
+                now = time.time()
+                if _dual_core_tpm_zero_since <= 0.0:
+                    _dual_core_tpm_zero_since = now
+                elif (now - _dual_core_tpm_zero_since) >= TPM_ZERO_REHYDRATE_SEC:
+                    _trigger_non_blocking_stream_rehydration(list(stack))
+                    log_engine(
+                        "agent_feed_guardian: dual-core tpm=0 — stream rehydrate triggered"
+                    )
+                    _dual_core_tpm_zero_since = now
+            else:
+                _dual_core_tpm_zero_since = 0.0
+        except Exception as exc:
+            log_engine(f"agent_feed_guardian: dual-core check {type(exc).__name__}: {exc}")
+
         try:
             from system.unified_fulfillment_cache import get_fulfillment_payload
 

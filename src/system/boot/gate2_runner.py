@@ -234,6 +234,21 @@ class Gate2Runner:
             gates_dict=None,
         )
 
+        from system.agent_execution_mode import (
+            authentic_demo_broker_required,
+            broker_demo_execution_required,
+        )
+
+        # DEMO/PRODUCTION: never block boot on slow IG position sync — hydrate async.
+        if broker_demo_execution_required() or authentic_demo_broker_required():
+            from system.boot.gate2_async_hydration import start_gate2_background_hydration
+
+            start_gate2_background_hydration(rest, self._context, self._state)
+            self.mark_gate_complete(detail="IGRestClient Armed (async hydration)")
+            if self._context.rest_client is None:
+                self._context.rest_client = rest
+            return
+
         from system.node_profile import is_shadow_node
 
         # Shadow desktop sidecar: skip blocking IG REST hydration on weekend/outage;
@@ -257,7 +272,7 @@ class Gate2Runner:
             )
             return
 
-        hydration_timeout = 12.0 if is_shadow_node() else 35.0
+        hydration_timeout = 8.0 if is_shadow_node() else 10.0
 
         def _hydrate() -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], int]:
             positions = rest.open_positions()

@@ -689,9 +689,11 @@ def build_api_feed_health() -> dict[str, Any]:
 
 
 def build_market_rotation_status() -> dict[str, Any]:
-    """Rotation health placeholder — fields wired for future logic."""
+    """Rotation health from orchestrator + dual-core stack (telemetry only)."""
     active: list[str] = []
     candidates: list[str] = []
+    rotation_state = "IDLE"
+    last_ts: str | None = None
     try:
         from runtime.dual_core_execution import ROTATION_UNIVERSE, get_active_stack_epics
 
@@ -700,13 +702,42 @@ def build_market_rotation_status() -> dict[str, Any]:
         candidates = [e for e in ROTATION_UNIVERSE if e not in active_set]
     except Exception:
         pass
+    try:
+        from runtime.market_orchestrator import MarketOrchestrator
+
+        orch_active = MarketOrchestrator.get_global_active_epics()
+        if orch_active:
+            active = list(dict.fromkeys([*active, *orch_active]))
+            rotation_state = "ACTIVE"
+    except Exception:
+        pass
+    try:
+        from runtime.market_orchestrator import MarketOrchestrator
+
+        ts = getattr(MarketOrchestrator, "_last_rotation_mono", None)
+        if ts is not None:
+            import time
+            from datetime import datetime, timezone
+
+            last_ts = datetime.fromtimestamp(
+                time.time() - max(0.0, time.monotonic() - float(ts)),
+                tz=timezone.utc,
+            ).isoformat(timespec="seconds")
+    except Exception:
+        pass
+    status = "ok" if active else "warming"
+    detail = (
+        f"{len(active)} active / {len(candidates)} candidates"
+        if active
+        else "awaiting orchestrator rank"
+    )
     return {
         "active_markets": active,
         "candidate_markets": candidates,
-        "rotation_state": "IDLE",
-        "last_rotation_timestamp": None,
-        "status": "placeholder",
-        "detail": "rotation logic not implemented",
+        "rotation_state": rotation_state,
+        "last_rotation_timestamp": last_ts,
+        "status": status,
+        "detail": detail,
     }
 
 

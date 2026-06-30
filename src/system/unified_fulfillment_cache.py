@@ -947,7 +947,27 @@ def _tuning_variables(
     }
 
 
-def _refresh_loop() -> None:
+def _refresh_thread_main(*, boot_force: bool = False) -> None:
+    """Background refresh — boot_force sync must not block post-ready stacked tracks."""
+    if boot_force:
+        try:
+            sync_performance_rows_from_ig_rest(force=True)
+        except Exception:
+            pass
+        try:
+            snap = _build_fulfillment_snapshot()
+            with _CACHE_LOCK:
+                _CACHE.clear()
+                _CACHE.update(snap)
+            _write_pulse_snapshot(snap)
+            try:
+                from system.ipc.ring_buffer import publish_cockpit_shm
+
+                publish_cockpit_shm(snap)
+            except Exception:
+                pass
+        except Exception:
+            pass
     while not _REFRESH_STOP.wait(_REFRESH_MS / 1000.0):
         try:
             sync_performance_rows_from_ig_rest()
@@ -982,20 +1002,9 @@ def start_fulfillment_cache_refresh() -> None:
     if _REFRESH_THREAD is not None and _REFRESH_THREAD.is_alive():
         return
     _REFRESH_STOP.clear()
-    sync_performance_rows_from_ig_rest(force=True)
-    snap = _build_fulfillment_snapshot()
-    with _CACHE_LOCK:
-        _CACHE.clear()
-        _CACHE.update(snap)
-    _write_pulse_snapshot(snap)
-    try:
-        from system.ipc.ring_buffer import publish_cockpit_shm
-
-        publish_cockpit_shm(snap)
-    except Exception:
-        pass
     _REFRESH_THREAD = threading.Thread(
-        target=_refresh_loop,
+        target=_refresh_thread_main,
+        kwargs={"boot_force": True},
         name="unified-fulfillment-cache",
         daemon=True,
     )

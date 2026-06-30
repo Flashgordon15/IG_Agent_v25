@@ -38,6 +38,7 @@ class VirtualStopTrack:
     entry_level: float
     size: float
     armed_at: float
+    ceiling_pts: float = INTERNAL_RISK_CEILING_PTS
 
 
 def stretch_broker_stop_distance(
@@ -59,8 +60,10 @@ def register_virtual_stop(
     entry_level: float,
     size: float,
     deal_id: str = "",
+    ceiling_pts: float | None = None,
 ) -> str:
-    """Arm internal 2.0pt virtual ceiling for an open contract."""
+    """Arm internal virtual ceiling for an open contract."""
+    ceiling = float(ceiling_pts) if ceiling_pts is not None else INTERNAL_RISK_CEILING_PTS
     track_id = deal_id or f"{epic}:{direction}:{int(time.time() * 1000)}"
     with _lock:
         _positions[track_id] = VirtualStopTrack(
@@ -71,12 +74,50 @@ def register_virtual_stop(
             entry_level=float(entry_level),
             size=float(size),
             armed_at=time.time(),
+            ceiling_pts=ceiling,
         )
     log_engine(
         f"VirtualStop: armed track={track_id} epic={epic} {direction} "
-        f"entry={entry_level} ceiling={INTERNAL_RISK_CEILING_PTS}pt"
+        f"entry={entry_level} ceiling={ceiling}pt"
     )
+    try:
+        from system.unified_runtime_state import update_stops_limits
+
+        update_stops_limits(
+            trailing_active=True,
+            dynamic_limit_active=True,
+            deal_id=str(deal_id or track_id),
+            trade_state={
+                "epic": epic,
+                "direction": direction,
+                "entry_level": entry_level,
+                "ceiling_pts": ceiling,
+            },
+        )
+    except Exception:
+        pass
     return track_id
+
+
+def virtual_stop_snapshot() -> dict[str, Any]:
+    """Export armed virtual stops for unified status / GUI."""
+    with _lock:
+        return {
+            "count": len(_positions),
+            "watchdog_active": _watchdog_thread is not None and _watchdog_thread.is_alive(),
+            "positions": [
+                {
+                    "track_id": t.track_id,
+                    "deal_id": t.deal_id,
+                    "epic": t.epic,
+                    "direction": t.direction,
+                    "entry_level": t.entry_level,
+                    "size": t.size,
+                    "armed_at": t.armed_at,
+                }
+                for t in _positions.values()
+            ],
+        }
 
 
 def clear_virtual_stop(track_id: str) -> None:
@@ -121,7 +162,7 @@ def on_streaming_mid_tick(epic: str, mid: float) -> None:
             entry_level=track.entry_level,
             mid=float(mid),
         )
-        if adverse >= INTERNAL_RISK_CEILING_PTS:
+        if adverse >= track.ceiling_pts:
             _trigger_virtual_flatten(track, adverse_pts=adverse)
 
 
@@ -132,7 +173,7 @@ def _trigger_virtual_flatten(track: VirtualStopTrack, *, adverse_pts: float) -> 
         _in_flight.add(track.track_id)
     log_engine(
         f"VirtualStop: CEILING BREACH epic={track.epic} adverse={adverse_pts:.2f}pt "
-        f"≥ {INTERNAL_RISK_CEILING_PTS} — async market flatten"
+        f"≥ {track.ceiling_pts} — async market flatten"
     )
     try:
         from system.boot.boot_loop_holder import schedule_coro

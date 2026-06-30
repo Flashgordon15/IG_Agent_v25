@@ -1,0 +1,55 @@
+{
+  "$schema": "./config_schema.json",
+  "$extends": "config_v31.json",
+  "version": "31.1.0",
+  "app_version": "v31.1-demo-throughput",
+  "_note": "DEMO ONLY — higher trade frequency for soak/learning. Do NOT use on LIVE.",
+  "demo_throughput_mode": {
+    "enabled": true,
+    "bypass_execution_guards": true,
+    "pierce_z_threshold": 1.5,
+    "max_daily_trades": 240,
+    "cooldown_seconds": 90,
+    "cooldown_minutes_after_close": 3,
+    "gate_eval_cooldown_sec": 5,
+    "order_cadence_sec": 10,
+    "stagnant_dead_zone_sec": 120,
+    "z_short_window": 12
+  },
+  "pricing": {
+    "yahoo_poll_sec": 5
+  },
+  "max_daily_trades": 240,
+  "cooldown_seconds": 90,
+  "entry_protection": {
+    "cooldown_minutes_after_close": 3,
+    "max_trades_per_epic_per_session": 30
+  },
+  "demo_soak_mode": {
+    "enabled": true,
+    "fitness_min": 48,
+    "bypass_ml_veto": true,
+    "require_points_healthy": false,
+    "spread_to_atr_circuit_max": 15.0
+  },
+  "micro_lot_verification": {
+    "enabled": false,
+    "_note": "Demo throughput uses canary_lot_size (0.5 index / 1.0 gold) — 0.1 clamp causes MINIMUM_ORDER_SIZE_ERROR"
+  },
+  "dual_core": {
+    "broker_account_product": "SPREADBET",
+    "active_stack_slots": 3,
+    "_note": "3 parallel markets: DOW + Gold + Nikkei rotation"
+  },
+  "micro_risk": {
+    "risk_per_trade_gbp": 5.0,
+    "target_r_multiple": 1.5,
+    "min_profit_target_pts": 1.0,
+    "max_loss_cap_pts": 4.0,
+    "virtual_stop_ceiling_pts": 4.0,
+    "_note": "Replaces fixed 1.5/2.0pt stops that clustered Gold P&L at ±£20 (size×pts×$1/pt)"
+  },
+  "session_validation": {
+    "clear_circuit_breaker_on_boot": true
+  }
+}

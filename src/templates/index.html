@@ -60,6 +60,9 @@
       <div id="core-b-badge" class="hidden px-4 py-2 rounded-lg border border-neon-cyan/60 bg-neon-cyan/10 text-neon-cyan text-xs font-bold tracking-widest badge-scalper-active">
         ⚡ CORE_B: SCALPER_ACTIVE
       </div>
+      <div id="feed-stall-badge" class="hidden px-4 py-2 rounded-lg border border-red-500/70 bg-red-900/30 text-red-400 text-xs font-bold tracking-widest animate-pulse">
+        ⚠ FEED STALL
+      </div>
       <div class="text-right text-[10px] text-slate-500 space-y-0.5">
         <div>BALANCE <span id="account-balance" class="text-neon-green neon-text-green font-bold">—</span></div>
         <div>MARGIN <span id="account-margin" class="text-neon-cyan neon-text-cyan font-bold">—</span></div>
@@ -70,6 +73,7 @@
 
     <div id="stacked-lock-banner" class="mb-4 px-4 py-3 rounded-xl border border-neon-cyan/50 bg-neon-cyan/10 text-center text-sm font-bold tracking-wide badge-scalper-active">
       🏛️ <span id="stack-mode-label">STACKED DUAL-ASSET LOCK</span>: <span id="stack-top-label" class="neon-text-cyan">Wall Street</span> + <span id="stack-bottom-label" class="neon-text-amber">Gold</span> <span id="stack-mode-detail" class="text-slate-400">[PARALLEL TRACKS]</span>
+      <div id="rotation-telemetry" class="text-[10px] text-slate-500 mt-1 font-mono font-normal tracking-normal"></div>
     </div>
     <div id="failover-banner" class="hidden mb-4 px-4 py-3 rounded-xl border border-neon-green/50 bg-neon-green/10 text-center text-sm font-bold tracking-wide">
       ⚡ FOREX FAILOVER LOCK · <span class="neon-text-green">EUR/USD</span> TOP · <span class="neon-text-cyan">GBP/USD</span> BOTTOM · ML SOVEREIGNTY ACTIVE
@@ -521,7 +525,7 @@
 
     async function fetchJson(url, timeoutMs) {
       const ctrl = new AbortController();
-      const t = setTimeout(function() { ctrl.abort(); }, timeoutMs || 2500);
+      const t = setTimeout(function() { ctrl.abort(); }, timeoutMs || 12000);
       try {
         const r = await fetch(url, { cache: 'no-store', signal: ctrl.signal });
         clearTimeout(t);
@@ -535,7 +539,7 @@
 
     async function pollBrokerReady() {
       try {
-        const d = await fetchJson('/api/v31/broker/ready?_=' + Date.now(), 2000);
+        const d = await fetchJson('/api/v31/broker/ready?_=' + Date.now(), 10000);
         if (d) renderBrokerReady(d);
       } catch (_) { /* silent */ }
     }
@@ -545,7 +549,7 @@
       pollTelemetry._inFlight = true;
       try {
         const qs = '?_=' + Date.now();
-        const h = await fetchJson('/api/health' + qs, 2000);
+        const h = await fetchJson('/api/health' + qs, 15000);
         const health = h || {};
         const gate = health.boot_gate;
         const block = String(health.block_reason || '').trim();
@@ -553,8 +557,8 @@
           (block ? ' · BLOCK: ' + block : ' · valve open');
 
         const [t, hi] = await Promise.all([
-          fetchJson('/api/v31/telemetry' + qs, 2500),
-          fetchJson('/api/v31/history' + qs, 2000)
+          fetchJson('/api/v31/telemetry' + qs, 15000),
+          fetchJson('/api/v31/history' + qs, 12000)
         ]);
         const telem = t || {};
         const hist = hi || {};
@@ -580,6 +584,24 @@
         const coreB = Boolean(dc.core_b_micro_active);
         const badge = $('core-b-badge');
         badge.classList.toggle('hidden', !coreB);
+
+        // Feed stall detection — tpm=0 on all stacked channels
+        const stackedChannels = telem.stacked_asset_channels || [];
+        const feedStall = stackedChannels.length > 0 && stackedChannels.every(ch => (ch.ticks_per_minute || 0) === 0);
+        const feedStallBadge = $('feed-stall-badge');
+        if (feedStallBadge) feedStallBadge.classList.toggle('hidden', !feedStall);
+        const rotReason = String(telem.last_rotation_reason || telem.rotation_escape_active ? 'escape active' : '').trim();
+        const rotEl = $('rotation-telemetry');
+        if (rotEl) {
+          const tpmLine = stackedChannels.map(ch => {
+            const name = ch.market_name || ch.epic || '?';
+            return name + ': ' + (ch.ticks_per_minute || 0) + '/min';
+          }).join(' · ');
+          rotEl.textContent = (rotReason ? '↻ ' + rotReason : '↻ rotation idle') + (tpmLine ? ' · ' + tpmLine : '');
+        }
+        if (feedStall && gate == null) {
+          $('header-status').textContent = 'FEED STALL · ' + (rotReason || 'awaiting tick velocity');
+        }
         $('core-b-state').textContent = coreB ? 'ARMED' : 'MUTED';
         $('core-b-state').className = 'text-xs mt-1 ' + (coreB ? 'neon-text-cyan' : 'text-slate-500');
 
@@ -595,9 +617,7 @@
         updateRadar(telem.ml_radar_axes);
         renderLedger(telem.active_positions);
         renderHistory(hist);
-        if (telem.ledger_synced != null) {
-          renderBrokerReady({ ledger_synced: telem.ledger_synced, ledger_hydrated: telem.ledger_hydrated });
-        }
+        // Broker ready matrix owned by pollBrokerReady — avoid partial overwrite flicker
 
         $('sync-line').textContent =
           'telemetry ' + (telem.ts || '—') + ' · ' + (telem.ledger_query || telem.positions_db_source || 'triage_v31.db') + ' · poll 1s';

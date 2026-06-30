@@ -1483,6 +1483,12 @@ def main() -> None:
     apply_runtime_mode_to_environ()
     profile = apply_node_profile_to_environ()
     stamp_process_boot_start()
+    try:
+        from system.boot.boot_orchestrator import init_boot_pipeline
+
+        init_boot_pipeline()
+    except Exception:
+        pass
 
     from system.app_identity import APP_DISPLAY_NAME, APP_VERSION_LABEL
     from system.boot.exceptions import Gate1FatalError

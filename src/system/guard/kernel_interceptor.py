@@ -135,6 +135,8 @@ def _instrument_module(mod: types.ModuleType) -> int:
             for meth_name, meth in inspect.getmembers(obj, predicate=inspect.isfunction):
                 if meth_name.startswith("_") and meth_name not in _HOT_METHODS:
                     continue
+                if isinstance(inspect.getattr_static(obj, meth_name, None), staticmethod):
+                    continue
                 original = getattr(obj, meth_name, None)
                 if original is None or id(original) in _WRAPPED_IDS:
                     continue

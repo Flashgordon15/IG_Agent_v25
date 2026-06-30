@@ -72,18 +72,41 @@ def _register_bootstrap_routes(app: FastAPI) -> None:
             "progress": int(boot.get("percent") or 0),
         }
 
+    @app.get("/api/state", include_in_schema=False)
+    def bootstrap_api_state() -> dict[str, Any]:
+        from api.agent_state import get_api_state_response
+
+        return get_api_state_response()
+
     @app.get("/api/health", include_in_schema=False)
     def bootstrap_api_health() -> JSONResponse:
+        import time
         from datetime import datetime, timezone
 
-        from api.gate_health_matrix import build_gate_health_response
-        from api.snapshot_store import snapshot_age_s_fast
+        from api.readiness_snapshot import get_health_snapshot
         from fastapi.responses import JSONResponse
 
-        code, body = build_gate_health_response(include_extended=True)
+        t0 = time.perf_counter()
+        code, body = get_health_snapshot()
         body["ts"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
-        body["snapshot_age_s"] = snapshot_age_s_fast()
+        try:
+            from api.endpoint_profiler import record_request
+            record_request("health", (time.perf_counter() - t0) * 1000.0)
+        except Exception:
+            pass
         return JSONResponse(status_code=code, content=body)
+
+    @app.get("/api/boot_status", include_in_schema=False)
+    def bootstrap_boot_status() -> JSONResponse:
+        from api.boot_status import api_boot_status_json
+
+        return api_boot_status_json()
+
+    @app.get("/api/boot_log", include_in_schema=False)
+    def bootstrap_boot_log(limit: int = 100) -> JSONResponse:
+        from api.boot_status import api_boot_log_json
+
+        return api_boot_log_json(limit=min(max(limit, 1), 200))
 
     @app.get("/api/startup/status", include_in_schema=False)
     def bootstrap_startup_status() -> dict[str, Any]:
@@ -497,6 +520,59 @@ def create_app(
                 pass
 
         try:
+            from api.readiness_snapshot import start_readiness_snapshot_refresher
+
+            start_readiness_snapshot_refresher()
+        except Exception:
+            pass
+
+        try:
+            from api.agent_state import start_agent_state_service
+
+            start_agent_state_service()
+        except Exception:
+            pass
+
+        try:
+            from runtime.unified_execution import start_unified_route_cache_refresher
+
+            start_unified_route_cache_refresher(interval_sec=3.0)
+        except Exception:
+            pass
+
+        try:
+            from api.health_light import start_health_light_refresher
+
+            start_health_light_refresher()
+        except Exception:
+            pass
+
+        try:
+            from system.boot.boot_orchestrator import start_boot_orchestrator
+
+            start_boot_orchestrator()
+        except Exception:
+            pass
+
+        try:
+            from system.unified_runtime_state import init_unified_runtime_state
+
+            init_unified_runtime_state()
+        except Exception:
+            pass
+
+        try:
+            from runtime.hard_enforcement import build_hard_enforcement_decisions
+
+            threading.Thread(
+                target=build_hard_enforcement_decisions,
+                name="hard-enforcement-kick",
+                daemon=True,
+            ).start()
+        except Exception:
+            pass
+
+        try:
             yield
         finally:
             shutdown.set()
@@ -570,35 +646,10 @@ def api_live_state() -> dict[str, Any]:
 
 @router.get("/api/state")
 def api_state() -> dict[str, Any]:
-    tick = get_tick()
-    sig = tick.get("signal") or {}
-    pts = tick.get("points") or {}
-    return {
-        "bid": tick.get("bid"),
-        "offer": tick.get("offer"),
-        "agent_state": pts.get("state", "CAUTION"),
-        "points_trade": float(pts.get("last_trade") or 0),
-        "points_session": float(pts.get("session") or 0),
-        "points_cumulative": float(pts.get("cumulative") or 0),
-        "ml_confidence": float(sig.get("confidence") or 0),
-        "signal_strength": float(sig.get("confidence") or 0),
-        "fitness_score": float(sig.get("fitness") or 0),
-        "fitness_factors": sig.get("fitness_factors") or {},
-        "signal_threshold": float(sig.get("threshold") or 0),
-        "config_signal_threshold": float(sig.get("config_signal_threshold") or 0),
-        "min_size_threshold": float(sig.get("min_size_threshold") or 0),
-        "points_confidence_floor": float(sig.get("points_confidence_floor") or 0),
-        "regime": tick.get("regime"),
-        "win_rate_today": tick.get("win_rate_today"),
-        "win_rate_alltime": tick.get("win_rate_20"),
-        "daily_pnl_gbp": float(tick.get("daily_pnl_gbp") or 0),
-        "stream_status": tick.get("stream_status", "DISCONNECTED"),
-        "rest_budget": tick.get("rest_calls_min", 0),
-        "spread_current": tick.get("spread"),
-        "spread_normal": tick.get("spread_normal"),
-        "sentiment_factor": tick.get("sentiment_factor"),
-        "watchdog_failed": _watchdog_failed(),
-    }
+    """Live internal state — feeds, routing, risk, governance, positions, gates."""
+    from api.agent_state import get_api_state_response
+
+    return get_api_state_response()
 
 
 @router.get("/api/trades")
@@ -999,10 +1050,12 @@ def register_deferred_route_tables(app: FastAPI) -> None:
         return
 
     from api import routes as _legacy_routes
+    from api import state_ws as _state_ws
     from api import ws as _legacy_ws
 
     app.include_router(router)
     app.include_router(ws_router)
+    app.include_router(_state_ws.router)
     app.include_router(_legacy_routes.router)
     app.include_router(_legacy_ws.router)
 
@@ -1023,14 +1076,30 @@ def mount_deferred_routers(app: FastAPI, loop: asyncio.AbstractEventLoop) -> Non
 
     stream_hub.bind_loop(loop)
     telemetry_stream_hub.bind_loop(loop)
+    from api import state_ws as _state_ws
     from api import ws as _legacy_ws
 
+    _state_ws.hub.bind_loop(loop)
     _legacy_ws.hub.bind_loop(loop)
 
     try:
-        from api.agent_health import start_health_cache_refresher
+        from api.readiness_snapshot import start_readiness_snapshot_refresher
 
-        start_health_cache_refresher()
+        start_readiness_snapshot_refresher()
+    except Exception:
+        pass
+
+    try:
+        from api.agent_state import start_agent_state_service
+
+        start_agent_state_service()
+    except Exception:
+        pass
+
+    try:
+        from runtime.unified_execution import start_unified_route_cache_refresher
+
+        start_unified_route_cache_refresher(interval_sec=3.0)
     except Exception:
         pass
 

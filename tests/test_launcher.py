@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -207,3 +208,43 @@ def test_ideal_session_verification_scores():
     gui_ok, missing, payload = lc.verify_gui_status(timeout_sec=0.1, poll_sec=0.01, fetch=fetch)
     assert health_ok and gui_ok and not missing
     assert payload["session_review"]["session_quality_score"] >= 65
+
+
+def test_supervisor_scripts_exist_and_executable():
+    launcher = _LAUNCHER_DIR
+    for name in (
+        "agent_kill.sh",
+        "agent_start.sh",
+        "agent_verify.sh",
+        "agent_gui.sh",
+        "agent_lib.sh",
+        "igagent_launcher.sh",
+    ):
+        path = launcher / name
+        assert path.is_file(), name
+        assert os.access(path, os.X_OK), f"{name} not executable"
+
+
+def test_igagent_swift_supervisor_source_exists():
+    swift_src = _LAUNCHER_DIR / "IGAgentSupervisor.swift"
+    assert swift_src.is_file()
+    text = swift_src.read_text()
+    assert "agent_kill.sh" in text
+    assert "agent_verify.sh" in text
+
+
+def test_igagent_go_supervisor_compiles():
+    go_src = _LAUNCHER_DIR.parent / "supervisor" / "igagent_launcher.go"
+    assert go_src.is_file()
+
+
+def test_build_swift_script_exists():
+    build = _LAUNCHER_DIR.parent / "supervisor" / "build_swift.sh"
+    assert build.is_file()
+
+
+def test_launch_agent_delegates_to_supervisor():
+    launch_sh = _LAUNCHER_DIR / "launch_agent.sh"
+    text = launch_sh.read_text()
+    assert "IGAgentSupervisor" in text
+    assert "igagent_launcher" in text

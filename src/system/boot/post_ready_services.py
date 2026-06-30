@@ -11,6 +11,22 @@ from system.boot.context import BootContext
 from system.engine_log import log_engine
 
 _SESSION_REFRESH_INTERVAL_SEC = 45 * 60
+_boot_rest_client: Any | None = None
+
+
+def get_boot_rest_client() -> Any | None:
+    return _boot_rest_client
+
+
+def _log_step_outcome(label: str, started: float, *, error: Exception | None = None) -> None:
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    if error is None:
+        log_engine(f"post-ready: {label} ok ({elapsed_ms:.0f}ms)")
+    else:
+        log_engine(
+            f"post-ready: {label} failed ({elapsed_ms:.0f}ms) "
+            f"{type(error).__name__}: {error}"
+        )
 
 
 def _harness_mode() -> bool:
@@ -53,8 +69,65 @@ def _start_session_refresh_watchdog(rest_client: Any) -> None:
     )
 
 
+def _ensure_feed_plane_ready(rest: Any, cfg: Any) -> None:
+    """P3 — feeds → fulfillment SHM → guardian before stacked tracks.
+
+    Rotation bootstrap runs inside ``start_stacked_dual_asset_tracks`` so this
+    path stays non-blocking (no synchronous Yahoo/REST universe scan here).
+    """
+    started = time.perf_counter()
+    try:
+        from feeder.yahoo_quote_poller import start_yahoo_quote_poller
+        from feeder.pricing_transport import yahoo_poll_seconds
+        from runtime.dual_core_execution import ROTATION_UNIVERSE
+
+        epics = list(ROTATION_UNIVERSE)
+        poll_sec = yahoo_poll_seconds(cfg)
+        start_yahoo_quote_poller(epics, poll_sec=poll_sec)
+        _log_step_outcome(
+            f"Yahoo poller armed ({len(epics)} epics, poll={poll_sec}s)",
+            started,
+        )
+    except Exception as e:
+        _log_step_outcome("Yahoo poller", started, error=e)
+
+    started = time.perf_counter()
+    try:
+        from system.unified_fulfillment_cache import start_fulfillment_cache_refresh
+
+        start_fulfillment_cache_refresh()
+        _log_step_outcome("Fulfillment cache refresh started (background SHM)", started)
+    except Exception as e:
+        _log_step_outcome("Fulfillment cache refresh", started, error=e)
+
+    started = time.perf_counter()
+    try:
+        from system.cockpit_feed_guardian_agent import start_agent_feed_guardian
+
+        start_agent_feed_guardian()
+        _log_step_outcome("Agent feed guardian started", started)
+    except Exception as e:
+        _log_step_outcome("Agent feed guardian", started, error=e)
+
+
 def start_post_ready_services(context: BootContext) -> None:
     """Start schedulers and monitors after dormant loops are unpaused."""
+    global _boot_rest_client
+    _boot_rest_client = context.rest_client
+    try:
+        from system.boot.boot_orchestrator import (
+            BootStage,
+            SubsystemId,
+            mark_stage_running,
+            mark_subsystem,
+            record_boot_event,
+        )
+        from system.boot.boot_orchestrator import StepStatus
+
+        mark_stage_running(BootStage.B)
+        record_boot_event("post_ready_begin", stage=BootStage.B.value)
+    except Exception:
+        pass
     if _harness_mode():
         log_engine("post-ready: harness fast-path — skipping non-essential daemons")
         return
@@ -62,10 +135,24 @@ def start_post_ready_services(context: BootContext) -> None:
     try:
         from api.gui_status import warm_unified_execution_route_cache
 
-        route_count = warm_unified_execution_route_cache()
-        log_engine(
-            f"post-ready: unified execution route cache warmed ({route_count} route(s))"
-        )
+        def _warm_routes_background() -> None:
+            try:
+                route_count = warm_unified_execution_route_cache()
+                log_engine(
+                    f"post-ready: unified execution route cache warmed ({route_count} route(s))"
+                )
+            except Exception as exc:
+                log_engine(
+                    f"post-ready: unified route cache warm-up skipped: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+
+        threading.Thread(
+            target=_warm_routes_background,
+            name="post-ready-route-warmup",
+            daemon=True,
+        ).start()
+        log_engine("post-ready: unified route cache warm-up scheduled (background)")
     except Exception as exc:
         log_engine(
             f"post-ready: unified route cache warm-up skipped: "
@@ -136,13 +223,6 @@ def start_post_ready_services(context: BootContext) -> None:
         start_cockpit_session_monitor()
     except Exception as e:
         log_engine(f"post-ready: cockpit session monitor skipped: {type(e).__name__}: {e}")
-
-    try:
-        from system.cockpit_feed_guardian_agent import start_agent_feed_guardian
-
-        start_agent_feed_guardian()
-    except Exception as e:
-        log_engine(f"post-ready: agent feed guardian skipped: {type(e).__name__}: {e}")
 
     if cfg is not None:
         try:
@@ -256,6 +336,14 @@ def start_post_ready_services(context: BootContext) -> None:
     except Exception as e:
         log_engine(f"post-ready: self-healing supervisor skipped: {type(e).__name__}: {e}")
 
+    try:
+        from api.health_light import start_health_light_refresher
+
+        start_health_light_refresher()
+        log_engine("post-ready: HealthLight 1s refresher started")
+    except Exception as e:
+        log_engine(f"post-ready: health_light refresher skipped: {type(e).__name__}: {e}")
+
     if rest is not None:
         try:
             from cockpit.emergency import clear_emergency_cockpit_override
@@ -307,6 +395,34 @@ def start_post_ready_services(context: BootContext) -> None:
                 log_engine(
                     f"post-ready: live_canary session reset skipped: {type(e).__name__}: {e}"
                 )
+            _ensure_feed_plane_ready(rest, cfg)
+            try:
+                from execution.correlation_guard import reset_session
+
+                reset_session()
+                log_engine("post-ready: correlation guard session reset")
+            except Exception as e:
+                log_engine(
+                    f"post-ready: correlation guard reset skipped: {type(e).__name__}: {e}"
+                )
+            try:
+                from runtime.broker_reject_guard import reset_broker_reject_guard_for_tests
+
+                reset_broker_reject_guard_for_tests()
+                log_engine("post-ready: broker reject guard cleared for fresh session")
+            except Exception as e:
+                log_engine(
+                    f"post-ready: broker reject guard reset skipped: {type(e).__name__}: {e}"
+                )
+            try:
+                from runtime.strategy_kill_switch import clear_strategy_kill_switch
+
+                clear_strategy_kill_switch()
+                log_engine("post-ready: strategy kill-switch cleared for fresh session")
+            except Exception as e:
+                log_engine(
+                    f"post-ready: strategy kill-switch clear skipped: {type(e).__name__}: {e}"
+                )
             start_stacked_dual_asset_tracks()
             log_engine("post-ready: StackedDualAsset parallel tracks armed")
             from runtime.dual_core_execution import start_socket_heartbeat_validator
@@ -318,8 +434,27 @@ def start_post_ready_services(context: BootContext) -> None:
             start_virtual_stop_watchdog(rest)
             log_engine("post-ready: VirtualStop 2.0pt watchdog armed (500ms)")
             try:
-                import threading
+                from runtime.dynamic_limit_engine import start_dynamic_limit_engine
 
+                start_dynamic_limit_engine()
+                log_engine("post-ready: dynamic limit engine armed")
+            except Exception as e:
+                log_engine(
+                    f"post-ready: dynamic limit engine skipped: {type(e).__name__}: {e}"
+                )
+            try:
+                from system.unified_runtime_state import (
+                    init_unified_runtime_state,
+                    update_stops_limits,
+                )
+
+                init_unified_runtime_state()
+                update_stops_limits(trailing_active=True, dynamic_limit_active=True)
+            except Exception as e:
+                log_engine(
+                    f"post-ready: unified runtime state hook skipped: {type(e).__name__}: {e}"
+                )
+            try:
                 from runtime.ledger_hydration_core import bootstrap_ledger_history_once
 
                 threading.Thread(

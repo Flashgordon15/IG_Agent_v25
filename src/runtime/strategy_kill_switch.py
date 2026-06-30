@@ -98,6 +98,11 @@ def trip_master_strategy_kill_switch(
 
 
 def clear_strategy_kill_switch_for_tests() -> None:
+    clear_strategy_kill_switch()
+
+
+def clear_strategy_kill_switch() -> None:
+    """Clear master kill-switch latch and process entry block."""
     global _tripped
     with _LOCK:
         _tripped = False

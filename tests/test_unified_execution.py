@@ -160,10 +160,30 @@ def test_daily_target_protection_suppresses_route():
         "CS.D.EURUSD.CFD.IP",
         selector_row=_selector("MOMENTUM"),
         hard_row=_hard(allow=[ExecutionPath.PATH_A.value], block=[ExecutionPath.MICRO.value]),
-        daily_targeting={"recommended_bias": {"stand_down_bias": 0.5}},
+        daily_targeting={
+            "recommended_bias": {"stand_down_bias": 0.5},
+            "bias_flags": ["AHEAD_OF_TARGET_PROTECTION"],
+            "contributing_factors": {"session_progress": {"band": "ahead"}},
+        },
     )
     assert route["execution_path"] == UnifiedExecutionPath.NONE.value
     assert "DAILY_TARGET_PROTECTION" in route["route_flags"]
+
+
+def test_enforcement_stand_down_does_not_suppress_when_far_behind():
+    """Hard-enforcement dampening raises stand_down_bias but must not block routes."""
+    route = decide_epic_unified_route(
+        "CS.D.EURUSD.CFD.IP",
+        selector_row=_selector("MOMENTUM"),
+        hard_row=_hard(allow=[ExecutionPath.PATH_A.value], block=[ExecutionPath.MICRO.value]),
+        daily_targeting={
+            "recommended_bias": {"stand_down_bias": 0.7},
+            "bias_flags": ["FAR_BEHIND_AGGRESSIVE", "ENFORCEMENT_BIAS_DAMPEN"],
+            "contributing_factors": {"session_progress": {"band": "far_behind"}},
+        },
+    )
+    assert route["execution_path"] != UnifiedExecutionPath.NONE.value
+    assert "DAILY_TARGET_PROTECTION" not in route["route_flags"]
 
 
 def test_unified_guards_enforce_cached_route():

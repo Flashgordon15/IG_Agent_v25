@@ -107,34 +107,153 @@ def health() -> dict[str, Any]:
 
 @router.get("/api/health")
 async def api_health() -> JSONResponse:
-    """Gate-aware health — HTTP 200 only after Gate 3 completes."""
-    from api.gate_health_matrix import build_gate_health_response
+    """Incremental health from async snapshot — non-blocking under tick load."""
+    import time
 
-    try:
-        from system.qmm_process_supervisor import process_entry_blocked
+    from api.endpoint_profiler import record_request
+    from api.readiness_snapshot import get_health_snapshot
 
-        blocked, detail = process_entry_blocked()
-        if blocked and "COCKPIT" in str(detail).upper():
-            from cockpit.emergency import clear_emergency_cockpit_override
-
-            clear_emergency_cockpit_override(resume_trading=False)
-    except Exception:
-        pass
-
-    code, body = build_gate_health_response(include_extended=True)
+    t0 = time.perf_counter()
+    code, body = get_health_snapshot()
     body["ts"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
-    body["snapshot_age_s"] = snapshot_age_s_fast()
+    record_request("health", (time.perf_counter() - t0) * 1000.0)
     return JSONResponse(status_code=code, content=body)
+
+
+@router.get("/api/boot_status")
+def api_boot_status() -> JSONResponse:
+    """Lightweight boot pipeline snapshot — stages, subsystems, trade_ready."""
+    from api.boot_status import api_boot_status_json
+
+    return api_boot_status_json()
+
+
+@router.get("/api/boot_log")
+def api_boot_log(limit: int = 100) -> JSONResponse:
+    """Recent boot events for cockpit splash diagnostics."""
+    from api.boot_status import api_boot_log_json
+
+    return api_boot_log_json(limit=min(max(limit, 1), 200))
+
+
+@router.get("/api/unified_status")
+def api_unified_status() -> JSONResponse:
+    """Full unified runtime snapshot for IG Cockpit."""
+    from api.unified_status import api_unified_status_json
+
+    return api_unified_status_json()
+
+
+@router.get("/api/trade_lifecycle")
+def api_trade_lifecycle() -> JSONResponse:
+    """Active trade lifecycle state machine + bus snapshot."""
+    from api.unified_status import api_trade_lifecycle_json
+
+    return api_trade_lifecycle_json()
+
+
+@router.get("/api/rejections")
+def api_rejections(limit: int = 20) -> JSONResponse:
+    """Recent classified IG rejections."""
+    from api.unified_status import api_rejections_json
+
+    return api_rejections_json(limit=min(max(limit, 1), 100))
+
+
+@router.get("/api/rotation_status")
+def api_rotation_status() -> JSONResponse:
+    """Market rotation sweep state."""
+    from api.unified_status import api_rotation_status_json
+
+    return api_rotation_status_json()
+
+
+@router.get("/api/trade_state")
+def api_trade_state() -> JSONResponse:
+    """Full trade state — lifecycle, stops, dynamic limits, sizing."""
+    from api.trade_state_api import api_trade_state_json
+
+    return api_trade_state_json()
+
+
+@router.get("/api/trade_events")
+def api_trade_events(limit: int = 50) -> JSONResponse:
+    """Typed trade/lifecycle events for trading path panel."""
+    from api.trade_state_api import api_trade_events_json
+
+    return api_trade_events_json(limit=min(max(limit, 1), 200))
+
+
+@router.get("/api/rotation_state")
+def api_rotation_state() -> JSONResponse:
+    """Alias for rotation_status with history."""
+    from api.trade_state_api import api_rotation_state_json
+
+    return api_rotation_state_json()
+
+
+@router.get("/api/ig_budget_state")
+def api_ig_budget_state() -> JSONResponse:
+    """IG REST rate budget + cooldown state for cockpit guard banner."""
+    from system.ig_budget_monitor import ig_budget_snapshot
+
+    return JSONResponse(content=ig_budget_snapshot())
+
+
+@router.get("/api/health_light")
+def api_health_light() -> JSONResponse:
+    """Lightweight O(1) system health — <5ms, no external calls."""
+    import time
+
+    from api.endpoint_profiler import record_request
+    from api.health_light import get_health_light_response
+
+    t0 = time.perf_counter()
+    body = get_health_light_response()
+    record_request("health_light", (time.perf_counter() - t0) * 1000.0)
+    return JSONResponse(content=body)
 
 
 @router.get("/api/gui_status")
 def api_gui_status() -> dict[str, Any]:
     """Read-only GUI polling — session identity + pipeline health indicators."""
-    from api.gui_status import build_gui_status
+    import time
+
+    from api.endpoint_profiler import record_request
+    from api.gui_status import get_gui_status_cached
     from datetime import datetime, timezone
 
-    body = build_gui_status()
+    t0 = time.perf_counter()
+    body = get_gui_status_cached()
     body["ts"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    record_request("gui_status", (time.perf_counter() - t0) * 1000.0)
+    return body
+
+
+@router.get("/api/readiness/profile")
+def api_readiness_profile() -> dict[str, Any]:
+    """Endpoint timing aggregates — for load profiling and slow-path diagnosis."""
+    from api.endpoint_profiler import timing_summary
+    from api.readiness_snapshot import _META
+
+    return {
+        "timings": timing_summary(),
+        "snapshot_meta": dict(_META),
+        "latency_budget_ms": 200,
+    }
+
+
+@router.get("/api/diagnostics")
+def api_system_diagnostics() -> dict[str, Any]:
+    """Unified organism view — routing, risk, feeds, execution, gates."""
+    import time
+
+    from api.endpoint_profiler import record_request
+    from api.system_diagnostics import build_system_diagnostics
+
+    t0 = time.perf_counter()
+    body = build_system_diagnostics()
+    record_request("diagnostics", (time.perf_counter() - t0) * 1000.0)
     return body
 
 

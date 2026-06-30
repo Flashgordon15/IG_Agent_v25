@@ -37,6 +37,15 @@ _HEALTH_CACHE_LOCK = threading.Lock()
 _HEALTH_REFRESH_STOP = threading.Event()
 _HEALTH_REFRESH_THREAD: threading.Thread | None = None
 _HEALTH_REFRESH_INTERVAL_SEC = 5.0
+_SYSTEM_STATUS_CACHE: dict[str, Any] | None = None
+_SYSTEM_STATUS_CACHE_AT: float = 0.0
+_SYSTEM_STATUS_CACHE_TTL_SEC = 30.0
+_WATCHDOG_CACHE: bool | None = None
+_WATCHDOG_CACHE_AT: float = 0.0
+_WATCHDOG_CACHE_TTL_SEC = 10.0
+_SUPERVISION_DRIFT_CACHE: dict[str, Any] | None = None
+_SUPERVISION_DRIFT_CACHE_AT: float = 0.0
+_SUPERVISION_DRIFT_CACHE_TTL_SEC = 30.0
 
 _RUNTIME_TICK_FIELDS: dict[str, Any] = {}
 _RUNTIME_TICK_LOCK = threading.Lock()
@@ -70,16 +79,41 @@ def _port_bound(port: int | None = None) -> bool:
 
 def _engine_log_age_sec() -> float | None:
     try:
-        log_path = logs_dir() / "engine.log"
-        if not log_path.is_file():
-            return None
-        return max(0.0, time.time() - log_path.stat().st_mtime)
+        candidates = [
+            logs_dir() / "engine.log",
+            logs_dir().parent / "logs" / "engine.log",
+        ]
+        try:
+            from system.paths import data_dir
+
+            candidates.append(data_dir() / "v31-production" / "logs" / "engine.log")
+        except Exception:
+            pass
+        best: float | None = None
+        for log_path in candidates:
+            if not log_path.is_file():
+                continue
+            age = max(0.0, time.time() - log_path.stat().st_mtime)
+            if best is None or age < best:
+                best = age
+        return best
     except Exception:
         return None
 
 
 def _watchdog_active() -> bool:
     """True when launchd or a manual watchdog process is supervising the agent."""
+    global _WATCHDOG_CACHE, _WATCHDOG_CACHE_AT
+    now = time.time()
+    if _WATCHDOG_CACHE is not None and (now - _WATCHDOG_CACHE_AT) < _WATCHDOG_CACHE_TTL_SEC:
+        return _WATCHDOG_CACHE
+    result = _watchdog_active_uncached()
+    _WATCHDOG_CACHE = result
+    _WATCHDOG_CACHE_AT = now
+    return result
+
+
+def _watchdog_active_uncached() -> bool:
     try:
         from system.overnight_supervision import launchd_watchdog_active
 
@@ -533,14 +567,47 @@ def _resolve_ig_account_id() -> str:
     return ""
 
 
+def _cached_system_status() -> dict[str, Any]:
+    global _SYSTEM_STATUS_CACHE, _SYSTEM_STATUS_CACHE_AT
+    now = time.time()
+    if _SYSTEM_STATUS_CACHE is not None and (now - _SYSTEM_STATUS_CACHE_AT) < _SYSTEM_STATUS_CACHE_TTL_SEC:
+        return dict(_SYSTEM_STATUS_CACHE)
+    from api.endpoint_profiler import timed_section
+
+    with timed_section("health.system_status"):
+        block: dict[str, Any] = {}
+        try:
+            from system.shadow_analytics import shadow_vs_live_metrics, system_status_snapshot
+            from system.milestone_notifications import milestone_status_block
+
+            shadow_block = system_status_snapshot()
+            block = {
+                "shadow_analytics": shadow_block,
+                "milestones": milestone_status_block(),
+                "metrics": {
+                    "shadow_vs_live": shadow_vs_live_metrics(),
+                },
+            }
+        except Exception:
+            block = {}
+    _SYSTEM_STATUS_CACHE = block
+    _SYSTEM_STATUS_CACHE_AT = now
+    return dict(block)
+
+
 def build_health_status() -> dict[str, Any]:
+    from api.endpoint_profiler import record_timing, timed_section
+
+    t0 = time.perf_counter()
     gate_age = seconds_since_last_gate_eval()
     loops_running = is_trading_running()
     paused = is_paused()
-    watchdog = _watchdog_active()
+    with timed_section("health.watchdog"):
+        watchdog = _watchdog_active()
     log_age = _engine_log_age_sec()
-    epics = _configured_epics()
-    quote_fresh = _quotes_fresh_by_epic(epics) if epics else {}
+    with timed_section("health.epics_quotes"):
+        epics = _configured_epics()
+        quote_fresh = _quotes_fresh_by_epic(epics) if epics else {}
 
     health = evaluate_trading_health(
         loops_running=loops_running,
@@ -553,7 +620,8 @@ def build_health_status() -> dict[str, Any]:
     )
     trading_healthy = bool(health["trading_healthy"])
 
-    supervision_drift = _supervision_drift_fields()
+    with timed_section("health.supervision_drift"):
+        supervision_drift = _supervision_drift_fields()
     env_scorer_fallback = _env_scorer_fallback_active()
     all_issues = list(health["issues"])
     drift_issues = supervision_drift.get("issues") or []
@@ -565,28 +633,15 @@ def build_health_status() -> dict[str, Any]:
         all_issues.append("env_scorer_fallback_active")
 
     gate_relaxations: dict[str, Any] = {}
-    try:
-        from system.gate_relaxation import relaxation_snapshot
+    with timed_section("health.gate_relaxations"):
+        try:
+            from system.gate_relaxation import relaxation_snapshot
 
-        gate_relaxations = relaxation_snapshot()
-    except Exception:
-        pass
+            gate_relaxations = relaxation_snapshot()
+        except Exception:
+            pass
 
-    system_status: dict[str, Any] = {}
-    try:
-        from system.shadow_analytics import shadow_vs_live_metrics, system_status_snapshot
-        from system.milestone_notifications import milestone_status_block
-
-        shadow_block = system_status_snapshot()
-        system_status = {
-            "shadow_analytics": shadow_block,
-            "milestones": milestone_status_block(),
-            "metrics": {
-                "shadow_vs_live": shadow_vs_live_metrics(),
-            },
-        }
-    except Exception:
-        system_status = {}
+    system_status = _cached_system_status()
 
     try:
         from system.boot_metrics import get_boot_metrics
@@ -602,14 +657,18 @@ def build_health_status() -> dict[str, Any]:
         }
 
     session_fields: dict[str, Any] = {}
-    try:
-        from runtime.session_identity import build_session_identity_fields
+    with timed_section("health.session_identity"):
+        try:
+            from runtime.session_identity import build_session_identity_fields
 
-        session_fields = build_session_identity_fields()
-    except Exception:
-        pass
+            session_fields = build_session_identity_fields()
+        except Exception:
+            pass
 
-    return _apply_supervision_init_timeout(
+    with timed_section("health.markets"):
+        markets = _build_market_health()
+
+    result = _apply_supervision_init_timeout(
         {
             "ok": trading_healthy and watchdog and supervision_drift.get("ok", True),
             "agent_alive": True,
@@ -632,13 +691,15 @@ def build_health_status() -> dict[str, Any]:
             "issues": all_issues,
             "last_log_age_sec": log_age,
             "last_gate_check_age_sec": gate_age,
-            "markets": _build_market_health(),
+            "markets": markets,
             "quote_fresh_by_epic": quote_fresh,
             "ig_account_id": _resolve_ig_account_id(),
             **_overnight_health_fields(),
             **supervision_drift,
         }
     )
+    record_timing("health.total", (time.perf_counter() - t0) * 1000.0)
+    return result
 
 
 def _build_fast_health_status() -> dict[str, Any]:
@@ -780,7 +841,10 @@ def _update_runtime_tick_fields(status: dict[str, Any]) -> None:
 
 def refresh_health_cache() -> dict[str, Any]:
     """Rebuild the cached /api/health payload (intended for background threads only)."""
-    status = build_health_status()
+    from api.endpoint_profiler import timed_section
+
+    with timed_section("health.refresh_cache"):
+        status = build_health_status()
     with _HEALTH_CACHE_LOCK:
         global _HEALTH_CACHE
         _HEALTH_CACHE = status
@@ -788,11 +852,24 @@ def refresh_health_cache() -> dict[str, Any]:
     return status
 
 
-def get_cached_health_status() -> dict[str, Any]:
+def _health_cache_stub() -> dict[str, Any]:
+    return {
+        "ok": False,
+        "agent_alive": True,
+        "health_cache_warming": True,
+        "issues": ["health_cache_warming"],
+        "trading_loops_running": is_trading_running(),
+        "trading_paused": is_paused(),
+    }
+
+
+def get_cached_health_status(*, allow_slow_fallback: bool = True) -> dict[str, Any]:
     """Return the latest cached health snapshot without blocking HTTP handlers."""
     with _HEALTH_CACHE_LOCK:
         if _HEALTH_CACHE is not None:
             return dict(_HEALTH_CACHE)
+    if not allow_slow_fallback:
+        return _health_cache_stub()
     return _build_fast_health_status()
 
 
@@ -826,6 +903,8 @@ def stop_health_cache_refresher() -> None:
 
 def reset_health_cache_for_tests() -> None:
     global _HEALTH_CACHE, _HEALTH_REFRESH_THREAD, _RUNTIME_TICK_FIELDS
+    global _SYSTEM_STATUS_CACHE, _SYSTEM_STATUS_CACHE_AT, _WATCHDOG_CACHE, _WATCHDOG_CACHE_AT
+    global _SUPERVISION_DRIFT_CACHE, _SUPERVISION_DRIFT_CACHE_AT
     stop_health_cache_refresher()
     reset_init_timeout_state_for_tests()
     with _HEALTH_CACHE_LOCK:
@@ -834,24 +913,40 @@ def reset_health_cache_for_tests() -> None:
         _RUNTIME_TICK_FIELDS = {}
     _HEALTH_REFRESH_THREAD = None
     _HEALTH_REFRESH_STOP.clear()
+    _SYSTEM_STATUS_CACHE = None
+    _SYSTEM_STATUS_CACHE_AT = 0.0
+    _WATCHDOG_CACHE = None
+    _WATCHDOG_CACHE_AT = 0.0
+    _SUPERVISION_DRIFT_CACHE = None
+    _SUPERVISION_DRIFT_CACHE_AT = 0.0
 
 
 def _supervision_drift_fields() -> dict[str, Any]:
+    global _SUPERVISION_DRIFT_CACHE, _SUPERVISION_DRIFT_CACHE_AT
+    now = time.time()
+    if (
+        _SUPERVISION_DRIFT_CACHE is not None
+        and (now - _SUPERVISION_DRIFT_CACHE_AT) < _SUPERVISION_DRIFT_CACHE_TTL_SEC
+    ):
+        return dict(_SUPERVISION_DRIFT_CACHE)
     try:
         from system.supervision_monitor import evaluate_supervision_drift
 
         drift = evaluate_supervision_drift()
-        return {
+        result = {
             "supervision_drift_ok": bool(drift.get("ok")),
             "supervision_drift": drift,
             "supervision_warnings": drift.get("warnings") or [],
         }
     except Exception:
-        return {
+        result = {
             "supervision_drift_ok": True,
             "supervision_drift": {},
             "supervision_warnings": [],
         }
+    _SUPERVISION_DRIFT_CACHE = result
+    _SUPERVISION_DRIFT_CACHE_AT = now
+    return dict(result)
 
 
 def _overnight_health_fields() -> dict[str, Any]:

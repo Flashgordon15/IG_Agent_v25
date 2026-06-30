@@ -2521,6 +2521,13 @@ class IGRestClient:
                 )
             except RestBudgetPausedError as exc:
                 raise IGAPIError(f"REST deferred ({exc})") from exc
+            try:
+                from system.data_execution_policy import audit_ig_rest_call
+                from system.rest_api_budget import categorize_rest_label
+
+                audit_ig_rest_call(f"{method} {path}", categorize_rest_label(f"{method} {path}"))
+            except Exception:
+                pass
         else:
             mgr.check_rest_allowed()
 

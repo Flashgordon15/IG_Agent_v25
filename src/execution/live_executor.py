@@ -690,6 +690,20 @@ class LiveExecutor:
         except Exception:
             allow_fractional = False
 
+        # Micro-lot safety net: clamp to 0.1 when verification is active so the
+        # IronClad ceiling (also 0.1) is never exceeded regardless of upstream path.
+        try:
+            from trading.micro_lot_verification import (
+                clamp_micro_lot_size,
+                micro_lot_verification_enabled,
+            )
+
+            if micro_lot_verification_enabled():
+                size = clamp_micro_lot_size(size)
+                allow_fractional = True  # 0.1 is a valid fractional lot
+        except Exception:
+            pass
+
         if allow_fractional and size >= 0.1:
             pass
         else:

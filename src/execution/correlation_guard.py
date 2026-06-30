@@ -386,6 +386,13 @@ def check_and_record(direction: str, *, risk_gbp: float = 0.0) -> tuple[bool, st
             return True, ""
     except Exception:
         pass
+    try:
+        from system.demo_execution_plane import demo_throughput_active
+
+        if demo_throughput_active():
+            return True, ""
+    except Exception:
+        pass
     global _buy_count, _sell_count
     if not _enabled:
         return True, ""

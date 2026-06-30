@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from contextlib import ExitStack
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -189,11 +189,36 @@ def test_post_ready_services_invokes_route_warmup():
             post_ready_services.start_post_ready_services(BootContext(config=None, rest_client=None))
             warm_api.assert_not_called()
 
-    with patch("api.gui_status.warm_unified_execution_route_cache", return_value=2) as warm_api:
-        with patch("system.boot.post_ready_services._harness_mode", return_value=False):
-            with patch(
-                "system.guard.kernel_interceptor.install_kernel_interceptor",
-                side_effect=ImportError("skip"),
-            ):
-                post_ready_services.start_post_ready_services(BootContext(config=None, rest_client=None))
-        warm_api.assert_called_once()
+    with patch("system.boot.post_ready_services._harness_mode", return_value=False):
+        with patch(
+            "system.guard.kernel_interceptor.install_kernel_interceptor",
+            side_effect=ImportError("skip"),
+        ):
+            with patch("system.boot.post_ready_services.threading.Thread") as thread_mock:
+                post_ready_services.start_post_ready_services(
+                    BootContext(config=None, rest_client=None)
+                )
+    names = [call.kwargs.get("name") for call in thread_mock.call_args_list]
+    assert "post-ready-route-warmup" in names
+
+
+def test_feed_plane_ready_skips_blocking_rotation_bootstrap():
+    """Feed plane must not synchronously scan the rotation universe before stacked tracks."""
+    from system.boot import post_ready_services
+
+    cfg = MagicMock()
+    cfg.get.return_value = {}
+    with (
+        patch("feeder.yahoo_quote_poller.start_yahoo_quote_poller") as yahoo_mock,
+        patch(
+            "system.unified_fulfillment_cache.start_fulfillment_cache_refresh"
+        ) as cache_mock,
+        patch("system.cockpit_feed_guardian_agent.start_agent_feed_guardian") as guardian_mock,
+        patch("runtime.dual_core_execution.bootstrap_multi_source_rotation_stack") as bootstrap_mock,
+    ):
+        post_ready_services._ensure_feed_plane_ready(MagicMock(), cfg)
+
+    yahoo_mock.assert_called_once()
+    cache_mock.assert_called_once()
+    guardian_mock.assert_called_once()
+    bootstrap_mock.assert_not_called()

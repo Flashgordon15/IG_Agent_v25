@@ -578,6 +578,32 @@ class RestApiBudget:
         with self._lock:
             return len(self._prune_locked(time.time()))
 
+    def calls_in_window(
+        self,
+        window_sec: float,
+        *,
+        categories: frozenset[str] | None = None,
+    ) -> int:
+        with self._lock:
+            now = time.time()
+            cutoff = now - max(1.0, float(window_sec))
+            records = [r for r in self._recent if r.ts >= cutoff]
+            if categories:
+                records = [r for r in records if r.category in categories]
+            return len(records)
+
+    def endpoint_counts_in_window(self, window_sec: float) -> dict[str, int]:
+        with self._lock:
+            now = time.time()
+            cutoff = now - max(1.0, float(window_sec))
+            counts: dict[str, int] = {}
+            for rec in self._recent:
+                if rec.ts < cutoff:
+                    continue
+                key = str(rec.label or rec.category or "other")
+                counts[key] = counts.get(key, 0) + 1
+            return dict(sorted(counts.items(), key=lambda kv: -kv[1])[:30])
+
     def _maybe_warn_locked(self, now: float) -> None:
         count = len(self._prune_locked(now))
         if count < self._warn_per_minute:

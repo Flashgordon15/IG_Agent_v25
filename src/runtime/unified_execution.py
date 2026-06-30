@@ -18,7 +18,9 @@ from runtime.strategy_selector import _feed_degraded, _governance_for_epic
 _OVERRIDE: list[dict[str, Any]] | None = None
 _ROUTE_CACHE: dict[str, dict[str, Any]] = {}
 _ROUTE_CACHE_AT: float = 0.0
-_ROUTE_CACHE_TTL_SEC = 1.0
+_ROUTE_CACHE_TTL_SEC = 3.0
+_ROUTE_REFRESH_STOP = __import__("threading").Event()
+_ROUTE_REFRESH_THREAD: __import__("threading").Thread | None = None
 
 
 class UnifiedExecutionPath(str, Enum):
@@ -66,6 +68,13 @@ class UnifiedExecutionRoute:
 def reset_unified_execution_for_tests() -> None:
     global _OVERRIDE, _ROUTE_CACHE, _ROUTE_CACHE_AT
     _OVERRIDE = None
+    _ROUTE_CACHE = {}
+    _ROUTE_CACHE_AT = 0.0
+
+
+def invalidate_unified_route_cache() -> None:
+    """Clear route cache after advisory chain or config change."""
+    global _ROUTE_CACHE, _ROUTE_CACHE_AT
     _ROUTE_CACHE = {}
     _ROUTE_CACHE_AT = 0.0
 
@@ -259,13 +268,17 @@ def decide_epic_unified_route(
             flags.append("REGIME_NONE_ROUTE")
             reasons.append(f"{regime} regime — route suppressed")
 
-    # Daily targeting stand_down bias
-    daily_bias = (daily_targeting or {}).get("recommended_bias") or {}
-    try:
-        stand_down_bias = float(daily_bias.get("stand_down_bias") or 0)
-    except (TypeError, ValueError):
-        stand_down_bias = 0.0
-    if stand_down_bias >= 0.35 and route_path is not UnifiedExecutionPath.NONE:
+    # Daily targeting — suppress only when explicitly ahead-of-target (not enforcement dampening)
+    daily_flags = list((daily_targeting or {}).get("bias_flags") or [])
+    progress_band = str(
+        ((daily_targeting or {}).get("contributing_factors") or {})
+        .get("session_progress", {})
+        .get("band", "")
+    ).lower()
+    ahead_of_target = (
+        "AHEAD_OF_TARGET_PROTECTION" in daily_flags or progress_band == "ahead"
+    )
+    if ahead_of_target and route_path is not UnifiedExecutionPath.NONE:
         route_path = UnifiedExecutionPath.NONE
         flags.append("DAILY_TARGET_PROTECTION")
         reasons.append("daily P&L ahead-of-target — route suppressed")
@@ -399,7 +412,89 @@ def _route_for_epic(epic: str) -> dict[str, Any] | None:
     return _ROUTE_CACHE.get(str(epic or ""))
 
 
+def cached_unified_routes() -> list[dict[str, Any]]:
+    """Read-only route cache for telemetry (/api/state) — no advisory rebuild."""
+    import time
+
+    if _ROUTE_CACHE and (time.time() - _ROUTE_CACHE_AT) > _ROUTE_CACHE_TTL_SEC:
+        _trigger_route_cache_refresh_async()
+    return list(_ROUTE_CACHE.values())
+
+
+def apply_route_cache_rows(routes: list[dict[str, Any]] | None) -> None:
+    """Update route cache from pre-built advisory rows (background/gui snapshot)."""
+    global _ROUTE_CACHE, _ROUTE_CACHE_AT
+    import time
+
+    rows = [r for r in (routes or []) if isinstance(r, dict) and r.get("epic")]
+    if not rows:
+        return
+    _ROUTE_CACHE = {str(row["epic"]): row for row in rows}
+    _ROUTE_CACHE_AT = time.time()
+
+
+def _trigger_route_cache_refresh_async() -> None:
+    def _run() -> None:
+        try:
+            from api.readiness_snapshot import get_gui_snapshot
+            from api.endpoint_profiler import timed_section
+
+            with timed_section("routing.cache_refresh_from_gui"):
+                snap = get_gui_snapshot()
+                routes = snap.get("unified_execution_route")
+                if isinstance(routes, list) and routes:
+                    apply_route_cache_rows(routes)
+        except Exception:
+            pass
+
+    __import__("threading").Thread(
+        target=_run,
+        name="unified-route-cache-refresh",
+        daemon=True,
+    ).start()
+
+
+def start_unified_route_cache_refresher(interval_sec: float = 3.0) -> None:
+    """Daemon: keep execution route cache aligned with latest GUI advisory snapshot."""
+    global _ROUTE_REFRESH_THREAD
+    if _ROUTE_REFRESH_THREAD is not None and _ROUTE_REFRESH_THREAD.is_alive():
+        return
+    _ROUTE_REFRESH_STOP.clear()
+
+    def _loop() -> None:
+        while not _ROUTE_REFRESH_STOP.is_set():
+            try:
+                from api.readiness_snapshot import get_gui_snapshot
+
+                snap = get_gui_snapshot()
+                routes = snap.get("unified_execution_route")
+                if isinstance(routes, list) and routes:
+                    apply_route_cache_rows(routes)
+            except Exception:
+                pass
+            if _ROUTE_REFRESH_STOP.wait(interval_sec):
+                break
+
+    _ROUTE_REFRESH_THREAD = __import__("threading").Thread(
+        target=_loop,
+        name="unified-route-refresher",
+        daemon=True,
+    )
+    _ROUTE_REFRESH_THREAD.start()
+
+
+def stop_unified_route_cache_refresher() -> None:
+    _ROUTE_REFRESH_STOP.set()
+
+
 def _path_allowed_by_route(epic: str, attempted: UnifiedExecutionPath) -> tuple[bool, str]:
+    try:
+        from system.demo_execution_plane import execution_guards_relaxed
+
+        if execution_guards_relaxed(epic=epic):
+            return True, ""
+    except Exception:
+        pass
     row = _route_for_epic(epic)
     if not row:
         return True, ""

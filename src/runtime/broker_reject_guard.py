@@ -6,6 +6,13 @@ import threading
 import time
 from typing import Any
 
+REJECTION_SIZE = "SIZE"
+REJECTION_MARGIN = "MARGIN"
+REJECTION_MARKET_CLOSED = "MARKET_CLOSED"
+REJECTION_RATE_LIMIT = "RATE_LIMIT"
+REJECTION_BROKER_STATE = "BROKER_STATE"
+REJECTION_UNKNOWN = "UNKNOWN"
+
 _lock = threading.Lock()
 _consecutive: dict[str, int] = {}
 _latched_until: dict[str, float] = {}
@@ -38,12 +45,86 @@ def reset_broker_reject_guard_for_tests() -> None:
         _latched_until.clear()
 
 
+def _should_latch(norm: str) -> bool:
+    """Size and generic demo rejects are recoverable — do not 15-min latch."""
+    if norm in ("MINIMUM_ORDER_SIZE_ERROR",):
+        return False
+    try:
+        from system.demo_execution_plane import demo_throughput_active
+
+        if demo_throughput_active():
+            if norm in _INSTRUMENT_MISMATCH_MARKERS:
+                return True
+            return False
+    except Exception:
+        pass
+    return True
+
+
 def _normalize_reason(reason: str) -> str:
     key = str(reason or "").strip().upper()
+    if "MINIMUM_ORDER_SIZE" in key:
+        return "MINIMUM_ORDER_SIZE_ERROR"
     for marker in _INSTRUMENT_MISMATCH_MARKERS:
         if marker in key:
             return marker
     return key or "UNKNOWN"
+
+
+def classify_rejection(reason: str) -> str:
+    """Classify IG rejection for GUI and unified state."""
+    key = _normalize_reason(reason)
+    if "MINIMUM_ORDER_SIZE" in key or "DEAL_SIZE" in key or "SIZE" in key:
+        return REJECTION_SIZE
+    if "MARGIN" in key or "INSUFFICIENT" in key or "FUNDS" in key:
+        return REJECTION_MARGIN
+    if "MARKET_CLOSED" in key or "NOT_TRADEABLE" in key or "CLOSED" in key:
+        return REJECTION_MARKET_CLOSED
+    if "RATE" in key or "LIMIT" in key and "ORDER" not in key:
+        return REJECTION_RATE_LIMIT
+    if "BROKER" in key or "STATE" in key or any(m in key for m in _INSTRUMENT_MISMATCH_MARKERS):
+        return REJECTION_BROKER_STATE
+    return REJECTION_UNKNOWN
+
+
+def record_rejection(
+    *,
+    epic: str,
+    reason: str,
+    classification: str | None = None,
+    self_correction_attempted: bool = False,
+    broker_epic: str = "",
+) -> dict[str, Any]:
+    """Never silent — log, unified state, and circuit-breaker accounting."""
+    norm = _normalize_reason(reason)
+    cls = classification or classify_rejection(norm)
+    trip = record_broker_confirm_rejection(
+        reason=norm,
+        epic=epic,
+        broker_epic=broker_epic,
+    )
+    try:
+        from system.unified_runtime_state import record_rejection as _urs_record
+
+        _urs_record(
+            epic=epic,
+            reason=norm,
+            classification=cls,
+            self_correction_attempted=self_correction_attempted,
+            extra={"broker_epic": broker_epic, "tripped": trip.get("tripped")},
+        )
+    except Exception:
+        pass
+    try:
+        from system.engine_log import log_engine
+
+        log_engine(
+            f"BrokerReject: {cls} epic={epic} reason={norm} "
+            f"self_correct={self_correction_attempted}"
+        )
+    except Exception:
+        pass
+    return {"reason": norm, "classification": cls, **trip}
 
 
 def record_broker_confirm_rejection(
@@ -58,7 +139,7 @@ def record_broker_confirm_rejection(
     with _lock:
         count = _consecutive.get(norm, 0) + 1
         _consecutive[norm] = count
-        tripped = count >= _trip_threshold
+        tripped = count >= _trip_threshold and _should_latch(norm)
         if tripped:
             _latched_until[norm] = now + _latch_sec
             _consecutive[norm] = 0
@@ -92,6 +173,10 @@ def broker_reject_dispatch_blocked() -> tuple[bool, str]:
         for key in expired:
             _latched_until.pop(key, None)
             _consecutive.pop(key, None)
+        # Size errors are recoverable — do not block dispatch for 15 minutes.
+        for size_key in ("MINIMUM_ORDER_SIZE_ERROR",):
+            _latched_until.pop(size_key, None)
+            _consecutive.pop(size_key, None)
         if not _latched_until:
             return False, ""
         key = max(_latched_until, key=_latched_until.get)
