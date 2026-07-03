@@ -456,6 +456,12 @@ class TradeManager:
                         )
                     )
                     stop = self._current_stop(trade_id, stop)
+
+                if getattr(cfg, "volatility_bracket_enabled", False) and entry_atr > 0:
+                    stop = self._apply_volatility_bracket(
+                        market, side, trade_id, entry, stop, target,
+                        px, entry_atr, epic, quote,
+                    )
             else:
                 stop = self._current_stop(trade_id, stop)
 
@@ -1824,6 +1830,69 @@ class TradeManager:
             )
         self._award_protection_milestone(trade_id, "trail", market)
         return msgs
+
+    def _apply_volatility_bracket(
+        self,
+        market: str,
+        side: str,
+        trade_id: int,
+        entry: float,
+        stop: float,
+        target: float,
+        px: float,
+        entry_atr: float,
+        epic: str,
+        quote: Quote,
+    ) -> float:
+        """Run volatility-adjusted ATR bracket and ratchet stop if tighter."""
+        from execution.risk_manager import (
+            compute_volatility_adjusted_trail_stop,
+            resolve_atr_for_epic,
+        )
+
+        baseline_atr = resolve_atr_for_epic(epic) if epic else entry_atr
+        row = compute_volatility_adjusted_trail_stop(
+            epic=epic,
+            side=side,
+            entry=entry,
+            current_stop=stop,
+            target=target,
+            atr=entry_atr,
+            baseline_atr=baseline_atr,
+            bid=float(quote.bid),
+            offer=float(quote.offer),
+        )
+        proposed = float(row.get("proposed_stop") or stop)
+        if not row.get("changed"):
+            return stop
+
+        if side == "BUY" and proposed > stop:
+            self.store.update_stop(
+                trade_id,
+                proposed,
+                f" | Vol bracket raised to {proposed:.5f} "
+                f"(vol_ratio={row['vol_ratio']:.2f})",
+            )
+            log_engine(
+                f"VOL_BRACKET BUY stop {stop:.5f}->{proposed:.5f} "
+                f"vol_ratio={row['vol_ratio']:.2f} mode={row['mode']} epic={epic}"
+            )
+            return proposed
+
+        if side == "SELL" and proposed < stop:
+            self.store.update_stop(
+                trade_id,
+                proposed,
+                f" | Vol bracket lowered to {proposed:.5f} "
+                f"(vol_ratio={row['vol_ratio']:.2f})",
+            )
+            log_engine(
+                f"VOL_BRACKET SELL stop {stop:.5f}->{proposed:.5f} "
+                f"vol_ratio={row['vol_ratio']:.2f} mode={row['mode']} epic={epic}"
+            )
+            return proposed
+
+        return stop
 
     def _stop_tolerance(self, epic: str) -> float:
         from system.pnl_math import pip_size_for_epic

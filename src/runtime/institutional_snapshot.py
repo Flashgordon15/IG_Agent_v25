@@ -75,6 +75,14 @@ def build_institutional_matrix_snapshot() -> dict[str, Any]:
     except Exception:
         pass
 
+    volatility_bracket: dict[str, Any] = {}
+    try:
+        from execution.risk_manager import get_volatility_bracket_snapshot
+
+        volatility_bracket = get_volatility_bracket_snapshot()
+    except Exception:
+        pass
+
     try:
         from trading.probability_engine import get_rls_calibrator_snapshot
 
@@ -100,6 +108,7 @@ def build_institutional_matrix_snapshot() -> dict[str, Any]:
         "alpha_decay": alpha_decay,
         "lead_lag_arbitrage": lead_lag,
         "asymmetric_risk": asymmetric_risk,
+        "volatility_bracket": volatility_bracket,
         "rls_calibrator": rls,
         "volume_profile": volume_profile,
     }

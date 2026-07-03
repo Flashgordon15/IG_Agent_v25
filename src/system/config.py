@@ -416,6 +416,10 @@ class Config:
         return bool(self._data["adaptive_trailing_stop_enabled"])
 
     @property
+    def volatility_bracket_enabled(self) -> bool:
+        return bool(self._data.get("volatility_bracket_enabled", False))
+
+    @property
     def adaptive_trailing_trigger_points(self) -> float:
         return float(self._data["adaptive_trailing_trigger_points"])
 

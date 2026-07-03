@@ -8,6 +8,12 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
+from execution.volatility_risk_bracket import (
+    BracketConfig as _BracketConfig,
+    BracketQuote as _BracketQuote,
+    BracketState as _BracketState,
+    update_bracket as _update_bracket,
+)
 from system.config import Config
 
 _DEFAULT_ATR_FALLBACK = 10.0
@@ -555,6 +561,9 @@ _tick_highs: dict[str, deque[float]] = {}
 _short_ema_high: dict[str, float] = {}
 _asymmetric_last: dict[str, dict[str, Any]] = {}
 
+_volatility_bracket_states: dict[str, _BracketState] = {}
+_volatility_bracket_last: dict[str, dict[str, Any]] = {}
+
 
 def record_asymmetric_tick(epic: str, *, bid: float, offer: float) -> None:
     """Feed 5-tick high stream for short-side aggressive trailing."""
@@ -642,6 +651,89 @@ def reset_asymmetric_risk_for_tests() -> None:
         _tick_highs.clear()
         _short_ema_high.clear()
         _asymmetric_last.clear()
+
+
+def compute_volatility_adjusted_trail_stop(
+    *,
+    epic: str,
+    side: str,
+    entry: float,
+    current_stop: float,
+    target: float,
+    atr: float,
+    baseline_atr: float,
+    bid: float,
+    offer: float,
+) -> dict[str, Any]:
+    """
+    Dynamic ATR bracket — vol-ratio trail tightening + flash-move ratchet.
+
+    Reuses a persistent BracketState per epic so that ATR smoothing and
+    prev_px flash detection carry across ticks (zero allocation on hot path).
+    """
+    key = str(epic or "").strip()
+    side_u = str(side or "").upper()
+    atr_v = max(1e-9, float(atr))
+    base_atr = max(1e-9, float(baseline_atr or atr_v))
+    stop = float(current_stop)
+
+    with _asymmetric_lock:
+        state = _volatility_bracket_states.get(key)
+
+    if state is None or state.side != side_u or state.entry != float(entry):
+        side_l = "BUY" if side_u == "BUY" else "SELL"
+        target_v = float(target)
+        if target_v <= 0:
+            target_v = (float(entry) + atr_v * 8.0) if side_u == "BUY" else (float(entry) - atr_v * 8.0)
+        state = _BracketState(
+            side=side_l,
+            entry=float(entry),
+            stop=stop,
+            target=target_v,
+            entry_atr=atr_v,
+            baseline_atr=base_atr,
+            live_atr=atr_v,
+            prev_px=float(entry),
+        )
+    else:
+        state.stop = stop
+
+    upd = _update_bracket(state, _BracketQuote(bid=bid, offer=offer, live_atr=atr_v))
+    row = {
+        "epic": key,
+        "side": side_u,
+        "mode": upd.mode,
+        "atr": round(atr_v, 6),
+        "baseline_atr": round(base_atr, 6),
+        "vol_ratio": round(upd.vol_ratio, 4),
+        "trail_atr_mult": round(upd.trail_atr_mult, 4),
+        "trail_distance": round(upd.trail_distance, 6),
+        "previous_stop": round(stop, 6),
+        "proposed_stop": round(upd.stop, 6),
+        "stop_hit": upd.stop_hit,
+        "changed": abs(upd.stop - stop) > 1e-9,
+        "ts": time.time(),
+    }
+    with _asymmetric_lock:
+        _volatility_bracket_states[key] = state
+        _volatility_bracket_last[key] = row
+    return row
+
+
+def get_volatility_bracket_snapshot() -> dict[str, Any]:
+    """Snapshot of all active volatility brackets for GUI broadcast."""
+    with _asymmetric_lock:
+        rows = [dict(v) for v in _volatility_bracket_last.values()]
+    return {
+        "ok": True,
+        "positions": rows[-16:],
+    }
+
+
+def reset_volatility_bracket_for_tests() -> None:
+    with _asymmetric_lock:
+        _volatility_bracket_states.clear()
+        _volatility_bracket_last.clear()
 
 
 # --- Global Equilibrium Risk Allocator (£10k capital cap) ---

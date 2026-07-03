@@ -26,6 +26,7 @@
   "reward_multiple": 3.0,
   "adaptive_high_confidence_reward_multiple": 3.0,
   "adaptive_max_limit_atr_multiple": 4.0,
+  "volatility_bracket_enabled": true,
   "spread_to_atr_circuit_breaker_max": 0.3,
   "enforce_rr_floor_filter": true,
   "enforce_1h_ema_filter": true,
