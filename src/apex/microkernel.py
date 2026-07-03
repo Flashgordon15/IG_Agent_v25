@@ -208,6 +208,8 @@ class ApexMicroKernel:
         self._latency_ring: list[float] = []
         self._ledger_snapshot_interval = 64
         self._micro_trend_cache: dict[str, dict[str, Any]] = {}
+        self._obi_cache: dict[str, float] = {}
+        self._microstructure = None
         self._deferred_frames: list[TickFrame] = []
         self._deferred_lock = threading.Lock()
         self._ingest_coalesce: dict[str, TickFrame] = {}
@@ -300,6 +302,51 @@ class ApexMicroKernel:
     def micro_trend_for(self, epic: str) -> dict[str, Any]:
         """Latest Worker B micro-trend alpha snapshot for gate promotion."""
         return dict(self._micro_trend_cache.get(str(epic or ""), {}))
+
+    def _microstructure_classifier(self) -> Any:
+        if self._microstructure is None:
+            from intelligence.microstructure import MicrostructureClassifier
+
+            self._microstructure = MicrostructureClassifier()
+        return self._microstructure
+
+    def _extract_order_book_depth(self, raw: dict[str, Any]) -> Any | None:
+        for key in ("order_book_depth", "depth", "order_book", "l2_depth"):
+            payload = raw.get(key)
+            if payload is not None:
+                return payload
+        return None
+
+    def _resolve_tick_flow_context(
+        self, epic: str, bid: float, offer: float, raw: dict[str, Any]
+    ) -> tuple[float, float, bool, Any | None]:
+        """Record hub tick for velocity; resolve OBI ratio and prior delta."""
+        velocity_engaged = False
+        try:
+            clf = self._microstructure_classifier()
+            clf.record_tick(epic, bid=bid, offer=offer)
+            velocity_engaged = bool(clf.velocity_engaged(epic))
+        except Exception:
+            pass
+
+        obi_ratio = 0.0
+        depth = self._extract_order_book_depth(raw)
+        if depth is not None:
+            try:
+                from intelligence.order_book_imbalance import compute_obi_ratio
+
+                obi_ratio = float(compute_obi_ratio(depth))
+            except Exception:
+                obi_ratio = 0.0
+        elif raw.get("obi_ratio") is not None:
+            try:
+                obi_ratio = float(raw.get("obi_ratio") or 0.0)
+            except (TypeError, ValueError):
+                obi_ratio = 0.0
+
+        prior_obi = float(self._obi_cache.get(epic, obi_ratio))
+        self._obi_cache[epic] = obi_ratio
+        return obi_ratio, prior_obi, velocity_engaged, depth
 
     def start(self) -> None:
         with self._lock:
@@ -429,8 +476,18 @@ class ApexMicroKernel:
             raw = quote
         elif hasattr(quote, "__dict__"):
             raw = {k: v for k, v in vars(quote).items() if not k.startswith("_")}
+        epic_key = str(epic or "")
+        obi_ratio, prior_obi, velocity_engaged, depth = self._resolve_tick_flow_context(
+            epic_key, bid, offer, raw
+        )
+        raw = dict(raw)
+        raw["obi_ratio"] = obi_ratio
+        raw["prior_obi_ratio"] = prior_obi
+        raw["tick_velocity_engaged"] = velocity_engaged
+        if depth is not None:
+            raw.setdefault("order_book_depth", depth)
         frame = TickFrame(
-            epic=str(epic or ""),
+            epic=epic_key,
             bid=bid,
             offer=offer,
             arrival_mono=time.monotonic(),
@@ -553,13 +610,28 @@ class ApexMicroKernel:
             )
             latency_us = (time.perf_counter() - t0) * 1_000_000.0
 
-            micro = evaluate_micro_trend_alpha(close)
+            micro = evaluate_micro_trend_alpha(
+                close,
+                obi_ratio=float((frame.raw or {}).get("obi_ratio") or 0.0),
+                prior_obi_ratio=(frame.raw or {}).get("prior_obi_ratio"),
+                order_book_depth=(frame.raw or {}).get("order_book_depth"),
+                tick_velocity_engaged=bool((frame.raw or {}).get("tick_velocity_engaged")),
+            )
             self._micro_trend_cache[frame.epic] = micro
             if micro.get("promote"):
                 frame.raw = dict(frame.raw or {})
                 frame.raw["micro_trend_score_pct"] = float(micro.get("score_pct") or 0.0)
                 frame.raw["micro_trend_direction"] = str(micro.get("direction") or "")
                 frame.raw["micro_trend_promote"] = True
+                frame.raw["micro_trend_tier"] = str(micro.get("promote_tier") or "")
+                frame.raw["micro_trend_forecast_direction"] = str(
+                    micro.get("forecast_direction") or ""
+                )
+                frame.raw["micro_trend_forecast_confidence"] = float(
+                    micro.get("forecast_confidence") or 0.0
+                )
+                frame.raw["micro_trend_obi_ratio"] = float(micro.get("obi_ratio") or 0.0)
+                frame.raw["micro_trend_ofi_delta"] = float(micro.get("ofi_delta") or 0.0)
 
             n = len(close)
             mat = snap["indicator_matrix"]
@@ -656,11 +728,19 @@ class ApexMicroKernel:
         log_engine(
             f"Apex Worker D: async ledger online → {logger.db_path} (WAL + BEGIN IMMEDIATE)"
         )
+        # Per-tick SQLite rows grew latency_metrics past 17M rows (2.9GB), and
+        # every analytics read against it became a multi-second disk scan that
+        # starved the whole process. Ticks are telemetry, not trades — sample.
+        tick_sample_every = 50
+        seen = 0
         while True:
             mf = self._close_q.get()
             if mf is None:
                 break
             try:
+                seen += 1
+                if seen % tick_sample_every != 0:
+                    continue
                 arrival_ts = time.time()
                 spread_penalty = max(0.0, mf.atr * 0.05)
                 log_tick_latency(

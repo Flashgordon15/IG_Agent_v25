@@ -7,10 +7,14 @@
   "demo_throughput_mode": {
     "enabled": true,
     "bypass_execution_guards": true,
+    "bypass_traffic_governor": true,
+    "demo_max_tx_per_60s": 12,
+    "unlimited_open_positions": true,
+    "unlimited_daily_trades": true,
     "pierce_z_threshold": 1.5,
-    "max_daily_trades": 240,
-    "cooldown_seconds": 90,
-    "cooldown_minutes_after_close": 3,
+    "max_daily_trades": 0,
+    "cooldown_seconds": 0,
+    "cooldown_minutes_after_close": 0,
     "gate_eval_cooldown_sec": 5,
     "order_cadence_sec": 10,
     "stagnant_dead_zone_sec": 120,
@@ -19,11 +23,18 @@
   "pricing": {
     "yahoo_poll_sec": 5
   },
-  "max_daily_trades": 240,
-  "cooldown_seconds": 90,
+  "max_daily_trades": 0,
+  "max_open_positions": 9999,
+  "max_positions_per_epic": 9999,
+  "one_position_per_epic": false,
+  "cooldown_seconds": 0,
+  "correlation_guard": {
+    "max_open_positions_global": 9999,
+    "max_concurrent_us_index_shorts": 9999
+  },
   "entry_protection": {
-    "cooldown_minutes_after_close": 3,
-    "max_trades_per_epic_per_session": 30
+    "cooldown_minutes_after_close": 0,
+    "max_trades_per_epic_per_session": 0
   },
   "demo_soak_mode": {
     "enabled": true,
@@ -34,12 +45,24 @@
   },
   "micro_lot_verification": {
     "enabled": false,
-    "_note": "Demo throughput uses canary_lot_size (0.5 index / 1.0 gold) — 0.1 clamp causes MINIMUM_ORDER_SIZE_ERROR"
+    "_note": "Spreadbet demo uses fractional canary lots (0.5 index / 1.0 gold) via resolve_executable_lot_size"
   },
   "dual_core": {
     "broker_account_product": "SPREADBET",
     "active_stack_slots": 3,
-    "_note": "3 parallel markets: DOW + Gold + Nikkei rotation"
+    "exclude_from_hot_path": [
+      "CS.D.EURUSD.CFD.IP",
+      "CS.D.GBPUSD.CFD.IP",
+      "IX.D.DAX.IFM.IP",
+      "CS.D.CRUDE.CFD.IP"
+    ],
+    "_note": "3 parallel markets: DOW + Nikkei + Gold when TRADEABLE; FX/DAX/Crude blocked on demo spreadbet"
+  },
+  "ig_deal_size_floors": {
+    "_note": "Authoritative min £/pt — mirrored in execution/size_floors.py SPREADBET_MIN_DEAL_BY_EPIC",
+    "CS.D.CFPGOLD.CFP.IP": 10.0,
+    "IX.D.NIKKEI.IFM.IP": 0.5,
+    "IX.D.DOW.IFM.IP": 0.5
   },
   "micro_risk": {
     "risk_per_trade_gbp": 5.0,

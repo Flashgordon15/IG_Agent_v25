@@ -4,12 +4,40 @@ Streaming client factory — optional Lightstreamer with REST poll fallback.
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from ig_api.auth import SessionTokens
 from ig_api.streaming_client import IGStreamingClient
 from system.credentials_loader import Credentials
 from system.engine_log import log_engine
+
+_session_handles: list[Any] = []
+_session_handles_lock = threading.Lock()
+
+
+def register_streaming_session_handle(client: Any | None) -> None:
+    if client is None:
+        return
+    with _session_handles_lock:
+        if client not in _session_handles:
+            _session_handles.append(client)
+
+
+def flush_streaming_session_handles() -> dict[str, Any]:
+    """Disconnect registered streaming clients — clears stale session state."""
+    with _session_handles_lock:
+        handles = list(_session_handles)
+    flushed = 0
+    errors: list[str] = []
+    for client in handles:
+        try:
+            if hasattr(client, "disconnect"):
+                client.disconnect()
+            flushed += 1
+        except Exception as exc:
+            errors.append(f"{type(exc).__name__}: {exc}")
+    return {"flushed": flushed, "total": len(handles), "errors": errors[:4]}
 
 
 def lightstreamer_available() -> bool:
@@ -114,6 +142,7 @@ def create_streaming_client(
                 poll_interval_seconds=poll_interval_seconds,
             )
             log_engine("streaming transport=lightstreamer (with REST poll fallback)")
+            register_streaming_session_handle(client)
             return client
         except Exception as e:
             log_engine(
@@ -121,9 +150,11 @@ def create_streaming_client(
             )
 
     log_engine("streaming transport=rest_poll")
-    return IGStreamingClient(
+    client = IGStreamingClient(
         credentials,
         session,
         rest_client=rest_client,
         poll_interval_seconds=poll_interval_seconds,
     )
+    register_streaming_session_handle(client)
+    return client

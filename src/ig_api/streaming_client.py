@@ -328,6 +328,14 @@ class IGStreamingClient:
             raise IGStreamError("Invalid session — login via REST first")
         if self._running:
             return
+        # A disconnect() flips _running but the poll thread may still be inside
+        # its sleep. Re-connecting then would revive that old thread AND spawn a
+        # second one — reuse the surviving thread instead of stacking a new one.
+        if self._thread is not None and self._thread.is_alive():
+            self._running = True
+            self._set_state(ConnectionState.CONNECTING)
+            log_engine("IG stream poll thread re-armed (existing thread reused)")
+            return
         self._running = True
         self._failures = 0
         self._first_tick_received = False

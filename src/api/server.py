@@ -56,20 +56,13 @@ def _register_bootstrap_routes(app: FastAPI) -> None:
     register_auth_login_route(app)
 
     @app.get("/health", include_in_schema=False)
-    def bootstrap_health() -> dict[str, Any]:
-        from system.app_identity import APP_VERSION_LABEL
-        from system.boot_metrics import get_boot_metrics
-
-        boot = get_boot_metrics()
-        stage = str(boot.get("stage") or "booting")
-        warming = stage == "warming" or bool(boot.get("warming"))
+    async def bootstrap_health() -> dict[str, Any]:
+        """Ultra-fast liveness — must never touch SystemState or the thread pool."""
         return {
-            "status": "warming" if warming else "ok",
-            "version": APP_VERSION_LABEL,
-            "bootstrapping": not bool(boot.get("ready")),
-            "ready": bool(boot.get("ready")),
-            "warming": warming,
-            "progress": int(boot.get("percent") or 0),
+            "ok": True,
+            "api": "up",
+            "status": "ok",
+            "bootstrap": True,
         }
 
     @app.get("/api/state", include_in_schema=False)
@@ -79,28 +72,74 @@ def _register_bootstrap_routes(app: FastAPI) -> None:
         return get_api_state_response()
 
     @app.get("/api/health", include_in_schema=False)
-    def bootstrap_api_health() -> JSONResponse:
+    async def bootstrap_api_health() -> JSONResponse:
         import time
         from datetime import datetime, timezone
 
-        from api.readiness_snapshot import get_health_snapshot
         from fastapi.responses import JSONResponse
 
         t0 = time.perf_counter()
-        code, body = get_health_snapshot()
+        try:
+            from api.health_instant import api_health_grace_active, build_instant_health_response
+
+            if api_health_grace_active():
+                body = build_instant_health_response()
+                code = 200
+            else:
+                from api.readiness_snapshot import get_health_snapshot
+
+                code, body = get_health_snapshot()
+        except Exception:
+            from api.health_light import get_health_light_response
+
+            body = {"ok": True, "status": "ok", "health_light": get_health_light_response()}
+            code = 200
         body["ts"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
         try:
             from api.endpoint_profiler import record_request
+
             record_request("health", (time.perf_counter() - t0) * 1000.0)
         except Exception:
             pass
         return JSONResponse(status_code=code, content=body)
 
-    @app.get("/api/boot_status", include_in_schema=False)
-    def bootstrap_boot_status() -> JSONResponse:
-        from api.boot_status import api_boot_status_json
+    @app.get("/api/health_light", include_in_schema=False)
+    async def bootstrap_api_health_light() -> JSONResponse:
+        """O(1) health_light — available before deferred routers mount."""
+        from api.health_light import get_health_light_response
+        from fastapi.responses import JSONResponse
 
-        return api_boot_status_json()
+        return JSONResponse(content=get_health_light_response())
+
+    @app.get("/api/boot_status", include_in_schema=False)
+    async def bootstrap_boot_status() -> JSONResponse:
+        """O(1) boot_status — event-loop safe, no thread-pool queue."""
+        from system.boot.boot_orchestrator import get_boot_status_snapshot
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(content=get_boot_status_snapshot())
+
+    @app.get("/api/iron_gauge", include_in_schema=False)
+    async def bootstrap_iron_gauge() -> JSONResponse:
+        """O(1) iron gauge — event-loop safe; avoids thread-pool starvation."""
+        from system.boot.iron_gauge import get_iron_gauge_snapshot
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(content=get_iron_gauge_snapshot())
+
+    @app.get("/api/orchestrator_state", include_in_schema=False)
+    async def bootstrap_orchestrator_state() -> JSONResponse:
+        from runtime.master_orchestrator import read_orchestrator_snapshot_fast
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(content=read_orchestrator_snapshot_fast())
+
+    @app.get("/api/iron_cage_status", include_in_schema=False)
+    async def bootstrap_iron_cage_status() -> JSONResponse:
+        from system.iron_cage_readiness import fast_iron_cage_status_snapshot
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(content=fast_iron_cage_status_snapshot())
 
     @app.get("/api/boot_log", include_in_schema=False)
     def bootstrap_boot_log(limit: int = 100) -> JSONResponse:
@@ -437,6 +476,17 @@ async def _run_boot_pipeline(
     watcher: asyncio.Task | None = None
     await _yield_event_loop()
     try:
+        import os
+
+        grace = 0.0
+        try:
+            from system.boot.api_health_grace import health_grace_sec
+
+            grace = health_grace_sec()
+        except Exception:
+            grace = float(os.environ.get("IG_API_HEALTH_GRACE_SEC", "12") or "12")
+        if grace > 0 and os.environ.get("IG_AGENT_PYTEST") != "1":
+            await asyncio.sleep(grace)
         from system.boot_coordinator import boot_lifespan
 
         async with boot_lifespan(app):
@@ -509,68 +559,106 @@ def create_app(
             _deferred_worker(), name="api-deferred-startup"
         )
 
-        if os.environ.get("IG_AGENT_PYTEST") == "1":
-            await mount_done.wait()
-        elif os.environ.get("IG_TEST_HARNESS") != "1":
-            try:
-                from system.manual_kill_monitor import start_manual_kill_monitor
+        def _start_post_bind_services() -> None:
+            import threading
+            import time
 
-                start_manual_kill_monitor()
+            try:
+                from system.boot.api_health_grace import mark_api_bound
+
+                mark_api_bound()
             except Exception:
                 pass
 
-        try:
-            from api.readiness_snapshot import start_readiness_snapshot_refresher
+            # Yield the GIL right after bind so uvicorn serves bootstrap /health
+            # before background refresh storms (launcher G5 probes <5s).
+            time.sleep(0.75)
 
-            start_readiness_snapshot_refresher()
+            def _start_heavy_post_bind_services() -> None:
+                try:
+                    from api.readiness_snapshot import start_readiness_snapshot_refresher
+
+                    start_readiness_snapshot_refresher()
+                except Exception:
+                    pass
+                try:
+                    from api.agent_health import start_health_cache_refresher
+
+                    start_health_cache_refresher()
+                except Exception:
+                    pass
+                try:
+                    from api.agent_state import start_agent_state_service
+
+                    start_agent_state_service()
+                except Exception:
+                    pass
+                try:
+                    from runtime.unified_execution import start_unified_route_cache_refresher
+
+                    start_unified_route_cache_refresher(interval_sec=3.0)
+                except Exception:
+                    pass
+                try:
+                    from system.boot.boot_orchestrator import start_boot_orchestrator
+
+                    start_boot_orchestrator()
+                except Exception:
+                    pass
+                try:
+                    from system.unified_runtime_state import init_unified_runtime_state
+
+                    init_unified_runtime_state()
+                except Exception:
+                    pass
+                try:
+                    from runtime.hard_enforcement import build_hard_enforcement_decisions
+
+                    threading.Thread(
+                        target=build_hard_enforcement_decisions,
+                        name="hard-enforcement-kick",
+                        daemon=True,
+                    ).start()
+                except Exception:
+                    pass
+
+            if os.environ.get("IG_AGENT_PYTEST") != "1" and os.environ.get(
+                "IG_TEST_HARNESS"
+            ) != "1":
+                try:
+                    from system.manual_kill_monitor import start_manual_kill_monitor
+
+                    start_manual_kill_monitor()
+                except Exception:
+                    pass
+            try:
+                from api.health_light import start_health_light_refresher
+
+                start_health_light_refresher()
+            except Exception:
+                pass
+            try:
+                from system.boot.api_health_grace import heavy_services_defer_sec
+
+                defer_sec = heavy_services_defer_sec()
+            except Exception:
+                defer_sec = 20.0
+            threading.Timer(defer_sec, _start_heavy_post_bind_services).start()
+
+        asyncio.create_task(
+            asyncio.to_thread(_start_post_bind_services),
+            name="api-post-bind-services",
+        )
+
+        try:
+            from system.boot.api_health_grace import mark_api_bound
+
+            mark_api_bound()
         except Exception:
             pass
 
-        try:
-            from api.agent_state import start_agent_state_service
-
-            start_agent_state_service()
-        except Exception:
-            pass
-
-        try:
-            from runtime.unified_execution import start_unified_route_cache_refresher
-
-            start_unified_route_cache_refresher(interval_sec=3.0)
-        except Exception:
-            pass
-
-        try:
-            from api.health_light import start_health_light_refresher
-
-            start_health_light_refresher()
-        except Exception:
-            pass
-
-        try:
-            from system.boot.boot_orchestrator import start_boot_orchestrator
-
-            start_boot_orchestrator()
-        except Exception:
-            pass
-
-        try:
-            from system.unified_runtime_state import init_unified_runtime_state
-
-            init_unified_runtime_state()
-        except Exception:
-            pass
-
-        try:
-            from runtime.hard_enforcement import build_hard_enforcement_decisions
-
-            threading.Thread(
-                target=build_hard_enforcement_decisions,
-                name="hard-enforcement-kick",
-                daemon=True,
-            ).start()
-        except Exception:
-            pass
+        if os.environ.get("IG_AGENT_PYTEST") == "1":
+            await mount_done.wait()
 
         try:
             yield

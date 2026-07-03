@@ -230,22 +230,43 @@ def _peak_confidence_from_signal(sig: SignalResult, conf: float) -> float:
 
 
 def _shield_integer_dispatch_size(
-    raw_size: float, *, min_lot: int = 1
-) -> tuple[int, bool]:
-    """Project Apex Monolith Core Execution Shield — int(size // 1) with safe defaults."""
-    calculated_size = 0.0
-    final_size = 0
-    under_min_lot = False
+    raw_size: float,
+    *,
+    min_lot: int = 1,
+    epic: str = "",
+    direction: str = "BUY",
+    cfg: Any | None = None,
+) -> tuple[float, bool]:
+    """Project Apex Monolith Core Execution Shield — spreadbet fractional or int lots."""
+    calculated_size = float(raw_size or 0)
+    try:
+        from execution.ig_size_validator import (
+            fractional_lot_execution_enabled,
+            resolve_executable_lot_size,
+        )
+
+        if fractional_lot_execution_enabled(cfg):
+            lot = resolve_executable_lot_size(
+                str(epic or ""),
+                calculated_size,
+                str(direction or "BUY"),
+                cfg,
+                None,
+                broker_epic=str(epic or ""),
+            )
+            if not lot.ok or float(lot.size) <= 0:
+                return 0.0, True
+            return float(lot.size), False
+    except Exception:
+        pass
     try:
         from apex.hardening import floor_contract_size
 
-        calculated_size = float(raw_size or 0)
         lot, under_min_lot = floor_contract_size(calculated_size, min_lot=min_lot)
-        final_size = int(lot // 1)
+        return float(int(lot)), under_min_lot
     except Exception as exc:
         log_engine(f"[CORE ERROR] Order dispatcher exception caught: {exc}")
-        return 0, True
-    return final_size, under_min_lot
+        return 0.0, True
 
 
 def promote_high_confidence_signal(
@@ -298,8 +319,12 @@ def promote_high_confidence_signal(
             )
         if raw_size is not None:
             calculated_size = float(raw_size or 0)
-            size_int, under_min = _shield_integer_dispatch_size(calculated_size)
-            final_size = int(size_int // 1)
+            size_int, under_min = _shield_integer_dispatch_size(
+                calculated_size,
+                epic=str((sig.snapshot or {}).get("epic") or ""),
+                direction=str(promoted.signal or ""),
+            )
+            final_size = float(size_int)
             under_min_lot = under_min
             snap_out = dict(promoted.snapshot or {})
             snap_out["dispatch_size_int"] = final_size
@@ -1554,6 +1579,7 @@ class TradingLoop:
     ) -> dict[str, Any]:
         """Non-bypassable stop/limit/size envelope when risk gate omits params."""
         from execution.epic_normalizer import normalize_night_matrix_epic
+        from execution.size_floors import hard_min_deal_size
         from execution.types import force_inject_gate_execution_params
         from trading.micro_lot_verification import clamp_micro_lot_size, micro_lot_verification_enabled
 
@@ -1561,7 +1587,8 @@ class TradingLoop:
         if micro_lot_verification_enabled():
             size = clamp_micro_lot_size(float(trade_size))
         else:
-            size = 1.0 if epic_norm in _NIGHT_MATRIX_FORCE_GATE_EPICS else float(trade_size)
+            floor = hard_min_deal_size(epic_norm)
+            size = max(floor, float(trade_size))
         return force_inject_gate_execution_params(
             epic=epic_norm,
             size=size,
@@ -2516,7 +2543,12 @@ class TradingLoop:
                 getattr(self._config, "trade_size", 0.1) or 0.1
             )
             try:
-                dispatch_size, under_min_lot = _shield_integer_dispatch_size(trade_size)
+                dispatch_size, under_min_lot = _shield_integer_dispatch_size(
+                    trade_size,
+                    epic=self._epic,
+                    direction=direction,
+                    cfg=self._config,
+                )
                 if under_min_lot:
                     if not hot:
                         from apex.hardening import under_min_lot_detail
@@ -2555,12 +2587,15 @@ class TradingLoop:
                 }
                 try:
                     from harmonization.iron_clad_risk import (
+                        IronCladRiskEngine,
                         MANDATORY_LIMIT_POINTS,
                         MANDATORY_STOP_POINTS,
-                        MAX_ORDER_SIZE,
                     )
 
-                    trade_size = min(float(trade_size), MAX_ORDER_SIZE)
+                    trade_size = min(
+                        float(trade_size),
+                        float(IronCladRiskEngine.effective_max_order_size()),
+                    )
                     stop_pts = max(MANDATORY_STOP_POINTS, 1.0)
                     limit_pts = max(MANDATORY_LIMIT_POINTS, stop_pts * 2.0)
                     gate_exec["stop_points"] = stop_pts
@@ -3032,7 +3067,12 @@ class TradingLoop:
             dispatch_size = 0
             under_min_lot = False
             try:
-                dispatch_size, under_min_lot = _shield_integer_dispatch_size(trade_size)
+                dispatch_size, under_min_lot = _shield_integer_dispatch_size(
+                    trade_size,
+                    epic=self._epic,
+                    direction=direction,
+                    cfg=self._config,
+                )
                 if under_min_lot:
                     from apex.hardening import under_min_lot_detail
 
@@ -4855,6 +4895,9 @@ class TradingLoop:
             final_size, under_min_lot = _shield_integer_dispatch_size(
                 calculated_size,
                 min_lot=int(float(self._config.adaptive_min_trade_size) // 1) or 1,
+                epic=self._epic,
+                direction=str(sig_for_risk.signal or ""),
+                cfg=self._config,
             )
             actual_size = float(final_size)
         except Exception as exc:

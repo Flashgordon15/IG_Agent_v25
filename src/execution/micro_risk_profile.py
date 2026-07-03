@@ -51,6 +51,73 @@ def _point_value_gbp(epic: str) -> float:
         return 1.0
 
 
+def loss_gbp_at_stop(
+    epic: str,
+    *,
+    size: float,
+    stop_pts: float,
+) -> float:
+    """GBP loss if stop_pts IG points are hit (spreadbet contract specs when available)."""
+    key = str(epic or "").strip()
+    sz = max(0.01, abs(float(size)))
+    pts = max(0.0, float(stop_pts))
+    spec = INSTRUMENT_PNL_SPEC.get(key)
+    if spec:
+        from trading.open_position_view import pnl_currency_amount_to_gbp
+
+        notional = pts * sz * float(spec.get("point_value") or 1.0)
+        return float(pnl_currency_amount_to_gbp(notional, str(spec.get("currency") or "USD")))
+    return pts * sz * _point_value_gbp(key)
+
+
+def clamp_size_for_stop_risk(
+    epic: str,
+    size: float,
+    stop_pts: float,
+    cfg: Any | None,
+) -> float:
+    """Downsize deal so broker-mandatory stop width respects risk_per_trade_gbp."""
+    profile = _load_profile(cfg)
+    loss = loss_gbp_at_stop(epic, size=size, stop_pts=stop_pts)
+    if loss <= profile.risk_per_trade_gbp or loss <= 0:
+        return float(size)
+    pv_loss_per_unit = loss / max(0.01, float(size))
+    if pv_loss_per_unit <= 0:
+        return float(size)
+    capped = profile.risk_per_trade_gbp / pv_loss_per_unit
+    return max(0.01, min(float(size), capped))
+
+
+def resolve_virtual_ceiling_pts(
+    *,
+    epic: str,
+    broker_stop_pts: float,
+    profile: MicroRiskProfile | None = None,
+) -> float:
+    """Tight internal ceiling — always inside broker stop, capped by micro_risk profile."""
+    prof = profile or MicroRiskProfile(
+        risk_per_trade_gbp=5.0,
+        target_r_multiple=1.5,
+        min_profit_target_pts=1.0,
+        max_loss_cap_pts=4.0,
+        virtual_stop_ceiling_pts=4.0,
+    )
+    broker = max(0.5, float(broker_stop_pts))
+    ceiling = min(float(prof.virtual_stop_ceiling_pts), float(prof.max_loss_cap_pts))
+    ceiling = min(ceiling, broker * 0.85)
+    return max(0.5, ceiling)
+
+
+# Non-GBP spreadbet contract specs (mirrors open_position_view).
+INSTRUMENT_PNL_SPEC: dict[str, dict[str, float | str]] = {
+    "IX.D.DOW.IFM.IP": {"point_value": 2.0, "currency": "USD"},
+    "IX.D.SPTRD.IFE.IP": {"point_value": 1.0, "currency": "USD"},
+    "CS.D.CFPGOLD.CFP.IP": {"point_value": 1.0, "currency": "USD"},
+    "IX.D.DAX.IFM.IP": {"point_value": 1.0, "currency": "EUR"},
+    "IX.D.NIKKEI.IFM.IP": {"point_value": 1.0, "currency": "JPY"},
+}
+
+
 def resolve_micro_tp_sl_for_epic(
     epic: str,
     size: float,
@@ -64,10 +131,13 @@ def resolve_micro_tp_sl_for_epic(
     P&L_gbp ≈ points × size × point_value_gbp
     """
     profile = _load_profile(cfg)
-    pv = _point_value_gbp(epic)
     size_f = max(0.01, abs(float(size)))
-    denom = size_f * pv
-    risk_pts = profile.risk_per_trade_gbp / denom if denom > 0 else profile.max_loss_cap_pts
+    per_pt_gbp = loss_gbp_at_stop(epic, size=size_f, stop_pts=1.0)
+    risk_pts = (
+        profile.risk_per_trade_gbp / per_pt_gbp
+        if per_pt_gbp > 0
+        else profile.max_loss_cap_pts
+    )
     sl_pts = min(profile.max_loss_cap_pts, max(0.5, risk_pts))
     tp_pts = max(profile.min_profit_target_pts, sl_pts * profile.target_r_multiple)
     # Volatility widen: high |z| → slightly wider targets (not fixed £20)

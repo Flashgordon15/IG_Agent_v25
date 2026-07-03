@@ -13,8 +13,9 @@ Setup (disabled until configured):
 
 All sends are fire-and-forget; API failures are logged only and never block trading.
 
-v29.1 telemetry: routine operational noise is buffered in-memory and flushed on an
-hourly heartbeat; [RISK SHIELD], critical faults, and substantial losses bypass
+v29.1 telemetry: routine operational noise (trades, scalper bursts, tuning) is
+buffered in-memory and flushed once per hour with the executive status report.
+[RISK SHIELD], critical faults, agent stop/crash, and substantial losses bypass
 the buffer and dispatch immediately.
 """
 
@@ -34,7 +35,10 @@ from system.engine_log import log_engine
 
 _LONDON = ZoneInfo("Europe/London")
 
-_DEFAULT_HEARTBEAT_INTERVAL_SEC = 3600.0
+TELEGRAM_ROUTINE_INTERVAL_SEC = 3600.0
+_DEFAULT_HEARTBEAT_INTERVAL_SEC = TELEGRAM_ROUTINE_INTERVAL_SEC
+_MAX_ROUTINE_SUMMARIES = 30
+_MAX_DIGEST_CHUNKS = 8
 _DEFAULT_SUBSTANTIAL_LOSS_POINTS = 50.0
 _ALERT_DEDUPE_SEC = 300.0
 _UNRESOLVED_ALERT_DEDUPE_SEC = 900.0
@@ -77,6 +81,8 @@ def _empty_heartbeat_buffer() -> dict[str, Any]:
         "correlation_multiplier": 1.0,
         "suppressed_count": 0,
         "buffer_dedupe_keys": set(),
+        "routine_summaries": [],
+        "digest_chunks": [],
     }
 
 
@@ -125,33 +131,15 @@ def set_heartbeat_provider(fn: Callable[[], dict[str, Any]] | None) -> None:
         _heartbeat_provider = fn
 
 
+def resolve_heartbeat_snapshot() -> dict[str, Any]:
+    """Snapshot payload for hourly combined Telegram reports."""
+    provider = _heartbeat_provider
+    return provider() if provider else _default_heartbeat_snapshot()
+
+
 def start_telegram_heartbeat(interval_sec: float | None = None) -> None:
-    """Start daemon thread that flushes the aggregated heartbeat buffer."""
-    global _heartbeat_thread
-    wait_sec = float(interval_sec or _DEFAULT_HEARTBEAT_INTERVAL_SEC)
-    if wait_sec <= 0:
-        wait_sec = _DEFAULT_HEARTBEAT_INTERVAL_SEC
-    with _lock:
-        if _heartbeat_thread is not None and _heartbeat_thread.is_alive():
-            return
-        _heartbeat_stop.clear()
-
-        def _loop() -> None:
-            while not _heartbeat_stop.wait(wait_sec):
-                try:
-                    notifier = get_telegram_notifier()
-                    if notifier is None or not notifier.enabled:
-                        continue
-                    provider = _heartbeat_provider
-                    payload = provider() if provider else {}
-                    notifier.flush_aggregated_heartbeat(payload)
-                except Exception as e:
-                    log_engine(f"telegram heartbeat failed: {type(e).__name__}: {e}")
-
-        _heartbeat_thread = threading.Thread(
-            target=_loop, name="telegram-heartbeat", daemon=True
-        )
-        _heartbeat_thread.start()
+    """Register hourly digest cadence — flush is owned by telegram_alerts scheduler."""
+    _ = interval_sec  # retained for API compatibility; interval read from config at send time
 
 
 def stop_telegram_heartbeat() -> None:
@@ -162,7 +150,7 @@ def stop_telegram_heartbeat() -> None:
 
 
 def executive_status_only_enabled(cfg: Any | None = None) -> bool:
-    """When True, status noise is suppressed; hourly executive + trade fills only."""
+    """When True, startup banners are suppressed; routine traffic stays hourly-buffered."""
     try:
         if cfg is None:
             from system.config_loader import get_config
@@ -177,12 +165,10 @@ def executive_status_only_enabled(cfg: Any | None = None) -> bool:
 
 
 def _preserve_alert_in_executive_mode(message: str) -> bool:
-    """Trade fills and true emergencies still notify when executive mode is on."""
+    """True emergencies still notify immediately when executive mode is on."""
     body = str(message or "").strip()
     if not body:
         return False
-    if body.startswith(("✅ WIN", "❌ LOSS")):
-        return True
     lower = body.lower()
     preserve = (
         "drawdown limit",
@@ -235,7 +221,7 @@ def send_unresolved_order_alert(
     return send_critical_alert(body, dedupe_key=f"unresolved:{key}")
 
 
-def send_critical_alert(message: str, *, dedupe_key: str | None = None) -> bool:
+def send_critical_alert(message: str, *, dedupe_key: str | None = None, parse_mode: str = "Markdown") -> bool:
     """Send an immediate critical alert (blocking). Logs all failures; never raises."""
     body = str(message or "").strip()
     if not body:
@@ -266,7 +252,7 @@ def send_critical_alert(message: str, *, dedupe_key: str | None = None) -> bool:
                 if now - last < _UNRESOLVED_ALERT_DEDUPE_SEC:
                     return False
                 notifier._alert_last_sent[dedupe_key] = now
-        ok = notifier.send_now(text)
+        ok = notifier.send_now(text, parse_mode=parse_mode)
         if not ok:
             log_engine(f"TELEGRAM ALERTS NOT WORKING: send failed for: {body[:120]}")
         return ok
@@ -336,7 +322,7 @@ class TelegramNotifier:
             substantial_loss_points=loss_pts,
         )
 
-    def _send_async(self, text: str) -> None:
+    def _send_async(self, text: str, *, parse_mode: str | None = None) -> None:
         if not self.enabled:
             return
         body = text.strip()
@@ -345,17 +331,20 @@ class TelegramNotifier:
         threading.Thread(
             target=self._send_sync,
             args=(body,),
+            kwargs={"parse_mode": parse_mode},
             name="telegram-send",
             daemon=True,
         ).start()
 
-    def _send_sync(self, text: str) -> bool:
+    def _send_sync(self, text: str, *, parse_mode: str | None = None) -> bool:
         url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
-        payload = {
+        payload: dict[str, Any] = {
             "chat_id": self.chat_id,
             "text": text,
             "disable_web_page_preview": True,
         }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
         try:
             resp = requests.post(url, json=payload, timeout=15)
             if resp.status_code >= 400:
@@ -370,14 +359,18 @@ class TelegramNotifier:
             log_engine(f"telegram send failed: {type(e).__name__}: {e}")
         return False
 
-    def send_now(self, text: str) -> bool:
+    def send_now(self, text: str, *, parse_mode: str | None = None) -> bool:
         """Blocking send — for tests and startup when the caller may return immediately."""
         if not self.enabled:
             return False
         body = text.strip()
         if not body:
             return False
-        return self._send_sync(body)
+        return self._send_sync(body, parse_mode=parse_mode)
+
+    def send_markdown(self, text: str, *, parse_mode: str = "Markdown") -> None:
+        """Async Markdown dispatch — used by alert_reporting_matrix coalescer."""
+        self._send_async(text, parse_mode=parse_mode)
 
     @staticmethod
     def _fmt_price(value: float) -> str:
@@ -455,6 +448,19 @@ class TelegramNotifier:
             )
             if mult_match:
                 buf["correlation_multiplier"] = float(mult_match.group(1))
+            summaries = buf.setdefault("routine_summaries", [])
+            if len(summaries) < _MAX_ROUTINE_SUMMARIES:
+                summaries.append(body.split("\n", 1)[0][:140])
+
+    def buffer_hourly_digest(self, text: str) -> None:
+        """Append a coalesced matrix digest for the next hourly Telegram send."""
+        body = str(text or "").strip()
+        if not body:
+            return
+        with self._buffer_lock:
+            chunks = self._heartbeat_buffer.setdefault("digest_chunks", [])
+            if len(chunks) < _MAX_DIGEST_CHUNKS:
+                chunks.append(body[:3500])
 
     def record_correlation_multiplier(self, multiplier: float) -> None:
         with self._buffer_lock:
@@ -487,9 +493,12 @@ class TelegramNotifier:
         if not raw:
             return
         urgent = force_urgent or self._is_urgent(raw)
-        if executive_status_only_enabled() and not urgent and not _preserve_alert_in_executive_mode(raw):
-            self._buffer_alert(raw, dedupe_key=dedupe_key)
-            return
+        if (
+            executive_status_only_enabled()
+            and not urgent
+            and _preserve_alert_in_executive_mode(raw)
+        ):
+            urgent = True
         if urgent:
             if dedupe_key:
                 self._alert_deduped(dedupe_key, raw)
@@ -513,22 +522,30 @@ class TelegramNotifier:
         )
         self._route_notification(line, dedupe_key=dedupe_key)
 
-    def flush_aggregated_heartbeat(self, snapshot: dict[str, Any] | None = None) -> None:
+    def _format_heartbeat_section(
+        self,
+        snapshot: dict[str, Any] | None,
+        *,
+        session_pts: float,
+        suppressed: int,
+        epics: set[str],
+        corr_mult: float,
+        routine_summaries: list[str],
+        digest_chunks: list[str],
+    ) -> str:
         snap = dict(snapshot or {})
-        with self._buffer_lock:
-            buf = self._heartbeat_buffer
-            session_pts = float(buf.get("session_pnl_points") or 0.0)
-            suppressed = int(buf.get("suppressed_count") or 0)
-            epics = set(buf.get("position_epics") or set())
-            corr_mult = float(buf.get("correlation_multiplier") or 1.0)
-            self._heartbeat_buffer = _empty_heartbeat_buffer()
-
         positions = int(snap.get("positions") or snap.get("open_deals") or len(epics) or 0)
         if snap.get("correlation_multiplier") is not None:
             corr_mult = float(snap.get("correlation_multiplier") or corr_mult)
         epic_count = len(epics) if epics else positions
         pts_sign = "+" if session_pts >= 0 else ""
-        text = (
+        sections: list[str] = []
+        if digest_chunks:
+            sections.extend(digest_chunks)
+        if routine_summaries:
+            bullet_lines = "\n".join(f"• {line}" for line in routine_summaries[:_MAX_ROUTINE_SUMMARIES])
+            sections.append(f"📋 *Hourly activity*\n{bullet_lines}")
+        sections.append(
             "================================\n"
             "📊 [AGENT HEARTBEAT REPORT]\n"
             "================================\n"
@@ -537,6 +554,63 @@ class TelegramNotifier:
             f"• Current Risk State: Correlation Multiplier at {corr_mult:.2f}\n"
             f"• Filters Suppressed: {suppressed} standard alerts silenced this hour.\n"
             "================================"
+        )
+        return "\n\n".join(sections)
+
+    def send_hourly_combined_report(
+        self,
+        executive_text: str,
+        snapshot: dict[str, Any] | None = None,
+        *,
+        parse_mode: str = "Markdown",
+    ) -> bool:
+        """Single hourly Telegram payload: executive summary + buffered digests + heartbeat."""
+        snap = dict(snapshot or {})
+        with self._buffer_lock:
+            buf = self._heartbeat_buffer
+            session_pts = float(buf.get("session_pnl_points") or 0.0)
+            suppressed = int(buf.get("suppressed_count") or 0)
+            epics = set(buf.get("position_epics") or set())
+            corr_mult = float(buf.get("correlation_multiplier") or 1.0)
+            routine_summaries = list(buf.get("routine_summaries") or [])
+            digest_chunks = list(buf.get("digest_chunks") or [])
+            self._heartbeat_buffer = _empty_heartbeat_buffer()
+
+        heartbeat = self._format_heartbeat_section(
+            snap,
+            session_pts=session_pts,
+            suppressed=suppressed,
+            epics=epics,
+            corr_mult=corr_mult,
+            routine_summaries=routine_summaries,
+            digest_chunks=digest_chunks,
+        )
+        parts = [str(executive_text or "").strip(), heartbeat]
+        text = "\n\n".join(part for part in parts if part)
+        if not text:
+            return False
+        return self.send_now(text, parse_mode=parse_mode)
+
+    def flush_aggregated_heartbeat(self, snapshot: dict[str, Any] | None = None) -> None:
+        """Legacy alias — hourly sends should use send_hourly_combined_report."""
+        snap = dict(snapshot or {})
+        with self._buffer_lock:
+            buf = self._heartbeat_buffer
+            session_pts = float(buf.get("session_pnl_points") or 0.0)
+            suppressed = int(buf.get("suppressed_count") or 0)
+            epics = set(buf.get("position_epics") or set())
+            corr_mult = float(buf.get("correlation_multiplier") or 1.0)
+            routine_summaries = list(buf.get("routine_summaries") or [])
+            digest_chunks = list(buf.get("digest_chunks") or [])
+            self._heartbeat_buffer = _empty_heartbeat_buffer()
+        text = self._format_heartbeat_section(
+            snap,
+            session_pts=session_pts,
+            suppressed=suppressed,
+            epics=epics,
+            corr_mult=corr_mult,
+            routine_summaries=routine_summaries,
+            digest_chunks=digest_chunks,
         )
         self._send_async(text)
 

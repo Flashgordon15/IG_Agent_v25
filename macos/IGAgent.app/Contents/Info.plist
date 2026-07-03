@@ -6,23 +6,27 @@
   <string>en</string>
   <key>CFBundleExecutable</key>
   <string>IGAgent</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>CFBundleIdentifier</key>
-  <string>com.igagent.launcher</string>
+  <string>com.igagent.flightdeck</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
-  <string>IG Agent</string>
+  <string>Iron Cage Flight Deck</string>
+  <key>CFBundleDisplayName</key>
+  <string>Iron Cage Flight Deck</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>41.0</string>
+  <string>29.1</string>
   <key>CFBundleVersion</key>
-  <string>41</string>
+  <string>291</string>
   <key>LSMinimumSystemVersion</key>
   <string>12.0</string>
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSAppleEventsUsageDescription</key>
-  <string>IG Agent opens the dashboard in your browser after launch.</string>
+  <string>Iron Cage Flight Deck opens the native trading cockpit after boot.</string>
 </dict>
 </plist>

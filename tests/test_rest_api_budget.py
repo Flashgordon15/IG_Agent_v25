@@ -27,19 +27,18 @@ class PreemptiveThrottleTests(unittest.TestCase):
         with (
             patch.object(budget, "_maybe_warn_locked"),
             patch.object(budget, "_maybe_periodic_log_locked"),
-            patch(
-                "system.rest_api_budget.hub_quote_stream_genuinely_stale",
-                return_value=True,
-            ),
+            patch("system.rest_api_budget._demo_throughput_rest_bypass", return_value=False),
+            patch("system.rest_api_budget._dual_core_stream_fresh", return_value=False),
+            patch("system.rest_api_budget.hub_quote_stream_fresh", return_value=False),
             patch("system.rate_limit_manager.get_rate_limit_manager") as mgr,
         ):
             mgr.return_value.check_rest_allowed.return_value = None
             mgr.return_value.is_rest_blocked.return_value = False
             for _ in range(7):
                 budget.acquire(label="GET /positions")
-        self.assertTrue(budget._preemptive_pause_active())
-        with self.assertRaises(RestBudgetPausedError):
-            budget.acquire(label="GET /accounts")
+            self.assertTrue(budget._preemptive_pause_active())
+            with self.assertRaises(RestBudgetPausedError):
+                budget.acquire(label="GET /accounts")
 
     def test_preemptive_throttle_skipped_when_stream_fresh(self) -> None:
         budget = RestApiBudget(min_interval_seconds=0.001, warn_per_minute=6)
@@ -80,10 +79,12 @@ class PreemptiveThrottleTests(unittest.TestCase):
         budget = RestApiBudget(min_interval_seconds=0.001, warn_per_minute=6)
         budget._preemptive_pause_until = time.time() + 30.0
         with (
+            patch("system.rest_api_budget._demo_throughput_rest_bypass", return_value=False),
             patch(
                 "system.rest_api_budget.hub_quote_stream_genuinely_stale",
                 return_value=True,
             ),
+            patch("system.rest_api_budget._dual_core_stream_fresh", return_value=False),
             patch("system.rate_limit_manager.get_rate_limit_manager") as mgr,
         ):
             mgr.return_value.check_rest_allowed.return_value = None
@@ -103,6 +104,33 @@ class PreemptiveThrottleTests(unittest.TestCase):
             budget._track_preemptive_locked(time.time())
         self.assertFalse(budget._preemptive_pause_active())
         self.assertFalse(budget._preemptive_throttle_blocks_rest())
+
+    def test_demo_throughput_bypasses_preemptive_throttle(self) -> None:
+        budget = RestApiBudget(min_interval_seconds=0.001, warn_per_minute=6)
+        budget._preemptive_pause_until = time.time() + 30.0
+        with (
+            patch(
+                "system.rest_api_budget.hub_quote_stream_genuinely_stale",
+                return_value=True,
+            ),
+            patch("system.rest_api_budget._demo_throughput_rest_bypass", return_value=True),
+            patch("system.rate_limit_manager.get_rate_limit_manager") as mgr,
+        ):
+            mgr.return_value.check_rest_allowed.return_value = None
+            mgr.return_value.is_rest_blocked.return_value = False
+            budget.acquire(label="GET /markets/EPIC")
+        self.assertFalse(budget._preemptive_throttle_blocks_rest())
+
+    def test_dual_core_stream_counts_as_fresh(self) -> None:
+        with patch(
+            "system.rest_api_budget._dual_core_stream_fresh",
+            return_value=True,
+        ):
+            self.assertFalse(
+                __import__(
+                    "system.rest_api_budget", fromlist=["hub_quote_stream_genuinely_stale"]
+                ).hub_quote_stream_genuinely_stale()
+            )
 
     def test_ohlc_bootstrap_rest_exempt_from_preemptive_budget(self) -> None:
         budget = RestApiBudget(min_interval_seconds=0.001, warn_per_minute=6)

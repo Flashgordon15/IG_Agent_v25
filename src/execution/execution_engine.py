@@ -505,12 +505,27 @@ class ExecutionEngine:
             "probe_execution_process_tick",
             epic=str(getattr(signal, "epic", "") or ""),
         ):
-            return self._execute_trade_body(
+            epic = str(getattr(signal, "epic", "") or "")
+            try:
+                from system.latency_trace import record_stage
+
+                record_stage(epic=epic, stage="decision")
+            except Exception:
+                pass
+            result = self._execute_trade_body(
                 signal,
                 prevalidated=prevalidated,
                 gate_snapshot=gate_snapshot,
                 shadow_force_fill=shadow_force_fill,
             )
+            try:
+                from system.latency_trace import record_pipeline_complete, record_stage
+
+                record_stage(epic=epic, stage="ig_rest")
+                record_pipeline_complete(epic=epic)
+            except Exception:
+                pass
+            return result
 
     def _execute_trade_body(
         self,
@@ -594,6 +609,34 @@ class ExecutionEngine:
                 rejection_reason=str(e),
                 execution_params={},
             )
+
+        try:
+            from system.chaos_guardian import acquire_outbound_token
+            from system.demo_execution_plane import demo_throughput_active
+
+            token_ok = True
+            if not demo_throughput_active():
+                token_ok = acquire_outbound_token(
+                    "ig", category="orders", max_wait_sec=8.0, priority="fast_pass"
+                )
+            elif not acquire_outbound_token(
+                "ig", category="orders", max_wait_sec=2.0, priority="fast_pass"
+            ):
+                from system.chaos_guardian import replenish_critical_buckets
+
+                replenish_critical_buckets()
+                token_ok = acquire_outbound_token(
+                    "ig", category="orders", max_wait_sec=4.0, priority="fast_pass"
+                )
+            if not token_ok:
+                return ExecutionResult(
+                    success=False,
+                    action="REJECTED",
+                    rejection_reason="chaos_guardian_token_exhausted",
+                    execution_params={},
+                )
+        except Exception:
+            pass
 
         trace_execution(
             "EXECUTION",

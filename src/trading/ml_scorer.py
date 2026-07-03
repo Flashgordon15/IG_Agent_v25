@@ -15,6 +15,68 @@ _MODEL_DIR = data_dir() / "ml_model"
 _MODEL_FILE = _MODEL_DIR / "model.pkl"
 _META_FILE = _MODEL_DIR / "meta.json"
 
+_HOLDOUT_FRACTION = 0.20
+_TIMESTAMP_COLUMNS = ("timestamp", "ts", "time", "datetime", "date", "created_at")
+
+
+def _find_timestamp_column(columns: list[str]) -> str | None:
+    lowered = {c.lower(): c for c in columns}
+    for name in _TIMESTAMP_COLUMNS:
+        if name in lowered:
+            return lowered[name]
+    for c in columns:
+        low = c.lower()
+        if "time" in low or "date" in low:
+            return c
+    return None
+
+
+def _rank_auc(y_true: list[int], y_score: list[float]) -> float | None:
+    pos = [s for t, s in zip(y_true, y_score) if t == 1]
+    neg = [s for t, s in zip(y_true, y_score) if t == 0]
+    if not pos or not neg:
+        return None
+    ranked = sorted(zip(y_score, y_true))
+    ranks: dict[int, float] = {}
+    i = 0
+    while i < len(ranked):
+        j = i
+        while j < len(ranked) and ranked[j][0] == ranked[i][0]:
+            j += 1
+        avg_rank = (i + j + 1) / 2.0
+        for k in range(i, j):
+            ranks[k] = avg_rank
+        i = j
+    rank_sum_pos = sum(r for k, r in ranks.items() if ranked[k][1] == 1)
+    n_pos, n_neg = len(pos), len(neg)
+    return (rank_sum_pos - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg)
+
+
+def _manual_logloss(y_true: list[int], y_score: list[float]) -> float:
+    import math
+
+    eps = 1e-15
+    total = 0.0
+    for t, s in zip(y_true, y_score):
+        p = min(max(s, eps), 1.0 - eps)
+        total += -(t * math.log(p) + (1 - t) * math.log(1.0 - p))
+    return total / max(1, len(y_true))
+
+
+def _holdout_metrics(
+    y_true: Any, y_score: Any
+) -> tuple[float | None, float | None]:
+    yt = [int(v) for v in y_true]
+    ys = [float(v) for v in y_score]
+    try:
+        from sklearn.metrics import log_loss, roc_auc_score
+
+        auc = float(roc_auc_score(yt, ys)) if len(set(yt)) > 1 else None
+        ll = float(log_loss(yt, ys, labels=[0, 1]))
+        return auc, ll
+    except ImportError:
+        return _rank_auc(yt, ys), _manual_logloss(yt, ys)
+
 
 class MLScorer:
     def __init__(self) -> None:
@@ -77,6 +139,14 @@ class MLScorer:
         label_map = {"WIN": 1, "LOSS": 0, 1: 1, 0: 0}
         df["_y"] = df[label_col].map(label_map)
         df = df[df["_y"].notna()].copy()
+
+        # Chronological order so the holdout is strictly out-of-time
+        ts_col = _find_timestamp_column([c for c in df.columns if c != "_y"])
+        if ts_col is not None:
+            ts = pd.to_datetime(df[ts_col], errors="coerce")
+            if ts.notna().any():
+                df = df.assign(_ts=ts).sort_values("_ts", kind="stable").drop(columns="_ts")
+
         y = df["_y"].astype(int)
 
         # Normalise instrument-specific magnitudes so the model generalises across
@@ -110,13 +180,33 @@ class MLScorer:
             X["fired"] = X["fired"].astype(int)
 
         self._feature_names = list(X.columns)
-        model = XGBClassifier(
+        params = dict(
             n_estimators=100,
             max_depth=4,
             learning_rate=0.08,
             eval_metric="logloss",
             scale_pos_weight=1,
         )
+
+        # Chronological 80/20 holdout: validate out-of-time, then refit on 100%
+        holdout_auc: float | None = None
+        holdout_logloss: float | None = None
+        cut = int(len(X) * (1.0 - _HOLDOUT_FRACTION))
+        if 0 < cut < len(X):
+            y_fit = y.iloc[:cut]
+            y_hold = y.iloc[cut:]
+            if y_fit.nunique() > 1 and len(y_hold) > 0:
+                try:
+                    fold = XGBClassifier(**params)
+                    fold.fit(X.iloc[:cut], y_fit)
+                    probs = fold.predict_proba(X.iloc[cut:])[:, 1]
+                    holdout_auc, holdout_logloss = _holdout_metrics(y_hold, probs)
+                except Exception as e:
+                    log_engine(
+                        f"ml_scorer holdout evaluation failed: {type(e).__name__}: {e}"
+                    )
+
+        model = XGBClassifier(**params)
         model.fit(X, y)
         _MODEL_DIR.mkdir(parents=True, exist_ok=True)
         with open(_MODEL_FILE, "wb") as f:
@@ -127,21 +217,29 @@ class MLScorer:
         )
         self._model = model
         log_engine(
-            f"ml_scorer trained on {len(df)} rows ({int(y.sum())} wins), {len(self._feature_names)} features"
+            f"ml_scorer trained on {len(df)} rows ({int(y.sum())} wins), "
+            f"{len(self._feature_names)} features | "
+            f"holdout_auc={holdout_auc if holdout_auc is None else round(holdout_auc, 4)} "
+            f"holdout_logloss={holdout_logloss if holdout_logloss is None else round(holdout_logloss, 4)}"
         )
 
     def predict(self, features: dict[str, float]) -> float:
         if self._model is None:
             return 0.5
         try:
-            import pandas as pd
+            import numpy as np
 
             missing = [k for k in self._feature_names if k not in features]
             if missing:
                 log_engine(f"ml_scorer predict: missing features {missing} — skipping")
                 return 0.5
-            row = {k: float(features[k]) for k in self._feature_names}
-            X = pd.DataFrame([row])
+            # Row built in the canonical training feature order (meta.json).
+            # xgboost's inplace_predict path validates ndarray inputs by column
+            # count only, so a bare 2-D array is safe and avoids the per-call
+            # DataFrame construction cost.
+            X = np.array(
+                [[float(features[k]) for k in self._feature_names]], dtype=np.float32
+            )
             prob = float(self._model.predict_proba(X)[0][1])
             return max(0.0, min(1.0, prob))
         except Exception as e:

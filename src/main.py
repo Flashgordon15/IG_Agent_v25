@@ -37,20 +37,59 @@ _singleton_socket: socket.socket | None = None
 _singleton_socket_bound = False
 
 
+_SINGLETON_BIND_RETRIES = 5
+_SINGLETON_BIND_RETRY_SEC = 2.0
+
+
 def enforce_absolute_socket_singleton() -> None:
+    """
+    Fail closed when a live twin holds the singleton port.
+
+    Retries briefly first: during a supervisor restart the outgoing instance may
+    hold the port for a few seconds while tearing down. Always logs before
+    exiting — a silent exit(0) here previously left supervisors with an
+    unexplained "agent process died".
+    """
     global _singleton_socket, _singleton_socket_bound
     if _singleton_socket_bound:
         return
+    last_err: OSError | None = None
+    for attempt in range(1, _SINGLETON_BIND_RETRIES + 1):
+        try:
+            _singleton_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            # CRITICAL HARDENING: Allow immediate local address re-binding
+            _singleton_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            _singleton_socket.bind(("127.0.0.1", 49151))
+            _singleton_socket.listen(1)
+            _singleton_socket_bound = True
+            if attempt > 1:
+                _log_engine(
+                    f"singleton: port 49151 acquired on attempt {attempt} "
+                    "(previous instance released during retry window)"
+                )
+            return
+        except OSError as exc:
+            last_err = exc
+            try:
+                if _singleton_socket is not None:
+                    _singleton_socket.close()
+            except OSError:
+                pass
+            _singleton_socket = None
+            if attempt < _SINGLETON_BIND_RETRIES:
+                time.sleep(_SINGLETON_BIND_RETRY_SEC)
+
+    # Fail closed — a true active twin instance is running.
+    msg = (
+        f"singleton FAIL-CLOSED: port 49151 still held after "
+        f"{_SINGLETON_BIND_RETRIES} attempts ({last_err}) — live twin instance; exiting"
+    )
     try:
-        _singleton_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        # CRITICAL HARDENING: Allow immediate local address re-binding
-        _singleton_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        _singleton_socket.bind(("127.0.0.1", 49151))
-        _singleton_socket.listen(1)
-        _singleton_socket_bound = True
-    except OSError:
-        # Fail closed instantly if a true active twin instance is running
-        sys.exit(0)
+        _log_engine(msg)
+    except Exception:
+        pass
+    print(msg, file=sys.stderr)
+    sys.exit(0)
 
 
 _IMMUTABLE_BIND_TARGET_MS = 200
@@ -62,15 +101,104 @@ def _immutable_boot_choreography_enabled() -> bool:
     return non_blocking_boot_enabled()
 
 
+def _start_pre_bind_watchdog() -> None:
+    try:
+        from system.boot.pre_bind_watchdog import start_pre_bind_watchdog
+
+        start_pre_bind_watchdog(port=_api_port())
+    except Exception as exc:
+        _log_engine(f"boot_watchdog: start skipped ({type(exc).__name__})")
+
+
 def _align_desktop_api_port() -> None:
     """Apex Electron shell — force shadow :9090 regardless of NODE_ENV leakage."""
     if os.environ.get("IG_APEX_DESKTOP", "").strip() != "1" and (
         os.environ.get("IG_AGENT_DESKTOP_LAUNCH", "").strip() != "1"
     ):
         return
+    # macOS launcher keeps explicit :8080 — only Apex Electron forces shadow :9090.
+    if os.environ.get("IG_AGENT_FROM_LAUNCHER", "").strip() == "1" or (
+        os.environ.get("LAUNCHER_DESKTOP", "").strip() == "1"
+    ):
+        return
     os.environ["IG_API_PORT"] = str(_DESKTOP_API_PORT)
     os.environ["IG_NODE_PROFILE"] = "shadow"
     os.environ["NODE_ENV"] = "shadow"
+
+
+_boot_milestone_t0: float = 0.0
+
+
+def _boot_milestone(step: str) -> None:
+    global _boot_milestone_t0
+    if _boot_milestone_t0 <= 0:
+        _boot_milestone_t0 = time.monotonic()
+    ms = int((time.monotonic() - _boot_milestone_t0) * 1000)
+    _log_engine(f"boot_milestone: {step} +{ms}ms")
+
+
+def _apply_launcher_desktop_env_early() -> None:
+    if os.environ.get("APP_MODE", "").strip().upper() == "TESTBED":
+        return
+    if os.environ.get("LAUNCHER_DESKTOP", "").strip() == "1" or (
+        os.environ.get("IG_AGENT_FROM_LAUNCHER", "").strip() == "1"
+    ):
+        os.environ.setdefault("IG_AGENT_DESKTOP_LAUNCH", "1")
+        os.environ.pop("IG_APEX_DESKTOP", None)
+
+
+def _force_launcher_non_blocking_boot() -> None:
+    if os.environ.get("LAUNCHER_DESKTOP", "").strip() == "1" or (
+        os.environ.get("IG_AGENT_FROM_LAUNCHER", "").strip() == "1"
+    ) or os.environ.get("IG_AGENT_DESKTOP_LAUNCH", "").strip() == "1":
+        os.environ["IG_NON_BLOCKING_BOOT"] = "1"
+        os.environ.pop("IG_BLOCKING_BOOT", None)
+
+
+def _defer_heavy_pre_bind_work() -> bool:
+    from system.boot.non_blocking_bootstrap import non_blocking_boot_enabled
+
+    if non_blocking_boot_enabled():
+        return True
+    return (
+        os.environ.get("IG_APEX_DESKTOP", "").strip() == "1"
+        or os.environ.get("IG_AGENT_FROM_LAUNCHER", "").strip() == "1"
+        or os.environ.get("LAUNCHER_DESKTOP", "").strip() == "1"
+    )
+
+
+def _run_deferred_desktop_boot(*, boot_context: Any | None = None) -> None:
+    """Heavy boot chores deferred until after API bind on launcher/desktop paths."""
+    _boot_milestone("deferred_desktop_boot_start")
+    try:
+        from system.boot.boot_orchestrator import init_boot_pipeline
+
+        init_boot_pipeline()
+    except Exception as exc:
+        _log_engine(f"deferred_boot: init_boot_pipeline skipped: {type(exc).__name__}")
+    if os.environ.get("IG_APEX_DESKTOP", "").strip() == "1":
+        try:
+            from apex.ipc_bridge import start_ipc_bridge_daemon
+            from apex.microkernel import start_microkernel
+            from execution.atomic_gateway import set_monitoring_mode
+
+            set_monitoring_mode(False)
+            start_ipc_bridge_daemon()
+            start_microkernel(workers_only=True)
+            _log_engine("deferred_boot: Apex IPC bridge + micro-kernel armed")
+        except Exception as exc:
+            _log_engine(f"deferred_boot: Apex bootstrap failed: {type(exc).__name__}: {exc}")
+    _exchange_rollover_emergence_pause()
+    _pre_startup_cleanup()
+    _boot_milestone("deferred_desktop_boot_done")
+
+
+try:
+    from system.boot.desktop_post_bind import register_post_bind_runner
+
+    register_post_bind_runner(_run_deferred_desktop_boot)
+except Exception:
+    pass
 
 
 def _api_port() -> int:
@@ -347,12 +475,31 @@ def _exchange_rollover_emergence_pause() -> None:
     if not in_window:
         return
     try:
+        from system.demo_execution_plane import demo_throughput_active
+
+        if demo_throughput_active():
+            _log_engine(
+                "rollover pause: skipped — demo_throughput_mode "
+                "(order gates use live IG market_status)"
+            )
+            return
+    except Exception:
+        pass
+    try:
         from system.config_loader import ConfigLoader
 
         cfg = ConfigLoader().load()
         lc = cfg.get("live_canary") if hasattr(cfg, "get") else {}
         if isinstance(lc, dict) and lc.get("enabled") and lc.get("skip_rollover_pause"):
             _log_engine("rollover pause: skipped — live_canary.skip_rollover_pause")
+            return
+        ep = cfg.get("entry_protection") if hasattr(cfg, "get") else {}
+        po = ep.get("premium_overnight") if isinstance(ep, dict) else {}
+        if isinstance(po, dict) and po.get("lockdown_permanent"):
+            _log_engine(
+                "rollover pause: skipped — night matrix lockdown "
+                "(broker EDITS_ONLY gates orders at dispatch)"
+            )
             return
     except Exception:
         pass
@@ -577,6 +724,37 @@ def _pre_startup_cleanup() -> None:
     )
 
 
+def _daemon_supervisor_active() -> bool:
+    """True when scripts/daemon_supervisor.sh is alive and owns recovery."""
+    candidates: list[Path] = []
+    data_root = os.environ.get("IG_DATA_ROOT", "").strip()
+    if data_root:
+        candidates.append(Path(data_root) / "supervisor.pid")
+    try:
+        from system.paths import project_root as _proj_root
+
+        candidates.append(_proj_root() / "src" / "data" / "v31-production" / "supervisor.pid")
+    except Exception:
+        pass
+    for pid_file in candidates:
+        try:
+            raw = pid_file.read_text(encoding="utf-8").strip()
+            if raw and raw.isdigit():
+                os.kill(int(raw), 0)
+                return True
+        except (OSError, ValueError):
+            continue
+    try:
+        probe = subprocess.run(
+            ["/usr/bin/pgrep", "-f", "daemon_supervisor.sh"],
+            capture_output=True,
+            timeout=5,
+        )
+        return probe.returncode == 0
+    except Exception:
+        return False
+
+
 def _ensure_watchdog_running() -> None:
     """Start scripts/watchdog.sh when absent — skip if launchd already owns supervision."""
     from system.paths import logs_dir, project_root
@@ -587,6 +765,20 @@ def _ensure_watchdog_running() -> None:
         if launchd_watchdog_active():
             _log_engine(
                 "startup: launchd watchdog active — skipping manual watchdog spawn"
+            )
+            return
+    except Exception:
+        pass
+
+    # Never stack a second supervision layer on top of daemon_supervisor.sh —
+    # dueling supervisors have SIGKILLed healthy booting agents (a watchdog
+    # spawned here saw an unbound port + missing lock mid-boot and reaped the
+    # very process that spawned it).
+    try:
+        if _daemon_supervisor_active():
+            _log_engine(
+                "startup: daemon_supervisor active — skipping watchdog.sh spawn "
+                "(supervisor owns recovery)"
             )
             return
     except Exception:
@@ -838,6 +1030,21 @@ class AgentRuntime:
         self._shutting_down = False
         self._boot_context = boot_context
         self._uvicorn_server: Any | None = None
+        self._boot_degraded = False
+
+    def mark_boot_degraded(self, reason: str) -> None:
+        if self._boot_degraded:
+            return
+        self._boot_degraded = True
+        _log_engine(f"boot_degraded: {reason}")
+        try:
+            from system.system_state import get_system_state
+
+            state = get_system_state()
+            if hasattr(state, "note_boot_degraded"):
+                state.note_boot_degraded(reason)
+        except Exception:
+            pass
 
     def shutdown(self, *, source: str = "runtime") -> None:
         if self._shutting_down:
@@ -1167,6 +1374,7 @@ class AgentRuntime:
         backoff). Main thread blocks only on the API server join.
         """
         from api.server import create_app
+        from system.boot.desktop_post_bind import schedule_desktop_post_bind
         from system.boot.non_blocking_bootstrap import (
             schedule_post_bind_maintenance,
             wait_for_api_port,
@@ -1194,16 +1402,22 @@ class AgentRuntime:
         os.environ.setdefault("PYTHONPATH", str(project_root() / "src"))
         logs_dir().mkdir(parents=True, exist_ok=True)
 
-        app = create_app(
-            watch_snapshot=True,
-            use_boot_pipeline=True,
-            boot_context=self._boot_context,
-        )
+        try:
+            app = create_app(
+                watch_snapshot=True,
+                use_boot_pipeline=True,
+                boot_context=self._boot_context,
+            )
+        except Exception as exc:
+            self.mark_boot_degraded(f"immutable_create_app:{type(exc).__name__}")
+            release_instance_lock()
+            return EXIT_CONFIG
         if not os.environ.get("IG_AGENT_FROM_LAUNCHER"):
             _open_browser_delayed(_dashboard_url())
 
         import uvicorn
 
+        _start_pre_bind_watchdog()
         bind_started = time.monotonic()
         _log_engine(f"immutable_boot: fast-bind API on :{bind_port}")
         config = uvicorn.Config(app, host=_API_HOST, port=bind_port, log_level="info")
@@ -1214,6 +1428,7 @@ class AgentRuntime:
             try:
                 server.run()
             except Exception as exc:
+                self.mark_boot_degraded(f"immutable_uvicorn:{type(exc).__name__}")
                 _log_engine(f"API server stopped — {type(exc).__name__}: {exc}")
 
         api_thread = threading.Thread(
@@ -1221,28 +1436,32 @@ class AgentRuntime:
         )
         api_thread.start()
 
-        if not wait_for_api_port(_API_HOST, bind_port, timeout_sec=5.0):
-            self.shutdown(source="immutable_bind_failed")
-            release_instance_lock()
-            return EXIT_INSTANCE
-
-        bind_ms = int((time.monotonic() - bind_started) * 1000)
-        if bind_ms > _IMMUTABLE_BIND_TARGET_MS:
-            _log_engine(
-                f"immutable_boot: WARN bind exceeded {_IMMUTABLE_BIND_TARGET_MS}ms "
-                f"(actual={bind_ms}ms)"
-            )
+        bind_wait = float(os.environ.get("IG_IMMUTABLE_BIND_WAIT_SEC", "45"))
+        if wait_for_api_port(_API_HOST, bind_port, timeout_sec=bind_wait):
+            bind_ms = int((time.monotonic() - bind_started) * 1000)
+            if bind_ms > _IMMUTABLE_BIND_TARGET_MS:
+                _log_engine(
+                    f"immutable_boot: WARN bind exceeded {_IMMUTABLE_BIND_TARGET_MS}ms "
+                    f"(actual={bind_ms}ms)"
+                )
+            else:
+                _log_engine(
+                    f"immutable_boot: :{bind_port} bound in {bind_ms}ms "
+                    f"(target <{_IMMUTABLE_BIND_TARGET_MS}ms)"
+                )
         else:
             _log_engine(
-                f"immutable_boot: :{bind_port} bound in {bind_ms}ms "
-                f"(target <{_IMMUTABLE_BIND_TARGET_MS}ms)"
+                f"immutable_boot: WARN /api/health not live within {bind_wait:.0f}s "
+                f"— continuing (G2/G3 hydration still running in background)"
             )
 
         schedule_post_bind_maintenance(
             boot_context=self._boot_context,
-            purge_bytecode=False,
-            install_kernel=False,
+            purge_bytecode=_defer_heavy_pre_bind_work(),
+            install_kernel=_defer_heavy_pre_bind_work(),
         )
+        if _defer_heavy_pre_bind_work():
+            schedule_desktop_post_bind(boot_context=self._boot_context)
         if not _is_test_harness_mode():
             threading.Thread(
                 target=_ensure_watchdog_running,
@@ -1296,24 +1515,33 @@ class AgentRuntime:
             if not _is_test_harness_mode():
                 _ensure_watchdog_running()
 
-            app = create_app(
-                watch_snapshot=True,
-                use_boot_pipeline=True,
-                boot_context=self._boot_context,
-            )
+            try:
+                app = create_app(
+                    watch_snapshot=True,
+                    use_boot_pipeline=True,
+                    boot_context=self._boot_context,
+                )
+            except Exception as exc:
+                self.mark_boot_degraded(f"create_app:{type(exc).__name__}")
+                raise
             if not os.environ.get("IG_AGENT_FROM_LAUNCHER"):
                 _open_browser_delayed(_dashboard_url())
 
             import uvicorn
 
             bind_port = _api_port()
+            _start_pre_bind_watchdog()
             _log_engine(f"API server: blocking legacy bind on port {bind_port}")
             config = uvicorn.Config(
                 app, host=_API_HOST, port=bind_port, log_level="info"
             )
             server = uvicorn.Server(config)
             self._uvicorn_server = server
-            server.run()
+            try:
+                server.run()
+            except Exception as exc:
+                self.mark_boot_degraded(f"uvicorn:{type(exc).__name__}")
+                raise
             return EXIT_OK
         finally:
             self.shutdown(source="normal")
@@ -1334,10 +1562,26 @@ def _install_signal_handlers(runtime: AgentRuntime) -> None:
 
 
 def main() -> None:
+    global _boot_milestone_t0
+    os.environ.setdefault("IG_AGENT_IN_PROCESS", "1")
+    # ~100 runtime threads contend for the GIL; at the default 5ms switch
+    # interval a 100ms Yahoo HTTPS fetch stretched to 2-3s inside this process
+    # (measured), tripping every feed timeout and starving the market data hub.
+    # 1ms switching restores sub-second socket reads for the feed threads.
+    sys.setswitchinterval(0.001)
+    try:
+        from system.global_exception_handler import install_global_exception_handlers
+
+        install_global_exception_handlers()
+    except Exception:
+        pass
+    _boot_milestone_t0 = time.monotonic()
+    _apply_launcher_desktop_env_early()
     # Step 0 — evict stale port listeners + SHM before singleton lock or heavy boot
     from system.identity.process_orchestrator import os_surface_cleanse
 
     os_surface_cleanse()
+    _boot_milestone("os_surface_cleanse")
     # Step 1 — kernel singleton lock (SO_REUSEADDR for TIME_WAIT recovery)
     enforce_absolute_socket_singleton()
     os.environ.setdefault("IG_NON_BLOCKING_BOOT", "1")
@@ -1435,6 +1679,8 @@ def main() -> None:
     )
     load_dotenv(override=_from_launcher)
     prepare_boot_env()
+    _force_launcher_non_blocking_boot()
+    _boot_milestone("dotenv_prepared")
 
     from runtime.app_mode import apply_app_mode_to_environ
     from runtime.session_lock import acquire_session_lock
@@ -1453,7 +1699,12 @@ def main() -> None:
         _log_engine(f"session lock refused: {lock_msg}")
         sys.exit(EXIT_INSTANCE)
 
+    _boot_milestone("session_lock")
+    _start_pre_bind_watchdog()
+
     from system.boot.non_blocking_bootstrap import non_blocking_boot_enabled
+
+    _defer_pre_bind = _defer_heavy_pre_bind_work()
 
     try:
         from system.agent_execution_mode import ensure_production_execution_armed_on_boot
@@ -1462,8 +1713,10 @@ def main() -> None:
     except Exception as exc:
         _log_engine(f"production execution arming failed: {type(exc).__name__}: {exc}")
 
+    _boot_milestone("execution_armed")
+
     if os.environ.get("IG_ORCHESTRATOR_CHILD", "").strip() != "1" or isolated_track is not None:
-        if not non_blocking_boot_enabled():
+        if not non_blocking_boot_enabled() and not _defer_pre_bind:
             try:
                 from system.guard.kernel_interceptor import install_kernel_interceptor
 
@@ -1483,12 +1736,15 @@ def main() -> None:
     apply_runtime_mode_to_environ()
     profile = apply_node_profile_to_environ()
     stamp_process_boot_start()
-    try:
-        from system.boot.boot_orchestrator import init_boot_pipeline
+    _boot_milestone("profile_stamped")
 
-        init_boot_pipeline()
-    except Exception:
-        pass
+    if not _defer_pre_bind:
+        try:
+            from system.boot.boot_orchestrator import init_boot_pipeline
+
+            init_boot_pipeline()
+        except Exception:
+            pass
 
     from system.app_identity import APP_DISPLAY_NAME, APP_VERSION_LABEL
     from system.boot.exceptions import Gate1FatalError
@@ -1507,12 +1763,15 @@ def main() -> None:
         f"(node={profile.kind} api=:{profile.api_port}) ==="
     )
     if not _harness_entry and not _daemon_entry:
-        _exchange_rollover_emergence_pause()
-        if not non_blocking_boot_enabled():
-            _purge_workspace_bytecode()
+        if not _defer_pre_bind:
+            _exchange_rollover_emergence_pause()
+            if not non_blocking_boot_enabled():
+                _purge_workspace_bytecode()
+            else:
+                _log_engine("non_blocking_boot: bytecode purge deferred to post-bind")
         else:
-            _log_engine("non_blocking_boot: bytecode purge deferred to post-bind")
-    if _desktop_fast_bind:
+            _log_engine("non_blocking_boot: rollover/purge/startup cleanup deferred to post-bind")
+    if _desktop_fast_bind and not _defer_pre_bind:
         try:
             from apex.ipc_bridge import start_ipc_bridge_daemon
             from apex.microkernel import start_microkernel
@@ -1525,10 +1784,13 @@ def main() -> None:
         except Exception as exc:
             _log_engine(f"Apex desktop bootstrap failed: {type(exc).__name__}: {exc}")
 
-    _pre_startup_cleanup()
+    if not _defer_pre_bind:
+        _pre_startup_cleanup()
+
+    _boot_milestone("pre_runtime")
 
     boot_ctx = None
-    if _desktop_fast_bind or non_blocking_boot_enabled():
+    if _desktop_fast_bind or non_blocking_boot_enabled() or _defer_pre_bind:
         _log_engine(
             "Non-blocking boot: deferring Gate1 to post-bind lifespan (fast API bind)"
         )

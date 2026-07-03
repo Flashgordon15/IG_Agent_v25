@@ -94,6 +94,12 @@ def reset_app_mode_for_tests() -> None:
     global _MODE, _SHIM_WARNED
     _MODE = None
     _SHIM_WARNED = False
+    try:
+        from runtime.session_identity import reset_session_identity_cache_for_tests
+
+        reset_session_identity_cache_for_tests()
+    except Exception:
+        pass
 
 
 def live_armed() -> bool:

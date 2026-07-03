@@ -33,6 +33,11 @@ class MacroSnapshot:
     us10y_volatility: float = 0.0
     cross_correlation: float = 0.0
     feature_weights: tuple[float, ...] = field(default_factory=lambda: _DEFAULT_WEIGHTS)
+    sentiment_long_pct: float = 50.0
+    sentiment_delta_5m: float = 0.0
+    sentiment_delta_30m: float = 0.0
+    sentiment_contrarian: float = 0.0
+    news_countdown_norm: float = 0.0
     updated_at: float = 0.0
     source: str = "idle"
 
@@ -103,6 +108,28 @@ def collect_macro_snapshot() -> MacroSnapshot:
     if dxy_mom != 0.0 and us10y_delta != 0.0:
         cross = max(-1.0, min(1.0, -dxy_mom * us10y_delta * 40.0))
     weights = _compute_feature_weights(dxy_mom, dxy_vol, us10y_delta, us10y_vol, cross)
+    sent_long = 50.0
+    sent_d5 = 0.0
+    sent_d30 = 0.0
+    sent_contra = 0.0
+    news_norm = 0.0
+    try:
+        from trading.sentiment_momentum import sentiment_momentum_features
+
+        sfeats = sentiment_momentum_features("CS.D.EURUSD.CFD.IP")
+        sent_long = float(sfeats.get("long_pct") or 50.0)
+        sent_d5 = float(sfeats.get("delta_5m") or 0.0)
+        sent_d30 = float(sfeats.get("delta_30m") or 0.0)
+        sent_contra = float(sfeats.get("contrarian_pressure") or 0.0)
+    except Exception:
+        pass
+    try:
+        from system.calendar_gate import news_proximity_features
+
+        nfeats = news_proximity_features("CS.D.EURUSD.CFD.IP")
+        news_norm = float(nfeats.get("countdown_norm") or 0.0)
+    except Exception:
+        pass
     snap = MacroSnapshot(
         dxy_level=round(dxy_level, 4),
         dxy_momentum=round(dxy_mom, 6),
@@ -112,6 +139,11 @@ def collect_macro_snapshot() -> MacroSnapshot:
         us10y_volatility=round(us10y_vol, 6),
         cross_correlation=round(cross, 4),
         feature_weights=weights,
+        sentiment_long_pct=round(sent_long, 2),
+        sentiment_delta_5m=round(sent_d5, 6),
+        sentiment_delta_30m=round(sent_d30, 6),
+        sentiment_contrarian=round(sent_contra, 4),
+        news_countdown_norm=round(news_norm, 4),
         updated_at=time.time(),
         source="macro_radar",
     )
@@ -172,6 +204,11 @@ def macro_radar_telemetry() -> dict[str, Any]:
         "us10y_delta": snap.us10y_delta,
         "cross_correlation": snap.cross_correlation,
         "feature_weights": list(snap.feature_weights),
+        "sentiment_long_pct": snap.sentiment_long_pct,
+        "sentiment_delta_5m": snap.sentiment_delta_5m,
+        "sentiment_delta_30m": snap.sentiment_delta_30m,
+        "sentiment_contrarian": snap.sentiment_contrarian,
+        "news_countdown_norm": snap.news_countdown_norm,
         "updated_at": snap.updated_at,
         "source": snap.source,
     }

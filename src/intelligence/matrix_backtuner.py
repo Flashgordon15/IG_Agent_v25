@@ -53,6 +53,9 @@ DEFAULT_EPIC_STOP: dict[str, float] = {
 
 SWEEP_STEPS = 101  # -5.0% … +5.0% of base floor in 0.1% increments
 MAX_FORWARD_TICKS = 600
+ENTRY_MATCH_WINDOW_TICKS = 120
+HOLDOUT_MIN_RESOLVED = 40
+HOLDOUT_TRAIN_FRACTION = 0.7
 REPORT_FILENAME = "matrix_backtuner_report.json"
 
 
@@ -157,6 +160,9 @@ class EpicTape:
     mids: np.ndarray
     bids: np.ndarray
     offers: np.ndarray
+    timestamps: np.ndarray = field(
+        default_factory=lambda: np.zeros(0, dtype=np.float64)
+    )
 
 
 def load_archive_tapes(archive_path: Path) -> dict[str, EpicTape]:
@@ -173,6 +179,7 @@ def load_archive_tapes(archive_path: Path) -> dict[str, EpicTape]:
             mids=state.mids.copy(),
             bids=np.frombuffer(state.bids, dtype=np.float64).copy(),
             offers=np.frombuffer(state.offers, dtype=np.float64).copy(),
+            timestamps=np.frombuffer(state.timestamps, dtype=np.float64).copy(),
         )
     return tapes
 
@@ -217,17 +224,104 @@ class EpicFeatureCache:
     confidence: np.ndarray
 
 
+def _vectorized_rsi(mids: np.ndarray, period: int) -> np.ndarray:
+    n = mids.size
+    out = np.full(n, 50.0, dtype=np.float64)
+    if n <= period:
+        return out
+    deltas = np.diff(mids)
+    gains = np.clip(deltas, 0.0, None)
+    losses = np.clip(-deltas, 0.0, None)
+    cg = np.concatenate(([0.0], np.cumsum(gains)))
+    cl = np.concatenate(([0.0], np.cumsum(losses)))
+    idx = np.arange(period, n)
+    span = float(period - 1)
+    avg_gain = (cg[idx] - cg[idx - period + 1]) / span
+    avg_loss = (cl[idx] - cl[idx - period + 1]) / span
+    rsi = np.where(
+        avg_loss <= 1e-12,
+        np.where(avg_gain > 0.0, 100.0, 50.0),
+        100.0 - (100.0 / (1.0 + avg_gain / np.maximum(avg_loss, 1e-300))),
+    )
+    out[period:] = rsi
+    return out
+
+
+def _vectorized_atr(bids: np.ndarray, offers: np.ndarray, period: int) -> np.ndarray:
+    n = bids.size
+    out = np.zeros(n, dtype=np.float64)
+    if n < 2:
+        return out
+    high = np.maximum(bids, offers)
+    low = np.minimum(bids, offers)
+    prev_close = (bids[:-1] + offers[:-1]) * 0.5
+    tr = np.maximum(
+        high[1:] - low[1:],
+        np.maximum(np.abs(high[1:] - prev_close), np.abs(low[1:] - prev_close)),
+    )
+    tr_full = np.zeros(n, dtype=np.float64)
+    tr_full[1:] = tr
+    ct = np.cumsum(tr_full)
+    idx = np.arange(1, n)
+    start = np.maximum(1, idx - period + 1)
+    counts = (idx - start + 1).astype(np.float64)
+    out[1:] = (ct[idx] - ct[start - 1]) / counts
+    return out
+
+
 def _build_epic_feature_cache(tape: EpicTape, *, stop_points: float) -> EpicFeatureCache:
+    from system.ml.cold_start_compiler import _ATR_PERIOD, _RSI_PERIOD
+
     n = tape.mids.size
-    rsi_vals = np.empty(n, dtype=np.float64)
-    atr_vals = np.empty(n, dtype=np.float64)
-    conf_vals = np.empty(n, dtype=np.float64)
-    for idx in range(n):
-        conf, rsi, atr = _archive_features_at(tape, idx, stop_points=stop_points)
-        rsi_vals[idx] = rsi
-        atr_vals[idx] = atr
-        conf_vals[idx] = conf
+    if n == 0:
+        empty = np.zeros(0, dtype=np.float64)
+        return EpicFeatureCache(rsi=empty, atr=empty.copy(), confidence=empty.copy())
+
+    rsi_vals = _vectorized_rsi(tape.mids, _RSI_PERIOD)
+    atr_vals = _vectorized_atr(tape.bids, tape.offers, _ATR_PERIOD)
+
+    momentum = np.zeros(n, dtype=np.float64)
+    if n > 1:
+        prev = tape.mids[:-1]
+        safe_prev = np.where(prev > 0.0, prev, 1.0)
+        momentum[1:] = np.where(prev > 0.0, (tape.mids[1:] - prev) / safe_prev, 0.0)
+
+    atr_ratio = atr_vals / max(1.0, float(stop_points))
+    rsi_component = np.clip(rsi_vals, 0.0, 100.0)
+    atr_component = np.clip(50.0 + (atr_ratio - 1.0) * 25.0, 0.0, 100.0)
+    momentum_component = np.clip(50.0 + momentum * 5000.0, 0.0, 100.0)
+    conf_vals = (
+        0.45 * rsi_component + 0.30 * atr_component + 0.25 * momentum_component
+    )
     return EpicFeatureCache(rsi=rsi_vals, atr=atr_vals, confidence=conf_vals)
+
+
+def _parse_signal_epoch(ts: str) -> float | None:
+    text = str(ts or "").strip()
+    if not text:
+        return None
+    try:
+        from simulation.historical_replayer import parse_timestamp
+
+        return float(parse_timestamp(text))
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def _anchor_idx_for_timestamp(tape: EpicTape, ts_epoch: float) -> int | None:
+    stamps = tape.timestamps
+    if stamps.size == 0 or stamps.size != tape.mids.size:
+        return None
+    if ts_epoch < float(stamps[0]) or ts_epoch > float(stamps[-1]):
+        return None
+    pos = int(np.searchsorted(stamps, ts_epoch))
+    if pos >= stamps.size:
+        return stamps.size - 1
+    if pos == 0:
+        return 0
+    before = float(stamps[pos - 1])
+    after = float(stamps[pos])
+    return pos - 1 if (ts_epoch - before) <= (after - ts_epoch) else pos
 
 
 def _match_archive_entry_idx_cached(
@@ -238,11 +332,20 @@ def _match_archive_entry_idx_cached(
     target_atr: float,
     max_forward: int = MAX_FORWARD_TICKS,
     stride: int = 8,
-) -> int:
+    anchor_idx: int | None = None,
+    anchor_window: int = ENTRY_MATCH_WINDOW_TICKS,
+) -> int | None:
     limit = max(32, tape.mids.size - max_forward - 1)
     if limit <= 32:
-        return 16
-    indices = np.arange(32, limit, stride, dtype=np.int64)
+        return None if anchor_idx is not None else 16
+    if anchor_idx is not None:
+        lo = max(32, int(anchor_idx) - int(anchor_window))
+        hi = min(limit, int(anchor_idx) + int(anchor_window) + 1)
+        if lo >= hi:
+            return None
+        indices = np.arange(lo, hi, dtype=np.int64)
+    else:
+        indices = np.arange(32, limit, stride, dtype=np.int64)
     scores = np.abs(cache.rsi[indices] - float(target_rsi)) + np.abs(
         cache.atr[indices] - max(0.0, float(target_atr))
     ) * 2.0
@@ -430,15 +533,15 @@ def resolve_first_touch_outcome(
     for i in range(entry_idx + 1, end):
         mid = float(mids[i])
         if side == "BUY":
-            if mid >= entry + tp_pts:
-                return "true_win"
             if mid <= entry - stop_pts:
                 return "true_loss"
-        else:
-            if mid <= entry - tp_pts:
+            if mid >= entry + tp_pts:
                 return "true_win"
+        else:
             if mid >= entry + stop_pts:
                 return "true_loss"
+            if mid <= entry - tp_pts:
+                return "true_win"
     return "unresolved"
 
 
@@ -474,13 +577,16 @@ def load_shadow_signals(
     weights: ModelWeights,
     archive_tapes: dict[str, EpicTape],
     reward_multiple: float,
+    stats: dict[str, int] | None = None,
 ) -> list[LabeledSignal]:
     if not shadow_path.is_file():
         raise FileNotFoundError(f"shadow log missing: {shadow_path}")
 
     ledger_snaps = _load_gate_snapshots_by_ts()
     labeled: list[LabeledSignal] = []
-    feature_cache: dict[str, EpicFeatureCache] = {}
+    feature_cache: dict[tuple[str, float], EpicFeatureCache] = {}
+    if stats is not None:
+        stats.setdefault("skipped_unanchored", 0)
 
     with shadow_path.open("r", encoding="utf-8") as fh:
         for line in fh:
@@ -510,19 +616,36 @@ def load_shadow_signals(
             atr = float(row.get("atr") or 0)
             ts = str(row.get("timestamp") or "")
 
+            ts_epoch = _parse_signal_epoch(ts)
+            anchor_idx = (
+                _anchor_idx_for_timestamp(tape, ts_epoch)
+                if ts_epoch is not None
+                else None
+            )
+            if anchor_idx is None:
+                if stats is not None:
+                    stats["skipped_unanchored"] += 1
+                continue
+
             stop_pts, tp_pts = _stop_and_tp(
                 epic=epic, atr=atr, cfg=cfg, reward_multiple=reward_multiple
             )
-            cache = feature_cache.get(epic)
+            cache_key = (epic, round(stop_pts, 4))
+            cache = feature_cache.get(cache_key)
             if cache is None:
                 cache = _build_epic_feature_cache(tape, stop_points=stop_pts)
-                feature_cache[epic] = cache
+                feature_cache[cache_key] = cache
             entry_idx = _match_archive_entry_idx_cached(
                 cache,
                 tape,
                 target_rsi=rsi,
                 target_atr=atr,
+                anchor_idx=anchor_idx,
             )
+            if entry_idx is None:
+                if stats is not None:
+                    stats["skipped_unanchored"] += 1
+                continue
             archive_conf, archive_rsi, archive_atr = _archive_features_at(
                 tape, entry_idx, stop_points=stop_pts
             )
@@ -608,6 +731,13 @@ def _expanded_floor_grid(
     return np.linspace(lo, hi, steps)
 
 
+def _suffix_cumsum_3d(hist: np.ndarray) -> np.ndarray:
+    out = hist
+    for axis in range(3):
+        out = np.flip(np.cumsum(np.flip(out, axis), axis=axis), axis)
+    return out
+
+
 def _evaluate_sweep_grid(
     *,
     conf: np.ndarray,
@@ -620,61 +750,80 @@ def _evaluate_sweep_grid(
     fit_floors: np.ndarray,
     ml_floors: np.ndarray,
 ) -> tuple[SweepResult | None, list[SweepResult]]:
-    best: SweepResult | None = None
-    top: list[SweepResult] = []
+    cf = np.sort(np.asarray(conf_floors, dtype=np.float64))
+    ff = np.sort(np.asarray(fit_floors, dtype=np.float64))
+    mf = np.sort(np.asarray(ml_floors, dtype=np.float64))
+    if cf.size == 0 or ff.size == 0 or mf.size == 0:
+        return None, []
 
-    for conf_floor in conf_floors:
-        conf_pass = conf >= conf_floor
-        for fit_floor in fit_floors:
-            fit_pass = fitness >= fit_floor
-            layer = conf_pass & fit_pass & resolved
-            for ml_floor in ml_floors:
-                sel = layer & (ml >= ml_floor)
-                n_sel = int(sel.sum())
-                if n_sel == 0:
-                    continue
-                n_loss = int((sel & is_loss).sum())
-                if n_loss > 0:
-                    continue
-                n_win = int((sel & is_win).sum())
-                score = float(n_win) - 0.001 * n_sel
-                candidate = SweepResult(
-                    signal_confidence_floor_pct=round(float(conf_floor), 3),
-                    environment_fitness_floor_pct=round(float(fit_floor), 3),
-                    ml_veto_floor_probability=round(float(ml_floor), 4),
-                    true_wins_included=n_win,
-                    true_losses_included=n_loss,
-                    signals_selected=n_sel,
-                    score=score,
-                )
-                top.append(candidate)
-                if best is None or candidate.score > best.score:
-                    best = candidate
-                elif (
-                    candidate.score == best.score
-                    and candidate.signals_selected > best.signals_selected
-                ):
-                    best = candidate
+    res_idx = np.flatnonzero(resolved)
+    if res_idx.size == 0:
+        return None, []
 
-    top.sort(key=lambda r: (-r.score, -r.true_wins_included, r.signals_selected))
-    return best, top[:25]
+    # bin index = number of floors the signal passes on that axis
+    ic = np.searchsorted(cf, conf[res_idx], side="right")
+    jf = np.searchsorted(ff, fitness[res_idx], side="right")
+    km = np.searchsorted(mf, ml[res_idx], side="right")
+
+    shape = (cf.size + 1, ff.size + 1, mf.size + 1)
+    hist_sel = np.zeros(shape, dtype=np.int64)
+    hist_win = np.zeros(shape, dtype=np.int64)
+    hist_loss = np.zeros(shape, dtype=np.int64)
+    np.add.at(hist_sel, (ic, jf, km), 1)
+    np.add.at(hist_win, (ic, jf, km), is_win[res_idx].astype(np.int64))
+    np.add.at(hist_loss, (ic, jf, km), is_loss[res_idx].astype(np.int64))
+
+    # combo (a, b, c) selects signals whose bin index exceeds the floor index on every axis
+    n_sel3 = _suffix_cumsum_3d(hist_sel)[1:, 1:, 1:]
+    n_win3 = _suffix_cumsum_3d(hist_win)[1:, 1:, 1:]
+    n_loss3 = _suffix_cumsum_3d(hist_loss)[1:, 1:, 1:]
+
+    valid = (n_sel3 > 0) & (n_loss3 == 0)
+    if not bool(valid.any()):
+        return None, []
+
+    score3 = n_win3.astype(np.float64) - 0.001 * n_sel3.astype(np.float64)
+    score_masked = np.where(valid, score3, -np.inf)
+    max_score = float(score_masked.max())
+    tie = valid & (score_masked == max_score)
+    best_flat = int(np.argmax(np.where(tie, n_sel3, -1)))
+    a, b, c = np.unravel_index(best_flat, n_sel3.shape)
+
+    def _result_at(ai: int, bi: int, ci: int) -> SweepResult:
+        return SweepResult(
+            signal_confidence_floor_pct=round(float(cf[ai]), 3),
+            environment_fitness_floor_pct=round(float(ff[bi]), 3),
+            ml_veto_floor_probability=round(float(mf[ci]), 4),
+            true_wins_included=int(n_win3[ai, bi, ci]),
+            true_losses_included=int(n_loss3[ai, bi, ci]),
+            signals_selected=int(n_sel3[ai, bi, ci]),
+            score=float(score3[ai, bi, ci]),
+        )
+
+    best = _result_at(int(a), int(b), int(c))
+
+    va, vb, vc = np.nonzero(valid)
+    order = np.lexsort((n_sel3[valid], -n_win3[valid], -score3[valid]))[:25]
+    top = [_result_at(int(va[i]), int(vb[i]), int(vc[i])) for i in order]
+    return best, top
 
 
-def sweep_threshold_matrix(
+def _signal_sort_epoch(signal: LabeledSignal) -> float:
+    epoch = _parse_signal_epoch(signal.timestamp)
+    return epoch if epoch is not None else 0.0
+
+
+def _sweep_single_set(
     signals: list[LabeledSignal],
     bases: FloorBases,
-) -> tuple[SweepResult | None, list[SweepResult], dict[str, Any]]:
-    if not signals:
-        return None, [], {"phase": "none"}
-
+    meta: dict[str, Any],
+) -> tuple[SweepResult | None, list[SweepResult]]:
     conf = np.array([s.confidence for s in signals], dtype=np.float64)
     fitness = np.array([s.fitness for s in signals], dtype=np.float64)
     ml = np.array([s.ml_probability for s in signals], dtype=np.float64)
     is_win = np.array([s.outcome == "true_win" for s in signals], dtype=bool)
     is_loss = np.array([s.outcome == "true_loss" for s in signals], dtype=bool)
     resolved = is_win | is_loss
-
-    meta: dict[str, Any] = {"phases": []}
 
     best, top = _evaluate_sweep_grid(
         conf=conf,
@@ -720,6 +869,60 @@ def sweep_threshold_matrix(
     else:
         meta["phase_used"] = "config_local"
 
+    return best, top
+
+
+def _holdout_metrics(
+    holdout: list[LabeledSignal],
+    best: SweepResult,
+) -> dict[str, int]:
+    conf = np.array([s.confidence for s in holdout], dtype=np.float64)
+    fitness = np.array([s.fitness for s in holdout], dtype=np.float64)
+    ml = np.array([s.ml_probability for s in holdout], dtype=np.float64)
+    is_win = np.array([s.outcome == "true_win" for s in holdout], dtype=bool)
+    is_loss = np.array([s.outcome == "true_loss" for s in holdout], dtype=bool)
+    sel = (
+        (conf >= best.signal_confidence_floor_pct)
+        & (fitness >= best.environment_fitness_floor_pct)
+        & (ml >= best.ml_veto_floor_probability)
+    )
+    return {
+        "holdout_n": int(sel.sum()),
+        "holdout_wins": int((sel & is_win).sum()),
+        "holdout_losses": int((sel & is_loss).sum()),
+    }
+
+
+def sweep_threshold_matrix(
+    signals: list[LabeledSignal],
+    bases: FloorBases,
+) -> tuple[SweepResult | None, list[SweepResult], dict[str, Any]]:
+    if not signals:
+        return None, [], {"phase": "none"}
+
+    meta: dict[str, Any] = {"phases": []}
+
+    resolved_signals = sorted(
+        (s for s in signals if s.outcome in ("true_win", "true_loss")),
+        key=_signal_sort_epoch,
+    )
+    n_resolved = len(resolved_signals)
+
+    if n_resolved < HOLDOUT_MIN_RESOLVED:
+        meta["holdout"] = False
+        best, top = _sweep_single_set(signals, bases, meta)
+        return best, top, meta
+
+    split = int(n_resolved * HOLDOUT_TRAIN_FRACTION)
+    train = resolved_signals[:split]
+    holdout = resolved_signals[split:]
+
+    best, top = _sweep_single_set(train, bases, meta)
+    meta["holdout"] = True
+    meta["train_n"] = len(train)
+    meta["holdout_pool_n"] = len(holdout)
+    if best is not None:
+        meta.update(_holdout_metrics(holdout, best))
     return best, top, meta
 
 
@@ -857,12 +1060,14 @@ def run_matrix_backtuner(
     weights = _load_model_weights()
 
     archive_tapes = load_archive_tapes(archive)
+    load_stats: dict[str, int] = {}
     signals = load_shadow_signals(
         shadow,
         cfg=cfg,
         weights=weights,
         archive_tapes=archive_tapes,
         reward_multiple=reward_multiple,
+        stats=load_stats,
     )
 
     wins = sum(1 for s in signals if s.outcome == "true_win")
@@ -891,9 +1096,18 @@ def run_matrix_backtuner(
             "fallback": "P5–P95 archive-matched metric expansion when config-local finds no zero-loss set",
         },
         "sweep_meta": sweep_meta,
+        "skipped_unanchored": int(load_stats.get("skipped_unanchored", 0)),
+        "entry_match_window_ticks": ENTRY_MATCH_WINDOW_TICKS,
+        "holdout": bool(sweep_meta.get("holdout", False)),
         "best_candidate": asdict(best) if best else None,
         "top_candidates": [asdict(c) for c in top_candidates],
     }
+    if report["holdout"]:
+        for key in ("holdout_n", "holdout_wins", "holdout_losses"):
+            if key in sweep_meta:
+                report[key] = sweep_meta[key]
+                if report["best_candidate"] is not None:
+                    report["best_candidate"][key] = sweep_meta[key]
 
     promotion: dict[str, Any] | None = None
     if best is not None and promote:

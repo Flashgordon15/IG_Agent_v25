@@ -45,6 +45,13 @@
     .gate-uncouple { color: #00f5ff; text-shadow: 0 0 6px #00f5ff66; }
     .gate-muted { color: #94a3b8; }
     .neon-text-amber { color: #ffb020; text-shadow: 0 0 8px #ffb02088; }
+    .ic-gate { width: 2.4rem; height: 2.4rem; border-radius: 0.5rem; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; border: 1px solid rgba(100,116,139,0.4); }
+    .ic-gate-green { background: rgba(57,255,20,0.12); border-color: #39ff14; color: #39ff14; box-shadow: 0 0 10px #39ff1433; }
+    .ic-gate-amber { background: rgba(251,191,36,0.12); border-color: #fbbf24; color: #fbbf24; }
+    .ic-gate-red { background: rgba(248,113,113,0.12); border-color: #f87171; color: #f87171; }
+    .ic-gate-grey { background: rgba(30,41,59,0.5); color: #64748b; }
+    .ready-pill-ready { background: rgba(57,255,20,0.15); border: 1px solid #39ff14; color: #39ff14; animation: pulseNeon 1.4s ease-in-out infinite; }
+    .ready-pill-hold { background: rgba(248,113,113,0.12); border: 1px solid #f87171; color: #f87171; }
   </style>
 </head>
 <body class="h-full font-mono text-slate-200 min-h-screen">
@@ -56,6 +63,7 @@
       <div>
         <h1 class="text-xs tracking-[0.35em] uppercase text-slate-500">IG Agent v31 · Quant Cockpit</h1>
         <p id="header-status" class="text-[11px] text-neon-cyan mt-1">syncing…</p>
+        <p id="feed-status-line" class="text-[10px] text-slate-400 mt-0.5 font-mono">Data feeds: …</p>
       </div>
       <div id="core-b-badge" class="hidden px-4 py-2 rounded-lg border border-neon-cyan/60 bg-neon-cyan/10 text-neon-cyan text-xs font-bold tracking-widest badge-scalper-active">
         ⚡ CORE_B: SCALPER_ACTIVE
@@ -71,12 +79,72 @@
       </div>
     </header>
 
+    <!-- Iron Cage readiness splash -->
+    <div id="iron-cage-banner" class="glass rounded-xl p-3 mb-4 border border-neon-cyan/25">
+      <div class="flex flex-wrap items-center justify-between gap-3 mb-3">
+        <div>
+          <div class="text-[9px] uppercase tracking-[0.3em] text-slate-500">Iron Cage Readiness</div>
+          <div id="iron-cage-blockers" class="text-[10px] text-amber-400 mt-1 font-mono truncate max-w-xl">booting…</div>
+        </div>
+        <div id="ready-pill" class="ready-pill-hold px-4 py-2 rounded-lg text-xs font-bold tracking-widest">NOT READY</div>
+      </div>
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-3 text-[10px]">
+        <div>
+          <div class="text-slate-500 uppercase tracking-wider mb-2">Boot Gates G1–G5</div>
+          <div id="iron-cage-gates" class="flex flex-wrap gap-2"></div>
+        </div>
+        <div>
+          <div class="text-slate-500 uppercase tracking-wider mb-2">Data &amp; Execution</div>
+          <div id="iron-cage-feed-exec" class="font-mono space-y-1 text-slate-300">—</div>
+        </div>
+        <div>
+          <div class="text-slate-500 uppercase tracking-wider mb-2">Subsystem Matrix</div>
+          <div id="iron-cage-subsystems" class="flex flex-wrap gap-1.5"></div>
+        </div>
+      </div>
+    </div>
+
     <div id="stacked-lock-banner" class="mb-4 px-4 py-3 rounded-xl border border-neon-cyan/50 bg-neon-cyan/10 text-center text-sm font-bold tracking-wide badge-scalper-active">
       🏛️ <span id="stack-mode-label">STACKED DUAL-ASSET LOCK</span>: <span id="stack-top-label" class="neon-text-cyan">Wall Street</span> + <span id="stack-bottom-label" class="neon-text-amber">Gold</span> <span id="stack-mode-detail" class="text-slate-400">[PARALLEL TRACKS]</span>
       <div id="rotation-telemetry" class="text-[10px] text-slate-500 mt-1 font-mono font-normal tracking-normal"></div>
     </div>
     <div id="failover-banner" class="hidden mb-4 px-4 py-3 rounded-xl border border-neon-green/50 bg-neon-green/10 text-center text-sm font-bold tracking-wide">
       ⚡ FOREX FAILOVER LOCK · <span class="neon-text-green">EUR/USD</span> TOP · <span class="neon-text-cyan">GBP/USD</span> BOTTOM · ML SOVEREIGNTY ACTIVE
+    </div>
+
+    <!-- Analytics panels — v31 multimarket / rotation / quality -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4 mb-4">
+      <div class="glass rounded-xl p-3 lg:col-span-2">
+        <div class="text-[10px] uppercase tracking-widest text-neon-cyan mb-2">Multi-Market Evaluation</div>
+        <div id="multimarket-grid" class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-2 text-[10px] font-mono">
+          <div class="text-slate-600 col-span-full">loading markets…</div>
+        </div>
+      </div>
+      <div class="glass rounded-xl p-3">
+        <div class="text-[10px] uppercase tracking-widest text-amber-400 mb-2">Rotation Intelligence</div>
+        <div id="rotation-panel" class="text-[10px] font-mono space-y-1 text-slate-400">—</div>
+        <div id="rotation-history" class="mt-2 text-[9px] text-slate-500 max-h-24 overflow-y-auto">—</div>
+      </div>
+      <div class="glass rounded-xl p-3">
+        <div class="text-[10px] uppercase tracking-widest text-neon-green mb-2">P&amp;L &amp; Risk</div>
+        <div id="pnl-risk-panel" class="text-[11px] font-mono space-y-1">—</div>
+      </div>
+      <div class="glass rounded-xl p-3">
+        <div class="text-[10px] uppercase tracking-widest text-neon-pink mb-2">Trade Quality</div>
+        <div id="trade-quality-panel" class="text-[11px] font-mono space-y-1">—</div>
+      </div>
+      <div class="glass rounded-xl p-3">
+        <div class="text-[10px] uppercase tracking-widest text-slate-400 mb-2">Lifecycle Pipeline</div>
+        <div id="lifecycle-panel" class="text-[10px] font-mono space-y-1 max-h-40 overflow-y-auto">—</div>
+      </div>
+      <div class="glass rounded-xl p-3">
+        <div class="text-[10px] uppercase tracking-widest text-neon-cyan mb-2">Regime Switching</div>
+        <div id="regime-panel" class="text-[10px] font-mono space-y-1 max-h-40 overflow-y-auto">—</div>
+      </div>
+      <div class="glass rounded-xl p-3">
+        <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">System Health Matrix</div>
+        <div id="system-health-panel" class="text-[10px] font-mono space-y-1">—</div>
+      </div>
     </div>
 
     <!-- Stacked neon tick charts -->
@@ -459,6 +527,244 @@
       return '£' + Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     }
 
+    function icGateClass(color) {
+      const c = String(color || 'grey').toLowerCase();
+      return 'ic-gate ic-gate-' + (c === 'green' || c === 'amber' || c === 'red' ? c : 'grey');
+    }
+
+    function feedHealthClass(h) {
+      const s = String(h || '').toLowerCase();
+      if (s === 'ok') return 'text-emerald-400';
+      if (s === 'degraded') return 'text-amber-400';
+      return 'text-red-400';
+    }
+
+    function renderMultimarket(data) {
+      const el = $('multimarket-grid');
+      if (!el) return;
+      const markets = (data && data.markets) || [];
+      if (!markets.length) {
+        if (el.dataset.empty !== '1') {
+          el.innerHTML = '<div class="text-slate-600 col-span-full">no market data</div>';
+          el.dataset.empty = '1';
+        }
+        return;
+      }
+      el.dataset.empty = '0';
+      const html = markets.map(m => {
+        const active = m.in_active_stack ? 'border-neon-cyan/50' : 'border-slate-800/60';
+        const pnl = Number(m.pnl_open_gbp || 0);
+        const pnlCls = pnl >= 0 ? 'text-neon-green' : 'text-red-400';
+        return `<div class="rounded-lg border ${active} p-2 bg-slate-900/40">
+          <div class="flex justify-between"><span class="text-slate-300 font-bold">${m.label || shortEpic(m.epic)}</span>
+          <span class="${feedHealthClass(m.feed_health)}">${String(m.feed_health || '—').toUpperCase()}</span></div>
+          <div class="text-slate-500 mt-1">Z ${Number(m.z_score || 0).toFixed(2)} · ${m.vol_regime || '—'} · ${m.ticks_per_minute || 0}/min</div>
+          <div>Sig ${m.signals_1h || 0} · Open ${m.orders_open || 0} · <span class="${pnlCls}">${pnl.toFixed(2)}</span></div>
+          <div class="text-slate-600 truncate">${m.lifecycle_state || 'idle'}${m.rotation_reason ? ' · ' + m.rotation_reason : ''}</div>
+        </div>`;
+      }).join('');
+      if (el.innerHTML !== html) el.innerHTML = html;
+    }
+
+    function renderRotationPanel(rot) {
+      rot = rot || {};
+      const panel = $('rotation-panel');
+      const hist = $('rotation-history');
+      if (!panel) return;
+      const scores = rot.rotation_scores || (rot.rotation && rot.rotation.rotation_scores) || [];
+      const active = (rot.rotation && rot.rotation.active_instruments) || [];
+      const sweep = (rot.rotation && rot.rotation.rotation_sweep_count) || 0;
+      const reason = (rot.rotation && rot.rotation.last_rotation_reason) || '';
+      let html = `<div>Sweep <span class="text-neon-cyan">${sweep}</span> · ${reason || 'idle'}</div>`;
+      html += scores.slice(0, 5).map(s =>
+        `<div class="flex justify-between gap-2"><span>${s.label || shortEpic(s.epic)}</span><span class="text-neon-cyan">${Number(s.composite || 0).toFixed(1)}</span></div>`
+      ).join('');
+      if (active.length) {
+        html += '<div class="text-slate-500 mt-1">Active: ' + active.map(a => a.label || shortEpic(a.epic)).join(' · ') + '</div>';
+      }
+      if (panel.innerHTML !== html) panel.innerHTML = html;
+      const events = rot.rotation_history || (rot.rotation && rot.rotation.rotation_history) || [];
+      if (hist) {
+        const hhtml = events.length ? events.slice(-5).reverse().map(e =>
+          `<div>${new Date((e.ts || 0) * 1000).toISOString().slice(11, 19)} ${(e.from || []).map(shortEpic).join('+')} → ${(e.to || []).map(shortEpic).join('+')} <span class="text-slate-600">${e.reason || ''}</span></div>`
+        ).join('') : 'no rotations yet';
+        if (hist.innerHTML !== hhtml) hist.innerHTML = hhtml;
+      }
+    }
+
+    function renderPnlRisk(tq, mm, risk) {
+      const el = $('pnl-risk-panel');
+      if (!el) return;
+      const riskPnl = (tq && tq.risk_vs_pnl) || {};
+      const cb = (risk && risk.circuit_breaker) || {};
+      const vol = (risk && risk.volatility_risk) || {};
+      const markets = (mm && mm.markets) || [];
+      const openPnl = markets.reduce((s, m) => s + Number(m.pnl_open_gbp || 0), 0);
+      const util = riskPnl.risk_utilization_pct;
+      const html =
+        `<div>Daily P&amp;L <span class="${Number(riskPnl.daily_pnl_gbp || 0) >= 0 ? 'text-neon-green' : 'text-red-400'}">${fmtGbp(riskPnl.daily_pnl_gbp)}</span></div>` +
+        `<div>Open unrealized <span class="text-neon-cyan">${fmtGbp(openPnl)}</span></div>` +
+        `<div>Drawdown ${Number(cb.drawdown_pct || vol.intraday_drawdown_pct || 0).toFixed(2)}% · CB L${cb.level || 0}</div>` +
+        `<div>Risk cap ${fmtGbp(riskPnl.max_daily_loss_gbp)} · util ${util != null ? util + '%' : '—'}</div>` +
+        `<div>Exposure ${fmtGbp(riskPnl.open_exposure_gbp)}</div>`;
+      if (el.innerHTML !== html) el.innerHTML = html;
+    }
+
+    function renderTradeQuality(tq) {
+      const el = $('trade-quality-panel');
+      if (!el || !tq) return;
+      const rate = tq.acceptance_rate != null ? (Number(tq.acceptance_rate) * 100).toFixed(1) + '%' : '—';
+      const slip = tq.slippage || {};
+      const html =
+        `<div>Acceptance <span class="text-neon-green">${rate}</span> · ✓${tq.orders_accepted || 0} ✗${tq.orders_rejected || 0}</div>` +
+        `<div>Slippage avg ${slip.avg_points != null ? slip.avg_points + ' pts' : '—'} (${slip.samples || 0} fills)</div>` +
+        `<div>Trail events ${tq.trailing_events || 0} · Dynamic limits ${tq.dynamic_limit_events || 0}</div>`;
+      if (el.innerHTML !== html) el.innerHTML = html;
+    }
+
+    function renderLifecyclePanel(lc) {
+      const el = $('lifecycle-panel');
+      if (!el) return;
+      lc = lc || {};
+      const machine = lc.machine || lc;
+      const active = machine.active || {};
+      const keys = Object.keys(active);
+      if (!keys.length) {
+        if (el.dataset.empty !== '1') {
+          el.innerHTML = '<div class="text-slate-600">no active lifecycle trades</div>';
+          el.dataset.empty = '1';
+        }
+        return;
+      }
+      el.dataset.empty = '0';
+      const html = keys.slice(0, 8).map(k => {
+        const t = active[k] || {};
+        return `<div class="flex justify-between gap-2"><span>${shortEpic(t.epic)} ${t.direction || ''}</span><span class="text-neon-cyan">${t.state || t.lifecycle_state || '—'}</span></div>`;
+      }).join('');
+      if (el.innerHTML !== html) el.innerHTML = html;
+    }
+
+    function regimeBadgeClass(label) {
+      const s = String(label || '').toLowerCase();
+      if (s.includes('trend')) return 'text-neon-green';
+      if (s.includes('mean')) return 'text-neon-cyan';
+      return 'text-amber-400';
+    }
+
+    function renderRegimePanel(reg) {
+      const el = $('regime-panel');
+      if (!el) return;
+      reg = reg || {};
+      const markets = reg.markets || [];
+      if (!markets.length) {
+        if (el.dataset.empty !== '1') {
+          el.innerHTML = '<div class="text-slate-600">regime engine warming…</div>';
+          el.dataset.empty = '1';
+        }
+        return;
+      }
+      el.dataset.empty = '0';
+      const html = markets.map(m =>
+        `<div class="flex justify-between gap-2 border-b border-slate-800/50 pb-1 mb-1">
+          <span class="text-slate-300">${m.epic ? shortEpic(m.epic) : '?'}</span>
+          <span class="${regimeBadgeClass(m.state_label)}">${String(m.state_label || '—').replace(/_/g, ' ').toUpperCase()}</span>
+        </div>
+        <div class="text-slate-500 mb-2">ADX ${Number(m.adx || 0).toFixed(1)} · ATR× ${Number(m.atr_ratio || 1).toFixed(2)} · conf ${(Number(m.confidence || 0) * 100).toFixed(0)}%</div>`
+      ).join('');
+      if (el.innerHTML !== html) el.innerHTML = html;
+    }
+
+    function renderSystemHealth(ic, hl, risk, lat, rec, orch) {
+      const el = $('system-health-panel');
+      if (!el) return;
+      ic = ic || {};
+      hl = hl || {};
+      risk = risk || {};
+      lat = lat || {};
+      rec = rec || {};
+      orch = orch || {};
+      const subs = ic.subsystems || {};
+      const sb = orch.scoreboard || {};
+      const pp = sb.total_pp != null ? sb.total_pp : (subs.master_orchestrator || {}).pp;
+      const rank = sb.rank || '—';
+      const opt = orch.optimization || {};
+      const capMult = opt.capacity_multiplier != null ? opt.capacity_multiplier : sb.capacity_multiplier;
+      const ringTs = orch.last_ring_buffer_refresh_ts;
+      const phases = orch.phase_status || {};
+      const phaseLine = Object.keys(phases).map(function(k) {
+        return k.replace('phase', 'P') + ':' + phases[k];
+      }).join(' · ');
+      const apiLat = hl.cached_api_latency_ms;
+      const cb = risk.circuit_breaker || {};
+      const cbLevel = cb.level || 0;
+      const html =
+        `<div>Trade ready <span class="${ic.trade_ready ? 'text-emerald-400' : 'text-amber-400'}">${ic.trade_ready ? 'YES' : 'NO'}</span></div>` +
+        `<div>Platform PP <span class="text-cyan-400">${pp != null ? pp : '—'}</span> · rank ${rank} · cap× ${capMult != null ? capMult : '—'}</div>` +
+        `<div>Warmup ${phaseLine || '—'} · rings ${ringTs ? new Date(ringTs * 1000).toISOString().slice(11, 19) + 'Z' : '—'}</div>` +
+        `<div>Exec loop ${hl.execution_loop_active ? 'ACTIVE' : 'STOPPED'} · API p50 ${apiLat != null ? apiLat + 'ms' : '—'}</div>` +
+        `<div>Circuit breaker L${cbLevel} · DD ${Number(cb.drawdown_pct || 0).toFixed(2)}%</div>` +
+        `<div>Latency p50 ${lat.p50_total_ms != null ? lat.p50_total_ms + 'ms' : '—'} · Reconcile ${rec.healthy !== false ? 'OK' : 'DRIFT'}</div>` +
+        `<div class="flex flex-wrap gap-1 mt-1">` +
+        Object.keys(subs).map(k => {
+          const s = subs[k] || {};
+          const cls = s.ok ? 'text-emerald-400' : 'text-red-400';
+          return `<span class="${cls}">${s.label || k}</span>`;
+        }).join(' · ') + `</div>`;
+      if (el.innerHTML !== html) el.innerHTML = html;
+    }
+
+    function renderIronCage(ic, boot, budget, feeds) {
+      ic = ic || {};
+      boot = boot || {};
+      budget = budget || {};
+      feeds = feeds || {};
+      const ready = Boolean(ic.trade_ready || ic.ready_to_trade);
+      const pill = $('ready-pill');
+      if (pill) {
+        pill.textContent = ready ? '✓ READY TO TRADE' : '⏸ NOT READY';
+        pill.className = (ready ? 'ready-pill-ready' : 'ready-pill-hold') +
+          ' px-4 py-2 rounded-lg text-xs font-bold tracking-widest';
+      }
+      const blockers = (ic.blockers || boot.blockers || []).slice(0, 4);
+      const warns = (ic.warnings || []).slice(0, 2);
+      const bl = $('iron-cage-blockers');
+      if (bl) {
+        if (ready) bl.textContent = 'All readiness checks passed · iron cage sealed';
+        else bl.textContent = blockers.length ? blockers.join(' · ') : (warns.join(' · ') || 'awaiting subsystems');
+        bl.className = 'text-[10px] mt-1 font-mono truncate max-w-xl ' + (ready ? 'text-emerald-400' : 'text-amber-400');
+      }
+      const gates = ic.gates || (boot.iron_cage && boot.iron_cage.gates) || [];
+      const gEl = $('iron-cage-gates');
+      if (gEl) {
+        gEl.innerHTML = gates.length ? gates.map(g =>
+          `<div class="${icGateClass(g.color)}" title="${g.label || ''}: ${g.detail || g.status}">${g.id || '?'}</div>`
+        ).join('') : '<span class="text-slate-600">gates pending…</span>';
+      }
+      const f = ic.feeds || {};
+      const ex = ic.execution || {};
+      const fe = $('iron-cage-feed-exec');
+      if (fe) {
+        const backoff = f.retry_backoff_sec != null ? f.retry_backoff_sec : (feeds.retry_backoff_sec || 0);
+        const igSig = f.ig_on_signal_path ? 'YES ⚠' : 'no';
+        const igLim = budget.rate_limited ? ('LIMITED ' + (budget.cooldown_seconds_remaining || 0) + 's') : 'clear';
+        fe.innerHTML =
+          `<div>Feed: <span class="${String(f.health || feeds.health) === 'ok' ? 'text-emerald-400' : 'text-amber-400'}">${String(f.health || feeds.health || '—').toUpperCase()}</span> · ${f.fresh_count ?? feeds.fresh_count ?? 0}/${f.total_epics ?? feeds.total_epics ?? 0} · ${String(f.primary_feed || feeds.primary_feed || '—').toUpperCase()}</div>` +
+          `<div>Backoff: ${Number(backoff).toFixed(0)}s · IG signal path: ${igSig}</div>` +
+          `<div>Exec: ${ex.loop_active ? 'RUNNING' : 'STOPPED'} · routes ${ex.routes_armed ?? '—'} · sweep ${ex.rotation_sweep_count ?? 0}</div>` +
+          `<div>IG budget: ${igLim}</div>`;
+      }
+      const subs = ic.subsystems || (boot.iron_cage && boot.iron_cage.subsystems) || {};
+      const sEl = $('iron-cage-subsystems');
+      if (sEl) {
+        sEl.innerHTML = Object.keys(subs).map(k => {
+          const s = subs[k] || {};
+          const ok = Boolean(s.ok);
+          const cls = ok ? 'bg-emerald-900/40 text-emerald-400 border-emerald-600/40' : 'bg-red-900/30 text-red-400 border-red-600/40';
+          return `<span class="px-2 py-0.5 rounded border text-[9px] ${cls}" title="${k}">${s.label || k}</span>`;
+        }).join('') || '<span class="text-slate-600">—</span>';
+      }
+    }
+
     function gateStatusClass(status) {
       const s = String(status || '').toUpperCase();
       if (s === 'PASSED') return 'gate-pass';
@@ -556,12 +862,47 @@
         $('header-status').textContent = (gate != null ? 'BOOT G' + gate : 'OPERATIONAL') +
           (block ? ' · BLOCK: ' + block : ' · valve open');
 
-        const [t, hi] = await Promise.all([
+        const [t, hi, feedState, icState, bootState, igBudget, mmEval, tqSnap, rotState, lcState, hlState, regState, riskState, latTrace, recState, orchState] = await Promise.all([
           fetchJson('/api/v31/telemetry' + qs, 15000),
-          fetchJson('/api/v31/history' + qs, 12000)
+          fetchJson('/api/v31/history' + qs, 12000),
+          fetchJson('/api/data_feed_state' + qs, 8000),
+          fetchJson('/api/iron_cage_status' + qs, 8000),
+          fetchJson('/api/boot_status' + qs, 8000),
+          fetchJson('/api/ig_budget_state' + qs, 8000),
+          fetchJson('/api/multimarket_eval' + qs, 8000),
+          fetchJson('/api/trade_quality' + qs, 8000),
+          fetchJson('/api/rotation_state' + qs, 8000),
+          fetchJson('/api/trade_lifecycle' + qs, 8000),
+          fetchJson('/api/health_light' + qs, 5000),
+          fetchJson('/api/regime_state' + qs, 8000),
+          fetchJson('/api/risk_state' + qs, 8000),
+          fetchJson('/api/latency_trace' + qs, 5000),
+          fetchJson('/api/reconciliation_state' + qs, 5000),
+          fetchJson('/api/orchestrator_state' + qs, 5000)
         ]);
         const telem = t || {};
         const hist = hi || {};
+        const feeds = feedState || {};
+        renderIronCage(icState, bootState, igBudget, feeds);
+        if (health.iron_cage && !icState) renderIronCage(health.iron_cage, bootState, igBudget, feeds);
+        renderMultimarket(mmEval);
+        renderRotationPanel(rotState);
+        renderPnlRisk(tqSnap, mmEval, riskState);
+        renderTradeQuality(tqSnap);
+        renderLifecyclePanel(lcState);
+        renderRegimePanel(regState);
+        renderSystemHealth(icState || health.iron_cage, hlState, riskState, latTrace, recState, orchState);
+
+        const feedLine = $('feed-status-line');
+        if (feedLine) {
+          const fh = String(feeds.health || 'offline').toUpperCase();
+          const primary = String(feeds.primary_feed || '—').toUpperCase();
+          const fallback = feeds.fallback_active ? 'yes' : 'no';
+          feedLine.textContent =
+            'Data feeds: ' + fh + ' · Primary: ' + primary + ' · Fallback: ' + fallback;
+          feedLine.className = 'text-[10px] mt-0.5 font-mono ' +
+            (fh === 'OK' ? 'text-emerald-400' : fh === 'DEGRADED' ? 'text-amber-400' : 'text-red-400');
+        }
 
         if (!h && !t) {
           $('header-status').textContent = 'API DEGRADED · retrying';

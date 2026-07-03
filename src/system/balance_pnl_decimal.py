@@ -8,6 +8,7 @@ from triggering false Superjet drawdown breaches.
 from __future__ import annotations
 
 import json
+import time
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
@@ -182,8 +183,28 @@ def collect_drawdown_debug_context() -> dict[str, Any]:
     return ctx
 
 
+_DRAWDOWN_DEBUG_MIN_INTERVAL_SEC = 30.0
+_drawdown_debug_last_emit: float = 0.0
+
+
 def log_drawdown_evaluation_debug(ctx: dict[str, Any]) -> None:
-    """Emit structured debug block to engine.log (Flight Deck avionics log)."""
+    """
+    Emit structured debug block to engine.log (Flight Deck avionics log).
+
+    Rate-limited: this fires on every drawdown evaluation across all trading
+    loops. Unthrottled it wrote ~3KB JSON many times per second, starving the
+    API event loop until health checks timed out and supervisors restarted a
+    healthy agent. Alerts and mismatch warnings always emit.
+    """
+    global _drawdown_debug_last_emit
+    urgent = bool(
+        ctx.get("balance_vs_available_alert")
+        or ctx.get("session_balance_mismatch_warning")
+    )
+    now = time.monotonic()
+    if not urgent and (now - _drawdown_debug_last_emit) < _DRAWDOWN_DEBUG_MIN_INTERVAL_SEC:
+        return
+    _drawdown_debug_last_emit = now
     try:
         payload = json.dumps(ctx, default=str, separators=(",", ":"))
         if len(payload) > 6000:

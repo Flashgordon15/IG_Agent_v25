@@ -636,17 +636,29 @@ class IGRestClient:
             self._auth.clear()
 
     @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
     def _dealing_rule_value(rules: dict[str, Any], key: str) -> float:
         entry = rules.get(key, {})
         if isinstance(entry, dict):
-            try:
-                return float(entry.get("value", 0))
-            except (TypeError, ValueError):
-                return 0.0
-        try:
-            return float(entry)
-        except (TypeError, ValueError):
-            return 0.0
+            return IGRestClient._safe_float(entry.get("value"), 0.0)
+        return IGRestClient._safe_float(entry, 0.0)
 
     @staticmethod
     def _instrument_currency(instrument: dict[str, Any]) -> str:
@@ -722,8 +734,8 @@ class IGRestClient:
             ),
             "min_step_distance": self._dealing_rule_value(rules, "minStepDistance"),
             "currency_code": self._instrument_currency(instrument),
-            "bid": float(snap.get("bid", 0)),
-            "offer": float(snap.get("offer", 0)),
+            "bid": self._safe_float(snap.get("bid"), 0.0),
+            "offer": self._safe_float(snap.get("offer"), 0.0),
         }
         self._market_constraints_cache[epic] = {"ts": now, "data": data}
         log_demo_rest("Market constraints", **data)
@@ -741,7 +753,7 @@ class IGRestClient:
         """Clamp size/stops/currency to IG dealing rules for the epic."""
         c = self.fetch_market_constraints(epic)
         status = c["market_status"]
-        if status not in ("TRADEABLE", "EDITS_ONLY"):
+        if status not in ("TRADEABLE", "OPEN"):
             raise IGOrderError(
                 f"Market {epic} not tradeable (status={status})",
                 status_code=400,
@@ -1574,12 +1586,52 @@ class IGRestClient:
             return {"dealReference": deal_ref, "shadow": True, "status": "MOCK_SHADOW_ENTRY"}
 
         self.ensure_session()
-        from execution.broker_epic_resolver import resolve_account_product, resolve_order_epic
+        from execution.broker_epic_resolver import resolve_account_product, resolve_order_epic_safe
 
-        broker_epic = resolve_order_epic(epic, account_product=resolve_account_product(rest=self))
-        if broker_epic != epic:
-            log_engine(f"IGRestClient: epic remap {epic} → {broker_epic} (broker product)")
+        logical_epic = epic
+        broker_epic = resolve_order_epic_safe(self, epic, cfg=None)
+        if broker_epic != logical_epic:
+            log_engine(f"IGRestClient: epic remap {logical_epic} → {broker_epic} (broker product)")
             epic = broker_epic
+
+        try:
+            from execution.order_transmit_guard import guard_order_transmit, log_transmit_block
+
+            allowed, norm_size, block_reason = guard_order_transmit(
+                epic=epic,
+                direction=direction,
+                size=float(size),
+                rest_client=self,
+                cfg=None,
+                check_traffic_slot=False,
+            )
+            if not allowed:
+                log_transmit_block(epic=epic, reason=block_reason, source="place_market_order")
+                raise IGOrderError(block_reason or "order_transmit_guard", status_code=400)
+            size = norm_size
+        except IGOrderError:
+            raise
+        except Exception as exc:
+            raise IGOrderError(
+                f"order_transmit_guard:{type(exc).__name__}",
+                status_code=400,
+            ) from exc
+
+        try:
+            market_gate = self.fetch_market_constraints(epic, budget_priority=True)
+            gate_status = str(market_gate.get("market_status") or "").upper()
+            if gate_status not in ("TRADEABLE", "OPEN"):
+                raise IGOrderError(
+                    f"Market {epic} not tradeable (status={gate_status})",
+                    status_code=400,
+                )
+        except IGOrderError:
+            raise
+        except Exception as exc:
+            raise IGOrderError(
+                f"Market {epic} status unavailable ({type(exc).__name__})",
+                status_code=400,
+            ) from exc
 
         micro_lot = False
         try:
@@ -2323,12 +2375,29 @@ class IGRestClient:
         self.ensure_session()
         deadline = time.time() + max_wait_seconds
         while time.time() < deadline:
-            r = self.request(
-                "GET",
-                f"/confirms/{deal_reference}",
-                headers=self._auth_headers("1"),
-                budget_priority=True,
-            )
+            try:
+                r = self.request(
+                    "GET",
+                    f"/confirms/{deal_reference}",
+                    headers=self._auth_headers("1"),
+                    budget_priority=True,
+                )
+            except IGAPIError as exc:
+                log_demo_rest(
+                    "GET /confirms — retry after IGAPIError",
+                    deal_reference=deal_reference,
+                    error=str(exc),
+                )
+                time.sleep(poll_interval_seconds)
+                continue
+            except Exception as exc:
+                log_demo_rest(
+                    "GET /confirms — retry after error",
+                    deal_reference=deal_reference,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                time.sleep(poll_interval_seconds)
+                continue
             if r.status_code != 200:
                 time.sleep(poll_interval_seconds)
                 continue
@@ -2515,6 +2584,25 @@ class IGRestClient:
 
         mgr = get_rate_limit_manager()
         if auth_required:
+            try:
+                from system.chaos_guardian import acquire_outbound_token
+                from system.rest_api_budget import categorize_rest_label
+
+                cat = categorize_rest_label(f"{method} {path}")
+                if not acquire_outbound_token(
+                    "ig",
+                    method=method,
+                    path=path,
+                    category=cat,
+                    max_wait_sec=30.0,
+                ):
+                    raise IGAPIError(
+                        f"ChaosGuardian: token bucket exhausted for {method} {path}"
+                    )
+            except IGAPIError:
+                raise
+            except Exception:
+                pass
             try:
                 get_rest_api_budget().acquire(
                     label=f"{method} {path}", priority=budget_priority

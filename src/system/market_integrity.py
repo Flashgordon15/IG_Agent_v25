@@ -207,6 +207,49 @@ def closed_slice_fields(*, reason: str = "market closed") -> dict[str, Any]:
     }
 
 
+def is_reference_pricing_source(source: str) -> bool:
+    """Yahoo / multi-feed reference paths — not IG execution REST."""
+    raw = str(source or "").strip().lower()
+    if not raw:
+        return False
+    if raw in ("replay", "harness", "test"):
+        return True
+    return any(
+        token in raw
+        for token in ("yahoo", "finnhub", "twelve", "multi_feed", "synthetic", "mock")
+    )
+
+
+def night_matrix_reference_always_on(epic: str) -> bool:
+    """24/7 night-matrix lockdown — reference quotes must not be calendar-blocked."""
+    key = str(epic or "").strip()
+    if not key:
+        return False
+    try:
+        from system.market_data_hub import NIGHT_MATRIX_EPICS
+
+        if key not in NIGHT_MATRIX_EPICS:
+            return False
+    except Exception:
+        return False
+    try:
+        from intelligence.premium_overnight import premium_overnight_enabled
+        from system.config_loader import get_config
+
+        if premium_overnight_enabled(get_config()):
+            return True
+    except Exception:
+        pass
+    try:
+        from system.demo_execution_plane import demo_throughput_active
+
+        if demo_throughput_active():
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def flush_epic_quote_cache(epic: str) -> None:
     """Drop hub + interpolator state for an epic."""
     key = str(epic or "").strip()
@@ -244,6 +287,8 @@ def on_market_closed(epic: str, *, reason: str = "market closed") -> None:
     key = str(epic or "").strip()
     if not key:
         return
+    if night_matrix_reference_always_on(key):
+        return
     flush_epic_quote_cache(key)
     publish_closed_state_to_dashboard(key, reason=reason)
     log_engine_intermittent(
@@ -271,6 +316,8 @@ def should_publish_live_quote(epic: str, *, source: str = "") -> bool:
     if str(source or "").lower() in ("replay", "harness"):
         return True
     if os.environ.get("IG_TEST_HARNESS", "").strip() == "1":
+        return True
+    if night_matrix_reference_always_on(epic) and is_reference_pricing_source(source):
         return True
     if epic_market_open(epic):
         return True

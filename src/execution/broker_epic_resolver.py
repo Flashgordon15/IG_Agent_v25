@@ -5,6 +5,9 @@ from __future__ import annotations
 import os
 from typing import Any
 
+import threading
+import time
+
 # Canonical CFD keys → IG spread-bet daily epics (UK DEMO/LIVE).
 _CFD_TO_SPREADBET_TODAY: dict[str, str] = {
     "CS.D.EURUSD.CFD.IP": "CS.D.EURUSD.TODAY.IP",
@@ -17,6 +20,42 @@ _CFD_TO_SPREADBET_DAILY: dict[str, str] = {
 }
 
 _SPREADBET_PRODUCTS = frozenset({"SPREADBET", "SPREAD_BET", "SB", "SPREADBETTING"})
+
+_WIRE_EPIC_CACHE_TTL_SEC = 300.0
+_wire_epic_cache: dict[str, tuple[float, str]] = {}
+_wire_epic_cache_lock = threading.Lock()
+
+
+def _wire_cache_key(logical_epic: str, product: str) -> str:
+    return f"{logical_epic}|{product}"
+
+
+def _cached_wire_epic(logical_epic: str, product: str) -> str | None:
+    key = _wire_cache_key(logical_epic, product)
+    now = time.time()
+    with _wire_epic_cache_lock:
+        row = _wire_epic_cache.get(key)
+        if row is None:
+            return None
+        ts, wire = row
+        if now - ts > _WIRE_EPIC_CACHE_TTL_SEC:
+            _wire_epic_cache.pop(key, None)
+            return None
+        return wire
+
+
+def _store_wire_epic(logical_epic: str, product: str, wire: str) -> None:
+    with _wire_epic_cache_lock:
+        _wire_epic_cache[_wire_cache_key(logical_epic, product)] = (
+            time.time(),
+            str(wire or "").strip(),
+        )
+
+
+def clear_wire_epic_cache() -> None:
+    """Test / operator hook — drop cached wire epic probes."""
+    with _wire_epic_cache_lock:
+        _wire_epic_cache.clear()
 
 
 def normalize_account_product(product: str | None) -> str:
@@ -34,6 +73,9 @@ def resolve_order_epic(epic: str, *, account_product: str | None = None) -> str:
 
     Spread-betting accounts reject ``.CFD.IP`` — use ``.TODAY.IP`` (default) or
     ``.DAILY.IP`` when ``IG_SPREADBET_EPIC_SUFFIX=daily``.
+
+    Prefer ``resolve_order_epic_safe`` at dispatch time — it probes GET /markets
+    and falls back to ``.CFD.IP`` when spread-bet remaps return 403/404.
     """
     key = str(epic or "").strip()
     if not key:
@@ -196,3 +238,94 @@ def resolve_hot_path_epics_from_config(cfg: Any | None = None, *, rest: Any | No
     if not epics:
         epics = ["CS.D.EURUSD.CFD.IP", "CS.D.GBPUSD.CFD.IP"]
     return tuple(dict.fromkeys(epics))
+
+
+def _is_fx_logical_epic(epic: str) -> bool:
+    key = _logical_cfd_epic(str(epic or "").strip())
+    return key in _CFD_TO_SPREADBET_TODAY or key.endswith(".CFD.IP") and key.startswith("CS.D.")
+
+
+def _spreadbet_wire_candidates(logical_epic: str, *, account_product: str) -> list[str]:
+    """Candidate wire epics for FX — spread-bet remaps first, CFD fallback last."""
+    if normalize_account_product(account_product) != "SPREADBET":
+        return [logical_epic]
+    cfd = _logical_cfd_epic(logical_epic)
+    candidates: list[str] = []
+    suffix_mode = str(os.environ.get("IG_SPREADBET_EPIC_SUFFIX", "today")).strip().lower()
+    table = _CFD_TO_SPREADBET_DAILY if suffix_mode == "daily" else _CFD_TO_SPREADBET_TODAY
+    mapped = table.get(cfd, "")
+    if mapped:
+        candidates.append(mapped)
+    if cfd.endswith(".CFD.IP"):
+        for suffix in (".TODAY.IP", ".DAILY.IP"):
+            alt = cfd.replace(".CFD.IP", suffix)
+            if alt not in candidates:
+                candidates.append(alt)
+    if cfd not in candidates:
+        candidates.append(cfd)
+    if logical_epic not in candidates and logical_epic != cfd:
+        candidates.insert(0, logical_epic)
+    return candidates
+
+
+def resolve_order_epic_safe(
+    rest: Any | None,
+    epic: str,
+    *,
+    cfg: Any | None = None,
+) -> str:
+    """
+    Pick a wire epic that returns HTTP 200 from GET /markets/{epic}.
+
+    For spread-bet FX: probe TODAY/DAILY remaps; keep CFD.IP when account lacks
+    FX_BET_ALL access (403 on spread-bet codes).
+    """
+    key = str(epic or "").strip()
+    if not key:
+        return key
+    product = resolve_account_product(rest=rest, cfg=cfg)
+    if rest is None:
+        return resolve_order_epic(key, account_product=product)
+
+    cached = _cached_wire_epic(key, product)
+    if cached:
+        return cached
+
+    # Non-FX: wire epic is deterministic — avoid REST probe storms during rotation sweeps.
+    if not _is_fx_logical_epic(key):
+        wire = resolve_order_epic(key, account_product=product)
+        _store_wire_epic(key, product, wire)
+        return wire
+
+    candidates = _spreadbet_wire_candidates(key, account_product=product)
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            rest.ensure_session()
+            resp = rest.request(
+                "GET",
+                f"/markets/{candidate}",
+                headers=rest._auth_headers("3"),
+                timeout=6,
+                budget_priority=True,
+            )
+            if resp.status_code == 401:
+                rest.login()
+                resp = rest.request(
+                    "GET",
+                    f"/markets/{candidate}",
+                    headers=rest._auth_headers("3"),
+                    timeout=6,
+                    budget_priority=True,
+                )
+            if resp.status_code == 200:
+                _store_wire_epic(key, product, candidate)
+                return candidate
+        except Exception:
+            continue
+    wire = resolve_order_epic(key, account_product=product)
+    _store_wire_epic(key, product, wire)
+    return wire

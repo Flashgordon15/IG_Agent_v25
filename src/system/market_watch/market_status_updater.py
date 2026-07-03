@@ -28,7 +28,8 @@ _started = False
 
 def _tradeable_market_status(raw: str) -> bool:
     status = str(raw or "").upper()
-    return status in ("TRADEABLE", "EDITS_ONLY", "OPEN")
+    # EDITS_ONLY = close/amend only — new deals rejected as MARKET_CLOSED_WITH_EDITS.
+    return status in ("TRADEABLE", "OPEN")
 
 
 def _status_from_rest(epic: str, client: Any) -> MarketStatus | None:

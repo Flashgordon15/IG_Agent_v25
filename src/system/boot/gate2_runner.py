@@ -25,6 +25,26 @@ def _session_valid(rest_client: Any) -> bool:
     return bool(session and getattr(session, "is_valid", False))
 
 
+def _ensure_authenticated_with_timeout(
+    credentials: Any,
+    *,
+    timeout_sec: float = 45.0,
+) -> Any:
+    """Bound IG login so Gate 2 cannot wedge the boot pipeline indefinitely."""
+    from system.ig_rest_session import ensure_shared_authenticated
+
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gate2-auth")
+    future = pool.submit(ensure_shared_authenticated, credentials)
+    try:
+        return future.result(timeout=timeout_sec)
+    except FuturesTimeoutError as exc:
+        raise IGAuthError(
+            f"IG login timed out after {timeout_sec:.0f}s"
+        ) from exc
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
 def _fetch_working_orders(rest_client: Any) -> list[dict[str, Any]]:
     rest_client.ensure_session()
     response = rest_client.request(
@@ -77,9 +97,23 @@ class Gate2Runner:
         try:
             self._execute()
         except Exception as exc:
+            from system.agent_execution_mode import broker_demo_execution_required
             from system.guard.live_path_guard import is_live_production_track, mock_broker_forbidden
 
-            if mock_broker_forbidden() or is_live_production_track():
+            if broker_demo_execution_required() and not is_live_production_track():
+                holder = get_credentials_holder()
+                raw = self._context.raw_config or load_raw_config_dict()
+                if holder.credentials is not None:
+                    self._complete_demo_deferred_auth(
+                        holder.credentials,
+                        raw,
+                        f"{type(exc).__name__}: {exc}",
+                    )
+                    return
+
+            if is_live_production_track() or (
+                mock_broker_forbidden() and not broker_demo_execution_required()
+            ):
                 log_engine(
                     "Gate2: live PRODUCTION broker error — entering fail-closed "
                     f"network hold ({type(exc).__name__}: {exc})"
@@ -156,9 +190,24 @@ class Gate2Runner:
             gates_dict=None,
         )
 
-        from system.ig_rest_session import ensure_shared_authenticated
+        from system.ig_rest_session import get_shared_rest_client
 
-        rest = ensure_shared_authenticated(credentials)
+        rest = get_shared_rest_client(credentials)
+        if broker_demo_execution_required() and not _session_valid(rest):
+            self._complete_demo_deferred_auth(
+                credentials,
+                raw,
+                "non-blocking DEMO boot",
+            )
+            return
+
+        try:
+            rest = _ensure_authenticated_with_timeout(credentials, timeout_sec=45.0)
+        except IGAuthError as exc:
+            if broker_demo_execution_required():
+                self._complete_demo_deferred_auth(credentials, raw, str(exc))
+                return
+            raise
         base = str(getattr(rest, "_base", "") or "")
         if credentials.account_type == "DEMO" and "demo-api.ig.com" not in base:
             raise IGAuthError(f"Wrong REST base for DEMO account: {base}")
@@ -287,12 +336,12 @@ class Gate2Runner:
             balance = rest.refresh_account_summary()
             return positions, orders, balance, open_count
 
+        pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gate2-hydrate")
         try:
-            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="gate2-hydrate") as pool:
-                future = pool.submit(_hydrate)
-                positions, orders, balance, open_count = future.result(
-                    timeout=hydration_timeout
-                )
+            future = pool.submit(_hydrate)
+            positions, orders, balance, open_count = future.result(
+                timeout=hydration_timeout
+            )
 
             self._context.hydration_detail = {
                 "open_positions": open_count,
@@ -364,9 +413,56 @@ class Gate2Runner:
             )
             self._bypass_and_force_sandbox_ready_token()
             return
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
 
         if self._context.rest_client is None:
             self._context.rest_client = rest
+
+    def _complete_demo_deferred_auth(
+        self,
+        credentials: Any,
+        raw: dict[str, Any],
+        reason: str,
+    ) -> None:
+        """DEMO boot: advance G2 while IG auth/hydration retries off-thread."""
+        import threading
+
+        from api.snapshot_store import set_boot_hydration
+        from system.ig_rest_session import get_shared_rest_client
+
+        rest = get_shared_rest_client(credentials)
+        self._context.rest_client = rest
+        self._commit_context_config(raw)
+        set_boot_hydration([], [])
+
+        def _retry_auth_and_hydrate() -> None:
+            try:
+                from system.boot.gate2_async_hydration import (
+                    start_gate2_background_hydration,
+                )
+                from system.ig_rest_session import ensure_shared_authenticated
+
+                authed = _ensure_authenticated_with_timeout(
+                    credentials, timeout_sec=90.0
+                )
+                self._context.rest_client = authed
+                start_gate2_background_hydration(authed, self._context, self._state)
+            except Exception as retry_exc:
+                log_engine(
+                    "Gate2-deferred: auth/hydration retry failed "
+                    f"{type(retry_exc).__name__}: {retry_exc}"
+                )
+
+        threading.Thread(
+            target=_retry_auth_and_hydrate,
+            name="gate2-deferred-auth",
+            daemon=True,
+        ).start()
+        self.mark_gate_complete(detail="IGRestClient Armed (auth deferred)")
+        log_engine(
+            f"Gate2: DEMO auth deferred — pipeline continuing ({reason})"
+        )
 
     def mark_gate_complete(self, *, detail: str = "") -> None:
         """Advance Gate 2 past 32% — pipeline continues to G3→G5."""

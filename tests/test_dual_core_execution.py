@@ -36,9 +36,16 @@ from runtime.dual_core_execution import (
 
 @pytest.fixture(autouse=True)
 def _clean_dual_core():
-    reset_dual_core_for_tests()
-    yield
-    reset_dual_core_for_tests()
+    # Hermetic guard — on machines with live IG credentials, rotation paths
+    # would otherwise resolve a real REST client and probe /markets per epic
+    # with 30s rate-limit token waits, hanging the suite.
+    with patch(
+        "runtime.dual_core_execution._resolve_stack_rest_client",
+        return_value=None,
+    ):
+        reset_dual_core_for_tests()
+        yield
+        reset_dual_core_for_tests()
 
 
 def _seed_compressed_channel(epic: str = PRIMARY_STACKED_EPIC) -> None:
@@ -78,10 +85,13 @@ def test_macro_mode_when_z_above_threshold():
 
 
 def test_evaluate_micro_scalp_sell_at_upper_band():
-    from runtime.dual_core_execution import get_stacked_snapshots
+    from runtime.dual_core_execution import STACKED_DUAL_ASSETS, get_stacked_snapshots
 
-    _seed_compressed_channel(SECONDARY_STACKED_EPIC)
-    snap = get_stacked_snapshots()[SECONDARY_STACKED_EPIC]
+    # Use an epic actually in the default stack — the stack no longer
+    # includes Gold since the demo-throughput rebase.
+    stacked_epic = STACKED_DUAL_ASSETS[-1]
+    _seed_compressed_channel(stacked_epic)
+    snap = get_stacked_snapshots()[stacked_epic]
     assert snap.core_b_micro_active
     direction = evaluate_micro_scalp_signal(
         epic=snap.epic,
@@ -96,9 +106,15 @@ def test_canary_lot_size_fx_vs_index():
     cfg = MagicMock()
     cfg.max_deal_size_fx = 1.0
     cfg.max_deal_size_index = 0.5
-    assert canary_lot_size("CS.D.EURUSD.CFD.IP", cfg) == 1.0
-    assert canary_lot_size("IX.D.DOW.IFM.IP", cfg) == 0.5
-    assert canary_lot_size("CS.D.CFPGOLD.CFP.IP", cfg) == 1.0
+    # Pin the spreadbet/fractional-lot mode so expectations are deterministic
+    # regardless of demo-throughput state on the host.
+    with patch(
+        "execution.ig_size_validator.fractional_lot_execution_enabled",
+        return_value=True,
+    ):
+        assert canary_lot_size("CS.D.EURUSD.CFD.IP", cfg) == 1.0
+        assert canary_lot_size("IX.D.DOW.IFM.IP", cfg) == 0.5
+        assert canary_lot_size("CS.D.CFPGOLD.CFP.IP", cfg) == 10.0
 
 
 def test_dual_core_status_dict_shape():
@@ -183,17 +199,43 @@ def test_stagnant_dead_zone_triggers_rotation():
         evaluate_multi_source_rotation_sweep,
     )
 
-    _rotate_active_stack_to(
-        ("CS.D.EURUSD.CFD.IP", "CS.D.GBPUSD.CFD.IP"),
-        reason="test_setup",
-    )
-    for i in range(140):
-        ingest_hub_mid("IX.D.DOW.IFM.IP", 52000.0 + i * 5.0)
-    _stagnant_since_by_epic["CS.D.EURUSD.CFD.IP"] = (
-        time_mod.time() - STAGNANT_DEAD_ZONE_SEC - 5.0
-    )
-    with patch("runtime.dual_core_execution._fetch_multi_source_quote") as fetch:
-        fetch.return_value = (1.1, 1.1002, "mock")
+    # Keep the whole test hermetic — never resolve a live REST client (a real
+    # session probes IG /markets per rotation-universe epic with 30s token
+    # waits, which hangs the suite on machines that have credentials).
+    with (
+        patch(
+            "runtime.dual_core_execution._resolve_stack_rest_client",
+            return_value=None,
+        ),
+        # With rest=None the tradeable universe collapses to the default
+        # index stack; widen it so the FX test epics survive rotation.
+        patch(
+            "runtime.dual_core_execution.resolve_tradeable_stack_epics",
+            return_value=(
+                "CS.D.EURUSD.CFD.IP",
+                "CS.D.GBPUSD.CFD.IP",
+                "IX.D.DOW.IFM.IP",
+                "IX.D.NIKKEI.IFM.IP",
+            ),
+        ),
+        # Mock 1.1 quotes for index epics would poison the global hub's packet
+        # validator (implausible-jump circuit breaker) for later tests.
+        patch(
+            "runtime.dual_core_execution.get_market_data_hub",
+            return_value=MagicMock(),
+        ),
+        patch("runtime.dual_core_execution._fetch_multi_source_quote") as fetch,
+    ):
+        _rotate_active_stack_to(
+            ("CS.D.EURUSD.CFD.IP", "CS.D.GBPUSD.CFD.IP"),
+            reason="test_setup",
+        )
+        for i in range(140):
+            ingest_hub_mid("IX.D.DOW.IFM.IP", 52000.0 + i * 5.0)
+        _stagnant_since_by_epic["CS.D.EURUSD.CFD.IP"] = (
+            time_mod.time() - STAGNANT_DEAD_ZONE_SEC - 5.0
+        )
+        fetch.return_value = (1.1, 1.1002, "mock", time_mod.time())
         state = evaluate_multi_source_rotation_sweep()
     assert "CS.D.EURUSD.CFD.IP" in (state.get("stagnant_rotated") or [])
     assert state.get("last_rotation_reason") == STAGNANT_DEAD_ZONE_REASON

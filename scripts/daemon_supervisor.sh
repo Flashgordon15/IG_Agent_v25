@@ -14,15 +14,24 @@ V31_DATA="${IG_DATA_ROOT:-${AGENT_ROOT}/src/data/v31-production}"
 LOG_DIR="${V31_DATA}/logs"
 APP_MODE="${APP_MODE:-DEMO}"
 IG_ACCOUNT_SCOPE="${IG_ACCOUNT_SCOPE:-}"
-IG_AGENT_CONFIG="${IG_AGENT_CONFIG:-config/config_v31.json}"
+IG_AGENT_CONFIG="${IG_AGENT_CONFIG:-config/config_v31_demo_throughput.json}"
 IG_BROKER_PLANE="${IG_BROKER_PLANE:-DEMO}"
 SUPERVISOR_LOG="${LOG_DIR}/supervisor.log"
 
 # Self-daemonize when launched interactively (survives parent shell exit).
+# nohup alone only blocks SIGHUP — the process stays in the launcher's session
+# and gets reaped when that terminal session is cleaned up (this silently
+# killed supervisor+agent stacks launched from IDE terminals). POSIX setsid
+# via perl (no setsid binary on macOS) makes the daemon a true session leader.
 if [[ "${DAEMON_SUPERVISOR_REDIRECT:-}" != "1" ]]; then
   mkdir -p "${LOG_DIR}"
   export DAEMON_SUPERVISOR_REDIRECT=1
-  nohup "${BASH_SOURCE[0]}" "$@" >> "${SUPERVISOR_LOG}" 2>&1 &
+  if command -v perl >/dev/null 2>&1; then
+    nohup /usr/bin/env perl -e 'use POSIX qw(setsid); setsid(); exec @ARGV or die "exec: $!"' \
+      -- "${BASH_SOURCE[0]}" "$@" >> "${SUPERVISOR_LOG}" 2>&1 &
+  else
+    nohup "${BASH_SOURCE[0]}" "$@" >> "${SUPERVISOR_LOG}" 2>&1 &
+  fi
   disown 2>/dev/null || true
   echo "daemon_supervisor detached pid=$! log=${SUPERVISOR_LOG}"
   exit 0
@@ -79,13 +88,45 @@ except Exception as exc:
 " 2>/dev/null || true
 }
 
+# All main.py PIDs belonging to THIS checkout. Matches absolute command lines
+# and the relative "python3 -u src/main.py" form this script spawns (pgrep -f
+# against "${AGENT_ROOT}/src/main.py" never matches the relative form, which
+# previously made the booting agent invisible to the recovery logic).
+agent_main_pids() {
+  local abs rel pid cwd
+  abs="$(pgrep -f "${AGENT_ROOT}/src/main.py" 2>/dev/null || true)"
+  rel=""
+  for pid in $(pgrep -f "[s]rc/main\.py" 2>/dev/null || true); do
+    case " ${abs} " in *" ${pid} "*) continue ;; esac
+    cwd="$(lsof -a -p "${pid}" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
+    if [[ -n "${cwd}" && "${cwd}" == "${AGENT_ROOT}" ]]; then
+      rel="${rel} ${pid}"
+    fi
+  done
+  printf '%s %s\n' "${abs}" "${rel}" | tr ' ' '\n' | sed '/^$/d'
+}
+
 supervisor_already_running() {
-  if [[ ! -f "${SUPERVISOR_PID_FILE}" ]]; then
-    return 1
+  if [[ -f "${SUPERVISOR_PID_FILE}" ]]; then
+    local old_pid
+    old_pid="$(tr -d '[:space:]' < "${SUPERVISOR_PID_FILE}" 2>/dev/null || true)"
+    if [[ -n "${old_pid}" && "${old_pid}" != "$$" ]] && kill -0 "${old_pid}" 2>/dev/null; then
+      return 0
+    fi
   fi
-  local old_pid
-  old_pid="$(tr -d '[:space:]' < "${SUPERVISOR_PID_FILE}" 2>/dev/null || true)"
-  [[ -n "${old_pid}" && "${old_pid}" != "$$" ]] && kill -0 "${old_pid}" 2>/dev/null
+  local live_pid
+  live_pid="$(pgrep -f "${AGENT_ROOT}/scripts/daemon_supervisor.sh" 2>/dev/null | head -1 || true)"
+  if [[ -n "${live_pid}" && "${live_pid}" != "$$" ]]; then
+    echo "${live_pid}" > "${SUPERVISOR_PID_FILE}"
+    return 0
+  fi
+  return 1
+}
+
+manual_stop_engaged() {
+  PYTHONPATH="${AGENT_ROOT}/src" "$(resolve_python)" -c \
+    "import sys; from system.shutdown_cleanup import manual_stop_active; sys.exit(0 if manual_stop_active() else 1)" \
+    2>/dev/null
 }
 
 circuit_breaker_active() {
@@ -157,15 +198,16 @@ wait_port_free() {
 evict_stale_processes() {
   local mode="${1:-full}"
   log "eviction: clearing stale ig_agent / :${API_PORT} occupants (mode=${mode})"
-  if [[ -x "${PY}" ]] || command -v python3 >/dev/null 2>&1; then
-    PYTHONPATH="${AGENT_ROOT}/src" "$(resolve_python)" -c \
-      "from system.shutdown_cleanup import mark_manual_stop; mark_manual_stop(source='daemon_supervisor_boot')" \
-      2>/dev/null || true
+  if manual_stop_engaged; then
+    log "eviction: manual_stop active — skipping eviction"
+    return 1
   fi
 
   # Graceful SIGTERM for project main.py first (anti-zombie protocol).
-  if pgrep -f "${AGENT_ROOT}/src/main.py" >/dev/null 2>&1; then
-    pgrep -f "${AGENT_ROOT}/src/main.py" | xargs kill -TERM 2>/dev/null || true
+  local main_pids
+  main_pids="$(agent_main_pids)"
+  if [[ -n "${main_pids}" ]]; then
+    echo "${main_pids}" | xargs kill -TERM 2>/dev/null || true
     wait_port_free || true
   fi
 
@@ -241,31 +283,38 @@ PY
 }
 
 stop_agent_graceful() {
-  local pid=""
-  if [[ -f "${AGENT_PID_FILE}" ]]; then
-    pid="$(tr -d '[:space:]' < "${AGENT_PID_FILE}" 2>/dev/null || true)"
+  local pids
+  pids="$(agent_main_pids)"
+  if [[ -z "${pids}" ]]; then
+    rm -f "${AGENT_PID_FILE}"
+    wait_port_free || true
+    return 0
   fi
-  if [[ -z "${pid}" ]] || ! kill -0 "${pid}" 2>/dev/null; then
-    pid="$(pgrep -f "${AGENT_ROOT}/src/main.py" 2>/dev/null | head -1 || true)"
-  fi
-  if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
-    log "recovery: SIGTERM agent pid=${pid}"
-    kill -TERM "${pid}" 2>/dev/null || true
-    local deadline=$(( $(date +%s) + 30 ))
-    while kill -0 "${pid}" 2>/dev/null; do
-      if (( $(date +%s) >= deadline )); then
-        log "recovery: agent pid=${pid} did not exit — sending SIGKILL"
-        kill -KILL "${pid}" 2>/dev/null || true
-        break
-      fi
-      sleep 1
-    done
+  log "recovery: SIGTERM all main.py pids=(${pids//$'\n'/ })"
+  echo "${pids}" | xargs kill -TERM 2>/dev/null || true
+  local deadline=$(( $(date +%s) + 30 ))
+  while (( $(date +%s) < deadline )); do
+    pids="$(agent_main_pids)"
+    [[ -z "${pids}" ]] && break
+    sleep 1
+  done
+  pids="$(agent_main_pids)"
+  if [[ -n "${pids}" ]]; then
+    log "recovery: SIGKILL survivor main.py pids=(${pids//$'\n'/ })"
+    echo "${pids}" | xargs kill -KILL 2>/dev/null || true
+    sleep 1
   fi
   rm -f "${AGENT_PID_FILE}"
   wait_port_free || true
 }
 
 start_agent_inner() {
+  local existing
+  existing="$(agent_main_pids | wc -l | tr -d '[:space:]')"
+  if [[ -n "${existing}" && "${existing}" != "0" ]]; then
+    log "launch: ${existing} main.py still present — evicting before spawn"
+    evict_stale_processes full
+  fi
   export APP_MODE="${APP_MODE}"
   export IG_ACCOUNT_SCOPE="${IG_ACCOUNT_SCOPE}"
   export IG_BROKER_PLANE="${IG_BROKER_PLANE}"
@@ -275,6 +324,15 @@ start_agent_inner() {
   export IG_AGENT_CONFIG="${IG_AGENT_CONFIG}"
   export PYTHONPATH="${AGENT_ROOT}/src"
   export IG_AGENT_ROOT="${AGENT_ROOT}"
+  export IG_AGENT_FROM_LAUNCHER=1
+  export IG_NON_BLOCKING_BOOT="${IG_NON_BLOCKING_BOOT:-1}"
+  # Tell in-process recovery layers (WatchdogSelfHealer) that this supervisor
+  # owns restarts — prevents them spawning duplicate main.py agents.
+  export IG_APEX_DAEMON=1
+  if [[ "${LAUNCHER_DESKTOP:-}" == "1" ]]; then
+    export IG_APEX_DESKTOP=1
+    export IG_AGENT_DESKTOP_LAUNCH=1
+  fi
 
   log "launch: starting v31.1.0 core (APP_MODE=${APP_MODE} config=${IG_AGENT_CONFIG} :${API_PORT} scope=${IG_ACCOUNT_SCOPE:-masked})"
   cd "${AGENT_ROOT}"
@@ -283,6 +341,20 @@ start_agent_inner() {
   echo "${agent_pid}" > "${AGENT_PID_FILE}"
   AGENT_START_EPOCH=$(date +%s)
   log "launch: agent detached pid=${agent_pid}"
+
+  # Fail-fast spawn verification: an interpreter that dies inside preflight
+  # (bad config, credential import error, sibling lock) exits within seconds
+  # and previously left only an unexplained "agent process died". Surface the
+  # last stdout lines here so every crash has a recorded cause.
+  sleep 3
+  if ! kill -0 "${agent_pid}" 2>/dev/null; then
+    log "launch: FAILED — pid=${agent_pid} exited within 3s; agent_stdout tail follows"
+    tail -5 "${LOG_DIR}/agent_stdout.log" 2>/dev/null | while IFS= read -r line; do
+      log "launch:   ${line}"
+    done
+    return 1
+  fi
+  return 0
 }
 
 start_agent() {
@@ -299,12 +371,10 @@ agent_process_alive() {
   if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
     return 0
   fi
-  if pgrep -f "${AGENT_ROOT}/src/main.py" >/dev/null 2>&1; then
-    local live_pid
-    live_pid="$(pgrep -f "${AGENT_ROOT}/src/main.py" 2>/dev/null | head -1 || true)"
-    if [[ -n "${live_pid}" ]]; then
-      echo "${live_pid}" > "${AGENT_PID_FILE}"
-    fi
+  local live_pid
+  live_pid="$(agent_main_pids | head -1 || true)"
+  if [[ -n "${live_pid}" ]]; then
+    echo "${live_pid}" > "${AGENT_PID_FILE}"
     return 0
   fi
   if lsof -iTCP:"${API_PORT}" -sTCP:LISTEN -t >/dev/null 2>&1; then
@@ -338,6 +408,10 @@ fetch_health_code() {
 
 recovery_restart() {
   local reason="$1"
+  if manual_stop_engaged; then
+    log "recovery suppressed — manual_stop active (reason=${reason})"
+    return 1
+  fi
   if circuit_breaker_active; then
     log "recovery suppressed — circuit breaker active"
     return 1
@@ -350,10 +424,21 @@ recovery_restart() {
     open_circuit_breaker "3 crashes within ${CRASH_WINDOW_SEC}s — last: ${reason}"
     return 1
   fi
+  # Escalating backoff — repeated crashes get progressively longer cool-downs
+  # so a flapping boot doesn't burn all 3 circuit-breaker strikes in seconds.
+  local backoff=2
+  if (( crashes >= 2 )); then
+    backoff=30
+  elif (( crashes >= 1 )); then
+    backoff=10
+  fi
   stop_agent_graceful
-  sleep 2
-  evict_stale_processes soft
-  start_agent_inner
+  log "recovery: cool-down ${backoff}s before relaunch (crash #${crashes})"
+  sleep "${backoff}"
+  evict_stale_processes full
+  if ! start_agent_inner; then
+    log "recovery: relaunch failed instantly — next poll cycle will re-evaluate"
+  fi
   UNHEALTHY_503_SINCE=0
   return 0
 }
@@ -396,9 +481,17 @@ POLL_COUNT=0
 
 if agent_is_operational; then
   log "supervisor: existing agent detected — adopting monitor (no cold eviction)"
-  pgrep -f "${AGENT_ROOT}/src/main.py" 2>/dev/null | head -1 > "${AGENT_PID_FILE}" || true
-  # Adopted sessions are already past boot — do not reset grace (avoids false deferrals).
-  AGENT_START_EPOCH=0
+  agent_main_pids | head -1 > "${AGENT_PID_FILE}" || true
+  # Adopted agents get the same boot grace as spawned ones: an adopted agent
+  # mid-hydration (port bound, health 000/503) must not be reaped immediately.
+  AGENT_START_EPOCH=$(date +%s)
+elif manual_stop_engaged; then
+  log "supervisor: manual_stop active — not starting agent"
+  while manual_stop_engaged; do
+    sleep "${POLL_INTERVAL_SEC}"
+  done
+  log "supervisor: manual_stop cleared — cold start"
+  start_agent
 else
   start_agent
 fi
@@ -411,6 +504,11 @@ while true; do
   fi
 
   if ! agent_process_alive; then
+    if manual_stop_engaged; then
+      log "health: agent down — manual_stop hold (no auto-restart)"
+      sleep "${POLL_INTERVAL_SEC}"
+      continue
+    fi
     if agent_in_boot_grace; then
       log "health: boot grace — :${API_PORT} bound, deferring recovery"
       sleep "${POLL_INTERVAL_SEC}"

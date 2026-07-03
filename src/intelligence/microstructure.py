@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import threading
 import time
+from bisect import bisect_left
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
@@ -55,9 +56,9 @@ def _momentum_slope(mids: np.ndarray) -> float:
         return 0.0
 
 
-def _window_ticks(ticks: list[_Tick], horizon_sec: float, now: float) -> list[_Tick]:
-    cutoff = now - horizon_sec
-    return [t for t in ticks if t.ts >= cutoff]
+def _cutoff_index(timestamps: list[float], horizon_sec: float, now: float) -> int:
+    """First index inside the trailing horizon; timestamps append monotonically."""
+    return bisect_left(timestamps, now - horizon_sec)
 
 
 class MicrostructureClassifier:
@@ -171,8 +172,8 @@ class MicrostructureClassifier:
             return 0
         ts_now = float(now or time.time())
         with self._lock:
-            buf = list(self._buffers.get(key, ()))
-        return len(_window_ticks(buf, float(window_sec), ts_now))
+            timestamps = [t.ts for t in self._buffers.get(key, ())]
+        return len(timestamps) - _cutoff_index(timestamps, float(window_sec), ts_now)
 
     def needs_historical_warmup(self, epic: str) -> bool:
         return self.tick_count(epic) < MIN_WARMUP_TICKS
@@ -327,8 +328,7 @@ class MicrostructureClassifier:
         )
         return count
 
-    def _features(self, ticks: list[_Tick], horizon: float, now: float) -> dict[str, float]:
-        window = _window_ticks(ticks, horizon, now)
+    def _features(self, window: list[_Tick]) -> dict[str, float]:
         if len(window) < 2:
             return {"momentum": 0.0, "volatility": 0.0, "range_pct": 0.0, "sweep": 0.0}
         mids = np.array([t.mid for t in window], dtype=np.float64)
@@ -338,9 +338,13 @@ class MicrostructureClassifier:
         hi, lo = float(np.max(mids)), float(np.min(mids))
         mid_ref = float(mids[-1]) or 1.0
         range_pct = (hi - lo) / abs(mid_ref)
+        # Sweep = is the CURRENT move an outlier vs the *prior* returns only;
+        # including r_t in sigma lets the spike deflate its own score.
         sweep = 0.0
-        if rets.size and vol > 1e-12:
-            sweep = float(np.max(np.abs(rets))) / vol
+        if rets.size >= 3:
+            sigma_ref = float(np.std(rets[:-1], ddof=1))
+            if sigma_ref > 1e-12:
+                sweep = float(abs(rets[-1])) / sigma_ref
         return {
             "momentum": mom,
             "volatility": vol,
@@ -363,10 +367,14 @@ class MicrostructureClassifier:
 
             return neutral_microstructure_verdict(key, reason="buffer_unavailable")
 
+        timestamps = [t.ts for t in buf]
+        i5 = _cutoff_index(timestamps, TF_5S, ts_now)
+        i1 = _cutoff_index(timestamps, TF_1M, ts_now)
+        i5m = _cutoff_index(timestamps, TF_5M, ts_now)
         try:
-            f5 = self._features(buf, TF_5S, ts_now)
-            f1 = self._features(buf, TF_1M, ts_now)
-            f5m = self._features(buf, TF_5M, ts_now)
+            f5 = self._features(buf[i5:])
+            f1 = self._features(buf[i1:])
+            f5m = self._features(buf[i5m:])
         except (ValueError, FloatingPointError, IndexError):
             from intelligence.defensive_defaults import neutral_microstructure_verdict
 
@@ -378,9 +386,7 @@ class MicrostructureClassifier:
         order_block = False
         detail_parts: list[str] = []
 
-        w5 = _window_ticks(buf, TF_5S, ts_now)
-
-        if len(w5) >= self._min_ticks_5s:
+        if len(buf) - i5 >= self._min_ticks_5s:
             if f5["sweep"] >= self._sweep_sigma:
                 sweep = True
                 regime = "SWEEP_BUY" if f5["momentum"] > 0 else "SWEEP_SELL"
@@ -430,7 +436,8 @@ class MicrostructureClassifier:
             pass
 
         velocity_note = ""
-        if self.velocity_engaged(key, now=ts_now):
+        ticks_200ms = len(buf) - _cutoff_index(timestamps, VELOCITY_WINDOW_SEC, ts_now)
+        if ticks_200ms > VELOCITY_ENGAGED_TICKS:
             velocity_note = "velocity_engaged_rsi_override"
             detail_parts.append(velocity_note)
 

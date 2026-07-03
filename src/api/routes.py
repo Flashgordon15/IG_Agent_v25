@@ -85,7 +85,8 @@ router.include_router(testbed_router)
 
 
 @router.get("/health")
-def health() -> dict[str, Any]:
+async def health() -> dict[str, Any]:
+    """Fast liveness — avoid sync thread-pool dispatch under boot load."""
     t0 = time.perf_counter()
     age = snapshot_age_s_fast()
     payload = {
@@ -192,6 +193,14 @@ def api_rotation_state() -> JSONResponse:
     return api_rotation_state_json()
 
 
+@router.get("/api/data_feed_state")
+def api_data_feed_state() -> JSONResponse:
+    """Primary/backup feed health — Yahoo/Finnhub/Alpha first-past-the-post."""
+    from system.feeds.data_feed_orchestrator import get_data_feed_state
+
+    return JSONResponse(content=get_data_feed_state())
+
+
 @router.get("/api/ig_budget_state")
 def api_ig_budget_state() -> JSONResponse:
     """IG REST rate budget + cooldown state for cockpit guard banner."""
@@ -200,8 +209,153 @@ def api_ig_budget_state() -> JSONResponse:
     return JSONResponse(content=ig_budget_snapshot())
 
 
+@router.get("/api/iron_cage_status")
+def api_iron_cage_status() -> JSONResponse:
+    """Iron Cage readiness contract — gates, feeds, execution, IG budget."""
+    from system.iron_cage_readiness import fast_iron_cage_status_snapshot
+
+    return JSONResponse(content=fast_iron_cage_status_snapshot())
+
+
+@router.get("/api/iron_gauge")
+async def api_iron_gauge() -> JSONResponse:
+    """Unified startup cage — phases, tier, recovery log, trade contract."""
+    from system.boot.iron_gauge import get_iron_gauge_snapshot
+
+    return JSONResponse(content=get_iron_gauge_snapshot())
+
+
+@router.get("/api/regime_state")
+def api_regime_state() -> JSONResponse:
+    """Markov regime switching state — ADX/ATR/spread over 1440m window."""
+    from system.regime_state import get_regime_state_snapshot
+
+    return JSONResponse(content=get_regime_state_snapshot())
+
+
+@router.get("/api/risk_state")
+def api_risk_state() -> JSONResponse:
+    """Volatility-adaptive risk + circuit breaker telemetry."""
+    from system.risk_state import get_risk_state_snapshot
+
+    return JSONResponse(content=get_risk_state_snapshot())
+
+
+@router.get("/api/tuner_state")
+def api_tuner_state() -> JSONResponse:
+    """Autonomous parameter tuner — regime matrix, metrics, optimization history."""
+    from runtime.parameter_tuner import get_tuner_state_snapshot
+
+    return JSONResponse(content=get_tuner_state_snapshot())
+
+
+@router.get("/api/exploration_state")
+def api_exploration_state() -> JSONResponse:
+    """Multi-market portfolio exploration — universe, margin, correlation tree."""
+    from runtime.portfolio_exploration_engine import get_exploration_state_snapshot
+
+    return JSONResponse(content=get_exploration_state_snapshot())
+
+
+@router.get("/api/guardian_status")
+def api_guardian_status() -> JSONResponse:
+    """Chaos guardian — token buckets, reconnect history, state sync, packet health."""
+    from system.chaos_guardian import get_guardian_status_snapshot
+
+    return JSONResponse(content=get_guardian_status_snapshot())
+
+
+@router.get("/api/orchestrator_state")
+def api_orchestrator_state() -> JSONResponse:
+    """Master orchestrator — warmup logs, strategy matrix, scoreboard, active loops."""
+    from runtime.master_orchestrator import get_orchestrator_state_snapshot
+
+    return JSONResponse(content=get_orchestrator_state_snapshot())
+
+
+@router.get("/api/reporting_status")
+def api_reporting_status() -> JSONResponse:
+    """Alert matrix — webhook status, queue depth, recent broadcasts."""
+    from system.alert_reporting_matrix import get_reporting_status_snapshot
+
+    return JSONResponse(content=get_reporting_status_snapshot())
+
+
+@router.get("/api/macro_steering")
+def api_macro_steering() -> JSONResponse:
+    """Macro steering surface — sentiment ROC, news countdown, 48-bar shadow-walk."""
+    from cockpit.sre_snapshots import get_macro_steering_snapshot
+
+    return JSONResponse(content=get_macro_steering_snapshot())
+
+
+@router.get("/api/ai_diagnostics")
+def api_ai_diagnostics() -> JSONResponse:
+    """Autonomic healer + ML cognitive diagnostics — uncompressed JSON snapshot."""
+    from system.autonomic_healer import get_ai_diagnostics_snapshot
+
+    return JSONResponse(content=get_ai_diagnostics_snapshot())
+
+
+@router.get("/api/latency_trace")
+def api_latency_trace() -> JSONResponse:
+    """Tick-to-trade latency ring buffer summary."""
+    from system.latency_trace import get_latency_trace_snapshot
+
+    return JSONResponse(content=get_latency_trace_snapshot())
+
+
+@router.get("/api/reconciliation_state")
+def api_reconciliation_state() -> JSONResponse:
+    """Broker vs internal position reconciliation status."""
+    from system.broker_reconciliation_daemon import get_reconciliation_snapshot
+
+    return JSONResponse(content=get_reconciliation_snapshot())
+
+
+@router.get("/api/multimarket_eval")
+def api_multimarket_eval() -> JSONResponse:
+    """Per-market evaluation snapshot — signals, lifecycle, P&L, feed health."""
+    from analytics.multimarket_eval import get_multimarket_eval_snapshot
+
+    return JSONResponse(content=get_multimarket_eval_snapshot())
+
+
+@router.get("/api/trade_quality")
+def api_trade_quality() -> JSONResponse:
+    """Trade quality metrics — acceptance, slippage, risk vs P&L."""
+    from analytics.trade_quality import get_trade_quality_snapshot
+
+    return JSONResponse(content=get_trade_quality_snapshot())
+
+
+@router.get("/api/tuning_params")
+def api_tuning_params() -> JSONResponse:
+    """Runtime tuning parameters (read-only overlay merge)."""
+    from analytics.tuning_params import get_tuning_params
+
+    return JSONResponse(content=get_tuning_params())
+
+
+@router.post("/api/tuning_update")
+async def api_tuning_update(request: Request) -> JSONResponse:
+    """Apply validated tuning overlay — never overrides iron cage hard limits."""
+    from analytics.tuning_params import apply_tuning_update
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    params = body.get("params") if isinstance(body, dict) else body
+    if not isinstance(params, dict):
+        params = body if isinstance(body, dict) else {}
+    result = apply_tuning_update(params, source="cockpit_api")
+    status = 200 if result.get("ok") else 400
+    return JSONResponse(status_code=status, content=result)
+
+
 @router.get("/api/health_light")
-def api_health_light() -> JSONResponse:
+async def api_health_light() -> JSONResponse:
     """Lightweight O(1) system health — <5ms, no external calls."""
     import time
 
@@ -386,6 +540,23 @@ def api_admin_reset_correlation_guard() -> JSONResponse:
     snap = snapshot()
     log_engine(f"admin: correlation guard reset — buy={snap.get('buy')} sell={snap.get('sell')}")
     return JSONResponse({"ok": True, "snapshot": snap})
+
+
+@router.post("/api/admin/unlimited-trading")
+def api_admin_unlimited_trading() -> JSONResponse:
+    """DEMO soak — clear session trade caps and correlation counters."""
+    from execution.correlation_guard import force_purge_session_correlation_counters, snapshot
+    from system.demo_execution_plane import arm_demo_unlimited_trading_session
+    from system.engine_log import log_engine
+
+    arm_demo_unlimited_trading_session(clear_counts=True)
+    force_purge_session_correlation_counters(reason="operator_unlimited_trading")
+    snap = snapshot()
+    log_engine(
+        "admin: unlimited trading armed — session caps cleared "
+        f"buy={snap.get('buy')} sell={snap.get('sell')}"
+    )
+    return JSONResponse({"ok": True, "unlimited": True, "correlation_guard": snap})
 
 
 @router.post("/api/admin/force-close")

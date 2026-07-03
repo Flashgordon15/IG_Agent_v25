@@ -243,6 +243,20 @@ def fetch_json(url: str, *, timeout_sec: float = 5.0) -> dict[str, Any] | None:
         return None
 
 
+def http_any_alive(port: int = DEFAULT_PORT, *, timeout_sec: float = 3.0) -> bool:
+    """True when loopback port accepts TCP or bootstrap health responds."""
+    if not port_is_bound(port):
+        return False
+    for path, probe_timeout in (
+        ("/health", min(timeout_sec, 1.5)),
+        ("/api/health_light", min(timeout_sec, 2.0)),
+        ("/api/health", timeout_sec),
+    ):
+        if fetch_json(f"http://127.0.0.1:{port}{path}", timeout_sec=probe_timeout) is not None:
+            return True
+    return port_is_bound(port)
+
+
 def verify_health(
     *,
     port: int = DEFAULT_PORT,
@@ -257,8 +271,17 @@ def verify_health(
     while time.time() < deadline:
         last = fetch_fn(url)
         if last is not None:
-            phase = (last.get("system_state") or {}).get("phase") or last.get("phase")
-            if str(phase).upper() == "G5" or last.get("status") == "ok":
+            ss = last.get("system_state") or {}
+            phase = str(ss.get("phase") or last.get("phase") or "").upper()
+            status = str(last.get("status") or "").upper()
+            gp = last.get("gate_progression") or {}
+            if phase in ("G5", "READY") or last.get("status") == "ok":
+                return True, last
+            if status == "OPERATIONAL" and (
+                last.get("partial_ready")
+                or gp.get("operational_ready")
+                or bool(last.get("trading_ready"))
+            ):
                 return True, last
         time.sleep(poll_sec)
     return False, last
@@ -291,6 +314,51 @@ def dashboard_url(port: int = DEFAULT_PORT) -> str:
     return f"http://127.0.0.1:{port}/"
 
 
+def desktop_mode_active() -> bool:
+    """True when bootstrap must route exclusively through native WKWebView shell."""
+    for key in ("IG_DESKTOP_FLIGHT_DECK", "LAUNCHER_DESKTOP", "IG_DESKTOP_SHELL_ACTIVE"):
+        if os.environ.get(key, "").strip().lower() in ("1", "true", "yes"):
+            return True
+    return False
+
+
+def open_desktop_flight_deck(
+    root: Path,
+    *,
+    launch_supervisor: bool = False,
+    cockpit_port: int = 8787,
+    popen_fn: Callable[..., Any] | None = None,
+) -> int:
+    """Launch Iron Cage native desktop shell (pywebview) — unified Flight Deck product."""
+    py = _python_bin(root)
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(root / "src"),
+        "IG_AGENT_ROOT": str(root),
+        "IG_DESKTOP_FLIGHT_DECK": "1",
+        "IG_COCKPIT_URL": f"http://127.0.0.1:{cockpit_port}/",
+    }
+    cmd = [
+        str(py),
+        "-m",
+        "cockpit.desktop_app_shell",
+        "--cockpit-url",
+        f"http://127.0.0.1:{cockpit_port}/",
+    ]
+    if launch_supervisor:
+        cmd.append("--launch-supervisor")
+    spawn = popen_fn or subprocess.Popen
+    proc = spawn(
+        cmd,
+        cwd=str(root),
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return int(proc.pid or 0)
+
+
 def should_start_npm_dev(root: Path) -> bool:
     dist_index = root / "dashboard" / "dist" / "index.html"
     return not dist_index.is_file()
@@ -303,7 +371,10 @@ def open_dashboard(
     open_fn: Callable[[str], None] | None = None,
     popen_fn: Callable[..., Any] | None = None,
 ) -> None:
-    """Open browser to agent dashboard; optionally start npm dev if dist missing."""
+    """Open dashboard — native shell only when desktop mode; no OS browser in that path."""
+    if desktop_mode_active():
+        open_desktop_flight_deck(root)
+        return
     url = dashboard_url(port)
     if should_start_npm_dev(root) and os.environ.get("LAUNCHER_SKIP_NPM_DEV", "").strip() not in (
         "1",
@@ -392,6 +463,9 @@ def _cli() -> int:
         return 0
 
     if args.phase == "gui":
+        if desktop_mode_active():
+            open_desktop_flight_deck(root)
+            return 0
         open_dashboard(root, port=args.port)
         return 0
 

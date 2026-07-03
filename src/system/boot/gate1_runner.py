@@ -97,15 +97,10 @@ class Gate1Runner:
                 "weekend blackout disabled (24/7 execution plane)"
             )
             if not production_execution_active():
-                try:
-                    from feeder.mock_feed_engine import start_aggressive_momentum_wave
-
-                    start_aggressive_momentum_wave()
-                except Exception as exc:
-                    log_engine(
-                        f"Gate1: momentum wave synthesizer skipped: "
-                        f"{type(exc).__name__}: {exc}"
-                    )
+                log_engine(
+                    "Gate1: mock momentum wave deferred to post-ready "
+                    "(avoids CPU starvation during G2–G5 hydration)"
+                )
             else:
                 log_engine(
                     "Gate1: IG_PRODUCTION_EXECUTION — mock momentum wave suppressed"

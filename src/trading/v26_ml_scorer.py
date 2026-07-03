@@ -77,14 +77,18 @@ class V26MLScorer:
         if not feat_names:
             return None
         try:
-            import pandas as pd
+            import numpy as np
 
             missing = [k for k in feat_names if k not in features]
             if missing:
                 log_engine(f"v26_ml_scorer {epic}: missing {missing}")
                 return None
-            row = {k: float(features[k]) for k in feat_names}
-            prob = float(model.predict_proba(pd.DataFrame([row]))[0][1])
+            # Row built in the manifest's canonical feature order; xgboost's
+            # inplace_predict validates ndarray inputs by column count only.
+            X = np.array(
+                [[float(features[k]) for k in feat_names]], dtype=np.float32
+            )
+            prob = float(model.predict_proba(X)[0][1])
             return max(0.0, min(1.0, prob))
         except Exception as e:
             log_engine(f"v26_ml_scorer predict {epic}: {type(e).__name__}: {e}")

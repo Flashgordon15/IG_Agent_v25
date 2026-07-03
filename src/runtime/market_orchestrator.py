@@ -571,7 +571,20 @@ def ensure_v6_trading_plane_materialized(
         f"(timeout={remaining:.0f}s)"
     )
     try:
-        handoff.run_full_handoff_sync()
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+
+        pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="v6-handoff")
+        fut = pool.submit(handoff.run_full_handoff_sync)
+        try:
+            fut.result(timeout=remaining)
+        except FuturesTimeout:
+            log_engine(
+                f"V6InLoopHandoff: materialization timed out after {remaining:.0f}s "
+                "— gate worker continuing (repair may retry)"
+            )
+            return is_trading_plane_live()
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
     except Exception as exc:
         log_engine(
             f"V6InLoopHandoff: blocking materialization failed "
@@ -963,6 +976,7 @@ class MarketOrchestrator:
         self._feed_offline_epics: set[str] = set()
         self._last_rotation_log_key: tuple[Any, ...] | None = None
         self._last_rotation_log_ts: float = 0.0
+        self._last_rotation_rank_snapshot: list[dict[str, Any]] = []
         self._v5_rest_client: Any | None = None
         self._v5_defer_ohlc = False
         self._v6_skeleton_mode = False
@@ -1518,9 +1532,20 @@ class MarketOrchestrator:
             self._last_rotation_log_key = log_key
             self._last_rotation_log_ts = now
 
+        rank_snapshot = [
+            {
+                "epic": epic,
+                "rank": rank,
+                "score": round(float(score), 2),
+                "status": status,
+            }
+            for epic, rank, score, status in rank_rows
+        ]
+
         with self._lock:
             self._active_epics = active
             self._active_epics_updated_at = time.time()
+            self._last_rotation_rank_snapshot = rank_snapshot
         return list(self._active_epics)
 
     def get_active_epics(self) -> list[str]:
@@ -1533,6 +1558,14 @@ class MarketOrchestrator:
         if _ORCHESTRATOR_REF is None:
             return []
         return _ORCHESTRATOR_REF.get_active_epics()
+
+    @staticmethod
+    def get_global_rotation_rank_snapshot() -> list[dict[str, Any]]:
+        global _ORCHESTRATOR_REF
+        if _ORCHESTRATOR_REF is None:
+            return []
+        with _ORCHESTRATOR_REF._lock:
+            return list(_ORCHESTRATOR_REF._last_rotation_rank_snapshot)
 
     @staticmethod
     def get_signal_engine_for_market(market: str) -> Any | None:

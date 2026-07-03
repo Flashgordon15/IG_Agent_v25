@@ -201,6 +201,27 @@ def test_start_health_light_refresher_idempotent():
     hl._refresher_stop.set()
 
 
+def test_iron_cage_from_health_light_post_ready_operational():
+    from api.health_light import _iron_cage_from_health_light
+
+    snap = {
+        "execution_loop_active": True,
+        "stacked_sweep_alive": True,
+        "routing_state": {"armed": 7},
+        "data_feeds": {"hub": {"fresh_count": 6}},
+    }
+    incomplete_boot = {
+        "gates": [{"status": "running"}, {"status": "complete"}],
+    }
+    with patch(
+        "system.boot.boot_orchestrator.get_boot_status_snapshot",
+        return_value=incomplete_boot,
+    ):
+        ic = _iron_cage_from_health_light(snap)
+    assert ic["trade_ready"] is True
+    assert ic["blockers"] == []
+
+
 def test_dual_core_rotation_tests():
     """Part A: test boot grace window in channel health."""
     from runtime.dual_core_execution import (

@@ -229,6 +229,12 @@ class EnvironmentScorer:
         if not key:
             return 50.0
         if key in self._sentiment_cache:
+            try:
+                from trading.sentiment_momentum import record_sentiment_sample
+
+                record_sentiment_sample(key, self._sentiment_cache[key])
+            except Exception:
+                pass
             return self._sentiment_cache[key]
         long_pct = 50.0
         try:
@@ -238,6 +244,18 @@ class EnvironmentScorer:
             long_pct = 50.0
         long_pct = max(0.0, min(100.0, long_pct))
         self._sentiment_cache[key] = long_pct
+        try:
+            from trading.sentiment_momentum import (
+                record_sentiment_sample,
+                sentiment_surface_adjustment,
+            )
+
+            record_sentiment_sample(key, long_pct)
+            sent_surface = sentiment_surface_adjustment(key)
+            self._sentiment_detail[key] = sent_surface
+            return long_pct
+        except Exception:
+            pass
         crowded_long = 80.0
         crowded_short = 20.0
         log_raw = True
@@ -274,6 +292,12 @@ class EnvironmentScorer:
 
     def get_sentiment_factor(self, market: str) -> dict[str, Any]:
         key = self._epic or market
+        try:
+            from trading.sentiment_momentum import sentiment_surface_adjustment
+
+            return dict(sentiment_surface_adjustment(key))
+        except Exception:
+            pass
         return dict(
             self._sentiment_detail.get(
                 key,
@@ -370,7 +394,10 @@ class EnvironmentScorer:
         trend_15m = c15i.iloc[-2]
 
         current_atr = float(last_5m.get("atr", 0))
-        atr_series = c5i["atr"].dropna()
+        # current_atr is anchored to the last CLOSED bar (iloc[-2]); the
+        # baseline must end at the same bar or the ratio mixes time anchors
+        # (the forming bar's partial ATR leaked into the 20-bar mean).
+        atr_series = c5i["atr"].iloc[:-1].dropna()
         if len(atr_series) >= 20:
             avg_atr_20 = float(atr_series.iloc[-20:].mean())
         elif len(atr_series) > 0:

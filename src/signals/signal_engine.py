@@ -449,12 +449,11 @@ class SignalEngine:
     def _empty_candles(self) -> pd.DataFrame:
         return pd.DataFrame(columns=list(self._CANDLE_COLUMNS))
 
-    def _resample_ohlc_from_quotes(
-        self, raw_quotes: list[Quote], minutes: int
-    ) -> pd.DataFrame:
-        """Force raw tick quotes into true time-bucketed OHLC bars before indicators."""
+    def _tick_frame_from_quotes(self, raw_quotes: list[Quote]) -> pd.DataFrame | None:
+        """Build the sorted/deduped tick frame ONCE so multi-timeframe
+        resampling shares it instead of rebuilding + re-sorting per rule."""
         if not raw_quotes:
-            return self._empty_candles()
+            return None
         times = pd.to_datetime([q.time for q in raw_quotes])
         tick_df = pd.DataFrame(
             {
@@ -468,6 +467,9 @@ class SignalEngine:
         tick_df = tick_df.sort_index()
         if tick_df.index.has_duplicates:
             tick_df = tick_df[~tick_df.index.duplicated(keep="last")]
+        return tick_df
+
+    def _resample_tick_frame(self, tick_df: pd.DataFrame, minutes: int) -> pd.DataFrame:
         rule = f"{minutes}min"
         ohlc = tick_df["price"].resample(rule).ohlc().ffill()
         ohlc["price"] = ohlc["close"]
@@ -483,24 +485,37 @@ class SignalEngine:
         result["spread"] = spread.to_numpy()
         return result[list(self._CANDLE_COLUMNS)]
 
+    def _resample_ohlc_from_quotes(
+        self, raw_quotes: list[Quote], minutes: int
+    ) -> pd.DataFrame:
+        """Force raw tick quotes into true time-bucketed OHLC bars before indicators."""
+        tick_df = self._tick_frame_from_quotes(raw_quotes)
+        if tick_df is None:
+            return self._empty_candles()
+        return self._resample_tick_frame(tick_df, minutes)
+
     def candles_for_market(self, market: str, minutes: int) -> pd.DataFrame:
         """Resample seed + live quotes for *market* into N-minute OHLC bars."""
         return self._resample_ohlc_from_quotes(
             self._quotes_for_market(market), minutes
         )
 
+    def _multi_timeframe_candles(
+        self, market: str, minute_rules: tuple[int, ...]
+    ) -> tuple[pd.DataFrame, ...]:
+        """One quote sort + one tick frame shared across all timeframes."""
+        tick_df = self._tick_frame_from_quotes(self._quotes_for_market(market))
+        if tick_df is None:
+            return tuple(self._empty_candles() for _ in minute_rules)
+        return tuple(self._resample_tick_frame(tick_df, m) for m in minute_rules)
+
     def candle_frames(
         self, market: str, *, quote_df: pd.DataFrame | None = None
     ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         """Return (quote_df, 5m, 15m, 60m candles) from seed + live quotes."""
         df = quote_df if quote_df is not None else self.quote_df(market)
-        raw = self._quotes_for_market(market)
-        return (
-            df,
-            self._resample_ohlc_from_quotes(raw, 5),
-            self._resample_ohlc_from_quotes(raw, 15),
-            self._resample_ohlc_from_quotes(raw, 60),
-        )
+        c5, c15, c60 = self._multi_timeframe_candles(market, (5, 15, 60))
+        return (df, c5, c15, c60)
 
     def candles(self, df: pd.DataFrame, minutes: int) -> pd.DataFrame:
         if df.empty:
@@ -543,25 +558,26 @@ class SignalEngine:
         cfg = self._cfg
         if df.empty:
             return df
-        out = df.copy()
         period = max(1, int(getattr(cfg, "rsi_period", 14) or 14))
         min_bars = period + 1
-        if len(out) < min_bars:
+        if len(df) < min_bars:
+            out = df.copy()
             out["rsi"] = 50.0
             out["fast_ema"] = out["price"]
             out["slow_ema"] = out["price"]
             out["atr"] = 0.0
-        else:
-            from signals.indicators import apply_indicators_frame
+            return out
+        from signals.indicators import apply_indicators_frame
 
-            out = apply_indicators_frame(
-                out,
-                fast_span=int(cfg.fast_ema),
-                slow_span=int(cfg.slow_ema),
-                rsi_period=period,
-                atr_period=int(cfg.atr_period),
-            )
-        return out
+        # apply_indicators_frame copies internally — copying here too doubled
+        # the allocation on every timeframe of every evaluation.
+        return apply_indicators_frame(
+            df,
+            fast_span=int(cfg.fast_ema),
+            slow_span=int(cfg.slow_ema),
+            rsi_period=period,
+            atr_period=int(cfg.atr_period),
+        )
 
     @staticmethod
     def _signal_bar_indices(frame_len: int) -> tuple[int, int, int]:
@@ -879,9 +895,7 @@ class SignalEngine:
 
         rsi_buy_max = apply_temporary_test_rsi_buy_max(float(_strict.rsi_buy_max))
         rsi_sell_min = float(_strict.rsi_sell_min)
-        c5 = self.candles_for_market(market, 5)
-        c15 = self.candles_for_market(market, 15)
-        c60 = self.candles_for_market(market, 60)
+        c5, c15, c60 = self._multi_timeframe_candles(market, (5, 15, 60))
 
         # Need at least 4 5m bars so we have 3 confirmed closed bars (iloc[-4..-2])
         # plus one currently-open bar (iloc[-1]) that is excluded from signal logic.
@@ -889,9 +903,7 @@ class SignalEngine:
             epic = self._resolve_epic_for_market(market)
             if epic in _rest_rate_limit_epics or self.ohlc_seed_count(market) < 4:
                 self.hydrate_from_local_repository(market, epic=epic)
-                c5 = self.candles_for_market(market, 5)
-                c15 = self.candles_for_market(market, 15)
-                c60 = self.candles_for_market(market, 60)
+                c5, c15, c60 = self._multi_timeframe_candles(market, (5, 15, 60))
         if len(c5) < 4 or len(c15) < 3:
             self.last_snapshot[market] = {}
             empty = SignalResult(

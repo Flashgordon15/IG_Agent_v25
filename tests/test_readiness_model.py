@@ -126,3 +126,26 @@ def test_failed_gate_cockpit_not_usable() -> None:
     assert bundle["readiness_level"] == 0
     assert bundle["cockpit_usable"] is False
     assert bundle["readiness_label"] == "Boot failed"
+
+
+def test_subsystem_feeds_uses_data_feed_orchestrator_counts() -> None:
+    bundle = build_readiness_bundle(
+        gate_progression={
+            "phase": "G5",
+            "gates": _gates(G1="complete", G2="complete", G3="complete", G4="complete"),
+            "operational_ready": True,
+        },
+        api_feed_health={
+            "fresh_count": 7,
+            "total_epics": 7,
+            "health": "ok",
+            "feeds": {
+                "yahoo": {"health": "ok", "alive": True, "last_tick_at": "2026-01-01T00:00:00Z"},
+            },
+        },
+        unified_execution_route=[{"epic": "CS.D.EURUSD.CFD.IP", "execution_path": "MICRO"}],
+    )
+    feeds = bundle["subsystem_readiness"]["feeds"]
+    assert feeds["ready"] is True
+    assert feeds["fresh_count"] == 7
+    assert feeds["total_count"] == 7

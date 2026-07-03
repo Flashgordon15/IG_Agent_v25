@@ -54,6 +54,14 @@ class IronCladRiskEngine:
     @staticmethod
     def effective_max_order_size() -> float:
         try:
+            from system.demo_execution_plane import demo_throughput_active
+
+            if demo_throughput_active():
+                # Spreadbet gold demo floor — must not cap below IG minimum.
+                return 10.0
+        except Exception:
+            pass
+        try:
             from platform_v2 import platform_v2_enabled
             from platform_v2.compound_profit_escalation import v2_max_order_size
 

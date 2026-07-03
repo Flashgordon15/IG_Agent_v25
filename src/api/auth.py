@@ -117,8 +117,13 @@ def path_is_public(path: str, method: str) -> bool:
     if _apex_desktop_public_api() and path in (
         "/api/startup/status",
         "/api/health",
+        "/api/health_light",
         "/health",
         "/api/gui_status",
+        "/api/boot_status",
+        "/api/iron_gauge",
+        "/api/orchestrator_state",
+        "/api/iron_cage_status",
         "/api/testbed/status",
     ):
         return True

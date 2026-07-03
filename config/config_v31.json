@@ -4,6 +4,12 @@
   "version": "31.0.0",
   "app_version": "v31.0",
   "_note": "v31 production plane — extends v30 Apex monolith; DEMO/LIVE routing via credentials + operating_mode",
+  "pricing": {
+    "reference_transport": "yahoo",
+    "yahoo_poll_sec": 2.0,
+    "ig_snapshot_at_execution": false,
+    "_note": "Yahoo/Finnhub/Alpha primary for signals; IG REST execution-only"
+  },
   "execution": {
     "max_deal_size": 0.5,
     "max_daily_risk_loss": 400.0,
@@ -12,5 +18,19 @@
   },
   "max_deal_size": 0.5,
   "max_daily_risk_loss": 400.0,
-  "trailing_stop_distance": 45.0
+  "trailing_stop_distance": 45.0,
+  "micro_risk": {
+    "risk_per_trade_gbp": 5.0,
+    "target_r_multiple": 1.5,
+    "min_profit_target_pts": 1.0,
+    "max_loss_cap_pts": 4.0,
+    "virtual_stop_ceiling_pts": 4.0,
+    "_note": "Virtual stop fires inside IG broker minimum (10pt) — prevents clustered -£7.59 losses on Dow 0.5 lot"
+  },
+  "telegram": {
+    "executive_status_only": true,
+    "telegram_heartbeat_interval_seconds": 3600,
+    "telegram_substantial_loss_points": 50.0,
+    "_note": "Routine Telegram traffic batches hourly; critical/risk-shield alerts stay immediate"
+  }
 }

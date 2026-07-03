@@ -27,6 +27,7 @@ _sell_count: int = 0
 _buy_risk_gbp: float = 0.0
 _sell_risk_gbp: float = 0.0
 _session_key: str = ""
+_state_loaded: bool = False
 
 MAX_NEW_PER_DIRECTION = 5  # max new entries in the same direction per calendar day
 _enabled: bool = True
@@ -158,6 +159,13 @@ def check_open_book_limits(
     """
     Block new entries when global open book or US-index short stack is at cap.
     """
+    try:
+        from system.demo_execution_plane import demo_unlimited_open_positions
+
+        if demo_unlimited_open_positions():
+            return True, ""
+    except Exception:
+        pass
     if not _enabled:
         return True, ""
     direction_u = str(direction or "").upper()
@@ -244,6 +252,14 @@ def _persist_state() -> None:
         log_engine(f"correlation_guard: persist failed: {type(e).__name__}: {e}")
 
 
+def _ensure_state_loaded() -> None:
+    global _state_loaded
+    if _state_loaded:
+        return
+    _state_loaded = True
+    _load_state()
+
+
 def _load_state() -> None:
     global _buy_count, _sell_count, _buy_risk_gbp, _sell_risk_gbp, _session_key
     if not _STATE_FILE.is_file():
@@ -264,18 +280,16 @@ def _load_state() -> None:
         log_engine(f"correlation_guard: load failed: {type(e).__name__}: {e}")
 
 
-_load_state()
-
-
 def reset_correlation_guard_for_tests() -> None:
     """Clear in-memory and on-disk guard state between pytest cases."""
-    global _buy_count, _sell_count, _buy_risk_gbp, _sell_risk_gbp, _session_key
+    global _buy_count, _sell_count, _buy_risk_gbp, _sell_risk_gbp, _session_key, _state_loaded
     with _lock:
         _session_key = ""
         _buy_count = 0
         _sell_count = 0
         _buy_risk_gbp = 0.0
         _sell_risk_gbp = 0.0
+        _state_loaded = True
     try:
         _STATE_FILE.unlink(missing_ok=True)
     except Exception:
@@ -284,6 +298,7 @@ def reset_correlation_guard_for_tests() -> None:
 
 def reset_session(*, key: str | None = None) -> None:
     global _buy_count, _sell_count, _buy_risk_gbp, _sell_risk_gbp, _session_key
+    _ensure_state_loaded()
     with _lock:
         _session_key = key or _session_date_key()
         _buy_count = 0
@@ -332,6 +347,7 @@ def rehydrate_direction_risk(
 ) -> None:
     """Set open-position £ heat by direction (agent restart)."""
     global _buy_risk_gbp, _sell_risk_gbp
+    _ensure_state_loaded()
     with _lock:
         _buy_risk_gbp = max(0.0, float(buy_risk_gbp))
         _sell_risk_gbp = max(0.0, float(sell_risk_gbp))
@@ -348,6 +364,7 @@ def confirm_direction_risk(direction: str, risk_gbp: float) -> None:
     risk = max(0.0, float(risk_gbp))
     if risk <= 0:
         return
+    _ensure_state_loaded()
     with _lock:
         d = str(direction or "").upper()
         if d == "BUY":
@@ -363,6 +380,7 @@ def release_direction_risk(direction: str, risk_gbp: float) -> None:
     risk = max(0.0, float(risk_gbp))
     if risk <= 0:
         return
+    _ensure_state_loaded()
     with _lock:
         d = str(direction or "").upper()
         if d == "BUY":
@@ -396,6 +414,7 @@ def check_and_record(direction: str, *, risk_gbp: float = 0.0) -> tuple[bool, st
     global _buy_count, _sell_count
     if not _enabled:
         return True, ""
+    _ensure_state_loaded()
     proposed = max(0.0, float(risk_gbp))
     max_heat = _max_same_direction_risk_gbp()
     with _lock:
@@ -439,6 +458,7 @@ def check_and_record(direction: str, *, risk_gbp: float = 0.0) -> tuple[bool, st
 def undo(direction: str) -> None:
     """Release one slot when an order is rejected after check_and_record was called."""
     global _buy_count, _sell_count
+    _ensure_state_loaded()
     with _lock:
         d = str(direction or "").upper()
         if d == "BUY":
@@ -449,6 +469,7 @@ def undo(direction: str) -> None:
 
 
 def snapshot() -> dict[str, object]:
+    _ensure_state_loaded()
     with _lock:
         return {
             "buy": _buy_count,

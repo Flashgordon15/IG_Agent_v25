@@ -30,6 +30,12 @@ _DEFAULT_QUOTE_MAX_AGE_SEC = 45.0
 _REST_POLL_QUOTE_MAX_AGE_FLOOR_SEC = 120.0
 _WATCHDOG_MARKER = "scripts/watchdog.sh"
 _WATCHDOG_LAUNCHD_MARKER = "watchdog_launchd.py"
+_SUPERVISOR_MARKERS = (
+    _WATCHDOG_MARKER,
+    _WATCHDOG_LAUNCHD_MARKER,
+    "scripts/daemon_supervisor.sh",
+    "igagent_launcher",
+)
 _WATCHDOG_PID_FILE = data_dir() / "watchdog.pid"
 
 _HEALTH_CACHE: dict[str, Any] | None = None
@@ -129,7 +135,7 @@ def _watchdog_active_uncached() -> bool:
                 return True
     except (OSError, ValueError):
         pass
-    for marker in (_WATCHDOG_MARKER, _WATCHDOG_LAUNCHD_MARKER):
+    for marker in _SUPERVISOR_MARKERS:
         try:
             result = subprocess.run(
                 ["/usr/bin/pgrep", "-f", marker],
@@ -595,12 +601,39 @@ def _cached_system_status() -> dict[str, Any]:
     return dict(block)
 
 
+def _execution_plane_active() -> bool:
+    """True when dual-core sweep / execution loop is live (v31 path)."""
+    try:
+        from api.health_light import get_health_light_response
+
+        hl = get_health_light_response()
+        armed = int((hl.get("routing_state") or {}).get("armed") or 0)
+        if bool(hl.get("execution_loop_active")):
+            return True
+        if bool(hl.get("stacked_sweep_alive")) and armed > 0:
+            return True
+    except Exception:
+        pass
+    try:
+        from system.boot.boot_orchestrator import get_boot_status_snapshot
+
+        if bool(get_boot_status_snapshot().get("trade_ready")):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def build_health_status() -> dict[str, Any]:
     from api.endpoint_profiler import record_timing, timed_section
 
     t0 = time.perf_counter()
     gate_age = seconds_since_last_gate_eval()
     loops_running = is_trading_running()
+    if not loops_running and _execution_plane_active():
+        loops_running = True
+        if gate_age is None:
+            gate_age = 0.0
     paused = is_paused()
     with timed_section("health.watchdog"):
         watchdog = _watchdog_active()
@@ -668,9 +701,46 @@ def build_health_status() -> dict[str, Any]:
     with timed_section("health.markets"):
         markets = _build_market_health()
 
+    iron_cage: dict[str, Any] = {}
+    with timed_section("health.iron_cage"):
+        try:
+            from system.iron_cage_readiness import fast_iron_cage_status_snapshot
+
+            iron_cage = fast_iron_cage_status_snapshot()
+            if not iron_cage.get("trade_ready"):
+                try:
+                    from api.health_light import get_health_light_response
+
+                    hl_ic = (get_health_light_response() or {}).get("iron_cage") or {}
+                    if hl_ic.get("trade_ready"):
+                        iron_cage = {
+                            **hl_ic,
+                            "ts": time.time(),
+                            "source": "health_light_direct",
+                        }
+                except Exception:
+                    pass
+            try:
+                from api.health_light import _schedule_iron_cage_cache_refresh
+
+                _schedule_iron_cage_cache_refresh(time.time())
+            except Exception:
+                pass
+        except Exception:
+            iron_cage = {"ok": False, "trade_ready": False, "blockers": ["iron_cage_unavailable"]}
+
+    base_ok = trading_healthy and watchdog and supervision_drift.get("ok", True)
+    iron_ok = bool(iron_cage.get("ok", False))
+    trade_ready = bool(iron_cage.get("trade_ready", False))
+    for tag in iron_cage.get("blockers") or []:
+        if tag not in all_issues:
+            all_issues.append(f"iron_cage:{tag}")
+
     result = _apply_supervision_init_timeout(
         {
-            "ok": trading_healthy and watchdog and supervision_drift.get("ok", True),
+            "ok": base_ok and iron_ok,
+            "trade_ready": trade_ready,
+            "iron_cage": iron_cage,
             "agent_alive": True,
             **_health_pid_fields(),
             **session_fields,
@@ -706,6 +776,10 @@ def _build_fast_health_status() -> dict[str, Any]:
     """Cheap in-memory snapshot when the background cache has not warmed yet."""
     gate_age = seconds_since_last_gate_eval()
     loops_running = is_trading_running()
+    if not loops_running and _execution_plane_active():
+        loops_running = True
+        if gate_age is None:
+            gate_age = 0.0
     paused = is_paused()
     per_epic = last_gate_check_by_epic()
     now = time.time()

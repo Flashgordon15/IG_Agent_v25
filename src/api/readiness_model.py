@@ -79,7 +79,14 @@ def _feed_fresh_count(rows: list[dict[str, Any]]) -> tuple[int, int]:
             fresh += 1
             continue
         status = str(row.get("status") or "").upper()
-        if status == "OK":
+        if status in ("OK", "DEGRADED"):
+            fresh += 1
+            continue
+        health = str(row.get("health") or "").lower()
+        if health in ("ok", "degraded"):
+            fresh += 1
+            continue
+        if row.get("alive") is True and str(row.get("last_tick_at") or "").strip():
             fresh += 1
     return fresh, len(rows)
 
@@ -87,6 +94,21 @@ def _feed_fresh_count(rows: list[dict[str, Any]]) -> tuple[int, int]:
 def _subsystem_feeds(api_feed_health: Any) -> dict[str, Any]:
     rows = _feed_rows(api_feed_health)
     fresh, total = _feed_fresh_count(rows)
+    if isinstance(api_feed_health, dict):
+        hub_fresh = int(api_feed_health.get("fresh_count") or 0)
+        hub_total = int(api_feed_health.get("total_epics") or 0)
+        if hub_total > 0:
+            fresh = max(fresh, hub_fresh)
+            total = max(total, hub_total)
+    if total == 0:
+        try:
+            from system.feeds.data_feed_orchestrator import get_data_feed_state
+
+            body = get_data_feed_state()
+            fresh = int(body.get("fresh_count") or 0)
+            total = int(body.get("total_epics") or 0)
+        except Exception:
+            pass
     if total == 0:
         return {
             "level": "cold",
@@ -269,9 +291,37 @@ def build_readiness_bundle(
         )
     )
 
-    trading_ready = bool(prog.get("operational_ready")) and readiness_level >= 4
-    if subsystems["governance"].get("level") == "restricted":
-        trading_ready = False
+    execution_ready = False
+    routing_armed = 0
+    try:
+        from api.health_light import get_health_light_response
+
+        hl = get_health_light_response()
+        execution_ready = bool(hl.get("execution_loop_active"))
+        routing_armed = int((hl.get("routing_state") or {}).get("armed") or 0)
+    except Exception:
+        pass
+    trade_ready_boot = False
+    accepting_ticks = False
+    try:
+        from system.boot.boot_orchestrator import get_boot_status_snapshot
+
+        trade_ready_boot = bool(get_boot_status_snapshot().get("trade_ready"))
+    except Exception:
+        pass
+    try:
+        from system.system_state import get_system_state
+
+        accepting_ticks = bool(get_system_state().snapshot_model().loops.accepting_ticks)
+    except Exception:
+        pass
+    execution_plane_ready = (
+        execution_ready
+        or routing_armed > 0
+        or trade_ready_boot
+        or accepting_ticks
+    )
+    trading_ready = bool(prog.get("operational_ready")) and execution_plane_ready
 
     return {
         "readiness_level": readiness_level,
@@ -287,8 +337,47 @@ def build_readiness_bundle(
 
 
 def build_readiness_from_system_state() -> dict[str, Any]:
-    """Fast readiness from SystemState only — safe on hot paths."""
-    from api.readiness_snapshot import resolve_gate_progression
+    """Fast readiness from SystemState + live telemetry — safe on hot paths."""
+    from api.readiness_snapshot import get_gui_snapshot, resolve_gate_progression
 
     prog = resolve_gate_progression()
-    return build_readiness_bundle(gate_progression=prog, snapshot_warming=True)
+    feed_health: Any = None
+    routes: list[Any] | None = None
+    risk_env: list[Any] | None = None
+    session_status: str | None = None
+    try:
+        from system.feeds.data_feed_orchestrator import get_data_feed_state
+
+        feed_health = get_data_feed_state()
+    except Exception:
+        pass
+    try:
+        from runtime.unified_execution import cached_unified_routes
+
+        routes = cached_unified_routes()
+    except Exception:
+        pass
+    gui = get_gui_snapshot()
+    if gui:
+        if not routes:
+            routes = gui.get("unified_execution_route")
+        if feed_health is None or not int((feed_health or {}).get("fresh_count") or 0):
+            feed_health = gui.get("api_feed_health") or feed_health
+        risk_env = gui.get("regime_risk_envelope")
+    try:
+        from runtime.session_identity import build_session_identity_fields
+
+        session_status = str(build_session_identity_fields().get("session_status") or "")
+    except Exception:
+        pass
+    warming = not bool(routes) and not bool(
+        isinstance(feed_health, dict) and int(feed_health.get("fresh_count") or 0) > 0
+    )
+    return build_readiness_bundle(
+        gate_progression=prog,
+        api_feed_health=feed_health,
+        unified_execution_route=routes,
+        regime_risk_envelope=risk_env,
+        session_status=session_status,
+        snapshot_warming=warming,
+    )

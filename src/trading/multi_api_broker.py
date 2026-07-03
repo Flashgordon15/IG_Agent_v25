@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -23,12 +23,16 @@ import requests
 from system.engine_log import log_engine
 
 STREAM_A_INTERVAL_SEC = 0.020
-STREAM_B_INTERVAL_SEC = 2.0
+# Macro volatility drifts over minutes — a 2s chart poll (4 epics = 2 req/s,
+# un-bucketed) tripped Yahoo IP throttling and poisoned the primary quote path.
+STREAM_B_INTERVAL_SEC = 30.0
 STREAM_B_SOCKET_TIMEOUT_SEC = 0.5
 STREAM_B_EXECUTOR_WALL_SEC = STREAM_B_SOCKET_TIMEOUT_SEC + 0.15
 HUB_HEARTBEAT_SEC = 0.020
 FLAT_TICK_WALK_PCT = 0.0005
-_CONCURRENT_FEED_TIMEOUT_SEC = 0.010
+# Stream A anchors synthetic ticks to a real mid; the anchor only needs a
+# periodic refresh, never a per-20ms-tick network race.
+_AGG_MID_TTL_SEC = 2.0
 _ALPHA_VANTAGE_QUOTE = "https://www.alphavantage.co/query"
 DEFAULT_EPICS = (
     "CS.D.CFPGOLD.CFP.IP",
@@ -93,6 +97,15 @@ def _yahoo_chart_network_fetch(url: str, epic: str) -> dict[str, float]:
 
     Hard 500 ms socket cap; never propagates blocking IO to the boot track.
     """
+    # Share the platform-wide yahoo budget — an un-bucketed side channel here
+    # previously contributed to IP-level throttling that broke the quote path.
+    try:
+        from system.chaos_guardian import acquire_outbound_token
+
+        if not acquire_outbound_token("yahoo", max_wait_sec=0.0):
+            return _synthetic_macro(epic)
+    except Exception:
+        pass
     # Secure Network Shield: Prevent connection deadlocks from freezing the boot process
     try:
         response = requests.get(
@@ -146,10 +159,30 @@ def _fetch_yahoo_mid_for_epic(epic: str) -> float | None:
     try:
         from feeder.yahoo_quote_poller import fetch_yahoo_quote
 
-        sample = fetch_yahoo_quote(epic, timeout_sec=0.008)
+        # Non-blocking token acquire: this runs on the Stream A hot path — if
+        # the yahoo bucket is dry we fall through to hub/mock instantly instead
+        # of parking a worker thread for 5s per call.
+        sample = fetch_yahoo_quote(epic, timeout_sec=1.5, token_wait_sec=0.0)
         if sample is None:
             return None
         return float((sample.bid + sample.offer) * 0.5)
+    except Exception:
+        return None
+
+
+def _hub_snapshot_mid(epic: str) -> tuple[float, str] | None:
+    """Zero-cost mid from the shared market data hub (fed by the quote poller)."""
+    try:
+        from system.market_data_hub import get_market_data_hub
+
+        quote = get_market_data_hub().get_snapshot(epic)
+        if quote is None:
+            return None
+        bid = float(getattr(quote, "bid", 0) or 0)
+        offer = float(getattr(quote, "offer", 0) or 0)
+        if bid <= 0 or offer <= 0 or float(quote.age_seconds()) > 45.0:
+            return None
+        return (bid + offer) / 2.0, f"hub:{getattr(quote, 'source', '') or 'unknown'}"
     except Exception:
         return None
 
@@ -170,7 +203,7 @@ def _fetch_alpha_vantage_mid(epic: str) -> float | None:
         res = requests.get(
             _ALPHA_VANTAGE_QUOTE,
             params=params,
-            timeout=0.008,
+            timeout=1.5,
             headers={"User-Agent": "IG-Agent-Apex/30.0"},
         )
         if res.status_code != 200:
@@ -204,37 +237,68 @@ def _median_outlier_filter(mids: list[float]) -> float:
     return float(np.median(inliers))
 
 
+_AGG_MID_CACHE: dict[str, tuple[float, float, str]] = {}
+_AGG_MID_CACHE_LOCK = threading.Lock()
+_AGG_MID_REFRESH_INFLIGHT: set[str] = set()
+
+
+def _refresh_aggregate_mid(epic: str) -> None:
+    """Background anchor refresh — network work never blocks Stream A."""
+    try:
+        mid: float | None = None
+        source = ""
+        row = _hub_snapshot_mid(epic)
+        if row is not None:
+            mid, source = row
+        if mid is None:
+            mid = _fetch_yahoo_mid_for_epic(epic)
+            source = "yahoo"
+        if mid is None:
+            mid = _fetch_alpha_vantage_mid(epic)
+            source = "alpha_vantage"
+        if mid is not None and float(mid) > 0:
+            with _AGG_MID_CACHE_LOCK:
+                _AGG_MID_CACHE[epic] = (time.monotonic(), float(mid), source)
+    finally:
+        with _AGG_MID_CACHE_LOCK:
+            _AGG_MID_REFRESH_INFLIGHT.discard(epic)
+
+
 def _concurrent_aggregate_mid(epic: str) -> tuple[float, str]:
     """
-    Un-throttled concurrent aggregation — Yahoo, Alpha Vantage, mock matrix.
-    Falls back within 10ms window to keep ring buffers populated.
-    """
-    tasks: dict[str, float | None] = {"yahoo": None, "alpha_vantage": None, "mock": None}
-    try:
-        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="multi-feed") as pool:
-            futures = {
-                pool.submit(_fetch_yahoo_mid_for_epic, epic): "yahoo",
-                pool.submit(_fetch_alpha_vantage_mid, epic): "alpha_vantage",
-                pool.submit(_fetch_mock_mid, epic): "mock",
-            }
-            try:
-                for future in as_completed(futures, timeout=_CONCURRENT_FEED_TIMEOUT_SEC):
-                    label = futures[future]
-                    try:
-                        tasks[label] = future.result()
-                    except Exception:
-                        tasks[label] = None
-            except FuturesTimeoutError:
-                pass
-    except RuntimeError:
-        return _fetch_mock_mid(epic), "mock_shutdown"
+    Real-mid anchor for the 20ms Stream A synthesizer.
 
-    mids = [float(v) for v in tasks.values() if v is not None and float(v) > 0]
-    if not mids:
-        return _fetch_mock_mid(epic), "mock_fallback"
-    filtered = _median_outlier_filter(mids)
-    source = "+".join(k for k, v in tasks.items() if v is not None and float(v) > 0)
-    return filtered, f"median:{source}"
+    The previous implementation raced yahoo + alpha_vantage network fetches on
+    EVERY 20ms tick (a fresh 3-thread pool per call, 10ms collect window). At
+    4 epics that attempted ~200 Yahoo fetches/sec, permanently draining the
+    ChaosGuardian yahoo bucket and starving the real quote path used by the
+    strategy sweep. Now: serve from a TTL cache (hub snapshot preferred),
+    refresh asynchronously, and fall back to the mock matrix when cold.
+    """
+    now = time.monotonic()
+    with _AGG_MID_CACHE_LOCK:
+        cached = _AGG_MID_CACHE.get(epic)
+        fresh = cached is not None and (now - cached[0]) <= _AGG_MID_TTL_SEC
+        needs_refresh = not fresh and epic not in _AGG_MID_REFRESH_INFLIGHT
+        if needs_refresh:
+            _AGG_MID_REFRESH_INFLIGHT.add(epic)
+
+    if needs_refresh:
+        try:
+            threading.Thread(
+                target=_refresh_aggregate_mid,
+                args=(epic,),
+                name="agg-mid-refresh",
+                daemon=True,
+            ).start()
+        except RuntimeError:
+            with _AGG_MID_CACHE_LOCK:
+                _AGG_MID_REFRESH_INFLIGHT.discard(epic)
+
+    if cached is not None:
+        _, mid, source = cached
+        return float(mid), source if fresh else f"{source}:stale"
+    return _fetch_mock_mid(epic), "mock_fallback"
 
 
 def _synthetic_macro(epic: str) -> dict[str, float]:
@@ -608,6 +672,9 @@ def reset_multi_api_broker_for_tests() -> None:
             _BROKER.stop()
         _BROKER = None
     _shutdown_stream_b_net_executor()
+    with _AGG_MID_CACHE_LOCK:
+        _AGG_MID_CACHE.clear()
+        _AGG_MID_REFRESH_INFLIGHT.clear()
 
 
 def multi_api_broker_running() -> bool:

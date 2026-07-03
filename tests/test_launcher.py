@@ -78,6 +78,22 @@ def test_clean_removes_stale_lock(root: Path):
     assert removed
 
 
+def test_http_any_alive_checks_bootstrap_health():
+    calls: list[str] = []
+
+    def fetch(url: str, timeout_sec: float = 3.0) -> dict[str, Any] | None:
+        calls.append(url)
+        if url.endswith("/health"):
+            return {"status": "ok"}
+        return None
+
+    with patch.object(lc, "port_is_bound", return_value=True), patch.object(
+        lc, "fetch_json", side_effect=fetch
+    ):
+        assert lc.http_any_alive(8080) is True
+    assert calls[0].endswith("/health")
+
+
 def test_verify_health_success():
     payload = {"system_state": {"phase": "G5"}}
 

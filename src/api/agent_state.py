@@ -377,10 +377,6 @@ def start_agent_state_service() -> None:
     if _THREAD is not None and _THREAD.is_alive():
         return
     _STOP.clear()
-    _merge_advisory_fields()
-    with _LOCK:
-        _STATE["gate_progression"] = resolve_gate_progression()
-        _STATE["updated_at"] = _utc_now()
 
     if _TICK_SUB_UNSUB is None:
         _TICK_SUB_UNSUB = subscribe_tick(_on_dashboard_tick)

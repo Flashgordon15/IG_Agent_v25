@@ -10,9 +10,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
+import numpy as np
 import pandas as pd
-
-from signals.indicators import floor_time
 
 LOOKBACK_MINUTES = 30
 CANDLE_MINUTES = 5
@@ -23,18 +22,26 @@ FLAT_PCT = 0.0005  # 0.05%
 def _candles_5m(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=["time", "open", "close", "mid"])
-    t = df.copy()
-    t["bucket"] = t["time"].apply(lambda d: floor_time(d, CANDLE_MINUTES))
-    return (
-        t.groupby("bucket", as_index=False)
-        .agg(
-            time=("bucket", "first"),
-            open=("mid", "first"),
-            close=("mid", "last"),
-            mid=("mid", "last"),
-        )
-        .sort_values("time")
-        .reset_index(drop=True)
+    bucket_sec = CANDLE_MINUTES * 60
+    times = pd.to_datetime(df["time"])
+    keys = times.to_numpy().astype("datetime64[ns]").astype("int64") // 10**9
+    keys = (keys // bucket_sec) * bucket_sec
+    mids = df["mid"].to_numpy(dtype=float)
+    if keys.size > 1 and np.any(np.diff(keys) < 0):
+        order = np.argsort(keys, kind="stable")
+        keys = keys[order]
+        mids = mids[order]
+    uniq, first_idx = np.unique(keys, return_index=True)
+    last_idx = np.append(first_idx[1:], keys.size) - 1
+    bucket_times = uniq.astype("datetime64[s]")
+    return pd.DataFrame(
+        {
+            "bucket": bucket_times,
+            "time": bucket_times,
+            "open": mids[first_idx],
+            "close": mids[last_idx],
+            "mid": mids[last_idx],
+        }
     )
 
 

@@ -59,12 +59,96 @@ _refresher_stop = threading.Event()
 _last_provider_check: float = 0.0
 _last_sweep_count: int = 0
 _last_sweep_ts: float = 0.0
+_IRON_CAGE_RECHECK_SEC = 10.0
+_last_iron_cage_refresh: float = 0.0
+_iron_cage_refresh_lock = threading.Lock()
+_iron_cage_refresh_running = False
+
+
+def _schedule_iron_cage_cache_refresh(now: float) -> None:
+    """Non-blocking iron_cage evaluate — must not stall the 1s health_light refresher."""
+    global _last_iron_cage_refresh, _iron_cage_refresh_running
+
+    if now - _last_iron_cage_refresh < _IRON_CAGE_RECHECK_SEC:
+        return
+    with _iron_cage_refresh_lock:
+        if _iron_cage_refresh_running:
+            return
+        _iron_cage_refresh_running = True
+        _last_iron_cage_refresh = now
+
+    def _run() -> None:
+        global _iron_cage_refresh_running
+        try:
+            from system.iron_cage_readiness import evaluate_iron_cage_readiness
+
+            evaluate_iron_cage_readiness(force_refresh=True)
+        except Exception:
+            pass
+        finally:
+            with _iron_cage_refresh_lock:
+                _iron_cage_refresh_running = False
+
+    threading.Thread(target=_run, name="iron-cage-refresh", daemon=True).start()
+
+
+def _iron_cage_from_health_light(snap: dict[str, Any]) -> dict[str, Any]:
+    """Derive trade_ready from live health_light fields — avoids stale iron_cage cache."""
+    blockers: list[str] = []
+    exec_active = bool(snap.get("execution_loop_active"))
+    armed = int((snap.get("routing_state") or {}).get("armed") or 0)
+    hub = (snap.get("data_feeds") or {}).get("hub") or {}
+    fresh = int(hub.get("fresh_count") or 0)
+
+    if not exec_active:
+        blockers.append("execution_inactive")
+    if armed <= 0:
+        blockers.append("routing_unarmed")
+    if fresh < 1:
+        blockers.append("feed_starvation")
+
+    post_ready_operational = (
+        exec_active and armed > 0 and fresh >= 4 and bool(snap.get("stacked_sweep_alive"))
+    )
+    if not post_ready_operational:
+        try:
+            from system.boot.boot_orchestrator import get_boot_status_snapshot
+
+            boot = get_boot_status_snapshot()
+            gates = boot.get("gates") or []
+            if gates and not all(str(g.get("status") or "").lower() == "complete" for g in gates):
+                blockers.append("gates_incomplete")
+        except Exception:
+            pass
+
+    trade_ready = len(blockers) == 0
+    return {
+        "ok": trade_ready,
+        "trade_ready": trade_ready,
+        "blockers": blockers[:8],
+    }
+
+
+def iron_cage_from_health_light_snapshot(
+    snap: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Derive iron-cage trade_ready from health_light telemetry fields (never blocks)."""
+    if snap is None:
+        snap = get_health_light_response()
+    if not snap:
+        return {
+            "ok": False,
+            "trade_ready": False,
+            "blockers": ["iron_cage_warming"],
+        }
+    return _iron_cage_from_health_light(snap)
 
 
 def get_health_light_response() -> dict[str, Any]:
     """O(1) dict copy — MUST NOT call external APIs or heavy endpoints."""
-    with _lock:
-        return dict(_snapshot)
+    # Atomic ref read — refresh swaps the whole dict without holding readers.
+    snap = _snapshot
+    return dict(snap) if snap else {}
 
 
 def _utc_now_iso() -> str:
@@ -73,7 +157,7 @@ def _utc_now_iso() -> str:
 
 def _refresh_snapshot() -> None:
     """Called every 1s from background thread — reads ONLY cached/local sources."""
-    global _last_provider_check, _last_sweep_count, _last_sweep_ts
+    global _last_provider_check, _last_sweep_count, _last_sweep_ts, _snapshot
 
     now = time.time()
     snap: dict[str, Any] = {
@@ -93,11 +177,10 @@ def _refresh_snapshot() -> None:
     # Execution loop active — stacked thread alive + tpm or sweep advancing
     try:
         from runtime.dual_core_execution import (
-            _ensure_stacked_sweep_running,
-            _ticks_per_minute,
             get_active_stack_epics,
             get_rotation_state,
             is_stacked_sweep_thread_alive,
+            _ticks_per_minute,
         )
 
         stack = get_active_stack_epics()
@@ -109,12 +192,6 @@ def _refresh_snapshot() -> None:
         elapsed_since_sweep = now - _last_sweep_ts if _last_sweep_ts > 0 else 9999
         min_tpm = min((_ticks_per_minute(e) for e in stack), default=0) if stack else 0
         thread_ok = is_stacked_sweep_thread_alive()
-        if not thread_ok:
-            _ensure_stacked_sweep_running()
-            thread_ok = is_stacked_sweep_thread_alive()
-        elif elapsed_since_sweep > 30.0 and min_tpm > 0:
-            _ensure_stacked_sweep_running()
-            thread_ok = is_stacked_sweep_thread_alive()
         snap["execution_loop_active"] = thread_ok and (
             elapsed_since_sweep < 5.0 or min_tpm >= 5
         )
@@ -191,16 +268,11 @@ def _refresh_snapshot() -> None:
 
     # Data feeds — cached hub status per feed
     try:
-        from system.market_data_hub import get_market_data_hub, NIGHT_MATRIX_EPICS
+        from system.market_data_hub import NIGHT_MATRIX_EPICS, night_matrix_signal_fresh_count
 
-        hub = get_market_data_hub()
-        fresh_count = 0
-        for epic in NIGHT_MATRIX_EPICS:
-            q = hub.get_snapshot(epic)
-            if q is not None and float(getattr(q, "bid", 0) or 0) > 0 and q.age_seconds() <= 45.0:
-                fresh_count += 1
+        fresh_count, total = night_matrix_signal_fresh_count(max_age_sec=45.0)
         snap["data_feeds"] = {
-            "hub": {"fresh_count": fresh_count, "total": len(NIGHT_MATRIX_EPICS)},
+            "hub": {"fresh_count": fresh_count, "total": total or len(NIGHT_MATRIX_EPICS)},
         }
     except Exception:
         snap["data_feeds"] = {}
@@ -237,12 +309,42 @@ def _refresh_snapshot() -> None:
         _last_provider_check = now
         _refresh_provider_availability(snap)
     else:
-        with _lock:
-            snap["ig_available"] = _snapshot.get("ig_available")
-            snap["yahoo_available"] = _snapshot.get("yahoo_available")
+        snap["ig_available"] = _snapshot.get("ig_available")
+        snap["yahoo_available"] = _snapshot.get("yahoo_available")
 
-    with _lock:
-        _snapshot.update(snap)
+    snap["iron_cage"] = _iron_cage_from_health_light(snap)
+    if snap["iron_cage"].get("trade_ready"):
+        try:
+            from system.iron_cage_readiness import publish_operational_iron_cage_cache
+
+            publish_operational_iron_cage_cache(
+                {
+                    "ok": True,
+                    "trade_ready": True,
+                    "blockers": snap["iron_cage"].get("blockers") or [],
+                    "execution": {
+                        "loop_active": bool(snap.get("execution_loop_active")),
+                        "stacked_sweep_alive": bool(snap.get("stacked_sweep_alive")),
+                        "rotation_sweep_count": int(snap.get("rotation_sweep_count") or 0),
+                        "routes_armed": int((snap.get("routing_state") or {}).get("armed") or 0),
+                    },
+                    "feeds": {
+                        "health": "ok",
+                        "fresh_count": int(
+                            (snap.get("data_feeds") or {}).get("hub", {}).get("fresh_count") or 0
+                        ),
+                    },
+                    "ts": time.time(),
+                    "source": "health_light_refresher",
+                }
+            )
+        except Exception:
+            pass
+    _schedule_iron_cage_cache_refresh(now)
+
+    _snapshot = snap
+
+    _write_heartbeat_file()
 
     try:
         from system.unified_runtime_state import update_from_health_light
@@ -250,9 +352,6 @@ def _refresh_snapshot() -> None:
         update_from_health_light(snap)
     except Exception:
         pass
-
-    # Write heartbeat file
-    _write_heartbeat_file()
 
 
 def _refresh_provider_availability(snap: dict[str, Any]) -> None:
@@ -343,11 +442,7 @@ def start_health_light_refresher() -> None:
         daemon=True,
     )
     _refresher_thread.start()
-    # Seed immediately so first HTTP request is non-empty
-    try:
-        _refresh_snapshot()
-    except Exception:
-        pass
+    # First snapshot runs inside refresher thread — avoid blocking API lifespan startup.
     log_engine("HealthLight: 1s refresher started")
 
 

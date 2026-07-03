@@ -30,6 +30,17 @@ HEALTH_URL = "http://127.0.0.1:8080/api/health"
 
 
 def _get(url: str) -> dict[str, Any]:
+    if os.environ.get("IG_AGENT_IN_PROCESS", "").strip() == "1":
+        if "fulfillment" in url:
+            from system.unified_fulfillment_cache import get_fulfillment_payload
+
+            payload = get_fulfillment_payload()
+            return payload if isinstance(payload, dict) else {}
+        if "/api/health" in url:
+            from api.agent_health import build_health_status
+
+            payload = build_health_status()
+            return payload if isinstance(payload, dict) else {}
     with urllib.request.urlopen(url, timeout=4) as resp:
         return json.loads(resp.read().decode("utf-8"))
 

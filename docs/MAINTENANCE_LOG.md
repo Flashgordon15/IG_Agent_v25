@@ -224,3 +224,72 @@ Once all stress gates pass:
 ---
 
 *End of maintenance log — do not re-arm live trading until S1–S3 are 100% green.*
+
+---
+
+## 2026-07-03 19:22 BST — Incident status: packet-validator circuit breaker fix HOLDING
+
+**Incident:** Market data hub reported `fresh=0` for hours; the packet-validator feed
+circuit breaker re-tripped every 5 minutes (`malformed_rate=99.9%`), rejecting ~100% of
+real quotes. Root cause: stale hardcoded `_HUB_SEED_DEFAULTS` (2024-era prices, 30–80%
+below live levels) poisoned the validator's out-of-order anchor, which was never updated
+on rejection; breaker drops were also counted as malformed traffic, so the breaker
+re-tripped the instant it expired.
+
+**Fix (live since ~19:03 BST restart):**
+- `src/system/packet_validator.py` — re-anchor last-mid after 3 consecutive jump rejects;
+  circuit-breaker drops no longer count toward the malformed-rate window.
+- `src/system/market_data_hub.py` — `_HUB_SEED_DEFAULTS` updated to current price levels.
+- `src/data/ohlc_yahoo_seeder.py` — crude spread 0.04; generic fallback spread scales
+  with price (flat 15.0 was 22% of crude mid → tripped the 10% spread cap).
+
+**Verified 19:22 BST:**
+- Last circuit-breaker trip: **19:02:00** (old process, during shutdown). None since —
+  previously it tripped every 5 minutes on the dot.
+- Feeds: `quotes_fresh=True`, **7/7 epics fresh**, `trading_healthy=True`.
+- Throughput actively flowing: ~830 log lines / 2 min; sweep evaluating live z-scores
+  (piercing-zone detections on Dow/Nikkei); last log line current to the second.
+- Process check clean: no dangling pytest; exactly one `src/main.py` (pid 97789,
+  ~30% CPU / 179MB RSS, normal) under `daemon_supervisor.sh` (pid 9525); only child is
+  the standard multiprocessing resource-tracker.
+
+**Note on recent task notifications:** the batch of "aborted"/completed shell task alerts
+around 19:12 were stale pre-fix test batches plus two deliberately killed wedged pytest
+runs (they hung on live network calls during the agent restart). Safe to ignore.
+
+---
+
+## 2026-07-03 20:15 BST — Quant audit fixes deployed (protocol restart)
+
+**Scope:** Full audit remediation across 12 modules — look-ahead/self-inclusion bias,
+hot-path bottlenecks, backtest/ML holdouts, matrix backtuner hindsight fixes.
+
+**Restart:** manual_stop hold → TERM (pid 97789) → pycache purge → supervisor relaunch.
+New agent **pid 61512**, port 8080 bound ~20:14 BST.
+
+**Verified 20:15 BST:**
+- `quotes_fresh=True`, **7/7 epics fresh**, `trading_healthy=True`, `trading_loops_running=True`
+- No packet-validator circuit-breaker trip since restart (prior recurring 5-minute cycle absent)
+- Transient boot heal on execution (`sweep_stalled`) during Gate F warm-up — resolved as loops armed
+
+**Key live-path changes now active:**
+- Prior-window z-scores in `dual_core_execution` (entry-gating signal no longer self-damped)
+- Leave-one-out spread/sweep z-scores in intelligence plane
+- Regime ATR ratio baseline excludes current bar; indicator memo cache on ring revision
+- Signal engine single-pass multi-timeframe resampling
+
+---
+
+## 2026-07-03 20:28 BST — Indicator kernel refinement deployed (protocol restart)
+
+**Scope:** `src/signals/indicators.py` only — anti-curve-fit constants, lag-reduced direction
+deadbands, vectorized EMA/RoC/percentile helpers, flow-boost cap at 25%.
+
+**Restart:** manual_stop hold → TERM (pid 61512) → pycache purge → supervisor relaunch.
+New agent **pid 74366**, port 8080 bound ~20:28 BST.
+
+**Verified 20:28 BST:**
+- `quotes_fresh=True`, **7/7 epics fresh**, `trading_healthy=True`
+- No packet-validator circuit-breaker trip since prior fix (~19:02 last trip)
+- Indicator tests: 20/20 pass (`test_apex_indicators`, `test_predictive_microkernel`,
+  `test_adversarial_hardening::MicroTrendAlphaTests`)

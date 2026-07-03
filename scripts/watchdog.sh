@@ -101,8 +101,45 @@ fi
 
 echo "$$" > "$PID_FILE"
 
+# All main.py PIDs for THIS project — matches both absolute invocations
+# ("$AGENT_DIR/src/main.py") and relative ones ("python3 -u src/main.py" spawned
+# by daemon_supervisor with cwd=$AGENT_DIR). Relative matches are cwd-verified so
+# agents from other checkouts are never claimed.
+agent_main_pids() {
+    local abs rel pid cwd
+    abs="$(/usr/bin/pgrep -f "${AGENT_DIR}/src/main.py" 2>/dev/null || true)"
+    rel=""
+    for pid in $(/usr/bin/pgrep -f "[s]rc/main\.py" 2>/dev/null || true); do
+        case " ${abs} " in *" ${pid} "*) continue ;; esac
+        cwd="$(lsof -a -p "${pid}" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
+        if [ -n "${cwd}" ] && [ "${cwd}" = "${AGENT_DIR}" ]; then
+            rel="${rel} ${pid}"
+        fi
+    done
+    printf '%s %s\n' "${abs}" "${rel}" | tr ' ' '\n' | sed '/^$/d'
+}
+
 agent_alive() {
-    lsof -iTCP:"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1 && [ -f "$LOCK_FILE" ]
+    lsof -iTCP:"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1 || return 1
+    [ -f "$LOCK_FILE" ] && return 0
+    # The instance lock is written after the API binds — during that window a
+    # healthy agent answers /api/health_light. Never treat it as a zombie.
+    local code
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 \
+        "http://127.0.0.1:${PORT}/api/health_light" 2>/dev/null || true)"
+    case "$code" in
+        200|503) return 0 ;;
+    esac
+    return 1
+}
+
+main_py_booting() {
+    # A live project-scoped main.py process IS the boot signal — the port bind
+    # and lock write land later in the boot choreography. Hung boots are still
+    # bounded by the restart cap + trading_healthy checks once the port binds.
+    local pids
+    pids="$(agent_main_pids)"
+    [ -n "${pids}" ]
 }
 
 clear_stale_agent_lock() {
@@ -124,29 +161,18 @@ clear_stale_agent_lock() {
         rm -f "$LOCK_FILE"
         log "WATCHDOG: removed stale instance lock (pid=${lock_pid} not running)"
     elif ! lsof -iTCP:"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then
+        # Lock pid alive but port unbound — a booting agent looks exactly like
+        # this before the API binds. Only reap if no project main.py is running.
+        if main_py_booting; then
+            log "WATCHDOG: lock pid=${lock_pid} alive and main.py booting — keeping lock"
+            return 0
+        fi
         rm -f "$LOCK_FILE"
         log "WATCHDOG: removed stale instance lock (pid=${lock_pid} but port ${PORT} free)"
     fi
 }
 
 clear_stale_agent_lock
-
-main_py_booting() {
-    if ! /usr/bin/pgrep -f "${AGENT_DIR}/src/main.py" >/dev/null 2>&1; then
-        return 1
-    fi
-    if lsof -iTCP:"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then
-        return 0
-    fi
-    if [ -f "$LOCK_FILE" ]; then
-        local lock_pid=""
-        lock_pid=$(head -1 "$LOCK_FILE" 2>/dev/null | awk '{print $1}' || true)
-        if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
-            return 0
-        fi
-    fi
-    return 1
-}
 
 manual_stop_active() {
     local flag="$AGENT_DIR/src/data/state/manual_stop.json"
@@ -175,6 +201,21 @@ try:
 except Exception:
     sys.exit(0)
 " "$flag"
+}
+
+supervisor_managed() {
+    local sup_file="${AGENT_DIR}/src/data/v31-production/supervisor.pid"
+    if [[ -n "${IG_DATA_ROOT:-}" ]]; then
+        sup_file="${IG_DATA_ROOT}/supervisor.pid"
+    fi
+    if [[ -f "${sup_file}" ]]; then
+        local spid
+        spid="$(tr -d '[:space:]' < "${sup_file}" 2>/dev/null || true)"
+        if [[ -n "${spid}" ]] && kill -0 "${spid}" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    pgrep -f "daemon_supervisor.sh" >/dev/null 2>&1
 }
 
 trading_healthy() {
@@ -235,11 +276,18 @@ if agent_alive; then
 elif main_py_booting; then
     last_restart_epoch=$(date +%s)
     log "WATCHDOG: main.py booting — startup grace ${STARTUP_GRACE_SEC}s (port=${PORT})"
+elif supervisor_managed; then
+    last_restart_epoch=$(date +%s)
+    log "WATCHDOG: daemon_supervisor active — startup grace ${STARTUP_GRACE_SEC}s (defer to supervisor)"
 else
     log "WATCHDOG: agent down on watchdog start — first restart check immediate (port=${PORT})"
 fi
 
 cleanup_stale() {
+    if supervisor_managed; then
+        log "WATCHDOG: daemon_supervisor active — skip port kill (supervisor owns recovery)"
+        return 0
+    fi
     log "WATCHDOG: cleaning up stale resources on port $PORT"
 
     local stale_pids
@@ -321,6 +369,13 @@ declare -a restart_times=()
 while true; do
     resolve_runtime_targets
 
+    if supervisor_managed && ! agent_alive; then
+        log "WATCHDOG: daemon_supervisor booting — deferring port cleanup/restart"
+        last_restart_epoch=$(date +%s)
+        sleep "$CHECK_INTERVAL"
+        continue
+    fi
+
     need_restart=0
     restart_reason=""
 
@@ -363,6 +418,11 @@ while true; do
     if (( need_restart )); then
         if manual_stop_active; then
             log "WATCHDOG: manual stop active — skipping auto-restart (${restart_reason})"
+            sleep "$CHECK_INTERVAL"
+            continue
+        fi
+        if supervisor_managed; then
+            log "WATCHDOG: daemon_supervisor active — deferring restart (${restart_reason})"
             sleep "$CHECK_INTERVAL"
             continue
         fi

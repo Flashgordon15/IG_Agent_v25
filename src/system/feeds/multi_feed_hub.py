@@ -366,6 +366,16 @@ class RacingMultiFeedHub:
         if yahoo_route_bypassed():
             log_engine("MultiFeedHub: Yahoo race loop skipped — route bypass active")
             return
+        try:
+            from feeder.yahoo_quote_poller import yahoo_poller_active
+
+            if yahoo_poller_active():
+                log_engine(
+                    "MultiFeedHub: Yahoo race loop skipped — orchestrator poller owns Yahoo path"
+                )
+                return
+        except Exception:
+            pass
         self._touch_heartbeat("yahoo", connected=True)
         while not _HUB_STOP.is_set():
             if yahoo_route_bypassed():
@@ -452,6 +462,13 @@ class RacingMultiFeedHub:
                                 provider="finnhub",
                                 source_id=SOURCE_FINNHUB,
                             )
+            except RuntimeError as exc:
+                if "shutdown" in str(exc).lower():
+                    log_engine("MultiFeedHub: Finnhub loop exiting — interpreter shutdown")
+                    return
+                self._record_timeout("finnhub")
+                log_guarded_exception("multi_feed_finnhub", exc)
+                await asyncio.sleep(2.0)
             except Exception as exc:
                 self._record_timeout("finnhub")
                 log_guarded_exception("multi_feed_finnhub", exc)
@@ -507,6 +524,13 @@ class RacingMultiFeedHub:
                             provider="twelvedata",
                             source_id=SOURCE_TWELVE_DATA,
                         )
+            except RuntimeError as exc:
+                if "shutdown" in str(exc).lower():
+                    log_engine("MultiFeedHub: Twelve Data loop exiting — interpreter shutdown")
+                    return
+                self._record_timeout("twelvedata")
+                log_guarded_exception("multi_feed_twelvedata", exc)
+                await asyncio.sleep(2.0)
             except Exception as exc:
                 self._record_timeout("twelvedata")
                 log_guarded_exception("multi_feed_twelvedata", exc)

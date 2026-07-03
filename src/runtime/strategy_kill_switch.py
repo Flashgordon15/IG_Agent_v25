@@ -23,6 +23,16 @@ def is_strategy_kill_active() -> bool:
     with _LOCK:
         if _tripped:
             return True
+    # Ignore persisted latch until G5 READY — post_ready clears file after reconcile.
+    try:
+        from system.system_state import get_system_state
+
+        state = get_system_state()
+        snap = state.try_snapshot(timeout=0.25)
+        if snap is not None and not bool(snap.get("ready")):
+            return False
+    except Exception:
+        pass
     if not _KILL_FILE.is_file():
         return False
     try:

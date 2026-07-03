@@ -116,7 +116,11 @@ def _position_state_fingerprint() -> str:
     try:
         from system.runtime_state_persist import _collect_state
 
-        blob = _collect_state()
+        blob = dict(_collect_state())
+        # saved_at is time.time() — hashing it made the fingerprint change on
+        # EVERY call, so the 150ms checkpoint monitor rewrote the full trading
+        # ledger continuously (log flood + disk churn + starved event loop).
+        blob.pop("saved_at", None)
     except Exception:
         blob = {}
     open_rows: list[dict[str, Any]] = []
@@ -625,6 +629,57 @@ def kill_other_agent_processes(
     return killed
 
 
+def stop_daemon_supervisor_processes(*, sigkill: bool = True) -> list[int]:
+    """Stop daemon_supervisor.sh — prevents respawn while main.py is tearing down."""
+    if os.environ.get("IG_AGENT_PYTEST") == "1":
+        return []
+    root = project_root()
+    needle = f"{root}/scripts/daemon_supervisor.sh"
+    stopped: list[int] = []
+    try:
+        result = subprocess.run(
+            ["/usr/bin/pgrep", "-f", needle],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        for pid_str in result.stdout.strip().splitlines():
+            try:
+                pid = int(pid_str.strip())
+            except ValueError:
+                continue
+            if pid == os.getpid():
+                continue
+            try:
+                os.kill(pid, signal.SIGTERM)
+                stopped.append(pid)
+                log_engine(f"shutdown cleanup: SIGTERM daemon_supervisor PID {pid}")
+            except ProcessLookupError:
+                pass
+            except Exception as exc:
+                log_engine(
+                    f"shutdown cleanup: SIGTERM supervisor {pid} failed: {type(exc).__name__}"
+                )
+    except Exception as exc:
+        log_engine(f"shutdown cleanup: supervisor pgrep failed: {type(exc).__name__}")
+        return stopped
+
+    if not stopped or not sigkill:
+        return stopped
+
+    time.sleep(2.0)
+    for pid in stopped:
+        try:
+            os.kill(pid, 0)
+            os.kill(pid, signal.SIGKILL)
+            log_engine(f"shutdown cleanup: SIGKILL daemon_supervisor PID {pid}")
+        except ProcessLookupError:
+            pass
+        except Exception:
+            pass
+    return stopped
+
+
 def perform_shutdown_cleanup(
     *, source: str = "shutdown", skip_port_cleanup: bool = False
 ) -> None:
@@ -641,6 +696,11 @@ def perform_shutdown_cleanup(
         return
 
     log_engine(f"shutdown cleanup: begin (source={source})")
+
+    try:
+        stop_daemon_supervisor_processes()
+    except Exception as e:
+        log_engine(f"shutdown cleanup: supervisor stop error (continuing): {e}")
 
     try:
         from harmonization.clean_shutdown import write_crash_state
@@ -675,6 +735,36 @@ def perform_shutdown_cleanup(
         log_engine("shutdown cleanup: market stream, reconciler, and position sync stopped")
     except Exception as e:
         log_engine(f"shutdown cleanup: stream/sync stop error (continuing): {e}")
+
+    try:
+        from runtime.trade_manager import stop_dual_core_coordinator
+
+        stop_dual_core_coordinator()
+    except Exception as e:
+        log_engine(f"shutdown cleanup: dual-core coordinator stop error (continuing): {e}")
+
+    try:
+        from runtime.dual_core_execution import stop_stacked_dual_asset_tracks
+
+        stop_stacked_dual_asset_tracks()
+    except Exception as e:
+        log_engine(f"shutdown cleanup: stacked sweep stop error (continuing): {e}")
+
+    try:
+        from cockpit.telemetry_bridge import stop_telemetry_bridge
+
+        stop_telemetry_bridge()
+    except Exception as e:
+        log_engine(f"shutdown cleanup: telemetry bridge stop error (continuing): {e}")
+
+    try:
+        from execution.broker_epic_resolver import clear_wire_epic_cache
+        from execution.broker_tradeability import clear_broker_status_cache
+
+        clear_wire_epic_cache()
+        clear_broker_status_cache()
+    except Exception as e:
+        log_engine(f"shutdown cleanup: broker cache purge error (continuing): {e}")
 
     try:
         from cockpit.launcher import stop_flight_deck
@@ -888,6 +978,14 @@ def _instance_lock_holder_pid() -> int | None:
 def _fetch_api_health(timeout: float = 3.0) -> dict | None:
     if os.environ.get("IG_AGENT_PYTEST") == "1":
         return None
+    if os.environ.get("IG_AGENT_IN_PROCESS", "").strip() == "1":
+        try:
+            from api.agent_health import build_health_status
+
+            data = build_health_status()
+            return data if isinstance(data, dict) else None
+        except Exception:
+            return None
     try:
         with urllib.request.urlopen(
             "http://127.0.0.1:8080/api/health",

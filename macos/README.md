@@ -1,21 +1,26 @@
-# IG Agent v41 — macOS Native Supervisor Launcher
+# Iron Cage Flight Deck — macOS native launcher
 
-Self-cleaning, PID-safe, port-safe one-click launch for DEMO (default). No terminal required when using **IGAgent.app**.
+One-click **Iron Cage Flight Deck** (pywebview WKWebView shell) for DEMO trading. No terminal, no legacy Swift splash, no browser auto-open.
 
 ## Quick start
 
 ```bash
-# Build Swift supervisor + app bundle
+# Build app bundle + icon
 ./macos/install_igagent_app.sh
 
-# Desktop shortcut
+# Desktop shortcut (Iron Cage Flight Deck.app)
 ./macos/setup_desktop_shortcut.sh
-
-# Or run from CLI (same pipeline)
-./macos/launcher/launch_agent.sh
 ```
 
-Double-click **IG Agent.app** (`macos/IGAgent.app` or Desktop alias).
+Double-click **Iron Cage Flight Deck** on the Desktop (or `macos/IGAgent.app`).
+
+Entry point: `desktop_flight_deck.sh` → `cockpit.desktop_app_shell --launch-supervisor`
+
+Legacy CLI (bash/Swift supervisor, no pywebview shell):
+
+```bash
+./macos/launcher/launch_agent.sh
+```
 
 ## Supervisor pipeline
 

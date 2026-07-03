@@ -225,6 +225,12 @@ def init_boot_pipeline() -> None:
         _boot_log.clear()
     record_boot_event("pipeline_init", stage=BootStage.A.value)
     mark_stage_running(BootStage.A)
+    try:
+        from system.boot.iron_gauge import init_iron_gauge
+
+        init_iron_gauge()
+    except Exception:
+        pass
     _publish_snapshot()
 
 
@@ -335,6 +341,42 @@ def _stage_index(stage_id: str) -> int:
         return -1
 
 
+def _enforce_stage_timeouts() -> None:
+    """Force-degrade RUNNING stages that exceed _STAGE_TIMEOUT_SEC — never wedge boot."""
+    global _current_stage
+    now_dt = datetime.now(timezone.utc)
+    order = [s.value for s, _, _ in _STAGE_DEFS]
+    forced: list[str] = []
+    with _lock:
+        for rec in _stages.values():
+            if rec.status != StepStatus.RUNNING.value or not rec.started_at:
+                continue
+            try:
+                started = datetime.fromisoformat(rec.started_at.replace("Z", "+00:00"))
+                elapsed = (now_dt - started).total_seconds()
+            except Exception:
+                elapsed = time.monotonic() - _boot_started_mono
+            if elapsed <= _STAGE_TIMEOUT_SEC:
+                continue
+            rec.status = StepStatus.DEGRADED.value
+            rec.completed_at = _utc_now_iso()
+            rec.last_error = f"timeout_{int(_STAGE_TIMEOUT_SEC)}s"
+            rec.elapsed_ms = elapsed * 1000.0
+            forced.append(rec.id)
+            idx = _stage_index(rec.id)
+            if idx >= 0 and idx + 1 < len(order):
+                nxt = order[idx + 1]
+                if _stage_index(nxt) > _stage_index(_current_stage):
+                    _current_stage = nxt
+    for sid in forced:
+        log_engine(
+            f"boot: stage {sid} exceeded {_STAGE_TIMEOUT_SEC:.0f}s — "
+            "forced degraded advance"
+        )
+    if forced:
+        _publish_snapshot()
+
+
 def _advance_current_stage(target: BootStage) -> None:
     global _current_stage
     if _stage_index(target.value) > _stage_index(_current_stage):
@@ -362,6 +404,17 @@ def _sync_from_cached_sources() -> None:
     """Background only — read cached health_light + system_state."""
     global _trade_ready, _trade_ready_at, _estimated_ready_sec
 
+    _enforce_stage_timeouts()
+
+    try:
+        from system.boot.gate3_runner import try_heal_stuck_g3
+        from system.boot.gate4_runner import try_heal_stuck_g4
+
+        try_heal_stuck_g3()
+        try_heal_stuck_g4()
+    except Exception as exc:
+        log_engine(f"boot:gate_heal {type(exc).__name__}: {exc}")
+
     try:
         from api.health_light import get_health_light_response
 
@@ -382,7 +435,17 @@ def _sync_from_cached_sources() -> None:
     hub = feeds.get("hub") or {}
     fresh = int(hub.get("fresh_count") or 0)
     total = int(hub.get("total") or 0)
-    feeds_ok = fresh >= 1 or bool(hl.get("stack_tpm"))
+    try:
+        from system.feeds.data_feed_orchestrator import primary_feed_active, signal_feed_health_ok
+
+        primary_feed_ok = primary_feed_active()
+        orchestrator_feed_ok = signal_feed_health_ok()
+    except Exception:
+        primary_feed_ok = fresh >= 1
+        orchestrator_feed_ok = fresh >= 1
+    feeds_ok = (fresh >= 1 or bool(hl.get("stack_tpm"))) and (
+        orchestrator_feed_ok or fresh >= 1
+    )
     routing = hl.get("routing_state") or {}
     armed = int(routing.get("armed") or 0)
     routing_ok = armed > 0 and not (
@@ -397,9 +460,27 @@ def _sync_from_cached_sources() -> None:
         ready_phase = True
 
     # Stage A — core agent
+    a_timed_out = False
+    a_timeout_err = ""
+    with _lock:
+        a_rec = _stages.get(BootStage.A.value)
+        if (
+            a_rec
+            and a_rec.status == StepStatus.DEGRADED.value
+            and str(a_rec.last_error or "").startswith("timeout_")
+        ):
+            a_timed_out = True
+            a_timeout_err = str(a_rec.last_error or "timeout")
     if ready_phase or hl.get("agent_online"):
         mark_stage_ok(BootStage.A)
         mark_subsystem(SubsystemId.CORE_AGENT, StepStatus.OK)
+        _advance_current_stage(BootStage.B)
+    elif a_timed_out:
+        mark_subsystem(
+            SubsystemId.CORE_AGENT,
+            StepStatus.DEGRADED,
+            error=a_timeout_err,
+        )
         _advance_current_stage(BootStage.B)
     else:
         mark_stage_running(BootStage.A)
@@ -481,20 +562,44 @@ def _sync_from_cached_sources() -> None:
     contract_ok, blockers = _evaluate_trade_ready_contract()
     extra_ok = (
         feeds_ok
+        and orchestrator_feed_ok
         and routing_ok
         and exec_ok
         and stacked
         and ig_ok
-        and yahoo_ok
+        and primary_feed_ok
         and gov_ok
         and ready_phase
     )
+    try:
+        from system.feeds.data_feed_orchestrator import ig_used_for_signal_path
+
+        if ig_used_for_signal_path():
+            extra_ok = False
+            blockers = list(blockers) if blockers else []
+            if "ig_on_signal_path" not in blockers:
+                blockers.append("ig_on_signal_path")
+    except Exception:
+        pass
     if contract_ok and extra_ok:
-        mark_stage_ok(BootStage.G, detail="trade_ready")
-        if not _trade_ready:
-            _trade_ready = True
-            _trade_ready_at = _utc_now_iso()
-            record_boot_event("trade_ready", stage=BootStage.G.value, detail="all_critical_ok")
+        cage: dict[str, Any] = {}
+        try:
+            from system.iron_cage_readiness import evaluate_iron_cage_readiness
+
+            cage = evaluate_iron_cage_readiness(force_refresh=True)
+            cage_ready = bool(cage.get("trade_ready"))
+        except Exception:
+            cage_ready = True
+        if cage_ready:
+            mark_stage_ok(BootStage.G, detail="trade_ready")
+            if not _trade_ready:
+                _trade_ready = True
+                _trade_ready_at = _utc_now_iso()
+                record_boot_event("trade_ready", stage=BootStage.G.value, detail="all_critical_ok")
+        else:
+            if ready_phase:
+                mark_stage_running(BootStage.G)
+            blockers = list(blockers) + list(cage.get("blockers") or [])
     else:
         if ready_phase:
             mark_stage_running(BootStage.G)
@@ -571,6 +676,28 @@ def _sync_from_cached_sources() -> None:
             _snapshot["startup_diagnostics"] = snap_copy["startup_diagnostics"]
     except Exception:
         pass
+    try:
+        from system.iron_cage_readiness import evaluate_iron_cage_readiness
+
+        ic = evaluate_iron_cage_readiness(force_refresh=True)
+        with _lock:
+            _snapshot["iron_cage"] = {
+                "ok": ic.get("ok"),
+                "trade_ready": ic.get("trade_ready"),
+                "blockers": ic.get("blockers") or [],
+                "warnings": ic.get("warnings") or [],
+                "gates": ic.get("gates") or [],
+                "feeds": ic.get("feeds") or {},
+                "execution": ic.get("execution") or {},
+                "ig_budget": ic.get("ig_budget") or {},
+                "subsystems": ic.get("subsystems") or {},
+            }
+            _trade_ready = bool(ic.get("trade_ready"))
+            _snapshot["trade_ready"] = _trade_ready
+            if not _trade_ready:
+                _snapshot["blockers"] = list(ic.get("blockers") or [])
+    except Exception:
+        pass
 
 
 def _build_startup_diagnostics(
@@ -624,6 +751,12 @@ def _refresh_loop() -> None:
     while not _stop.wait(_REFRESH_INTERVAL_SEC):
         try:
             _sync_from_cached_sources()
+            try:
+                from system.boot.iron_gauge import iron_gauge_tick
+
+                iron_gauge_tick()
+            except Exception as exc:
+                log_engine(f"boot:iron_gauge_tick {type(exc).__name__}: {exc}")
         except Exception as exc:
             log_engine(f"boot:refresh_loop {type(exc).__name__}: {exc}")
 

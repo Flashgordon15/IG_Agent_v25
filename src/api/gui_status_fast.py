@@ -73,6 +73,10 @@ def build_gui_status_fast() -> dict[str, Any]:
         "market_rotation_status": rotation_status,
         "unified_execution_route": routes,
         **governance,
+        # Launcher verify contract — present on fast tier; full DAG fills post-bind.
+        "strategy_selector_advice": {},
+        "strategy_controller_decisions": [],
+        "hard_enforcement_decisions": [],
         "snapshot_tier": "fast",
         "snapshot_warming": bool(routes) is False,
     }

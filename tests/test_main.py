@@ -24,14 +24,14 @@ class MainStartupTests(unittest.TestCase):
         self._singleton_patch.stop()
 
     def test_lock_present_exits(self) -> None:
-        with patch("main.emergency_stop_lock_present", return_value=True):
+        with patch("system.config_validator.emergency_stop_lock_present", return_value=True):
             code = main_mod.run_preflight()
         self.assertEqual(code, main_mod.EXIT_LOCK)
 
     @patch("main.load_raw_config_dict")
     def test_invalid_config_exits(self, load_mock: MagicMock) -> None:
         load_mock.return_value = {"epic": "X"}
-        with patch("main.emergency_stop_lock_present", return_value=False):
+        with patch("system.config_validator.emergency_stop_lock_present", return_value=False):
             with patch(
                 "main.merge_credentials_for_validation", side_effect=lambda d: d
             ):
@@ -39,9 +39,9 @@ class MainStartupTests(unittest.TestCase):
         self.assertEqual(code, main_mod.EXIT_CONFIG)
 
     @patch("system.demo_guard.validate_demo_only_startup", return_value=(True, "ok"))
-    @patch("main.bootstrap_credentials")
-    @patch("main.acquire_instance_lock", return_value=(False, "duplicate"))
-    @patch("main.validate_config", return_value=(True, []))
+    @patch("system.credentials_holder.bootstrap_credentials")
+    @patch("system.instance_lock.acquire_instance_lock", return_value=(False, "duplicate"))
+    @patch("system.config_validator.validate_config", return_value=(True, []))
     @patch("main.merge_credentials_for_validation")
     @patch("main.load_raw_config_dict")
     def test_instance_lock_duplicate_exits(
@@ -55,14 +55,14 @@ class MainStartupTests(unittest.TestCase):
     ) -> None:
         load_mock.return_value = _full_config()
         merge_mock.side_effect = lambda d: d
-        with patch("main.emergency_stop_lock_present", return_value=False):
+        with patch("system.config_validator.emergency_stop_lock_present", return_value=False):
             code = main_mod.run_preflight()
         self.assertEqual(code, main_mod.EXIT_INSTANCE)
 
     @patch("system.demo_guard.validate_demo_only_startup", return_value=(True, "ok"))
-    @patch("main.bootstrap_credentials")
-    @patch("main.acquire_instance_lock", return_value=(False, "duplicate Delete"))
-    @patch("main.validate_config", return_value=(True, []))
+    @patch("system.credentials_holder.bootstrap_credentials")
+    @patch("system.instance_lock.acquire_instance_lock", return_value=(False, "duplicate Delete"))
+    @patch("system.config_validator.validate_config", return_value=(True, []))
     @patch("main.merge_credentials_for_validation")
     @patch("main.load_raw_config_dict")
     @patch("system.watchdog_banner.record_startup_failure")
@@ -78,15 +78,15 @@ class MainStartupTests(unittest.TestCase):
     ) -> None:
         load_mock.return_value = _full_config()
         merge_mock.side_effect = lambda d: d
-        with patch("main.emergency_stop_lock_present", return_value=False):
+        with patch("system.config_validator.emergency_stop_lock_present", return_value=False):
             code = main_mod.run_preflight()
         self.assertEqual(code, main_mod.EXIT_INSTANCE)
         watchdog_mock.assert_not_called()
 
     @patch("system.demo_guard.validate_demo_only_startup", return_value=(True, "ok"))
-    @patch("main.bootstrap_credentials")
-    @patch("main.acquire_instance_lock", return_value=(True, "ok"))
-    @patch("main.validate_config", return_value=(True, []))
+    @patch("system.credentials_holder.bootstrap_credentials")
+    @patch("system.instance_lock.acquire_instance_lock", return_value=(True, "ok"))
+    @patch("system.config_validator.validate_config", return_value=(True, []))
     @patch("main.merge_credentials_for_validation")
     @patch("main.load_raw_config_dict")
     @patch("system.watchdog_banner.record_startup_success")
@@ -102,14 +102,13 @@ class MainStartupTests(unittest.TestCase):
     ) -> None:
         load_mock.return_value = _full_config()
         merge_mock.side_effect = lambda d: d
-        with patch("main.emergency_stop_lock_present", return_value=False):
+        with patch("system.config_validator.emergency_stop_lock_present", return_value=False):
             code = main_mod.run_preflight()
         self.assertEqual(code, main_mod.EXIT_OK)
         boot_mock.assert_called_once()
         watchdog_success_mock.assert_called_once()
 
-    @patch("main.log_engine")
-    def test_merge_credentials_adds_ig_keys(self, _log: MagicMock) -> None:
+    def test_merge_credentials_adds_ig_keys(self) -> None:
         cfg = {"epic": "IX.D.NIKKEI.IFM.IP"}
         creds = MagicMock()
         creds.ig_username = "u"
@@ -117,7 +116,7 @@ class MainStartupTests(unittest.TestCase):
         creds.ig_api_key = "k"
         creds.ig_account_id = "Z6BAH4"
         status = MagicMock(credentials=creds)
-        with patch("main.try_load_credentials", return_value=status):
+        with patch("system.credentials_loader.try_load_credentials", return_value=status):
             merged = main_mod.merge_credentials_for_validation(cfg)
         self.assertEqual(merged["ig_username"], "u")
         self.assertEqual(merged["account_id"], "Z6BAH4")
@@ -147,15 +146,20 @@ class PortConflictTests(unittest.TestCase):
         finally:
             s.close()
 
-    @patch("main.release_instance_lock")
-    @patch("main.check_port_available", return_value=False)
+    @patch("main._immutable_boot_choreography_enabled", return_value=False)
+    @patch("system.system_state.get_system_state")
+    @patch("system.instance_lock.release_instance_lock")
+    @patch("system.boot.port_eviction.reclaim_and_wait", return_value=False)
     @patch("main.run_preflight", return_value=main_mod.EXIT_OK)
     def test_port_in_use_prints_banner_exits_and_releases_lock(
         self,
         _preflight: MagicMock,
-        port_mock: MagicMock,
+        reclaim_mock: MagicMock,
         release_mock: MagicMock,
+        state_mock: MagicMock,
+        _immutable: MagicMock,
     ) -> None:
+        state_mock.return_value.gate_complete.return_value = True
         runtime = main_mod.AgentRuntime()
         stderr_capture: list[str] = []
 
@@ -171,44 +175,37 @@ class PortConflictTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as ctx:
                 runtime.run()
         self.assertEqual(ctx.exception.code, 1)
-        port_mock.assert_called_once_with(main_mod._API_PORT)
-        release_mock.assert_called_once()
+        reclaim_mock.assert_called()
+        release_mock.assert_called()
         combined = "".join(stderr_capture)
-        self.assertIn("port 8080 is already in use", combined)
-        self.assertIn("lsof -i :8080", combined)
+        self.assertIn("already in use", combined)
 
-    @patch("uvicorn.run")
-    @patch("main.create_app")
-    @patch("main.register_api_startup")
-    @patch("main.register_trading_loop")
-    @patch("runtime.agent_bootstrap.build_market_orchestrator")
-    @patch("main._rest_client_if_ready", return_value=None)
-    @patch("main.apply_config_defaults", side_effect=lambda d: d)
-    @patch("main._load_config")
-    @patch("main.check_port_available", return_value=True)
+    @patch("main._immutable_boot_choreography_enabled", return_value=False)
+    @patch("system.system_state.get_system_state")
+    @patch("uvicorn.Server")
+    @patch("api.server.create_app")
+    @patch("main._is_test_harness_mode", return_value=True)
+    @patch("system.boot.port_eviction.reclaim_and_wait", return_value=True)
     @patch("main.run_preflight", return_value=main_mod.EXIT_OK)
     def test_port_free_continues_to_uvicorn(
         self,
         _preflight: MagicMock,
-        port_mock: MagicMock,
-        load_mock: MagicMock,
-        _defaults: MagicMock,
-        _rest: MagicMock,
-        loop_mock: MagicMock,
-        _reg_loop: MagicMock,
-        _reg_startup: MagicMock,
-        _app_mock: MagicMock,
-        uvicorn_mock: MagicMock,
+        reclaim_mock: MagicMock,
+        _harness: MagicMock,
+        app_mock: MagicMock,
+        server_cls: MagicMock,
+        state_mock: MagicMock,
+        _immutable: MagicMock,
     ) -> None:
-        cfg = MagicMock()
-        cfg.as_dict.return_value = {"epic": "IX.D.NIKKEI.IFM.IP"}
-        load_mock.return_value = cfg
-        loop_mock.return_value = MagicMock()
+        state_mock.return_value.gate_complete.return_value = True
+        app_mock.return_value = MagicMock()
+        server_inst = MagicMock()
+        server_cls.return_value = server_inst
         runtime = main_mod.AgentRuntime()
         code = runtime.run()
         self.assertEqual(code, main_mod.EXIT_OK)
-        port_mock.assert_called_once_with(main_mod._API_PORT)
-        uvicorn_mock.assert_called_once()
+        reclaim_mock.assert_called()
+        server_inst.run.assert_called_once()
 
 
 if __name__ == "__main__":

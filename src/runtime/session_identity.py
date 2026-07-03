@@ -115,6 +115,7 @@ def _build_session_identity_fields_uncached() -> dict[str, Any]:
             )
         session_status = session_status_for_record(record)
 
+    paths_armed = _engine_paths_armed()
     return {
         "app_mode": mode.value,
         "broker_plane": broker_plane_for(mode),
@@ -123,8 +124,8 @@ def _build_session_identity_fields_uncached() -> dict[str, Any]:
         "session_status": session_status,
         "data_root": data_root,
         "config_overlay": config_overlay,
-        "engine_paths_armed": _engine_paths_armed(),
-        "paths_armed": _engine_paths_armed(),
+        "engine_paths_armed": paths_armed,
+        "paths_armed": dict(paths_armed),
         "api_port": port,
         "port": port,
         "pid": os.getpid(),

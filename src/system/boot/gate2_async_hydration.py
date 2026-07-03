@@ -72,9 +72,14 @@ def _hydrate_positions_orders(rest: Any, context: Any) -> None:
         balance = rest.refresh_account_summary()
         return positions, orders, balance, open_count
 
-    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="g2-bg-hydrate") as pool:
-        future = pool.submit(_run)
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="g2-bg-hydrate")
+    future = pool.submit(_run)
+    try:
         positions, orders, balance, open_count = future.result(timeout=12.0)
+    except FuturesTimeoutError:
+        raise TimeoutError("Gate2-async hydration timed out after 12s") from None
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
     context.hydration_detail = {
         "open_positions": open_count,

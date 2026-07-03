@@ -35,6 +35,12 @@ def heal_yahoo(*, cfg: Any | None = None) -> bool:
 
     mark_subsystem_healing(SubsystemId.YAHOO, action="restart_yahoo_poller")
     try:
+        try:
+            from system.chaos_guardian import clear_token_queue_delays
+
+            clear_token_queue_delays(refill=True)
+        except Exception:
+            pass
         from feeder.yahoo_quote_poller import start_yahoo_quote_poller
         from feeder.pricing_transport import yahoo_poll_seconds
         from runtime.dual_core_execution import ROTATION_UNIVERSE
@@ -140,15 +146,27 @@ def heal_execution() -> bool:
     """Restart stacked dual-asset execution loop only."""
     if not _cooldown_ok("execution"):
         return False
+    try:
+        from system.system_state import get_system_state
+
+        if not get_system_state().snapshot_model().ready:
+            return False
+    except Exception:
+        return False
     from system.boot.boot_orchestrator import SubsystemId, mark_subsystem_healing
 
     mark_subsystem_healing(SubsystemId.EXECUTION, action="restart_stacked_sweep")
     try:
-        from runtime.dual_core_execution import _ensure_stacked_sweep_running
+        from runtime.dual_core_execution import (
+            _ensure_stacked_sweep_running,
+            _stacked_sweep_is_productive,
+        )
 
+        if _stacked_sweep_is_productive():
+            return True
         _ensure_stacked_sweep_running()
         log_engine("boot_heal: stacked execution sweep restarted")
-        return True
+        return _stacked_sweep_is_productive()
     except Exception as exc:
         log_engine(f"boot_heal: execution restart failed {type(exc).__name__}: {exc}")
         return False

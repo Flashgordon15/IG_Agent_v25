@@ -73,6 +73,8 @@ def _default_spread(yahoo_symbol: str, close: float) -> float:
         return 0.0002
     if sym == "GC=F":
         return 0.5
+    if sym == "CL=F":
+        return 0.04
     if sym == "^DJI":
         return 3.0
     if sym == "NQ=F":
@@ -81,6 +83,11 @@ def _default_spread(yahoo_symbol: str, close: float) -> float:
         return 8.0
     if sym == "^GDAXI":
         return 2.0
+    # Flat 15.0 rejected low-priced instruments downstream (packet validator
+    # caps spread at 10% of mid — 15 pts on crude @ ~69 is 22%). Scale with
+    # price and keep the historical 15 pts for index-level (>3000) marks.
+    if close > 0:
+        return min(15.0, max(0.02, close * 0.0005))
     return 15.0
 
 

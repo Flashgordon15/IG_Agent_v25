@@ -48,7 +48,7 @@ class TelegramNotifierTests(unittest.TestCase):
         n = TelegramNotifier(enabled=True, bot_token="tok", chat_id="99")
         with patch.object(n, "_send_sync") as sync:
             n.send_now("test message")
-        sync.assert_called_once_with("test message")
+        sync.assert_called_once_with("test message", parse_mode=None)
 
     def test_notify_startup_uses_send_now(self) -> None:
         n = TelegramNotifier(enabled=True, bot_token="tok", chat_id="99")
@@ -147,6 +147,22 @@ class TelegramNotifierTests(unittest.TestCase):
         self.assertIn("+12.5 pts", text)
         self.assertIn("0.75", text)
         self.assertIn("7 standard alerts", text)
+        self.assertEqual(n._heartbeat_buffer["suppressed_count"], 0)
+
+    def test_send_hourly_combined_report_merges_executive_and_buffer(self) -> None:
+        n = TelegramNotifier(enabled=True, bot_token="tok", chat_id="99")
+        n._heartbeat_buffer["session_pnl_points"] = 3.0
+        n._heartbeat_buffer["suppressed_count"] = 2
+        n._heartbeat_buffer["routine_summaries"] = ["📈 Japan 225 BUY"]
+        n.buffer_hourly_digest("📦 Batch digest")
+        with patch.object(n, "send_now", return_value=True) as send_now:
+            ok = n.send_hourly_combined_report("Executive summary", {"positions": 1})
+        self.assertTrue(ok)
+        text = send_now.call_args[0][0]
+        self.assertIn("Executive summary", text)
+        self.assertIn("Batch digest", text)
+        self.assertIn("Japan 225", text)
+        self.assertIn("[AGENT HEARTBEAT REPORT]", text)
         self.assertEqual(n._heartbeat_buffer["suppressed_count"], 0)
 
 

@@ -20,10 +20,20 @@ from system.engine_log import log_engine
 from system.market_data_hub import QuoteSnapshot, get_market_data_hub
 
 _YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-_DEFAULT_TIMEOUT_SEC = 0.75
+# Spark batch schema — one request covers every polled symbol (1 rate-limit
+# token per poll cycle instead of one per epic).
+_YAHOO_SPARK = "https://query1.finance.yahoo.com/v7/finance/spark"
+_DEFAULT_TIMEOUT_SEC = 1.5
+# Generous socket cap for the background batch poll: in-process GIL contention
+# adds seconds of scheduling latency on top of the ~100ms network round trip,
+# and this path never blocks the trading sweep.
+_BATCH_TIMEOUT_SEC = 5.0
 _USER_AGENT = "IG-Agent-Apex/30.0"
 _ERROR_LOG_INTERVAL_SEC = 60.0
 _last_fetch_error_log: dict[str, float] = {}
+_RATE_LIMIT_BACKOFF_SEC = 0.0
+_RATE_LIMIT_UNTIL_MONO = 0.0
+_MAX_RATE_LIMIT_BACKOFF_SEC = 120.0
 
 _POLLER: YahooQuotePoller | None = None
 _POLLER_LOCK = threading.Lock()
@@ -46,8 +56,64 @@ def yahoo_symbol_for_epic(epic: str) -> str | None:
     return str(mapping[0])
 
 
-def fetch_yahoo_mid(symbol: str, *, timeout_sec: float = _DEFAULT_TIMEOUT_SEC) -> float | None:
-    """Fetch latest regular-market price from Yahoo chart v8 API."""
+def yahoo_rate_limited() -> bool:
+    return time.monotonic() < _RATE_LIMIT_UNTIL_MONO
+
+
+def yahoo_rate_limit_backoff_sec() -> float:
+    return float(_RATE_LIMIT_BACKOFF_SEC)
+
+
+def _apply_yahoo_rate_limit_backoff(*, status_code: int | None = None) -> None:
+    global _RATE_LIMIT_BACKOFF_SEC, _RATE_LIMIT_UNTIL_MONO
+    if status_code == 429:
+        _RATE_LIMIT_BACKOFF_SEC = min(
+            _MAX_RATE_LIMIT_BACKOFF_SEC,
+            max(5.0, _RATE_LIMIT_BACKOFF_SEC * 2.0 if _RATE_LIMIT_BACKOFF_SEC else 8.0),
+        )
+    else:
+        _RATE_LIMIT_BACKOFF_SEC = min(
+            _MAX_RATE_LIMIT_BACKOFF_SEC,
+            max(3.0, _RATE_LIMIT_BACKOFF_SEC * 1.5 if _RATE_LIMIT_BACKOFF_SEC else 5.0),
+        )
+    _RATE_LIMIT_UNTIL_MONO = time.monotonic() + _RATE_LIMIT_BACKOFF_SEC
+    log_engine(
+        f"YahooQuotePoller: rate-limit backoff {_RATE_LIMIT_BACKOFF_SEC:.0f}s "
+        f"(status={status_code or 'error'})"
+    )
+
+
+def _clear_yahoo_rate_limit_backoff() -> None:
+    global _RATE_LIMIT_BACKOFF_SEC, _RATE_LIMIT_UNTIL_MONO
+    if _RATE_LIMIT_BACKOFF_SEC > 0:
+        _RATE_LIMIT_BACKOFF_SEC = max(0.0, _RATE_LIMIT_BACKOFF_SEC * 0.5)
+    if _RATE_LIMIT_BACKOFF_SEC <= 1.0:
+        _RATE_LIMIT_BACKOFF_SEC = 0.0
+        _RATE_LIMIT_UNTIL_MONO = 0.0
+
+
+def fetch_yahoo_mid(
+    symbol: str,
+    *,
+    timeout_sec: float = _DEFAULT_TIMEOUT_SEC,
+    token_wait_sec: float = 5.0,
+) -> float | None:
+    """Fetch latest regular-market price from Yahoo chart v8 API.
+
+    ``token_wait_sec=0`` makes the rate-limit token acquire non-blocking —
+    latency-critical callers (the 500ms strategy sweep) must fail over to the
+    hub snapshot instantly instead of parking a worker for 5s per epic, which
+    stretched sweep iterations to 10-15s whenever the yahoo bucket ran dry.
+    """
+    if yahoo_rate_limited():
+        return None
+    try:
+        from system.chaos_guardian import acquire_outbound_token
+
+        if not acquire_outbound_token("yahoo", max_wait_sec=max(0.0, float(token_wait_sec))):
+            return None
+    except Exception:
+        pass
     url = _YAHOO_CHART.format(symbol=url_quote(symbol, safe=""))
     try:
         response = requests.get(
@@ -55,8 +121,12 @@ def fetch_yahoo_mid(symbol: str, *, timeout_sec: float = _DEFAULT_TIMEOUT_SEC) -
             timeout=timeout_sec,
             headers={"User-Agent": _USER_AGENT},
         )
+        if response.status_code == 429:
+            _apply_yahoo_rate_limit_backoff(status_code=429)
+            return None
         response.raise_for_status()
         payload = response.json()
+        _clear_yahoo_rate_limit_backoff()
     except Exception as exc:
         now = time.monotonic()
         last = _last_fetch_error_log.get(symbol, 0.0)
@@ -88,6 +158,76 @@ def fetch_yahoo_mid(symbol: str, *, timeout_sec: float = _DEFAULT_TIMEOUT_SEC) -
     return mid if mid > 0 else None
 
 
+def fetch_yahoo_mids_batch(
+    symbols: list[str] | tuple[str, ...],
+    *,
+    timeout_sec: float = _BATCH_TIMEOUT_SEC,
+    token_wait_sec: float = 5.0,
+) -> dict[str, float]:
+    """Fetch mids for many symbols in ONE spark request (one rate-limit token).
+
+    The per-symbol chart endpoint cost N tokens + N sequential round trips per
+    poll cycle; at 7 epics every 3s that alone saturated the yahoo budget and
+    left zero headroom, so every other consumer logged token exhaustion.
+    """
+    wanted = [str(s).strip() for s in symbols if str(s or "").strip()]
+    if not wanted:
+        return {}
+    if yahoo_rate_limited():
+        return {}
+    try:
+        from system.chaos_guardian import acquire_outbound_token
+
+        if not acquire_outbound_token("yahoo", max_wait_sec=max(0.0, float(token_wait_sec))):
+            return {}
+    except Exception:
+        pass
+    try:
+        response = requests.get(
+            _YAHOO_SPARK,
+            params={
+                "symbols": ",".join(wanted),
+                "range": "1d",
+                "interval": "5m",
+            },
+            timeout=timeout_sec,
+            headers={"User-Agent": _USER_AGENT},
+        )
+        if response.status_code == 429:
+            _apply_yahoo_rate_limit_backoff(status_code=429)
+            return {}
+        response.raise_for_status()
+        payload = response.json()
+        _clear_yahoo_rate_limit_backoff()
+    except Exception as exc:
+        now = time.monotonic()
+        last = _last_fetch_error_log.get("__spark__", 0.0)
+        if now - last >= _ERROR_LOG_INTERVAL_SEC:
+            _last_fetch_error_log["__spark__"] = now
+            log_engine(
+                f"YahooQuotePoller spark batch failed ({len(wanted)} symbols): "
+                f"{type(exc).__name__}: {exc}"
+            )
+        return {}
+
+    results = payload.get("spark", {}).get("result") or payload.get("result") or []
+    mids: dict[str, float] = {}
+    for row in results:
+        if not isinstance(row, dict):
+            continue
+        sym = str(row.get("symbol") or "")
+        responses = row.get("response") or []
+        meta = responses[0].get("meta") if responses and isinstance(responses[0], dict) else None
+        price = (meta or {}).get("regularMarketPrice")
+        try:
+            mid = float(price)
+        except (TypeError, ValueError):
+            continue
+        if sym and mid > 0:
+            mids[sym] = mid
+    return mids
+
+
 def yahoo_quote_from_mid(epic: str, mid: float, symbol: str) -> YahooQuoteSample:
     spread = default_spread_for_yahoo_symbol(symbol, mid)
     half = spread * 0.5
@@ -100,11 +240,16 @@ def yahoo_quote_from_mid(epic: str, mid: float, symbol: str) -> YahooQuoteSample
     )
 
 
-def fetch_yahoo_quote(epic: str, *, timeout_sec: float = _DEFAULT_TIMEOUT_SEC) -> YahooQuoteSample | None:
+def fetch_yahoo_quote(
+    epic: str,
+    *,
+    timeout_sec: float = _DEFAULT_TIMEOUT_SEC,
+    token_wait_sec: float = 5.0,
+) -> YahooQuoteSample | None:
     symbol = yahoo_symbol_for_epic(epic)
     if not symbol:
         return None
-    mid = fetch_yahoo_mid(symbol, timeout_sec=timeout_sec)
+    mid = fetch_yahoo_mid(symbol, timeout_sec=timeout_sec, token_wait_sec=token_wait_sec)
     if mid is None:
         return None
     return yahoo_quote_from_mid(epic, mid, symbol)
@@ -141,14 +286,38 @@ class YahooQuotePoller:
             sample.offer,
             source="yahoo",
         )
-        self._stats["published"] += 1
+        if snap is not None:
+            self._stats["published"] += 1
         return snap
 
     def poll_all(self) -> int:
+        """Batch poll — one spark request per cycle, per-epic chart fallback."""
+        symbol_by_epic = {
+            epic: sym
+            for epic in self._epics
+            if (sym := yahoo_symbol_for_epic(epic))
+        }
+        self._stats["polls"] += 1
+        mids = fetch_yahoo_mids_batch(list(symbol_by_epic.values()))
         published = 0
-        for epic in self._epics:
-            if self.poll_epic(epic) is not None:
+        hub = get_market_data_hub()
+        for epic, symbol in symbol_by_epic.items():
+            mid = mids.get(symbol)
+            if mid is None:
+                self._stats["errors"] += 1
+                continue
+            sample = yahoo_quote_from_mid(epic, mid, symbol)
+            snap = hub.publish(sample.epic, sample.bid, sample.offer, source="yahoo")
+            if snap is not None:
+                self._stats["published"] += 1
                 published += 1
+        if not mids:
+            # Batch endpoint unavailable — fall back to sequential chart polls.
+            for idx, epic in enumerate(self._epics):
+                if self.poll_epic(epic) is not None:
+                    published += 1
+                if idx + 1 < len(self._epics) and not yahoo_rate_limited():
+                    time.sleep(0.15)
         return published
 
     def start(self, epics: list[str] | tuple[str, ...]) -> None:
@@ -189,7 +358,11 @@ class YahooQuotePoller:
             except Exception as exc:
                 self._stats["errors"] += 1
                 log_engine(f"YahooQuotePoller loop error: {type(exc).__name__}: {exc}")
-            if self._stop.wait(self._poll_sec):
+            wait_sec = self._poll_sec
+            backoff = yahoo_rate_limit_backoff_sec()
+            if backoff > 0:
+                wait_sec = max(wait_sec, backoff)
+            if self._stop.wait(wait_sec):
                 break
 
 
@@ -220,6 +393,9 @@ def stop_yahoo_quote_poller() -> None:
 
 
 def reset_yahoo_quote_poller_for_tests() -> None:
+    global _RATE_LIMIT_BACKOFF_SEC, _RATE_LIMIT_UNTIL_MONO
+    _RATE_LIMIT_BACKOFF_SEC = 0.0
+    _RATE_LIMIT_UNTIL_MONO = 0.0
     stop_yahoo_quote_poller()
 
 

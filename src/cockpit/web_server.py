@@ -48,6 +48,10 @@ _broker_closed_fetched_at: float = 0.0
 _broker_closed_lock = threading.Lock()
 _broker_closed_bootstrapped = False
 _flight_deck_boot_seeded = False
+_ENRICH_CACHE_TTL_SEC = 0.4
+_enrich_cache_lock = threading.Lock()
+_enrich_cache_payload: dict[str, Any] = {}
+_enrich_cache_at: float = 0.0
 
 
 def _encode_ws_json(payload: Any) -> str:
@@ -178,6 +182,28 @@ def _enrich_telemetry_for_ui(payload: dict[str, Any]) -> dict[str, Any]:
             f"Flight Deck avionics HUD package skipped: {type(exc).__name__}: {exc}"
         )
     return _attach_closed_trades_for_ui(out)
+
+
+def _get_enriched_telemetry_for_ws(raw: dict[str, Any]) -> dict[str, Any]:
+    """Batch UI enrichment — shared across WS clients to avoid REST/render stampede."""
+    global _enrich_cache_at, _enrich_cache_payload
+    now = time.monotonic()
+    with _enrich_cache_lock:
+        if _enrich_cache_payload and (now - _enrich_cache_at) < _ENRICH_CACHE_TTL_SEC:
+            return dict(_enrich_cache_payload)
+    enriched = _enrich_telemetry_for_ui(raw)
+    with _enrich_cache_lock:
+        _enrich_cache_payload.clear()
+        _enrich_cache_payload.update(enriched)
+        _enrich_cache_at = now
+    return enriched
+
+
+def reset_enrich_cache_for_tests() -> None:
+    global _enrich_cache_at
+    with _enrich_cache_lock:
+        _enrich_cache_payload.clear()
+        _enrich_cache_at = 0.0
 
 
 def _normalize_position_row_for_ui(row: dict[str, Any]) -> dict[str, Any]:
@@ -556,6 +582,63 @@ def _attach_closed_trades_for_ui(payload: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def build_cockpit_ready_snapshot() -> dict[str, Any]:
+    """Fast readiness probe for launcher + Flight Deck boot polls."""
+    routes = (
+        "orchestrator_state",
+        "guardian_status",
+        "iron_cage_status",
+        "ai_diagnostics",
+        "health_light",
+    )
+    checks: dict[str, Any] = {}
+    ok_count = 0
+    for name in routes:
+        row: dict[str, Any] = {"ok": False}
+        try:
+            if name == "orchestrator_state":
+                from runtime.master_orchestrator import get_orchestrator_state_snapshot
+
+                snap = get_orchestrator_state_snapshot()
+                row["ok"] = isinstance(snap, dict) and bool(snap.get("ts"))
+                row["primed"] = bool(snap.get("primed"))
+                row["stage_tokens"] = len(snap.get("stage_tokens") or {})
+            elif name == "guardian_status":
+                from system.chaos_guardian import get_guardian_status_snapshot
+
+                snap = get_guardian_status_snapshot()
+                row["ok"] = isinstance(snap, dict) and snap.get("ok") is not False
+            elif name == "iron_cage_status":
+                from cockpit.agent_api_proxy import resolve_iron_cage_status
+
+                snap = resolve_iron_cage_status()
+                row["ok"] = isinstance(snap, dict) and "trade_ready" in snap
+            elif name == "ai_diagnostics":
+                from cockpit.agent_api_proxy import resolve_ai_diagnostics
+
+                snap = resolve_ai_diagnostics()
+                row["ok"] = isinstance(snap, dict) and bool(snap.get("engine_alive", True))
+            elif name == "health_light":
+                from api.health_light import get_health_light_response
+
+                snap = get_health_light_response()
+                row["ok"] = bool(snap.get("agent_online"))
+                row["execution_loop_active"] = bool(snap.get("execution_loop_active"))
+        except Exception as exc:
+            row["error"] = f"{type(exc).__name__}: {exc}"
+        if row.get("ok"):
+            ok_count += 1
+        checks[name] = row
+    return {
+        "ok": ok_count >= 3,
+        "service": "flight_deck_web",
+        "checks": checks,
+        "checks_passed": ok_count,
+        "checks_total": len(routes),
+        "ts": time.time(),
+    }
+
+
 def broadcast_system_hot_reload(*, source: str = "supervisor") -> None:
     """Queue a SYSTEM_HOT_RELOAD frame for all /ws/telemetry clients."""
     global _hot_reload_pending
@@ -625,6 +708,35 @@ def create_cockpit_app() -> Any:
     async def cockpit_health():
         return JSONResponse({"ok": True, "service": "flight_deck_web"})
 
+    @app.get("/api/cockpit_ready")
+    async def cockpit_ready():
+        try:
+            snap = await asyncio.to_thread(build_cockpit_ready_snapshot)
+            return JSONResponse(sanitize_for_ws_json(snap))
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+    @app.get("/api/health_light")
+    async def cockpit_health_light():
+        try:
+            from api.health_light import get_health_light_response
+
+            snap = await asyncio.to_thread(get_health_light_response)
+            return JSONResponse(sanitize_for_ws_json(snap))
+        except Exception:
+            from cockpit.agent_api_proxy import _rate_limited_proxy
+
+            proxied = await asyncio.to_thread(_rate_limited_proxy, "/api/health_light")
+            if isinstance(proxied, dict):
+                return JSONResponse(sanitize_for_ws_json(proxied))
+            return JSONResponse({"ok": False, "agent_online": False})
+
+    @app.post("/api/cockpit/hard-refresh")
+    async def cockpit_hard_refresh():
+        """Queue SYSTEM_HOT_RELOAD for all telemetry WS clients (cache-bust reload)."""
+        broadcast_system_hot_reload(source="operator_hard_refresh")
+        return JSONResponse({"ok": True, "action": "SYSTEM_HOT_RELOAD_queued"})
+
     @app.get("/api/cockpit-controls")
     async def cockpit_controls():
         """Operator lock state for Flight Deck toggles (shadow engine, etc.)."""
@@ -654,6 +766,86 @@ def create_cockpit_app() -> Any:
                 }
             )
         )
+
+    @app.get("/api/orchestrator_state")
+    async def cockpit_orchestrator_state():
+        try:
+            from runtime.master_orchestrator import get_orchestrator_state_snapshot
+
+            snap = await asyncio.to_thread(get_orchestrator_state_snapshot)
+            return JSONResponse(sanitize_for_ws_json(snap))
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+    @app.get("/api/guardian_status")
+    async def cockpit_guardian_status():
+        try:
+            from system.chaos_guardian import get_guardian_status_snapshot
+
+            snap = await asyncio.to_thread(get_guardian_status_snapshot)
+            return JSONResponse(sanitize_for_ws_json(snap))
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+    @app.get("/api/reporting_status")
+    async def cockpit_reporting_status():
+        try:
+            from system.alert_reporting_matrix import get_reporting_status_snapshot
+
+            snap = await asyncio.to_thread(get_reporting_status_snapshot)
+            return JSONResponse(sanitize_for_ws_json(snap))
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+    @app.get("/api/macro_steering")
+    async def cockpit_macro_steering():
+        try:
+            from cockpit.sre_snapshots import get_macro_steering_snapshot
+
+            snap = await asyncio.to_thread(get_macro_steering_snapshot)
+            return JSONResponse(sanitize_for_ws_json(snap))
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+    @app.get("/api/rotation_status")
+    async def cockpit_rotation_status():
+        try:
+            from api.unified_status import get_rotation_status_response
+
+            snap = await asyncio.to_thread(get_rotation_status_response)
+            return JSONResponse(sanitize_for_ws_json(snap))
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+    @app.get("/api/rejections")
+    async def cockpit_rejections():
+        try:
+            from api.unified_status import get_rejections_response
+
+            snap = await asyncio.to_thread(lambda: get_rejections_response(limit=12))
+            return JSONResponse(sanitize_for_ws_json(snap))
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+    @app.get("/api/iron_cage_status")
+    async def cockpit_iron_cage_status():
+        try:
+            from cockpit.agent_api_proxy import resolve_iron_cage_status
+
+            snap = await asyncio.to_thread(resolve_iron_cage_status)
+            return JSONResponse(sanitize_for_ws_json(snap))
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+    @app.get("/api/ai_diagnostics")
+    async def cockpit_ai_diagnostics():
+        try:
+            from cockpit.agent_api_proxy import resolve_ai_diagnostics
+
+            snap = await asyncio.to_thread(resolve_ai_diagnostics)
+            return JSONResponse(sanitize_for_ws_json(snap))
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
     @app.get("/api/drawdown-status")
     async def cockpit_drawdown_status():
@@ -690,6 +882,12 @@ def create_cockpit_app() -> Any:
     @app.websocket("/ws/telemetry")
     async def ws_telemetry(ws: WebSocket) -> None:
         await ws.accept()
+        try:
+            from cockpit.telemetry_bridge import ensure_telemetry_bridge
+
+            ensure_telemetry_bridge()
+        except Exception:
+            pass
         hz = 2.5
         interval = max(0.05, 1.0 / hz)
         try:
@@ -699,9 +897,23 @@ def create_cockpit_app() -> Any:
                     await _ws_send_json_frame(ws, hot_reload, channel="telemetry")
                     continue
                 payload = get_latest_telemetry()
+                from cockpit.agent_api_proxy import (
+                    gates_all_pending,
+                    hydrate_telemetry_from_agent,
+                )
+
+                needs_hydrate = (
+                    not payload
+                    or gates_all_pending(
+                        payload.get("gates") if isinstance(payload, dict) else {}
+                    )
+                    or not (isinstance(payload, dict) and payload.get("epics"))
+                )
+                if needs_hydrate:
+                    payload = hydrate_telemetry_from_agent(payload)
                 if not payload:
                     payload = {"ts": time.time(), "gates": {}, "epics": {}, "spread": {}}
-                payload = _enrich_telemetry_for_ui(payload)
+                payload = _get_enriched_telemetry_for_ws(payload)
                 await _ws_send_json_frame(ws, payload, channel="telemetry")
                 await asyncio.sleep(interval)
         except WebSocketDisconnect:
@@ -773,6 +985,12 @@ def start_cockpit_web_server(*, port: int | None = None, hz: float = 2.5) -> boo
             log_engine("Flight Deck web server already running")
             return True
         _stop.clear()
+        try:
+            from cockpit.telemetry_bridge import ensure_telemetry_bridge
+
+            ensure_telemetry_bridge(hz=hz)
+        except Exception as exc:
+            log_engine(f"Flight Deck telemetry bridge bootstrap: {type(exc).__name__}: {exc}")
         try:
             from system.protective_learning import (
                 activate_test_mode_runtime,

@@ -1,7 +1,8 @@
 """
 v29.0 Hourly Telegram Executive Status — consolidated status (not trade fills).
 
-Real-time entry/exit notifications remain in telegram_notifier.notify_trade_*.
+Routine trade open/close notifications and burst matrix events are buffered and
+included in the single hourly combined report.
 """
 
 from __future__ import annotations
@@ -152,14 +153,16 @@ def format_hourly_executive_report(state: dict[str, Any]) -> str:
     loops = "active" if state.get("trading_loops_running") else "stopped"
 
     return (
-        f"📊 IG Agent v29 — Hourly Executive ({ts})\n"
+        f"📊 *IG Agent v29 — Hourly Executive* (`{ts}`)\n"
+        f"```\n"
         f"Able to Trade: {able}\n"
         f"Quotes: {fresh}/{total} fresh | Loops: {loops}\n"
         f"Trades (1hr): {trades} ({wins}W / {losses}L)\n"
         f"P&L (24hr): {pnl_sign}£{pnl:,.2f}\n"
         f"Points: {cumulative:.1f} cumulative ({points_state})\n"
         f"Top rotation: {top}\n"
-        f"Liquidity shield blocks (1hr): {shield}"
+        f"Liquidity shield blocks (1hr): {shield}\n"
+        f"```"
     )
 
 
@@ -175,7 +178,7 @@ def send_executive_test_report() -> bool:
         if notifier is None or not notifier.enabled:
             log_engine("executive test report skipped — telegram disabled")
             return False
-        ok = notifier.send_now(text)
+        ok = notifier.send_now(text, parse_mode="Markdown")
         if ok:
             log_engine("executive test report sent")
         else:
@@ -186,22 +189,43 @@ def send_executive_test_report() -> bool:
         return False
 
 
+def _resolve_hourly_interval_sec() -> float:
+    try:
+        from system.config_loader import get_config
+
+        cfg = get_config()
+        raw = getattr(cfg, "telegram_heartbeat_interval_seconds", None)
+        if raw is not None:
+            sec = float(raw)
+            if sec > 0:
+                return sec
+    except Exception:
+        pass
+    return _HOURLY_INTERVAL_SEC
+
+
 def send_hourly_executive_report(state: dict[str, Any] | None = None) -> bool:
     """
-    Send the v29 hourly executive status update.
+    Send the v29 hourly executive status update (single combined Telegram message).
 
-    Does not replace notify_trade_opened / notify_trade_closed — those stay real-time.
+    Flushes pending matrix coalescer batches and buffered trade/routine alerts first.
     """
-    payload = build_executive_report_state(state)
-    text = format_hourly_executive_report(payload)
     try:
-        from system.telegram_notifier import get_telegram_notifier
+        from system.alert_reporting_matrix import flush_coalesce_to_hourly_digest
+        from system.telegram_notifier import get_telegram_notifier, resolve_heartbeat_snapshot
 
+        flush_coalesce_to_hourly_digest()
+        payload = build_executive_report_state(state)
+        text = format_hourly_executive_report(payload)
         notifier = get_telegram_notifier()
         if notifier is None or not notifier.enabled:
             log_engine("hourly executive report skipped — telegram disabled")
             return False
-        ok = notifier.send_now(text)
+        ok = notifier.send_hourly_combined_report(
+            text,
+            resolve_heartbeat_snapshot(),
+            parse_mode="Markdown",
+        )
         if ok:
             log_engine("hourly executive report sent")
         else:
@@ -213,14 +237,18 @@ def send_hourly_executive_report(state: dict[str, Any] | None = None) -> bool:
 
 
 def start_hourly_executive_telegram_scheduler(
-    interval_sec: float = _HOURLY_INTERVAL_SEC,
+    interval_sec: float | None = None,
 ) -> None:
     """
     Background hourly status thread (daemon).
 
-    Uses threading to match the agent's sync uvicorn runtime; does not touch trade alerts.
+    Uses threading to match the agent's sync uvicorn runtime; routine alerts are
+    buffered until each hourly tick.
     """
     global _hourly_thread
+    wait_sec = float(interval_sec if interval_sec is not None else _resolve_hourly_interval_sec())
+    if wait_sec <= 0:
+        wait_sec = _HOURLY_INTERVAL_SEC
     with _hourly_lock:
         if _hourly_thread is not None and _hourly_thread.is_alive():
             return
@@ -238,7 +266,7 @@ def start_hourly_executive_telegram_scheduler(
                     log_engine(
                         f"hourly executive scheduler tick failed: {type(e).__name__}: {e}"
                     )
-                if _hourly_stop.wait(interval_sec):
+                if _hourly_stop.wait(wait_sec):
                     break
 
         _hourly_thread = threading.Thread(
@@ -250,7 +278,7 @@ def start_hourly_executive_telegram_scheduler(
         log_engine(
             f"hourly executive telegram scheduler started "
             f"(first report in {_FIRST_REPORT_DELAY_SEC / 60:.0f}m, then every "
-            f"{interval_sec / 60:.0f}m)"
+            f"{wait_sec / 60:.0f}m)"
         )
 
 

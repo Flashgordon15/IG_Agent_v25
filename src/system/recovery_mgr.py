@@ -175,13 +175,16 @@ class V2DisasterRecoveryManager:
                 return rows
             return list(rest_client.open_positions() or [])
 
-        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="v62-broker") as pool:
-            fut = pool.submit(_fetch)
-            try:
-                return list(fut.result(timeout=timeout_sec))
-            except FuturesTimeoutError:
-                log_engine("V6.2 broker resync: positions/otc timed out — fallback empty")
-                return []
+        pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="v62-broker")
+        fut = pool.submit(_fetch)
+        try:
+            return list(fut.result(timeout=timeout_sec))
+        except FuturesTimeoutError:
+            log_engine("V6.2 broker resync: positions/otc timed out — fallback empty")
+            return []
+        finally:
+            # Never block gate worker on shutdown — timed-out REST may still be in flight.
+            pool.shutdown(wait=False, cancel_futures=True)
 
     def reconcile_failsafe_cache(
         self,

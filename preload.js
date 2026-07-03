@@ -13,9 +13,9 @@ function readRuntimeFromMain() {
     console.error("apex:runtime-config-sync failed", err);
   }
   return {
-    profile: "shadow",
-    apiPort: 9090,
-    apiBase: "http://127.0.0.1:9090",
+    profile: "live",
+    apiPort: 8080,
+    apiBase: "http://127.0.0.1:8080",
     cockpitPort: 9191,
     cockpitBase: "http://127.0.0.1:9191",
     protectProductionPorts: true,

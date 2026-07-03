@@ -125,8 +125,36 @@ def order_dispatch_lane():
         _ORDER_LANE_DEPTH.n = max(0, prev)
 
 
+def _demo_execution_warmup_bypass() -> bool:
+    """Demo soak / throughput — do not block orders on microkernel ring warmup."""
+    try:
+        from system.soak_live_fire import soak_mode_enabled
+
+        if soak_mode_enabled():
+            return True
+    except Exception:
+        pass
+    try:
+        from system.demo_execution_plane import demo_throughput_active
+
+        if demo_throughput_active():
+            return True
+    except Exception:
+        pass
+    try:
+        from system.gate_relaxation import demo_soak_enabled
+
+        if demo_soak_enabled():
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def warmup_blocks_execution() -> bool:
     """Project Apex Monolith Core Circuit Breaker."""
+    if _demo_execution_warmup_bypass():
+        return False
     try:
         from apex import microkernel
         from system.system_state import BootPhase, get_system_state
@@ -140,13 +168,8 @@ def warmup_blocks_execution() -> bool:
 
 
 def assert_execution_allowed() -> str | None:
-    try:
-        from system.soak_live_fire import soak_mode_enabled
-
-        if soak_mode_enabled():
-            return None
-    except Exception:
-        pass
+    if _demo_execution_warmup_bypass():
+        return None
     if warmup_blocks_execution():
         return "HOLD: WARMING_CIRCUIT_BREAKER"
     return None
@@ -163,12 +186,30 @@ def promote_and_validate_lot(
     from trading.trading_loop import promote_high_confidence_signal
 
     promoted = promote_high_confidence_signal(sig, threshold)
-    size_int, under_min = floor_contract_size(raw_size)
-    if under_min:
-        reason = under_min_lot_detail(size_int)
-        log_engine(reason)
-        return promoted, 0, "HOLD: UNDER_MIN_LOT"
-    return promoted, size_int, None
+    try:
+        from execution.ig_size_validator import resolve_executable_lot_size
+        from system.config_loader import get_config
+
+        lot = resolve_executable_lot_size(
+            str(getattr(sig, "epic", "") or ""),
+            float(raw_size),
+            str(getattr(sig, "signal", "") or ""),
+            get_config(),
+            None,
+        )
+        if not lot.ok:
+            return promoted, 0, lot.rejection_reason or "HOLD: UNDER_MIN_LOT"
+        size_out = float(lot.size)
+        if size_out != float(int(size_out)):
+            return promoted, int(size_out) if size_out >= 1 else 0, None
+        return promoted, int(size_out), None
+    except Exception:
+        size_int, under_min = floor_contract_size(raw_size)
+        if under_min:
+            reason = under_min_lot_detail(size_int)
+            log_engine(reason)
+            return promoted, 0, "HOLD: UNDER_MIN_LOT"
+        return promoted, size_int, None
 
 
 def validate_risk_envelope(*, risk_gbp: float, concurrent_gbp: float = 0.0) -> str | None:

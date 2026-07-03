@@ -14,6 +14,8 @@ mkdir -p "${IG_AGENT_ROOT}/logs"
 exec > >(tee -a "${LOG}") 2>&1
 
 echo "========== igagent_launcher.sh $(date -u +%Y-%m-%dT%H:%M:%SZ) =========="
+export LAUNCHER_DESKTOP=1
+export LAUNCHER_SUPERVISOR_PID="$$"
 notify_launcher "IG Agent" "Clean launch starting…"
 
 run_step() {

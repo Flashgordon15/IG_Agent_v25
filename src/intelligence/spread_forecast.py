@@ -7,11 +7,12 @@ Pure math; no I/O. Heavy batch recompute runs in IntelligenceComputeWorker.
 
 from __future__ import annotations
 
-import math
 import threading
 from collections import deque
 from dataclasses import dataclass
 from typing import Any
+
+import numpy as np
 
 from intelligence.types import SpreadForecastVerdict
 
@@ -93,21 +94,22 @@ class SpreadWideningForecast:
                     blocked=False,
                     reason="insufficient_samples",
                 )
-            spreads = list(row.spreads)
-            current = float(spreads[-1])
-            prev = float(spreads[-2])
-            delta = current - prev
+            spreads = np.asarray(row.spreads, dtype=np.float64)
 
-        n = len(spreads)
-        mean = sum(spreads) / n
-        var = sum((x - mean) ** 2 for x in spreads) / max(1, n - 1)
-        std = math.sqrt(max(var, 0.0))
+        n = int(spreads.size)
+        current = float(spreads[-1])
+        delta = current - float(spreads[-2])
 
-        deltas = [spreads[i] - spreads[i - 1] for i in range(1, len(spreads))]
-        if deltas:
-            d_mean = sum(deltas) / len(deltas)
-            d_var = sum((x - d_mean) ** 2 for x in deltas) / max(1, len(deltas) - 1)
-            d_std = math.sqrt(max(d_var, 0.0))
+        # Leave-one-out reference stats: the scored sample is excluded from its
+        # own mean/std window so a genuine spike cannot inflate sigma and mask itself.
+        prior = spreads[:-1]
+        mean = float(prior.mean())
+        std = float(prior.std(ddof=1)) if prior.size >= 2 else 0.0
+
+        prior_deltas = np.diff(prior)
+        if prior_deltas.size >= 2:
+            d_mean = float(prior_deltas.mean())
+            d_std = float(prior_deltas.std(ddof=1))
         else:
             d_mean = 0.0
             d_std = 0.0

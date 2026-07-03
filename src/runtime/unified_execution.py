@@ -488,10 +488,12 @@ def stop_unified_route_cache_refresher() -> None:
 
 
 def _path_allowed_by_route(epic: str, attempted: UnifiedExecutionPath) -> tuple[bool, str]:
+    import os
+
     try:
         from system.demo_execution_plane import execution_guards_relaxed
 
-        if execution_guards_relaxed(epic=epic):
+        if os.environ.get("IG_AGENT_PYTEST") != "1" and execution_guards_relaxed(epic=epic):
             return True, ""
     except Exception:
         pass

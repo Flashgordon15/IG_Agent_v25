@@ -69,6 +69,26 @@ class LiveExecutor:
         self._workers_lock = threading.Lock()
         self._pending_workers: list[threading.Thread] = []
 
+    def _resolve_order_size(
+        self,
+        signal: TradeSignal,
+        execution_params: dict[str, Any],
+    ) -> tuple[float, str | None]:
+        from execution.ig_size_validator import resolve_executable_lot_size
+
+        raw = float(execution_params.get("size", self._cfg.trade_size))
+        lot = resolve_executable_lot_size(
+            str(signal.epic or ""),
+            raw,
+            str(signal.direction or ""),
+            self._cfg,
+            self._client,
+            broker_epic=str(signal.epic or ""),
+        )
+        if not lot.ok:
+            return 0.0, lot.rejection_reason or "HOLD: UNDER_MIN_LOT"
+        return float(lot.size), None
+
     @property
     def config(self) -> Config:
         return _get_live_config()
@@ -265,14 +285,28 @@ class LiveExecutor:
             or execution_params.get("stop_pts")
             or 0
         )
-        allow_fractional = False
         try:
-            from system.soak_live_fire import soak_mode_enabled
-            from trading.live_production_probe import live_probe_enabled
+            from execution.ig_size_validator import fractional_lot_execution_enabled
 
-            allow_fractional = soak_mode_enabled() or live_probe_enabled()
+            allow_fractional = fractional_lot_execution_enabled(cfg)
         except Exception:
             allow_fractional = False
+        resolved_size, size_reject = self._resolve_order_size(signal, execution_params)
+        if size_reject:
+            update_demo_diagnostics(last_rejection=size_reject)
+            trace_execution(
+                "ORDER",
+                "LiveExecutor.execute",
+                decision=f"REJECTED: {size_reject}",
+            )
+            return ExecutionResult(
+                success=False,
+                action="REJECTED",
+                rejection_reason=size_reject,
+                execution_params={**execution_params, "size": resolved_size},
+            )
+        size = resolved_size
+        execution_params = {**execution_params, "size": size}
         point_value = float(cfg.get("ig_point_value_gbp", 1.0))
         proposed_risk_gbp = (
             stop_pts * size * point_value if stop_pts > 0 and size > 0 else 0.0
@@ -679,19 +713,41 @@ class LiveExecutor:
         stop_distance = float(execution_params.get("risk", cfg.stop_distance_points))
         limit_distance = float(execution_params.get("limit", cfg.limit_distance_points))
 
-        from apex.hardening import floor_contract_size, under_min_lot_detail
+        resolved_size, size_reject = self._resolve_order_size(signal, execution_params)
+        if size_reject:
+            return ExecutionResult(
+                success=False,
+                action="REJECTED",
+                rejection_reason=size_reject,
+                execution_params={**execution_params, "size": resolved_size},
+            )
+        size = resolved_size
+        execution_params = {**execution_params, "size": size}
 
-        allow_fractional = False
+        from execution.micro_risk_profile import clamp_size_for_stop_risk
+
+        clamped_size = clamp_size_for_stop_risk(
+            str(signal.epic or ""),
+            float(size),
+            float(stop_distance),
+            cfg,
+        )
+        if clamped_size < size - 1e-9:
+            log_engine(
+                f"LiveExecutor: size clamped for stop risk epic={signal.epic} "
+                f"{size}->{clamped_size:.4f} stop={stop_distance:.2f}pt"
+            )
+            size = clamped_size
+            execution_params = {**execution_params, "size": size}
+
         try:
-            from system.soak_live_fire import soak_mode_enabled
-            from trading.live_production_probe import live_probe_enabled
+            from execution.ig_size_validator import fractional_lot_execution_enabled
 
-            allow_fractional = soak_mode_enabled() or live_probe_enabled()
+            allow_fractional = fractional_lot_execution_enabled(cfg)
         except Exception:
             allow_fractional = False
 
-        # Micro-lot safety net: clamp to 0.1 when verification is active so the
-        # IronClad ceiling (also 0.1) is never exceeded regardless of upstream path.
+        # Micro-lot safety net when verification overlay is active.
         try:
             from trading.micro_lot_verification import (
                 clamp_micro_lot_size,
@@ -700,24 +756,10 @@ class LiveExecutor:
 
             if micro_lot_verification_enabled():
                 size = clamp_micro_lot_size(size)
-                allow_fractional = True  # 0.1 is a valid fractional lot
+                allow_fractional = True
+                execution_params = {**execution_params, "size": size}
         except Exception:
             pass
-
-        if allow_fractional and size >= 0.1:
-            pass
-        else:
-            size_int, under_min_lot = floor_contract_size(size)
-            if under_min_lot:
-                reason = under_min_lot_detail(size_int)
-                log_engine(reason)
-                return ExecutionResult(
-                    success=False,
-                    action="REJECTED",
-                    rejection_reason="HOLD: UNDER_MIN_LOT",
-                    execution_params={**execution_params, "size": size_int},
-                )
-            size = float(size_int)
 
         if hasattr(self._client, "normalize_order_params") and not allow_fractional:
             size, stop_distance, limit_distance, currency_code = (
@@ -918,7 +960,7 @@ class LiveExecutor:
                             f"— polling again after {retry_delay}s (no re-post)"
                         ),
                     )
-                    _time_exec.sleep(retry_delay)
+                    time.sleep(retry_delay)
                     continue
                 break
 
@@ -1021,7 +1063,7 @@ class LiveExecutor:
                         pass
                     last_error = str(e)
                     if attempt <= max_retries:
-                        _time_exec.sleep(retry_delay)
+                        time.sleep(retry_delay)
                         continue
                 else:
                     from system.guard.kernel_interceptor import dispatch_broker_connectivity_teardown
@@ -1123,7 +1165,7 @@ class LiveExecutor:
                         "LiveExecutor.retry",
                         decision=f"retrying in {retry_delay}s (attempt {attempt}/{max_retries + 1})",
                     )
-                    _time_exec.sleep(retry_delay)
+                    time.sleep(retry_delay)
                     continue
                 bus.emit(STAGE_IG_RESPONSE, STATUS_FAIL, last_error)
                 bus.finalize_failure(reason=last_error)
@@ -1194,7 +1236,7 @@ class LiveExecutor:
                         f"— polling again after {retry_delay}s (no re-post)"
                     ),
                 )
-                _time_exec.sleep(retry_delay)
+                time.sleep(retry_delay)
 
         if (
             not confirm.get("accepted")
@@ -1371,6 +1413,31 @@ class LiveExecutor:
                     confirm_direction_risk(signal.direction, entry_risk)
             except Exception:
                 pass
+            try:
+                from execution.post_fill_risk_controls import arm_post_fill_risk_controls
+
+                fill_px = float(signal.quote.mid or 0.0)
+                if fill_px <= 0:
+                    fill_px = float(
+                        signal.quote.offer
+                        if str(signal.direction or "").upper() == "BUY"
+                        else signal.quote.bid
+                    )
+                arm_post_fill_risk_controls(
+                    epic=str(signal.epic or ""),
+                    direction=str(signal.direction or "BUY"),
+                    size=float(size),
+                    entry_level=fill_px,
+                    deal_id=deal_id,
+                    stop_distance_pts=float(stop_distance),
+                    limit_distance_pts=float(limit_distance or 0.0),
+                    cfg=cfg,
+                )
+            except Exception as exc:
+                log_engine(
+                    f"LiveExecutor: post_fill_risk arm skipped deal={deal_id}: "
+                    f"{type(exc).__name__}: {exc}"
+                )
         if (
             not protect_on
             and deal_id

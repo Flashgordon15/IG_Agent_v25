@@ -64,6 +64,13 @@ def _is_apex_desktop_shell() -> bool:
     )
 
 
+def _is_macos_launcher_production() -> bool:
+    """IGAgent.app on :8080 — production DEMO plane, not isolated shadow sandbox."""
+    return os.environ.get("IG_AGENT_FROM_LAUNCHER", "").strip() == "1" or (
+        os.environ.get("LAUNCHER_DESKTOP", "").strip() == "1"
+    )
+
+
 def _resolve_kind() -> NodeKind:
     try:
         from system.apex_runtime_mode import ApexRuntimeMode, get_apex_runtime_mode
@@ -72,6 +79,8 @@ def _resolve_kind() -> NodeKind:
             return "testbed"
     except Exception:
         pass
+    if _is_macos_launcher_production():
+        return "production"
     if _is_apex_desktop_shell():
         return "shadow"
     raw = (

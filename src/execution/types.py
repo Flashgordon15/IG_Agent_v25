@@ -51,8 +51,9 @@ def normalize_gate_execution_params(
     from harmonization.iron_clad_risk import (
         MANDATORY_LIMIT_POINTS,
         MANDATORY_STOP_POINTS,
-        MAX_ORDER_SIZE,
+        IronCladRiskEngine,
     )
+    from execution.size_floors import hard_min_deal_size
 
     if not raw or not isinstance(raw, dict):
         raw = {}
@@ -60,10 +61,16 @@ def normalize_gate_execution_params(
     if raw.get("epic"):
         raw["epic"] = normalize_night_matrix_epic(str(raw["epic"]))
 
+    max_lot = float(IronCladRiskEngine.effective_max_order_size())
+    epic_key = normalize_night_matrix_epic(str(raw.get("epic") or ""))
+    floor = hard_min_deal_size(epic_key) if epic_key else 0.0
+
     try:
-        actual_size = min(
-            float(raw.get("actual_size") or raw.get("size") or 0),
-            MAX_ORDER_SIZE,
+        actual_size = float(raw.get("actual_size") or raw.get("size") or 0)
+        actual_size = (
+            max(floor, min(actual_size, max_lot))
+            if actual_size > 0
+            else max(floor, min(1.0, max_lot))
         )
         stop_points = float(raw.get("stop_points") or 0)
         limit_points = float(raw.get("limit_points") or 0)
@@ -80,7 +87,7 @@ def normalize_gate_execution_params(
         risk_gbp = None
 
     if actual_size <= 0:
-        actual_size = min(1.0, MAX_ORDER_SIZE)
+        actual_size = max(floor, min(1.0, max_lot))
     stop_points = max(float(stop_points), MANDATORY_STOP_POINTS)
     limit_points = max(
         float(limit_points) if limit_points > 0 else MANDATORY_LIMIT_POINTS,
@@ -135,13 +142,16 @@ def force_inject_gate_execution_params(
     from harmonization.iron_clad_risk import (
         MANDATORY_LIMIT_POINTS,
         MANDATORY_STOP_POINTS,
-        MAX_ORDER_SIZE,
+        IronCladRiskEngine,
     )
+    from execution.size_floors import hard_min_deal_size
 
     raw = dict(gate_execution_params or {})
     from execution.epic_normalizer import normalize_night_matrix_epic
 
     epic_key = normalize_night_matrix_epic(str(epic or raw.get("epic") or ""))
+    max_lot = float(IronCladRiskEngine.effective_max_order_size())
+    floor = hard_min_deal_size(epic_key) if epic_key else 0.0
 
     # When micro-lot verification is enabled the caller passes the clamped size
     # (0.1) as the ``size`` argument.  Use it as the authoritative value rather
@@ -153,12 +163,14 @@ def force_inject_gate_execution_params(
         _micro_active = False
 
     if _micro_active and size > 0:
-        # Explicit size argument wins over raw fields when micro-lot is on.
-        lot = min(max(float(size), 0.01), MAX_ORDER_SIZE)
+        lot = max(floor, min(max(float(size), 0.01), max_lot))
     else:
-        lot = min(
-            max(float(raw.get("actual_size") or raw.get("size") or size or 0.1), 0.01),
-            MAX_ORDER_SIZE,
+        lot = max(
+            floor,
+            min(
+                max(float(raw.get("actual_size") or raw.get("size") or size or 0.1), 0.01),
+                max_lot,
+            ),
         )
     stop = max(float(stop_points or raw.get("stop_points") or MANDATORY_STOP_POINTS), MANDATORY_STOP_POINTS)
     limit = max(

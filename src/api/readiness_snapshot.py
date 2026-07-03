@@ -106,6 +106,64 @@ def _http_code_for_body(body: dict[str, Any]) -> int:
     return 200
 
 
+def _overlay_live_iron_cage(body: dict[str, Any]) -> dict[str, Any]:
+    """Align /api/health trade_ready with the live health_light plane (O(1))."""
+    try:
+        from api.health_light import get_health_light_response, iron_cage_from_health_light_snapshot
+
+        hl = get_health_light_response()
+        if not hl:
+            return body
+        ic = iron_cage_from_health_light_snapshot(hl)
+        iron = body.get("iron_cage") if isinstance(body.get("iron_cage"), dict) else {}
+        stale_source = str(iron.get("source") or "") in ("peek_empty", "")
+        if ic.get("trade_ready") or stale_source or not iron:
+            hub = (hl.get("data_feeds") or {}).get("hub") or {}
+            body["iron_cage"] = {
+                **ic,
+                "execution": {
+                    "loop_active": bool(hl.get("execution_loop_active")),
+                    "stacked_sweep_alive": bool(hl.get("stacked_sweep_alive")),
+                    "rotation_sweep_count": int(hl.get("rotation_sweep_count") or 0),
+                    "routes_armed": int((hl.get("routing_state") or {}).get("armed") or 0),
+                },
+                "feeds": {
+                    "health": "ok" if int(hub.get("fresh_count") or 0) >= 1 else "offline",
+                    "fresh_count": int(hub.get("fresh_count") or 0),
+                    "total_epics": int(hub.get("total") or 0),
+                },
+                "ts": time.time(),
+                "source": "health_light_overlay",
+            }
+            trade_ready = bool(ic.get("trade_ready"))
+            body["trade_ready"] = trade_ready
+            if trade_ready:
+                body["trading_loops_running"] = bool(hl.get("execution_loop_active"))
+                body["trading_healthy"] = True
+                issues = [
+                    x
+                    for x in (body.get("issues") or [])
+                    if not str(x).startswith("iron_cage:")
+                    and x not in ("trading_loops_not_running", "no_gate_activity_recorded")
+                ]
+                body["issues"] = issues
+                body["ok"] = bool(body.get("watchdog_active", True)) and bool(
+                    body.get("supervision_drift_ok", True)
+                    if body.get("supervision_drift_ok") is not None
+                    else True
+                )
+            try:
+                from system.iron_cage_readiness import publish_operational_iron_cage_cache
+
+                if trade_ready:
+                    publish_operational_iron_cage_cache(body["iron_cage"])
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return body
+
+
 def _compose_health_light() -> dict[str, Any]:
     """Cheap health body when the background snapshot has not warmed yet."""
     from api.readiness_model import build_readiness_from_system_state
@@ -185,8 +243,11 @@ def refresh_health_snapshot() -> dict[str, Any]:
         except Exception:
             pass
 
+        body = _overlay_live_iron_cage(body)
+
+    global _HEALTH_SNAPSHOT
+    _HEALTH_SNAPSHOT = body
     with _LOCK:
-        _HEALTH_SNAPSHOT = body
         _META["health_ts"] = time.time()
     return body
 
@@ -324,18 +385,34 @@ def _gui_warming_skeleton() -> dict[str, Any]:
 
 def get_health_snapshot() -> tuple[int, dict[str, Any]]:
     """O(1) health payload for /api/health — never triggers heavy rebuild."""
-    with _LOCK:
-        if _HEALTH_SNAPSHOT:
-            body = dict(_HEALTH_SNAPSHOT)
-            age = time.time() - float(_META.get("health_ts") or 0.0)
-            body["snapshot_age_s"] = round(age, 3)
-            body["snapshot_stale"] = age > _HEALTH_REFRESH_INTERVAL_SEC * 3
-            return _http_code_for_body(body), body
+    snap = _HEALTH_SNAPSHOT
+    if snap:
+        body = dict(snap)
+        age = time.time() - float(_META.get("health_ts") or 0.0)
+        body["snapshot_age_s"] = round(age, 3)
+        body["snapshot_stale"] = age > _HEALTH_REFRESH_INTERVAL_SEC * 3
+        body = _overlay_live_iron_cage(body)
+        if age > _HEALTH_REFRESH_INTERVAL_SEC * 2:
+            threading.Thread(
+                target=refresh_health_snapshot,
+                name="readiness-health-stale-kick",
+                daemon=True,
+            ).start()
+        body["snapshot_stale"] = age > _HEALTH_REFRESH_INTERVAL_SEC * 3
+        return _http_code_for_body(body), body
 
-    body = _compose_health_light()
-    body["snapshot_age_s"] = 0.0
-    body["snapshot_stale"] = True
-    return _http_code_for_body(body), body
+    try:
+        from api.health_instant import build_instant_health_response
+
+        body = build_instant_health_response()
+        body.setdefault("snapshot_age_s", 0.0)
+        body.setdefault("snapshot_stale", True)
+        return _http_code_for_body(body), body
+    except Exception:
+        body = _overlay_live_iron_cage(_compose_health_light())
+        body.setdefault("snapshot_age_s", 0.0)
+        body.setdefault("snapshot_stale", True)
+        return _http_code_for_body(body), body
 
 
 def get_gui_snapshot() -> dict[str, Any]:

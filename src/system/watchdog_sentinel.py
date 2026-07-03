@@ -32,6 +32,30 @@ def _resolve_health_url() -> str:
     return f"http://127.0.0.1:{port}/api/health"
 
 
+def _daemon_supervisor_alive() -> bool:
+    """True when scripts/daemon_supervisor.sh owns agent recovery for this checkout.
+
+    The self-healer must never spawn a duplicate main.py while an external
+    supervisor is polling health — two recovery layers racing each other is how
+    duplicate agents (and port-eviction murder loops) happen.
+    """
+    candidates = []
+    data_root = os.environ.get("IG_DATA_ROOT", "").strip()
+    if data_root:
+        candidates.append(Path(data_root) / "supervisor.pid")
+    root = Path(__file__).resolve().parents[2]
+    candidates.append(root / "src" / "data" / "v31-production" / "supervisor.pid")
+    for pid_file in candidates:
+        try:
+            raw = pid_file.read_text(encoding="utf-8").strip()
+            if raw.isdigit():
+                os.kill(int(raw), 0)
+                return True
+        except (OSError, ValueError):
+            continue
+    return False
+
+
 def _resolve_ipc_sockets() -> list[str]:
     paths: list[str] = []
     try:
@@ -157,6 +181,8 @@ class WatchdogSelfHealer:
             pass
         if os.environ.get("IG_APEX_DAEMON", "").strip() == "1":
             return "apex_daemon_supervised"
+        if _daemon_supervisor_alive():
+            return "daemon_supervisor_owns_recovery"
         return None
 
     def _execute_recovery(self) -> None:

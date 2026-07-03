@@ -23,6 +23,18 @@ _RSI_CLIP_LO = 15.0
 _RSI_CLIP_HI = 85.0
 _FLOAT64 = np.float64
 
+# Spec-locked entry/exit thresholds — fixed constants, never fit on the full
+# evaluation series (anti curve-fit). Percentile/regime windows cap lookback
+# and exclude the bar being scored (leave-one-out).
+SPEC_LOCKED_ENTRY_THRESHOLDS = True
+VOL_REGIME_MIN_PRIOR_BARS = 10
+VOL_REGIME_MAX_REF_BARS = 100
+MICRO_TREND_MAX_FLOW_BOOST_PCT = 25.0
+# Recent-first direction deadbands — tighter on the 3-tick leg to cut lag vs
+# the slower multi-window mean fallback.
+DIRECTION_DEADBAND_RECENT_PCT = 0.008
+DIRECTION_DEADBAND_MEAN_PCT = 0.015
+
 try:
     import apex_math  # type: ignore[import-untyped]  # optional Rust PyO3 extension
 
@@ -61,19 +73,17 @@ def _wilder_smooth(values: np.ndarray, period: int) -> np.ndarray:
 
 
 def _np_ema(values: np.ndarray, span: int) -> np.ndarray:
-    """Exponential moving average — pure NumPy float64, no Pandas."""
+    """Exponential moving average — pandas C-core ewm (vectorized, float64)."""
     n = len(values)
     if n == 0:
         return np.array([], dtype=_FLOAT64)
-    if span < 1:
-        span = 1
-    alpha = _FLOAT64(2.0) / _FLOAT64(span + 1)
-    out = np.empty(n, dtype=_FLOAT64)
-    out[0] = values[0]
-    one_minus = _FLOAT64(1.0) - alpha
-    for i in range(1, n):
-        out[i] = alpha * values[i] + one_minus * out[i - 1]
-    return out
+    span = max(1, int(span))
+    return (
+        pd.Series(values, dtype=float)
+        .ewm(span=span, adjust=False, min_periods=1)
+        .mean()
+        .to_numpy(dtype=_FLOAT64, copy=False)
+    )
 
 
 def _np_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
@@ -143,6 +153,32 @@ def _np_atr_channels(
     mid = close.astype(_FLOAT64, copy=False)
     band = atr.astype(_FLOAT64, copy=False) * m
     return mid + band, mid, mid - band
+
+
+def _np_adx(
+    high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14
+) -> np.ndarray:
+    """Average Directional Index — float64, Wilder-smoothed."""
+    n = len(close)
+    out = np.full(n, np.nan, dtype=_FLOAT64)
+    if n < period + 2:
+        return out
+    up = high[1:] - high[:-1]
+    down = low[:-1] - low[1:]
+    plus_dm = np.where((up > down) & (up > 0), up, 0.0).astype(_FLOAT64)
+    minus_dm = np.where((down > up) & (down > 0), down, 0.0).astype(_FLOAT64)
+    prev_close = close[:-1]
+    tr = np.maximum(
+        high[1:] - low[1:],
+        np.maximum(np.abs(high[1:] - prev_close), np.abs(low[1:] - prev_close)),
+    ).astype(_FLOAT64)
+    atr_s = _wilder_smooth(tr, period)
+    plus_di = 100.0 * _wilder_smooth(plus_dm, period) / np.maximum(atr_s, 1e-12)
+    minus_di = 100.0 * _wilder_smooth(minus_dm, period) / np.maximum(atr_s, 1e-12)
+    dx = 100.0 * np.abs(plus_di - minus_di) / np.maximum(plus_di + minus_di, 1e-12)
+    adx_vals = _wilder_smooth(dx, period)
+    out[period + 1 :] = adx_vals[period:]
+    return np.nan_to_num(out, nan=0.0)
 
 
 def build_validation_mask(
@@ -378,6 +414,17 @@ def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     return pd.Series(out, index=df.index, dtype=float)
 
 
+def adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """ADX trend-strength indicator on OHLC frame."""
+    if df.empty or not all(c in df.columns for c in ("high", "low", "close")):
+        return pd.Series(dtype=float)
+    high = _as_float64(df["high"])
+    low = _as_float64(df["low"])
+    close = _as_float64(df["close"])
+    out = _np_adx(high, low, close, period)
+    return pd.Series(out, index=df.index, dtype=float)
+
+
 def apply_indicators_frame(
     df: pd.DataFrame,
     *,
@@ -449,6 +496,93 @@ def bucket(value: float, step: float, cap: float = 9999) -> str:
 MICRO_TREND_SLICE_WINDOWS = (3, 5, 8)
 STRATEGY_THRESHOLD_LOW_PCT = 42.0
 STRATEGY_THRESHOLD_HIGH_PCT = 45.0
+MICRO_TREND_FORECAST_TICKS = 4  # fractional 3–5 tick horizon (midpoint)
+OBI_ALIGNMENT_THRESHOLD = 0.15
+OFI_BOOST_SCALE = 35.0
+OBI_BOOST_SCALE = 22.0
+VELOCITY_BOOST_PCT = 8.0
+
+
+def _prior_window_percentile_bounds(
+    values: np.ndarray,
+    *,
+    low_pct: float,
+    high_pct: float,
+    min_prior: int = VOL_REGIME_MIN_PRIOR_BARS,
+    max_ref: int = VOL_REGIME_MAX_REF_BARS,
+) -> tuple[float, float, float] | None:
+    """Leave-one-out percentile bounds — current bar excluded from reference."""
+    finite = values[np.isfinite(values)]
+    if finite.size < min_prior + 1:
+        return None
+    current = float(finite[-1])
+    prior = finite[:-1]
+    ref = prior[-min(max_ref, prior.size) :]
+    if ref.size < min_prior:
+        return None
+    lo = float(np.percentile(ref, low_pct))
+    hi = float(np.percentile(ref, high_pct))
+    return current, lo, hi
+
+
+def _endpoint_roc_windows(
+    close: np.ndarray, windows: tuple[int, ...]
+) -> tuple[np.ndarray, float, float]:
+    """Vectorized endpoint RoC (%) for each lookback ending at close[-1]."""
+    n = close.size
+    end = float(close[-1])
+    rocs = np.full(len(windows), np.nan, dtype=_FLOAT64)
+    for i, w in enumerate(windows):
+        if n <= w:
+            continue
+        base = float(close[-w])
+        if base != 0.0:
+            rocs[i] = (end - base) / abs(base) * 100.0
+    recent_roc = 0.0
+    prior_roc = 0.0
+    if n >= 8:
+        r0 = float(close[-3])
+        p0 = float(close[-8])
+        if r0 != 0.0:
+            recent_roc = (end - r0) / abs(r0) * 100.0
+        if p0 != 0.0:
+            prior_roc = (float(close[-4]) - p0) / abs(p0) * 100.0
+    return rocs, recent_roc, prior_roc
+
+
+def _resolve_obi_ratio(
+    obi_ratio: float | None,
+    order_book_depth: Any | None,
+) -> float:
+    if obi_ratio is not None:
+        try:
+            return float(max(-1.0, min(1.0, obi_ratio)))
+        except (TypeError, ValueError):
+            return 0.0
+    if order_book_depth is None:
+        return 0.0
+    try:
+        from intelligence.order_book_imbalance import compute_obi_ratio
+
+        return float(compute_obi_ratio(order_book_depth))
+    except Exception:
+        return 0.0
+
+
+def _order_flow_aligned(direction: str, obi: float) -> bool:
+    if direction == "BUY":
+        return obi >= OBI_ALIGNMENT_THRESHOLD
+    if direction == "SELL":
+        return obi <= -OBI_ALIGNMENT_THRESHOLD
+    return False
+
+
+def _ofi_confirms_direction(direction: str, ofi_delta: float) -> bool:
+    if direction == "BUY":
+        return ofi_delta > 0.0
+    if direction == "SELL":
+        return ofi_delta < 0.0
+    return False
 
 
 def evaluate_micro_trend_alpha(
@@ -456,12 +590,17 @@ def evaluate_micro_trend_alpha(
     *,
     low_pct: float = STRATEGY_THRESHOLD_LOW_PCT,
     high_pct: float = STRATEGY_THRESHOLD_HIGH_PCT,
+    obi_ratio: float | None = None,
+    prior_obi_ratio: float | None = None,
+    order_book_depth: Any | None = None,
+    tick_velocity_engaged: bool = False,
 ) -> dict[str, Any]:
     """
-    Localized micro-trend RoC variance across short quote slices.
+    Localized micro-trend RoC + order-flow imbalance (OBI/OFI) + tick velocity.
 
-    Promotes when momentum shift clears 42%/45% strategy bands (volatile narrow sessions).
-    Pure NumPy float64 — no Pandas on tick path.
+    Blends price-velocity RoC with instantaneous OBI delta and 15-ticks/200ms
+    velocity engagement to fractionally forecast the next 3–5 ticks of direction.
+    Pure NumPy float64 on the price path — OBI resolved lazily when provided.
     """
     c = _as_float64(close)
     n = len(c)
@@ -471,65 +610,95 @@ def evaluate_micro_trend_alpha(
         "promote": False,
         "promote_tier": "",
         "direction": "FLAT",
+        "obi_ratio": 0.0,
+        "ofi_delta": 0.0,
+        "tick_velocity_engaged": bool(tick_velocity_engaged),
+        "order_flow_aligned": False,
+        "forecast_ticks": MICRO_TREND_FORECAST_TICKS,
+        "forecast_direction": "FLAT",
+        "forecast_confidence": 0.0,
     }
     if n < max(MICRO_TREND_SLICE_WINDOWS) + 1:
         return empty
 
-    roc_slices: list[float] = []
-    for w in MICRO_TREND_SLICE_WINDOWS:
-        if n <= w:
-            continue
-        window = c[-w:]
-        base = float(window[0])
-        if base == 0.0:
-            continue
-        roc = (float(window[-1]) - base) / abs(base) * 100.0
-        roc_slices.append(roc)
-
-    if not roc_slices:
+    roc_arr, recent_roc, prior_roc = _endpoint_roc_windows(c, MICRO_TREND_SLICE_WINDOWS)
+    valid = roc_arr[np.isfinite(roc_arr)]
+    if valid.size == 0:
         return empty
 
-    roc_arr = np.asarray(roc_slices, dtype=_FLOAT64)
-    roc_var = float(np.var(roc_arr))
-    mean_roc = float(np.mean(roc_arr))
-
-    recent_roc = 0.0
-    prior_roc = 0.0
-    if n >= 8:
-        recent_seg = c[-3:]
-        prior_seg = c[-8:-3]
-        r0 = float(recent_seg[0])
-        p0 = float(prior_seg[0])
-        if r0 != 0.0:
-            recent_roc = (float(recent_seg[-1]) - r0) / abs(r0) * 100.0
-        if p0 != 0.0:
-            prior_roc = (float(prior_seg[-1]) - p0) / abs(p0) * 100.0
+    roc_var = float(np.var(valid))
+    mean_roc = float(np.mean(valid))
     accel = recent_roc - prior_roc
     momentum = abs(recent_roc) + abs(accel) * 0.75 + roc_var * 4.0
-    score_pct = float(
-        np.clip(abs(recent_roc) * 28.0 + abs(accel) * 18.0 + roc_var * 120.0, 0.0, 100.0)
+    # Recent leg weighted higher than the multi-window mean — cuts entry lag.
+    base_score = float(
+        np.clip(
+            abs(recent_roc) * 32.0 + abs(accel) * 22.0 + roc_var * 100.0,
+            0.0,
+            100.0,
+        )
     )
-    if score_pct < momentum:
-        score_pct = float(np.clip(momentum * 14.0, 0.0, 100.0))
+    if base_score < momentum:
+        base_score = float(np.clip(momentum * 14.0, 0.0, 100.0))
 
     direction = "FLAT"
-    if recent_roc > 0.01 or mean_roc > 0.02:
+    if recent_roc > DIRECTION_DEADBAND_RECENT_PCT:
         direction = "BUY"
-    elif recent_roc < -0.01 or mean_roc < -0.02:
+    elif recent_roc < -DIRECTION_DEADBAND_RECENT_PCT:
         direction = "SELL"
+    elif mean_roc > DIRECTION_DEADBAND_MEAN_PCT:
+        direction = "BUY"
+    elif mean_roc < -DIRECTION_DEADBAND_MEAN_PCT:
+        direction = "SELL"
+
+    obi = _resolve_obi_ratio(obi_ratio, order_book_depth)
+    prior_obi = _resolve_obi_ratio(prior_obi_ratio, None) if prior_obi_ratio is not None else 0.0
+    ofi_delta = float(obi - prior_obi) if prior_obi_ratio is not None else 0.0
+
+    flow_aligned = _order_flow_aligned(direction, obi)
+    ofi_confirms = _ofi_confirms_direction(direction, ofi_delta)
+    flow_boost = 0.0
+    if flow_aligned:
+        flow_boost += abs(obi) * OBI_BOOST_SCALE
+    if ofi_confirms:
+        flow_boost += abs(ofi_delta) * OFI_BOOST_SCALE
+    if tick_velocity_engaged:
+        flow_boost += VELOCITY_BOOST_PCT
+    flow_boost = min(flow_boost, MICRO_TREND_MAX_FLOW_BOOST_PCT)
+
+    score_pct = float(np.clip(base_score + flow_boost, 0.0, 100.0))
 
     promote = score_pct >= low_pct and direction in ("BUY", "SELL")
     promote_tier = ""
     if promote:
         promote_tier = "high" if score_pct >= high_pct else "low"
+        if flow_aligned and (ofi_confirms or tick_velocity_engaged):
+            promote_tier = "high"
+
+    forecast_dir = direction if promote else "FLAT"
+    forecast_conf = 0.0
+    if promote:
+        velocity_factor = 1.12 if tick_velocity_engaged else 1.0
+        flow_factor = 1.0 + min(0.35, abs(obi) * 0.4 + abs(ofi_delta) * 0.25)
+        forecast_conf = float(
+            np.clip((score_pct / 100.0) * velocity_factor * flow_factor, 0.0, 1.0)
+        )
 
     return {
         "score_pct": score_pct,
+        "base_score_pct": base_score,
         "roc_variance": roc_var,
         "mean_roc": mean_roc,
         "promote": promote,
         "promote_tier": promote_tier,
         "direction": direction,
+        "obi_ratio": obi,
+        "ofi_delta": ofi_delta,
+        "tick_velocity_engaged": bool(tick_velocity_engaged),
+        "order_flow_aligned": flow_aligned,
+        "forecast_ticks": MICRO_TREND_FORECAST_TICKS,
+        "forecast_direction": forecast_dir,
+        "forecast_confidence": forecast_conf,
     }
 
 
@@ -545,13 +714,14 @@ def vol_regime(
             values = _as_float64(atr_series.dropna())
         else:
             values = _as_float64(np.asarray(atr_series, dtype=_FLOAT64))
-        values = values[np.isfinite(values)]
-        if len(values) < 10:
+        bounds = _prior_window_percentile_bounds(
+            values[np.isfinite(values)],
+            low_pct=low_pct,
+            high_pct=high_pct,
+        )
+        if bounds is None:
             return "unknown"
-        ref = values[-min(100, len(values)) :]
-        current = float(values[-1])
-        lo = float(np.percentile(ref, low_pct))
-        hi = float(np.percentile(ref, high_pct))
+        current, lo, hi = bounds
         if current <= lo:
             return "low"
         if current >= hi:

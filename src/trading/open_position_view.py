@@ -23,6 +23,7 @@ _PRICE_STALE_LOGGED: set[str] = set()
 # Non-GBP CFD specs — point_value is in position currency per index point (per contract).
 INSTRUMENT_PNL_SPEC: dict[str, dict[str, float | str]] = {
     "IX.D.DOW.IFM.IP": {"point_value": 2.0, "currency": "USD"},
+    "IX.D.NIKKEI.IFM.IP": {"point_value": 1.0, "currency": "GBP"},
     "IX.D.SPTRD.IFE.IP": {"point_value": 1.0, "currency": "USD"},
     "CS.D.CFPGOLD.CFP.IP": {"point_value": 1.0, "currency": "USD"},
     "IX.D.DAX.IFM.IP": {"point_value": 1.0, "currency": "EUR"},
@@ -800,6 +801,17 @@ def apply_display_daily_pnl(tick: dict[str, Any]) -> None:
     tick["daily_pnl_gbp"] = round(realized + open_upl, 2)
 
 
+def _store_row_value(row: Any, key: str, default: Any = None) -> Any:
+    """Read LearningStore row fields from dict or sqlite3.Row."""
+    if hasattr(row, "keys"):
+        keys = row.keys()
+        if key in keys:
+            return row[key]
+    if hasattr(row, "get"):
+        return row.get(key, default)
+    return default
+
+
 def positions_from_store_rows(
     rows: list[Any],
     quote: Quote | None,
@@ -812,21 +824,23 @@ def positions_from_store_rows(
         keys = tr.keys() if hasattr(tr, "keys") else ()
         side = str(tr["side"]).upper() if "side" in keys else ""
         entry = float(tr["entry"])
-        size = float(tr["size"] or 0)
+        size = float(_store_row_value(tr, "size") or 0)
         deal_id = ""
         if "ig_deal_id" in keys and tr["ig_deal_id"]:
             deal_id = str(tr["ig_deal_id"])
         elif "deal_id" in keys and tr["deal_id"]:
             deal_id = str(tr["deal_id"])
-        epic = str(tr.get("epic") or "")
+        epic = str(_store_row_value(tr, "epic") or "")
         spec = instrument_pnl_spec(epic)
+        stop_raw = _store_row_value(tr, "stop")
+        target_raw = _store_row_value(tr, "target")
         row: dict[str, Any] = {
             "deal_id": deal_id,
             "side": side,
             "entry": entry,
             "current": None,
-            "stop": float(tr["stop"]) if tr.get("stop") is not None else None,
-            "target": float(tr["target"]) if tr.get("target") is not None else None,
+            "stop": float(stop_raw) if stop_raw is not None else None,
+            "target": float(target_raw) if target_raw is not None else None,
             "pnl_gbp": None,
             "pnl_currency": None,
             "pnl_pts": None,
@@ -837,12 +851,12 @@ def positions_from_store_rows(
             "epic": epic,
             "point_value": float(spec["point_value"]),
             "currency": str(spec["currency"]),
-            "notes": str(tr["notes"] or "") if "notes" in keys else "",
+            "notes": str(_store_row_value(tr, "notes") or "") if "notes" in keys else "",
         }
         flags = infer_protection_flags(row)
         row["trail_active"] = flags["trail_active"]
         row["breakeven_hit"] = flags["breakeven_hit"]
-        upl = tr.get("unrealized_pnl") if hasattr(tr, "get") else None
+        upl = _store_row_value(tr, "unrealized_pnl")
         if upl is not None:
             try:
                 row["pnl_gbp"] = float(upl)

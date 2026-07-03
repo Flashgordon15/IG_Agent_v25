@@ -1,0 +1,492 @@
+{
+  "regime_matrix": {
+    "0": {
+      "size_factor": 0.85,
+      "stop_factor": 0.9,
+      "limit_factor": 0.85,
+      "trailing_sensitivity": 1.0
+    },
+    "1": {
+      "size_factor": 1.1,
+      "stop_factor": 1.25,
+      "limit_factor": 1.35,
+      "trailing_sensitivity": 1.0
+    },
+    "2": {
+      "size_factor": 1.25,
+      "stop_factor": 0.705,
+      "limit_factor": 0.7,
+      "trailing_sensitivity": 1.0
+    }
+  },
+  "params": {},
+  "tuner_updated_at": 1783106286.964216,
+  "boot_fallback": true,
+  "tuner_history": [
+    {
+      "ts": 1782931222.8500721,
+      "reasons": [
+        "daily_pnl_below_proportional_target",
+        "chop:performance_headroom"
+      ],
+      "daily_pnl_gbp": 99.17,
+      "trades": 6,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1782931516.535604,
+      "reasons": [
+        "daily_pnl_below_proportional_target",
+        "chop:performance_headroom"
+      ],
+      "daily_pnl_gbp": 99.17,
+      "trades": 6,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1782931713.575186,
+      "reasons": [
+        "daily_pnl_below_proportional_target",
+        "chop:performance_headroom"
+      ],
+      "daily_pnl_gbp": 99.17,
+      "trades": 6,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1782932446.0485,
+      "reasons": [
+        "daily_pnl_below_proportional_target",
+        "chop:performance_headroom"
+      ],
+      "daily_pnl_gbp": 99.17,
+      "trades": 7,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1782932696.330258,
+      "reasons": [
+        "daily_pnl_below_proportional_target",
+        "chop:performance_headroom"
+      ],
+      "daily_pnl_gbp": 99.17,
+      "trades": 7,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1782932949.0930371,
+      "reasons": [
+        "daily_pnl_below_proportional_target",
+        "chop:performance_headroom"
+      ],
+      "daily_pnl_gbp": 99.17,
+      "trades": 7,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1782935571.819092,
+      "reasons": [
+        "daily_pnl_below_proportional_target",
+        "chop:performance_headroom"
+      ],
+      "daily_pnl_gbp": 99.17,
+      "trades": 7,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1782936418.0584152,
+      "reasons": [
+        "daily_pnl_below_proportional_target",
+        "chop:performance_headroom"
+      ],
+      "daily_pnl_gbp": 99.17,
+      "trades": 26,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1782937160.776895,
+      "reasons": [
+        "daily_pnl_below_proportional_target",
+        "chop:performance_headroom"
+      ],
+      "daily_pnl_gbp": 99.17,
+      "trades": 36,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1782937586.2316191,
+      "reasons": [
+        "daily_pnl_below_proportional_target",
+        "chop:performance_headroom"
+      ],
+      "daily_pnl_gbp": 99.17,
+      "trades": 36,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1782937750.838444,
+      "reasons": [
+        "daily_pnl_below_proportional_target",
+        "chop:performance_headroom"
+      ],
+      "daily_pnl_gbp": 99.17,
+      "trades": 36,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1782939162.838583,
+      "reasons": [
+        "daily_pnl_below_proportional_target",
+        "chop:performance_headroom"
+      ],
+      "daily_pnl_gbp": 99.17,
+      "trades": 36,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1782940310.888216,
+      "reasons": [
+        "daily_pnl_below_proportional_target",
+        "chop:performance_headroom"
+      ],
+      "daily_pnl_gbp": 99.17,
+      "trades": 43,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1782941845.523201,
+      "reasons": [
+        "daily_pnl_below_proportional_target",
+        "chop:performance_headroom"
+      ],
+      "daily_pnl_gbp": 99.17,
+      "trades": 50,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1782942239.4860952,
+      "reasons": [
+        "daily_pnl_below_proportional_target",
+        "chop:performance_headroom"
+      ],
+      "daily_pnl_gbp": 99.17,
+      "trades": 50,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1782959570.374926,
+      "reasons": [
+        "chop:performance_headroom"
+      ],
+      "daily_pnl_gbp": 99.17,
+      "trades": 48,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1782959891.031306,
+      "reasons": [
+        "chop:performance_headroom"
+      ],
+      "daily_pnl_gbp": 3819.07,
+      "trades": 54,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1782960794.6391108,
+      "reasons": [
+        "chop:performance_headroom"
+      ],
+      "daily_pnl_gbp": 3819.07,
+      "trades": 54,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1782961064.1885529,
+      "reasons": [
+        "chop:performance_headroom"
+      ],
+      "daily_pnl_gbp": 3819.07,
+      "trades": 54,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1782964695.688771,
+      "reasons": [
+        "chop:performance_headroom"
+      ],
+      "daily_pnl_gbp": 3819.07,
+      "trades": 54,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1782968333.963969,
+      "reasons": [
+        "chop:performance_headroom"
+      ],
+      "daily_pnl_gbp": 5625.88,
+      "trades": 60,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1782971970.62046,
+      "reasons": [
+        "chop:performance_headroom"
+      ],
+      "daily_pnl_gbp": 5625.88,
+      "trades": 60,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1782975594.075497,
+      "reasons": [
+        "chop:performance_headroom"
+      ],
+      "daily_pnl_gbp": 5477.75,
+      "trades": 76,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1782975850.02915,
+      "reasons": [
+        "chop:performance_headroom"
+      ],
+      "daily_pnl_gbp": 5477.75,
+      "trades": 76,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1782976402.1584032,
+      "reasons": [
+        "chop:performance_headroom"
+      ],
+      "daily_pnl_gbp": 5477.75,
+      "trades": 76,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1782976793.4254239,
+      "reasons": [
+        "chop:performance_headroom"
+      ],
+      "daily_pnl_gbp": 5477.75,
+      "trades": 76,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1782980426.264123,
+      "reasons": [
+        "chop:performance_headroom"
+      ],
+      "daily_pnl_gbp": 5524.7,
+      "trades": 78,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1782981682.384959,
+      "reasons": [
+        "chop:performance_headroom"
+      ],
+      "daily_pnl_gbp": 5524.7,
+      "trades": 78,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1782982332.722137,
+      "reasons": [
+        "chop:performance_headroom"
+      ],
+      "daily_pnl_gbp": 5524.7,
+      "trades": 78,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1782982683.626366,
+      "reasons": [
+        "chop:performance_headroom"
+      ],
+      "daily_pnl_gbp": 5524.7,
+      "trades": 78,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1782986317.645639,
+      "reasons": [
+        "chop:performance_headroom"
+      ],
+      "daily_pnl_gbp": 5425.54,
+      "trades": 74,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1782987398.408447,
+      "reasons": [
+        "chop:performance_headroom"
+      ],
+      "daily_pnl_gbp": 5425.54,
+      "trades": 74,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1782991052.7202072,
+      "reasons": [
+        "chop:performance_headroom"
+      ],
+      "daily_pnl_gbp": 5425.54,
+      "trades": 92,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1782994763.509135,
+      "reasons": [
+        "chop:performance_headroom"
+      ],
+      "daily_pnl_gbp": 5425.54,
+      "trades": 92,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1782995261.6589959,
+      "reasons": [
+        "chop:performance_headroom"
+      ],
+      "daily_pnl_gbp": 5425.54,
+      "trades": 92,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1783082917.992788,
+      "reasons": [
+        "daily_pnl_below_proportional_target"
+      ],
+      "daily_pnl_gbp": 0,
+      "trades": 0,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1783086580.843489,
+      "reasons": [
+        "daily_pnl_below_proportional_target"
+      ],
+      "daily_pnl_gbp": 0,
+      "trades": 0,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1783088335.12589,
+      "reasons": [
+        "daily_pnl_below_proportional_target"
+      ],
+      "daily_pnl_gbp": 0,
+      "trades": 0,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1783089314.0714939,
+      "reasons": [
+        "daily_pnl_below_proportional_target"
+      ],
+      "daily_pnl_gbp": 0,
+      "trades": 0,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1783090199.623163,
+      "reasons": [
+        "daily_pnl_below_proportional_target"
+      ],
+      "daily_pnl_gbp": 0,
+      "trades": 0,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1783091166.843637,
+      "reasons": [
+        "daily_pnl_below_proportional_target"
+      ],
+      "daily_pnl_gbp": 0,
+      "trades": 0,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1783091999.3964748,
+      "reasons": [
+        "daily_pnl_below_proportional_target"
+      ],
+      "daily_pnl_gbp": 0,
+      "trades": 0,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1783093488.155411,
+      "reasons": [
+        "daily_pnl_below_proportional_target"
+      ],
+      "daily_pnl_gbp": 0,
+      "trades": 0,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1783094614.3663218,
+      "reasons": [
+        "daily_pnl_below_proportional_target"
+      ],
+      "daily_pnl_gbp": 0,
+      "trades": 0,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1783095515.407892,
+      "reasons": [
+        "daily_pnl_below_proportional_target"
+      ],
+      "daily_pnl_gbp": 0,
+      "trades": 0,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1783096721.337476,
+      "reasons": [
+        "daily_pnl_below_proportional_target"
+      ],
+      "daily_pnl_gbp": 0,
+      "trades": 0,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1783099440.850003,
+      "reasons": [
+        "daily_pnl_below_proportional_target"
+      ],
+      "daily_pnl_gbp": 0,
+      "trades": 0,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1783101948.324548,
+      "reasons": [
+        "daily_pnl_below_proportional_target"
+      ],
+      "daily_pnl_gbp": 0,
+      "trades": 0,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1783105629.289372,
+      "reasons": [
+        "daily_pnl_below_proportional_target"
+      ],
+      "daily_pnl_gbp": 0,
+      "trades": 0,
+      "matrix_delta": {}
+    },
+    {
+      "ts": 1783106286.963816,
+      "reasons": [
+        "daily_pnl_below_proportional_target"
+      ],
+      "daily_pnl_gbp": 0,
+      "trades": 0,
+      "matrix_delta": {}
+    }
+  ]
+}

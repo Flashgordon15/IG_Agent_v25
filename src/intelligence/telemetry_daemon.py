@@ -13,6 +13,7 @@ direct network requests when the gasket is active.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from datetime import datetime, timezone
@@ -154,10 +155,52 @@ def gasket_fetch_if_stale(
         return snap
 
 
+def _hub_sample_for_epic(epic: str, *, max_age_sec: float = 15.0) -> YahooQuoteSample | None:
+    """Reuse the shared hub quote (fed by YahooQuotePoller / streams).
+
+    The reactor previously fired its own un-bucketed Yahoo chart request per
+    epic per second (7 epics = ~420 req/min). Yahoo throttled the whole IP by
+    slow-walking responses, which timed out every other consumer — the primary
+    quote poller included — and starved the hub. Hub-first eliminates that.
+    """
+    try:
+        hub = get_market_data_hub()
+        snap = hub.get_snapshot(epic)
+        if snap is None:
+            return None
+        source = str(getattr(snap, "source", "") or "")
+        # Never recycle our own gasket publishes as "fresh" market data.
+        if source.startswith("telemetry_gasket"):
+            return None
+        bid = float(snap.bid or 0)
+        offer = float(snap.offer or 0)
+        if bid <= 0 or offer <= 0 or float(snap.age_seconds()) > max_age_sec:
+            return None
+        return YahooQuoteSample(
+            epic=epic,
+            symbol=yahoo_symbol_for_epic(epic) or "",
+            mid=(bid + offer) / 2.0,
+            bid=bid,
+            offer=offer,
+            source=source or "hub",
+        )
+    except Exception:
+        return None
+
+
 def _fetch_yahoo_sample(epic: str) -> tuple[YahooQuoteSample | None, int | None, str]:
     symbol = yahoo_symbol_for_epic(epic)
     if not symbol:
         return None, None, "no_yahoo_symbol"
+    try:
+        from system.chaos_guardian import acquire_outbound_token
+
+        # Non-blocking: reactor slices run every 50ms — if the shared yahoo
+        # budget is dry we replay instead of queueing more pressure.
+        if not acquire_outbound_token("yahoo", max_wait_sec=0.0):
+            return None, None, "yahoo_budget_dry"
+    except Exception:
+        pass
     url = _YAHOO_CHART.format(symbol=url_quote(symbol, safe=""))
     try:
         response = requests.get(
@@ -585,6 +628,20 @@ class V4MicroReactor:
             self._replay_epic(epic)
             return
 
+        # Hub-first: the dedicated quote poller already fetches these symbols;
+        # only fall back to a direct (bucketed) Yahoo fetch when the hub is cold.
+        sample = _hub_sample_for_epic(epic)
+        if sample is not None:
+            self._publish_tick(sample)
+            record_successful_tick(
+                epic=sample.epic,
+                bid=sample.bid,
+                offer=sample.offer,
+                mid=sample.mid,
+                spread=sample.offer - sample.bid,
+            )
+            return
+
         sample, http_status, reason = _fetch_yahoo_sample(epic)
         if sample is None:
             self._stats["errors"] += 1
@@ -758,9 +815,12 @@ def start_v2_telemetry_daemon(config: Any | None = None) -> V4MicroReactor | Non
             maybe_arm_ui_stress_render_from_env(delay_sec=8.0)
             return _reactor_ref
         try:
-            from feeder.yahoo_quote_poller import stop_yahoo_quote_poller
+            from feeder.pricing_transport import reference_transport_is_yahoo
 
-            stop_yahoo_quote_poller()
+            if not reference_transport_is_yahoo(config):
+                from feeder.yahoo_quote_poller import stop_yahoo_quote_poller
+
+                stop_yahoo_quote_poller()
         except Exception as exc:
             log_guarded_exception("telemetry_daemon_stop_yahoo", exc)
         _reactor_ref = V4MicroReactor(poll_hz_per_epic=cfg["poll_hz_per_epic"])

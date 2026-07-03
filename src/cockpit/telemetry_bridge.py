@@ -24,6 +24,7 @@ _command_queue: queue.Queue[str] | None = None
 _collector_thread: threading.Thread | None = None
 _command_thread: threading.Thread | None = None
 _stop = threading.Event()
+_collect_busy = threading.Lock()
 
 
 def get_telemetry_queue() -> queue.Queue[dict[str, Any]]:
@@ -526,14 +527,19 @@ def _liquidity_wave_snapshot() -> dict[str, Any]:
 
 
 def _collector_loop(epics: tuple[str, ...], hz: float) -> None:
-    interval = max(0.1, 1.0 / max(0.5, float(hz)))
+    interval = max(0.2, 1.0 / max(0.5, min(float(hz), 2.5)))
     q = get_telemetry_queue()
     while not _stop.is_set():
+        if not _collect_busy.acquire(blocking=False):
+            _stop.wait(interval)
+            continue
         try:
             payload = _collect_snapshot(epics)
             put_drop_oldest(q, payload)
         except Exception as e:
             log_engine(f"cockpit telemetry collect failed: {type(e).__name__}: {e}")
+        finally:
+            _collect_busy.release()
         _stop.wait(interval)
 
 
@@ -551,6 +557,26 @@ def _command_loop() -> None:
                 execute_emergency_cockpit_override()
             except Exception as e:
                 log_engine(f"cockpit emergency failed: {type(e).__name__}: {e}")
+
+
+def collect_telemetry_snapshot(
+    epics: tuple[str, ...] | None = None,
+) -> dict[str, Any]:
+    """Collect one telemetry frame in-process (safe for cockpit WS hot path)."""
+    target = epics or DEFAULT_EPICS
+    return _collect_snapshot(target)
+
+
+def ensure_telemetry_bridge(
+    *,
+    epics: tuple[str, ...] | None = None,
+    hz: float = 2.5,
+) -> None:
+    """Idempotent — start collector + command worker if not already running."""
+    if bridge_is_active():
+        return
+    start_telemetry_bridge(epics=epics, hz=hz)
+    log_engine("Flight Deck telemetry bridge self-heal engaged")
 
 
 def start_telemetry_bridge(
@@ -585,6 +611,9 @@ def bridge_is_active() -> bool:
 
 def stop_telemetry_bridge() -> None:
     _stop.set()
+    for th in (_collector_thread, _command_thread):
+        if th is not None and th.is_alive():
+            th.join(timeout=2.0)
 
 
 def reset_telemetry_bridge_for_tests() -> None:

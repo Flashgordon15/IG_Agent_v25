@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS latency_metrics (
 CREATE INDEX IF NOT EXISTS idx_latency_timestamp ON latency_metrics(timestamp);
 CREATE INDEX IF NOT EXISTS idx_latency_node_env ON latency_metrics(node_env);
 CREATE INDEX IF NOT EXISTS idx_latency_epic ON latency_metrics(epic);
+CREATE INDEX IF NOT EXISTS idx_latency_event_ts ON latency_metrics(event_type, timestamp);
 """
 
 _META_DDL = """
@@ -573,7 +574,13 @@ class TriageLogger:
             await db.commit()
 
             while True:
-                item = await asyncio.to_thread(self._queue.get)
+                try:
+                    item = await asyncio.to_thread(self._queue.get)
+                except RuntimeError:
+                    # Interpreter shutdown — the loop's thread executor is gone.
+                    # Exit cleanly instead of dying with an uncaught traceback.
+                    log_engine("TriageLogger: executor shut down — worker exiting")
+                    break
                 if item is None:
                     break
                 try:

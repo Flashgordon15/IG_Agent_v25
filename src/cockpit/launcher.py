@@ -78,6 +78,12 @@ def _open_cockpit_browser(port: int, *, delay: float = 2.0) -> None:
 def _apex_desktop_mode() -> bool:
     if os.environ.get("IG_APEX_DESKTOP", "").strip() == "1":
         return True
+    if os.environ.get("IG_DESKTOP_FLIGHT_DECK", "").strip() in ("1", "true", "yes"):
+        return True
+    if os.environ.get("LAUNCHER_DESKTOP", "").strip() in ("1", "true", "yes"):
+        return True
+    if os.environ.get("IG_DESKTOP_SHELL_ACTIVE", "").strip() in ("1", "true", "yes"):
+        return True
     if os.environ.get("IG_APEX_NO_BROWSER", "").strip() == "1":
         return True
     try:
@@ -108,13 +114,6 @@ def launch_flight_deck_after_gate4(cfg: Any | None) -> None:
             _bridge_started = True
             log_engine("Flight Deck telemetry bridge active")
 
-        if desktop_mode:
-            _ipc_ready.set()
-            log_engine(
-                "Flight Deck: telemetry only — Apex desktop shell (no browser / no :8787)"
-            )
-            return
-
         if os.environ.get("IG_COCKPIT_ISOLATED_EXTERNAL", "").strip() == "1":
             _ipc_ready.set()
             log_engine(
@@ -128,12 +127,23 @@ def launch_flight_deck_after_gate4(cfg: Any | None) -> None:
 
             if start_cockpit_web_server(port=port, hz=hz):
                 _web_started = True
-                auto_open = cockpit_block.get("auto_open_browser", True)
-                if auto_open and not __import__("os").environ.get("IG_AGENT_PYTEST"):
+                auto_open = bool(cockpit_block.get("auto_open_browser", True))
+                if desktop_mode:
+                    log_engine(
+                        f"Flight Deck web cockpit ready on port {port} "
+                        f"(desktop shell embed — browser suppressed)"
+                    )
+                elif not auto_open:
+                    log_engine(
+                        f"Flight Deck web cockpit ready on port {port} "
+                        f"(browser auto-open disabled)"
+                    )
+                elif not __import__("os").environ.get("IG_AGENT_PYTEST"):
                     _open_cockpit_browser(port)
+                else:
+                    log_engine(f"Flight Deck web cockpit ready on port {port}")
 
         _ipc_ready.set()
-        log_engine(f"Flight Deck web cockpit ready on port {port}")
 
 
 def wait_for_cockpit_ipc(*, timeout: float = 180.0) -> bool:

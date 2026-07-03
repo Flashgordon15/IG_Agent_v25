@@ -140,6 +140,12 @@ def session_is_healthy(record: dict[str, Any] | None) -> bool:
     pid = int(record.get("pid") or 0)
     if not pid_alive(pid):
         return False
+    # Never HTTP-probe our own health endpoint: when called from inside the
+    # /api/health handler this recursed into the same (busy) event loop and
+    # stacked 3s timeouts until every health check starved — supervisors then
+    # restarted a live agent. Being here means this process is alive.
+    if pid == os.getpid():
+        return True
     port_raw = record.get("port")
     if port_raw is not None:
         try:

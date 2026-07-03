@@ -25,6 +25,25 @@ WINDOW_SEC = 60.0
 def _effective_max_tx_per_window() -> int:
     """Canary/live-canary may raise the hard cap; 0 = unlimited."""
     try:
+        from system.demo_execution_plane import demo_throughput_active
+
+        if demo_throughput_active():
+            block = {}
+            try:
+                from system.config_loader import get_config
+
+                block = get_config().get("demo_throughput_mode") or {}
+            except Exception:
+                pass
+            if bool(block.get("bypass_traffic_governor", True)):
+                try:
+                    demo_max = int(block.get("demo_max_tx_per_60s") or 6)
+                except (TypeError, ValueError):
+                    demo_max = 6
+                return demo_max if demo_max > 0 else 0
+    except Exception:
+        pass
+    try:
         from system.config_loader import get_config
 
         cfg = get_config()
@@ -67,6 +86,17 @@ def _prune(now: float) -> None:
     cutoff = now - WINDOW_SEC
     while _transmit_times and _transmit_times[0] < cutoff:
         _transmit_times.popleft()
+
+
+def positions_otc_transmit_slot_available() -> bool:
+    """Peek — True when a POST /positions/otc would be allowed (does not consume)."""
+    max_tx = _effective_max_tx_per_window()
+    if max_tx <= 0:
+        return True
+    now = time.time()
+    with _lock:
+        _prune(now)
+        return len(_transmit_times) < max_tx
 
 
 def consume_positions_otc_transmit_slot(

@@ -238,10 +238,30 @@ def resolve_default_execution_mode_for_boot() -> None:
         os.environ["IG_AGENT_MODE"] = "DEMO"
 
 
-def ensure_execution_plane_armed_on_boot() -> None:
-    """One-shot: resolve mode then arm DEMO / session-validation unblock paths."""
+def ensure_execution_mode_resolved_on_boot() -> None:
+    """G1-safe: resolve IG_AGENT_MODE without opening LearningStore."""
     ensure_demo_broker_execution_armed_on_boot()
     ensure_production_execution_armed_on_boot()
     resolve_default_execution_mode_for_boot()
+
+
+def ensure_learning_store_execution_armed() -> None:
+    """Deferred past G3 — clears circuit-breaker state via LearningStore."""
     ensure_demo_sandbox_execution_armed()
     ensure_session_validation_execution_armed()
+
+
+def schedule_post_g3_execution_arming() -> None:
+    """Arm LearningStore-backed execution plane off the G2/G3 hydration thread."""
+    import threading
+
+    threading.Thread(
+        target=ensure_learning_store_execution_armed,
+        name="post-g3-exec-arm",
+        daemon=True,
+    ).start()
+
+
+def ensure_execution_plane_armed_on_boot() -> None:
+    """One-shot G1: mode resolution only — LearningStore deferred to post-G3."""
+    ensure_execution_mode_resolved_on_boot()

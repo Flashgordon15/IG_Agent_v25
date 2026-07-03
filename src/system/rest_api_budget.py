@@ -32,6 +32,44 @@ PREEMPTIVE_UTILIZATION_RATIO = 0.8
 FRESH_STREAM_TICK_MAX_AGE_SEC = 45.0
 
 
+def _demo_throughput_rest_bypass() -> bool:
+    try:
+        from system.demo_execution_plane import demo_throughput_active
+
+        return demo_throughput_active()
+    except Exception:
+        return False
+
+
+def _dual_core_stream_fresh(*, max_age: float = FRESH_STREAM_TICK_MAX_AGE_SEC) -> bool:
+    """Stacked sweep tick pulse when hub snapshots lag behind ingest."""
+    try:
+        from runtime.dual_core_execution import get_active_stack_epics, get_socket_heartbeat_state
+        from system.market_data_hub import get_market_data_hub
+
+        stack = get_active_stack_epics()
+        if not stack:
+            return False
+        hub = get_market_data_hub()
+        last_ticks = (get_socket_heartbeat_state() or {}).get("last_fresh_tick_at") or {}
+        now = time.time()
+        for epic in stack:
+            ts = last_ticks.get(epic)
+            if not ts or (now - float(ts)) > max_age:
+                continue
+            snap = hub.get_snapshot(epic)
+            if (
+                snap is not None
+                and float(getattr(snap, "bid", 0) or 0) > 0
+                and snap.age_seconds() <= max_age
+            ):
+                continue
+            return True
+        return False
+    except Exception:
+        return False
+
+
 class RestBudgetPausedError(RuntimeError):
     """Non-essential REST deferred — rate limit or proactive throttle."""
 
@@ -233,6 +271,8 @@ def hub_quote_stream_genuinely_stale(
     *, max_age: float = FRESH_STREAM_TICK_MAX_AGE_SEC, epic: str | None = None
 ) -> bool:
     """True when the last valid quote tick is older than max_age (or absent)."""
+    if _dual_core_stream_fresh(max_age=max_age):
+        return False
     age = hub_quote_stream_tick_age(epic=epic)
     if age is None:
         return True
@@ -261,6 +301,14 @@ def hub_quote_stream_fresh(
             return False
         if is_quote_stream_fresh(check_epic, max_age=max_age):
             return True
+    except Exception:
+        pass
+    if _dual_core_stream_fresh(max_age=max_age):
+        return True
+    try:
+        from system.market_data_hub import get_market_data_hub
+
+        check_epic = str(epic or "").strip() or _primary_market_epic()
         hub = get_market_data_hub()
         with hub._lock:
             rest = hub._rest
@@ -436,6 +484,8 @@ class RestApiBudget:
 
     def _preemptive_throttle_blocks_rest(self) -> bool:
         """Preemptive pause applies only when the live stream is down/stale."""
+        if _demo_throughput_rest_bypass():
+            return False
         if hub_quote_stream_fresh():
             return False
         return self._preemptive_pause_active()
@@ -522,6 +572,12 @@ class RestApiBudget:
 
     def _track_preemptive_locked(self, now: float) -> None:
         if _hub_in_maintenance():
+            return
+        if _demo_throughput_rest_bypass():
+            if self._preemptive_pause_active():
+                self._preemptive_pause_until = 0.0
+            self._consecutive_high_readings = 0
+            self._stale_pause_count = 0
             return
 
         stream_stale = hub_quote_stream_genuinely_stale()

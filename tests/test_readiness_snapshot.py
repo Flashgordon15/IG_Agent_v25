@@ -126,6 +126,45 @@ def test_refresh_health_populates_snapshot() -> None:
     assert body.get("snapshot_warming") is False
 
 
+def test_health_snapshot_overlays_stale_iron_cage_from_health_light() -> None:
+    from api.readiness_snapshot import _HEALTH_SNAPSHOT, _META, _overlay_live_iron_cage
+
+    stale = {
+        "status": "OPERATIONAL",
+        "ready": True,
+        "trade_ready": False,
+        "trading_healthy": True,
+        "supervision_drift_ok": True,
+        "iron_cage": {
+            "ok": False,
+            "trade_ready": False,
+            "blockers": ["iron_cage_warming"],
+            "source": "peek_empty",
+        },
+    }
+    hl = {
+        "execution_loop_active": True,
+        "stacked_sweep_alive": True,
+        "rotation_sweep_count": 3,
+        "routing_state": {"armed": 5},
+        "data_feeds": {"hub": {"fresh_count": 6, "total": 7}},
+        "iron_cage": {"ok": True, "trade_ready": True, "blockers": []},
+    }
+    with patch("api.health_light.get_health_light_response", return_value=hl):
+        merged = _overlay_live_iron_cage(dict(stale))
+    assert merged["trade_ready"] is True
+    assert merged["iron_cage"]["source"] == "health_light_overlay"
+    assert merged["iron_cage"]["feeds"]["fresh_count"] == 6
+
+    with patch("api.readiness_snapshot._HEALTH_SNAPSHOT", stale), patch(
+        "api.readiness_snapshot._META", {"health_ts": time.time()}
+    ), patch("api.health_light.get_health_light_response", return_value=hl):
+        code, body = get_health_snapshot()
+    assert code == 200
+    assert body["trade_ready"] is True
+    assert body["iron_cage"]["source"] == "health_light_overlay"
+
+
 def test_refresh_gui_populates_snapshot() -> None:
     stub = {"unified_execution_route": [{"epic": "CS.D.EURUSD.CFD.IP"}], "api_feed_health": {}}
     with patch("api.gui_status.build_gui_status", return_value=stub):

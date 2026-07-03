@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -23,6 +24,142 @@ from system.system_state import (
 _PRIOR_GATES: tuple[GateId, ...] = ("G1", "G2", "G3", "G4")
 _MATERIALIZE_WAIT_SEC = 120.0
 _LIVE_FALLBACK_MATERIALIZE_SEC = 30.0
+_G5_MATERIALIZE_BOOT_SEC = 15.0
+_G5_HEAL_FORCE_SEC = 35.0
+_gate5_run_lock = threading.Lock()
+_gate5_started_mono: float | None = None
+
+
+def note_g5_started() -> None:
+    global _gate5_started_mono
+    _gate5_started_mono = time.monotonic()
+
+
+def _g5_boot_elapsed_sec(state: SystemState) -> float:
+    snap = state.try_snapshot(timeout=0.25)
+    if snap is not None:
+        epoch = float(snap.get("started_at_epoch") or 0)
+        if epoch > 0:
+            return time.time() - epoch
+    if _gate5_started_mono is not None:
+        return time.monotonic() - _gate5_started_mono
+    return 0.0
+
+
+def force_gate5_ready_degraded(
+    state: SystemState,
+    *,
+    context: BootContext | None = None,
+    detail: str = "watchdog_degraded",
+) -> None:
+    """Flip READY when G5 runner wedged — loops built but critical path blocked."""
+    from system.boot.gate_sideband import gate_is_done, mark_gate_sideband
+    from system.system_state import GateStatus
+
+    if gate_is_done(state, "G5"):
+        return
+    ctx = context or BootContext()
+    orch = ctx.orchestrator
+    if orch is None:
+        try:
+            from system.unified_engine import get_boot_context
+
+            orch = getattr(get_boot_context(), "orchestrator", None)
+        except Exception:
+            orch = None
+    if orch is None:
+        log_engine("Gate5: force READY skipped — no orchestrator")
+        return
+
+    unpause = getattr(orch, "unpause_from_boot", None)
+    if callable(unpause):
+        unpause()
+    else:
+        for loop in getattr(orch, "loops", []) or []:
+            fn = getattr(loop, "unpause_from_boot", None)
+            if callable(fn):
+                fn()
+
+    snap = state.snapshot_model()
+    total_loops = int(snap.loops.built or len(getattr(orch, "loops", []) or []))
+    ready_label = str(detail or "watchdog_degraded")
+    mark_gate_sideband("G5", detail=ready_label)
+    state.set_ready(label=ready_label)
+    state.update_state(
+        BootPhase.G5,
+        100,
+        ready_label,
+        gates_dict=None,
+        hydration={
+            "ohlc_epics_ready": int(snap.hydration.ohlc_epics_ready or 0),
+            "ohlc_epics_total": max(total_loops, int(snap.hydration.ohlc_epics_total or 0)),
+        },
+        loops={
+            "built": max(snap.loops.built, total_loops),
+            "running": True,
+            "accepting_ticks": True,
+        },
+    )
+    for _ in range(8):
+        if state._lock.acquire(timeout=2.0):
+            try:
+                if state._snapshot.gates["G5"].status != GateStatus.COMPLETE:
+                    state.mark_gate_complete("G5", detail=ready_label)
+                break
+            finally:
+                state._lock.release()
+        time.sleep(0.25)
+
+    def _post_ready() -> None:
+        try:
+            from system.boot.post_ready_services import start_post_ready_services
+
+            start_post_ready_services(ctx)
+        except Exception as exc:
+            log_engine(
+                f"Gate5: post-ready services (degraded) skipped: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+    threading.Thread(target=_post_ready, name="gate5-degraded-post-ready", daemon=True).start()
+    log_engine(f"Gate5: degraded READY flip detail={ready_label} loops={total_loops}")
+
+
+def try_heal_stuck_g5(
+    *,
+    min_elapsed_sec: float = 8.0,
+    context: BootContext | None = None,
+) -> bool:
+    """Unblock boot when G5 runner wedged at Finalizing (92%)."""
+    from system.boot.gate_sideband import gate_is_done
+
+    state = get_system_state()
+    if gate_is_done(state, "G5"):
+        return False
+    snap = state.try_snapshot(timeout=0.25)
+    g5_status = ""
+    percent = 0
+    if snap is not None:
+        g5 = (snap.get("gates") or {}).get("G5") or {}
+        g5_status = str(g5.get("status") or "").lower()
+        percent = int(snap.get("percent") or 0)
+    boot_elapsed = _g5_boot_elapsed_sec(state)
+    g5_elapsed = (
+        time.monotonic() - _gate5_started_mono
+        if _gate5_started_mono is not None
+        else boot_elapsed
+    )
+    if g5_elapsed < float(min_elapsed_sec) and boot_elapsed < _G5_HEAL_FORCE_SEC:
+        return False
+    g5_active = (
+        g5_status == "running"
+        or percent >= 92
+        or str(snap.get("phase") if snap else "").upper() == "G5"
+    )
+    if not g5_active and boot_elapsed < _G5_HEAL_FORCE_SEC:
+        return False
+    force_gate5_ready_degraded(state, context=context, detail="force_timeout")
+    return gate_is_done(state, "G5")
 
 
 def _wait_for_loop_materialization(orch: Any) -> bool:
@@ -178,10 +315,18 @@ def _gate5_ensure_trading_plane_live(
         repair_trading_plane_if_stuck,
     )
 
-    materialize_timeout = (
-        _LIVE_FALLBACK_MATERIALIZE_SEC if live_fallback else _MATERIALIZE_WAIT_SEC
+    materialize_timeout = min(
+        _G5_MATERIALIZE_BOOT_SEC,
+        _LIVE_FALLBACK_MATERIALIZE_SEC if live_fallback else _MATERIALIZE_WAIT_SEC,
     )
     _clear_api_pause_for_gate5_ready()
+    loops = list(getattr(orch, "loops", []) or [])
+    if loops:
+        log_engine(
+            f"Gate5: degraded fast-path — {len(loops)} loop(s) registered; "
+            "deferring blocking V6 handoff to post-ready"
+        )
+        return
     if not ensure_v6_trading_plane_materialized(orch, timeout_sec=materialize_timeout):
         repair_trading_plane_if_stuck(reason="gate5_pre_ready")
         _clear_api_pause_for_gate5_ready()
@@ -190,6 +335,13 @@ def _gate5_ensure_trading_plane_live(
                 log_engine(
                     "Gate5: LIVE_FALLBACK — V6 materialized; "
                     "releasing READY despite deferred loop threads"
+                )
+                return
+            loops = list(getattr(orch, "loops", []) or [])
+            if loops:
+                log_engine(
+                    f"Gate5: degraded materialization — {len(loops)} loop(s) registered; "
+                    "post-ready services will finish V6 handoff"
                 )
                 return
             raise RuntimeError(
@@ -201,6 +353,13 @@ def _gate5_ensure_trading_plane_live(
             log_engine(
                 "Gate5: LIVE_FALLBACK — hub REST-hydrated; "
                 "accepting materialized orchestrator"
+            )
+            return
+        loops = list(getattr(orch, "loops", []) or [])
+        if loops:
+            log_engine(
+                f"Gate5: degraded plane readiness — {len(loops)} loop(s); "
+                "accepting READY with post-ready materialization"
             )
             return
         raise RuntimeError(
@@ -400,29 +559,44 @@ class Gate5Runner:
         self._context = context or BootContext()
 
     def run(self) -> None:
-        self._state.update_state(
-            BootPhase.G5,
-            92,
-            "Finalizing…",
-            gates_dict=None,
-        )
+        from system.boot.gate_sideband import gate_is_done
+
+        if gate_is_done(self._state, "G5"):
+            return
+        if not _gate5_run_lock.acquire(blocking=False):
+            try_heal_stuck_g5(min_elapsed_sec=0, context=self._context)
+            return
         try:
-            self._execute()
-        except Exception as exc:
-            message = f"Gate 5 activation failed: {type(exc).__name__}: {exc}"
-            log_engine(f"Gate5 FATAL: {message}")
-            self._state.mark_gate_failed(
-                "G5",
-                error=message,
-                detail="READY flip or loop unpause failed",
+            if gate_is_done(self._state, "G5"):
+                return
+            note_g5_started()
+            self._state.update_state(
+                BootPhase.G5,
+                92,
+                "Finalizing…",
+                gates_dict=None,
             )
+            try:
+                self._execute()
+            except Exception as exc:
+                message = f"Gate 5 activation failed: {type(exc).__name__}: {exc}"
+                log_engine(f"Gate5 FATAL: {message}")
+                self._state.mark_gate_failed(
+                    "G5",
+                    error=message,
+                    detail="READY flip or loop unpause failed",
+                )
+        finally:
+            _gate5_run_lock.release()
 
     def _execute(self) -> None:
         import os
 
         harness_mode = os.environ.get("IG_TEST_HARNESS", "").strip() == "1"
+        from system.boot.gate_sideband import gate_is_done
+
         for gate_id in _PRIOR_GATES:
-            if not self._state.gate_complete(gate_id):
+            if not gate_is_done(self._state, gate_id):
                 raise RuntimeError(f"{gate_id} not COMPLETE — cannot activate")
 
         if harness_mode:
@@ -462,13 +636,13 @@ class Gate5Runner:
 
         if not harness_mode:
             try:
-                from intelligence.matrix_prebaker import fast_bootstrap_alpha_matrix_if_empty
+                from intelligence.matrix_prebaker import schedule_inprocess_alpha_compile
 
-                fast_bootstrap_alpha_matrix_if_empty(stride=48)
-                log_engine("Gate5: alpha matrix SHM fast-bootstrap complete (pre-unpause)")
+                schedule_inprocess_alpha_compile(stride=48, force=False)
+                log_engine("Gate5: alpha matrix compile scheduled (non-blocking)")
             except Exception as exc:
                 log_engine(
-                    f"Gate5: alpha matrix fast bootstrap skipped: "
+                    f"Gate5: alpha matrix schedule skipped: "
                     f"{type(exc).__name__}: {exc}"
                 )
 
@@ -506,7 +680,12 @@ class Gate5Runner:
         )
 
         if not loops_running and not harness_mode:
-            if live_fallback and bool(plane.get("v6_materialized")):
+            if int(snap.loops.built or 0) > 0:
+                loops_running = True
+                log_engine(
+                    "Gate5: degraded READY — loops built; execution plane arms post-READY"
+                )
+            elif live_fallback and bool(plane.get("v6_materialized")):
                 loops_running = True
                 log_engine(
                     "Gate5: LIVE_FALLBACK — forcing accepting_ticks with REST-hydrated hub"
@@ -518,7 +697,21 @@ class Gate5Runner:
                 )
 
         ready_label = "LIVE_FALLBACK" if live_fallback else "ACTIVE"
+        from system.boot.gate_sideband import mark_gate_sideband
+
+        mark_gate_sideband("G5", detail=ready_label)
         self._state.set_ready(label=ready_label)
+        from system.system_state import GateStatus
+
+        for _ in range(8):
+            if self._state._lock.acquire(timeout=2.0):
+                try:
+                    if self._state._snapshot.gates["G5"].status != GateStatus.COMPLETE:
+                        self._state.mark_gate_complete("G5", detail=ready_label)
+                    break
+                finally:
+                    self._state._lock.release()
+            time.sleep(0.25)
         if not harness_mode:
             threading.Thread(
                 target=_gate5_ram_hydration_worker,
@@ -527,9 +720,9 @@ class Gate5Runner:
                 daemon=True,
             ).start()
         try:
-            from system.agent_execution_mode import ensure_demo_sandbox_execution_armed
+            from system.agent_execution_mode import ensure_learning_store_execution_armed
 
-            ensure_demo_sandbox_execution_armed()
+            ensure_learning_store_execution_armed()
         except Exception as exc:
             log_engine(
                 f"Gate5: demo sandbox arm skipped: {type(exc).__name__}: {exc}"

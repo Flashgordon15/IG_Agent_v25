@@ -9,7 +9,7 @@ require("fs").appendFileSync(
   `${new Date().toISOString()} module start\n`
 );
 
-const { app, BrowserWindow, ipcMain, session } = require("electron");
+const { app, BrowserWindow, ipcMain, session, utilityProcess } = require("electron");
 const { spawn, execSync, spawnSync } = require("child_process");
 const fs = require("fs");
 const net = require("net");
@@ -160,7 +160,20 @@ const PURGE_SCRIPT = app.isPackaged
   : path.join(__dirname, "scripts", "apex-purge-ports.sh");
 
 const SHADOW_API_PORT = APEX_API_PORT;
+const LIVE_AGENT_PORT = 8080;
 const SHADOW_COCKPIT_PORT = SHELL.runtime.shadowCockpitPort || 9191;
+
+/** Desktop GUI wraps the real IG Agent on :8080 — shadow :9090 is not used for demo trading. */
+function isLiveAgentShellMode() {
+  const flag = String(
+    process.env.IG_APEX_LIVE_ONLY || process.env.IG_AGENT_DESKTOP_LAUNCH || ""
+  ).trim();
+  if (flag === "1" || flag.toLowerCase() === "true") return true;
+  return probeLiveAgentHealth200();
+}
+/** Fast initial paint — do not block UI on full sidecar bootstrap. */
+const INITIAL_API_PROBE_MS = 2000;
+const INITIAL_API_PROBE_INTERVAL_MS = 250;
 
 function ipcSocketPath() {
   return path.join(USER_ROOT(), "data", "apex_ipc.sock");
@@ -195,11 +208,21 @@ let _ipcReconnectTimer = null;
 let _ipcConnectInFlight = false;
 let _ipcClientConnected = false;
 
+function resolveActiveApiPort() {
+  if (isLiveAgentShellMode()) return LIVE_AGENT_PORT;
+  if (probeApiHealth200(LIVE_AGENT_PORT)) return LIVE_AGENT_PORT;
+  if (probeApiHealth200(SHADOW_API_PORT)) return SHADOW_API_PORT;
+  if (SHELL.runtime.protectProductionPorts) return LIVE_AGENT_PORT;
+  return SHADOW_API_PORT;
+}
+
 function buildRendererRuntimeConfig() {
+  const liveShell = isLiveAgentShellMode();
+  const apiPort = resolveActiveApiPort();
   return {
-    profile: "shadow",
-    apiPort: APEX_API_PORT,
-    apiBase: `http://127.0.0.1:${APEX_API_PORT}`,
+    profile: liveShell || apiPort === LIVE_AGENT_PORT ? "live" : "shadow",
+    apiPort,
+    apiBase: `http://127.0.0.1:${apiPort}`,
     cockpitPort: SHADOW_COCKPIT_PORT,
     cockpitBase: `http://127.0.0.1:${SHADOW_COCKPIT_PORT}`,
     protectProductionPorts: Boolean(SHELL.runtime.protectProductionPorts),
@@ -251,7 +274,29 @@ function releaseShellImmutable() {
   }
   daemonProcess = null;
   sidecarProcess = null;
+  if (tickParserUtility && !tickParserUtility.killed) {
+    try {
+      tickParserUtility.kill();
+    } catch (_) {
+      /* ignore */
+    }
+  }
+  tickParserUtility = null;
+  tickParserReady = false;
+  _tickParserPendingLines.length = 0;
   log.info("releaseShellImmutable: IPC torn down — detached Python daemon preserved");
+}
+
+function isAllowedApexNavigationUrl(navigationUrl) {
+  try {
+    const parsed = new URL(navigationUrl);
+    const host = parsed.hostname;
+    if (host !== "127.0.0.1" && host !== "localhost") return false;
+    const port = Number(parsed.port) || (parsed.protocol === "https:" ? 443 : 80);
+    return port === LIVE_AGENT_PORT || port === SHADOW_API_PORT || port === SHADOW_COCKPIT_PORT;
+  } catch {
+    return false;
+  }
 }
 
 function installExternalBrowserGuards() {
@@ -263,7 +308,10 @@ function installExternalBrowserGuards() {
     contents.on("will-navigate", (event, navigationUrl) => {
       try {
         const parsed = new URL(navigationUrl);
-        if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+        if (
+          (parsed.protocol === "http:" || parsed.protocol === "https:") &&
+          !isAllowedApexNavigationUrl(navigationUrl)
+        ) {
           event.preventDefault();
           log.warn("Blocked external navigation:", navigationUrl);
         }
@@ -273,10 +321,103 @@ function installExternalBrowserGuards() {
     });
   });
 }
-/** @type {import('child_process').ChildProcess | null} */
-let daemonProcess = null;
+/** @type {import('electron').UtilityProcess | null} */
+let tickParserUtility = null;
+let tickParserReady = false;
+const _tickParserPendingLines = [];
+
+function ensureTickParserUtility() {
+  if (tickParserUtility && !tickParserUtility.killed) {
+    return tickParserUtility;
+  }
+  const scriptPath = path.join(__dirname, "electron", "utility", "tick-parser.js");
+  if (!fs.existsSync(scriptPath)) {
+    log.warn("tick-parser utility missing — main-thread JSON parse fallback");
+    return null;
+  }
+  tickParserReady = false;
+  tickParserUtility = utilityProcess.fork(scriptPath, [], {
+    serviceName: "apex-tick-parser",
+    stdio: "pipe",
+  });
+  tickParserUtility.on("message", (msg) => {
+    if (!msg || typeof msg !== "object") return;
+    if (msg.channel === "ready") {
+      tickParserReady = true;
+      if (_tickParserPendingLines.length) {
+        const batch = _tickParserPendingLines.splice(0, _tickParserPendingLines.length);
+        tickParserUtility.postMessage({ type: "lines", lines: batch });
+      }
+      return;
+    }
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (msg.channel === "warmup") {
+      mainWindow.webContents.send("apex:warmup", msg.payload);
+      return;
+    }
+    if (msg.channel === "ledger") {
+      mainWindow.webContents.send("apex:ledger", msg.payload);
+      return;
+    }
+    if (msg.channel === "story") {
+      mainWindow.webContents.send("apex:story", msg.payload);
+      return;
+    }
+    if (msg.channel === "tick") {
+      mainWindow.webContents.send("apex:tick", msg.raw || JSON.stringify(msg.payload || {}));
+    }
+  });
+  tickParserUtility.on("exit", () => {
+    tickParserReady = false;
+    tickParserUtility = null;
+  });
+  return tickParserUtility;
+}
+
+function dispatchIpcLineToUtility(line) {
+  const util = ensureTickParserUtility();
+  if (!util) {
+    return false;
+  }
+  if (!tickParserReady) {
+    _tickParserPendingLines.push(line);
+    if (_tickParserPendingLines.length > 256) {
+      _tickParserPendingLines.shift();
+    }
+    return true;
+  }
+  util.postMessage({ type: "line", line });
+  return true;
+}
+
+function parseIpcLineOnMainThread(tickString) {
+  let payload;
+  try {
+    payload = JSON.parse(tickString);
+  } catch {
+    payload = null;
+  }
+  if (payload && payload.type === "warmup" && mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("apex:warmup", payload);
+    return;
+  }
+  if (payload && payload.type === "ledger" && mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("apex:ledger", payload);
+    return;
+  }
+  if (payload && payload.type === "story" && mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("apex:story", payload);
+    return;
+  }
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("apex:tick", tickString);
+  }
+}
+
 /** Legacy alias — detached daemon child when Electron tracked the spawn. */
 let sidecarProcess = null;
+/** @type {import('child_process').ChildProcess | null} */
+let daemonProcess = null;
 /** @type {import('child_process').ChildProcess | null} */
 let powerAssertionProcess = null;
 /** @type {import('net').Socket | null} */
@@ -309,7 +450,7 @@ function flushPendingBootPhases() {
   pendingBootPhases = [];
 }
 
-function probeShadowApiHealth200() {
+function probeApiHealth200(port) {
   try {
     const curlBin = fs.existsSync("/usr/bin/curl") ? "/usr/bin/curl" : "curl";
     const result = spawnSync(
@@ -322,7 +463,7 @@ function probeShadowApiHealth200() {
         "%{http_code}",
         "--max-time",
         "2",
-        `http://127.0.0.1:${SHADOW_API_PORT}/api/health`,
+        `http://127.0.0.1:${port}/api/health`,
       ],
       { encoding: "utf8" }
     );
@@ -334,8 +475,21 @@ function probeShadowApiHealth200() {
   }
 }
 
+function probeShadowApiHealth200() {
+  return probeApiHealth200(SHADOW_API_PORT);
+}
+
+function probeLiveAgentHealth200() {
+  return probeApiHealth200(LIVE_AGENT_PORT);
+}
+
 function probeShadowApiHealthSync() {
   return probeShadowApiHealth200();
+}
+
+function isAnyApiHealthy() {
+  if (isLiveAgentShellMode()) return probeLiveAgentHealth200();
+  return probeLiveAgentHealth200() || probeShadowApiHealth200();
 }
 
 function daemonPidPath() {
@@ -429,8 +583,19 @@ function spawnDetachedDaemon() {
   return true;
 }
 
-function ensureDaemonSupervisor({ forceRestart = false } = {}) {
-  bootTrace(`ensureDaemonSupervisor forceRestart=${forceRestart}`);
+function ensureDaemonSupervisor({ forceRestart = false, blocking = true } = {}) {
+  bootTrace(`ensureDaemonSupervisor forceRestart=${forceRestart} blocking=${blocking}`);
+
+  if (isLiveAgentShellMode()) {
+    if (probeLiveAgentHealth200()) {
+      bootTrace("ensureDaemonSupervisor: live shell — :8080 agent adopted (no shadow sidecar)");
+      log.info("Live agent shell: using IG Agent on :8080 — shadow :9090 not required");
+      broadcastBootPhase(3, "Live IG Agent active on :8080");
+      return true;
+    }
+    log.warn("ensureDaemonSupervisor: live shell mode but :8080 agent not healthy yet");
+    return false;
+  }
 
   if (!forceRestart && probeShadowApiHealth200()) {
     sidecarExternallyAdopted = true;
@@ -451,6 +616,11 @@ function ensureDaemonSupervisor({ forceRestart = false } = {}) {
     return false;
   }
 
+  if (!blocking) {
+    bootTrace("ensureDaemonSupervisor: daemon spawned — health poll deferred (non-blocking)");
+    return true;
+  }
+
   const deadline = Date.now() + SIDECAR_READY_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (probeShadowApiHealth200()) {
@@ -465,6 +635,12 @@ function ensureDaemonSupervisor({ forceRestart = false } = {}) {
   }
   log.error(`ensureDaemonSupervisor: daemon not healthy within ${SIDECAR_READY_TIMEOUT_MS}ms`);
   return false;
+}
+
+function ensureDaemonSupervisorBackground() {
+  setImmediate(() => {
+    ensureDaemonSupervisor({ blocking: false });
+  });
 }
 
 /** Release UI shell only — immutable 24/7 daemon stays in system memory. */
@@ -643,31 +819,35 @@ function connectIpcSocket(attempt = 0) {
   ipcClient.on("data", (chunk) => {
     buffer += chunk.toString("utf8");
     let idx;
+    const lines = [];
     while ((idx = buffer.indexOf("\n")) >= 0) {
       const tickString = buffer.slice(0, idx).trim();
       buffer = buffer.slice(idx + 1);
-      if (!tickString) continue;
-      let payload;
-      try {
-        payload = JSON.parse(tickString);
-      } catch {
-        payload = null;
+      if (tickString) lines.push(tickString);
+    }
+    if (!lines.length) return;
+    if (lines.length === 1) {
+      if (!dispatchIpcLineToUtility(lines[0])) {
+        parseIpcLineOnMainThread(lines[0]);
       }
-      if (payload && payload.type === "warmup" && mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send("apex:warmup", payload);
-        continue;
+      return;
+    }
+    const util = ensureTickParserUtility();
+    if (util && tickParserReady) {
+      util.postMessage({ type: "lines", lines });
+      return;
+    }
+    if (util && !tickParserReady) {
+      for (const line of lines) {
+        _tickParserPendingLines.push(line);
       }
-      if (payload && payload.type === "ledger" && mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send("apex:ledger", payload);
-        continue;
+      while (_tickParserPendingLines.length > 256) {
+        _tickParserPendingLines.shift();
       }
-      if (payload && payload.type === "story" && mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send("apex:story", payload);
-        continue;
-      }
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send("apex:tick", tickString);
-      }
+      return;
+    }
+    for (const line of lines) {
+      parseIpcLineOnMainThread(line);
     }
   });
 
@@ -686,17 +866,41 @@ function connectIpcSocket(attempt = 0) {
   });
 }
 
-function waitForShadowApi(callback) {
-  const deadline = Date.now() + SIDECAR_READY_TIMEOUT_MS;
+function waitForInitialApi(callback) {
+  const deadline = Date.now() + INITIAL_API_PROBE_MS;
   const probe = () => {
-    if (probeShadowApiHealth200()) {
+    if (isAnyApiHealthy()) {
       callback(true);
       return;
     }
-    if (Date.now() < deadline) setTimeout(probe, 500);
+    if (Date.now() < deadline) setTimeout(probe, INITIAL_API_PROBE_INTERVAL_MS);
     else callback(false);
   };
   probe();
+}
+
+function inlineBootPageDataUrl() {
+  const html = `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>IG Agent Apex</title><style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;background:#0a0e14;color:#c8d6e5;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;display:flex;align-items:center;justify-content:center}
+.wrap{text-align:center}
+.spinner{width:40px;height:40px;border:3px solid rgba(200,214,229,.15);border-top-color:#5b9bd5;border-radius:50%;animation:spin .9s linear infinite;margin:0 auto 20px}
+@keyframes spin{to{transform:rotate(360deg)}}
+h1{font-size:18px;font-weight:500;letter-spacing:.02em}
+p{margin-top:8px;font-size:13px;opacity:.65}
+</style></head><body><div class="wrap"><div class="spinner"></div><h1>IG Agent Apex</h1><p>connecting&hellip;</p></div></body></html>`;
+  return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
+}
+
+function loadInitialBootPage() {
+  if (!mainWindow) return;
+  const splashPath = path.join(__dirname, "build", "apex-splash.html");
+  if (fs.existsSync(splashPath)) {
+    mainWindow.loadFile(splashPath);
+    return;
+  }
+  log.warn("apex-splash.html missing — loading inline boot page");
+  mainWindow.loadURL(inlineBootPageDataUrl());
 }
 
 function createMainWindow() {
@@ -724,12 +928,7 @@ function createMainWindow() {
     },
   });
 
-  const splashPath = path.join(__dirname, "build", "apex-splash.html");
-  if (fs.existsSync(splashPath)) {
-    mainWindow.loadFile(splashPath);
-  } else {
-    log.warn("apex-splash.html missing — loading dashboard directly");
-  }
+  loadInitialBootPage();
 
   mainWindow.once("ready-to-show", () => {
     mainWindow.focus();
@@ -740,23 +939,43 @@ function createMainWindow() {
 
   const loadDashboard = () => {
     if (!mainWindow) return;
-    const indexPath = resolveDashboardIndexPath();
-    if (fs.existsSync(indexPath)) {
-      console.log(`[APEX ENGINE] Loading dashboard bundle from: ${indexPath}`);
-      log.info(`[APEX ENGINE] Loading dashboard bundle from: ${indexPath}`);
-      mainWindow.loadFile(indexPath);
+    if (isLiveAgentShellMode() || probeLiveAgentHealth200()) {
+      const url = `http://127.0.0.1:${LIVE_AGENT_PORT}/`;
+      console.log(`[APEX ENGINE] Loading dashboard from live IG Agent: ${url}`);
+      log.info(`[APEX ENGINE] Loading dashboard from live IG Agent: ${url}`);
+      mainWindow.loadURL(url);
+    } else if (!isLiveAgentShellMode() && probeShadowApiHealth200()) {
+      const url = `http://127.0.0.1:${SHADOW_API_PORT}/`;
+      console.log(`[APEX ENGINE] Loading dashboard from shadow API: ${url}`);
+      log.info(`[APEX ENGINE] Loading dashboard from shadow API: ${url}`);
+      mainWindow.loadURL(url);
     } else {
-      const errPath = path.join(__dirname, "build", "apex-bundle-missing.html");
-      log.error("dashboard/dist missing — no HTTP browser fallback (apex standalone)");
-      if (fs.existsSync(errPath)) {
-        mainWindow.loadFile(errPath);
+      const indexPath = resolveDashboardIndexPath();
+      if (fs.existsSync(indexPath)) {
+        console.log(`[APEX ENGINE] Loading dashboard bundle from: ${indexPath}`);
+        log.info(`[APEX ENGINE] Loading dashboard bundle from: ${indexPath}`);
+        mainWindow.loadFile(indexPath);
+      } else {
+        const errPath = path.join(__dirname, "build", "apex-bundle-missing.html");
+        log.error("No API healthy and dashboard/dist missing — showing error page");
+        if (fs.existsSync(errPath)) {
+          mainWindow.loadFile(errPath);
+        } else {
+          mainWindow.loadURL(inlineBootPageDataUrl());
+        }
       }
     }
     connectIpcSocket(0);
   };
 
-  waitForShadowApi((ready) => {
-    if (!ready) log.error(`Shadow API not ready within ${SIDECAR_READY_TIMEOUT_MS}ms — loading shell anyway`);
+  ensureDaemonSupervisorBackground();
+
+  waitForInitialApi((ready) => {
+    if (!ready) {
+      log.warn(
+        `No API healthy within ${INITIAL_API_PROBE_MS}ms — loading dashboard with fallback (port ${resolveActiveApiPort()})`
+      );
+    }
     dashboardLoaded = true;
     loadDashboard();
   });
@@ -770,12 +989,16 @@ function createMainWindow() {
 
   mainWindow.webContents.on("did-start-navigation", (_event, _url, isInPlace, isMainFrame) => {
     if (!isMainFrame || !isInPlace || !dashboardLoaded) return;
-    if (probeShadowApiHealth200()) {
-      log.info("renderer reload — daemon healthy, IPC reconnect only");
+    if (probeLiveAgentHealth200() || (!isLiveAgentShellMode() && probeShadowApiHealth200())) {
+      log.info("renderer reload — API healthy, IPC reconnect only");
       connectIpcSocket(0);
       return;
     }
-    log.info("renderer reload — daemon down, supervisor respawn");
+    if (isLiveAgentShellMode()) {
+      log.warn("renderer reload — live agent :8080 down; start agent via agent_start.sh");
+      return;
+    }
+    log.info("renderer reload — no API healthy, supervisor respawn");
     ensureDaemonSupervisor({ forceRestart: true });
   });
 }
@@ -877,8 +1100,9 @@ if (!gotLock) {
       bootTrace("whenReady layout ok");
       await prepareRendererSession();
       bootTrace("whenReady renderer session purified");
-      ensureDaemonSupervisor();
-      bootTrace("whenReady daemon supervisor armed");
+      ensureDaemonSupervisorBackground();
+      bootTrace("whenReady daemon supervisor armed (background)");
+      ensureTickParserUtility();
       startPowerAssertion();
       createMainWindow();
       bootTrace("whenReady window created");

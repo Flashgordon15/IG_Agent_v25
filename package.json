@@ -16,6 +16,7 @@
     "apex:dashboard:build": "cd dashboard && npm run build",
     "apex:build-power": "bash scripts/apex-build-power-assertion.sh",
     "apex:dev": "npm run apex:build-power && electron .",
+    "start": "env -u ELECTRON_RUN_AS_NODE IG_APEX_LIVE_ONLY=1 IG_AGENT_DESKTOP_LAUNCH=1 electron .",
     "apex:start": "npm run apex:build-lock && npm run apex:build-power && npm run apex:dashboard:build && npm run apex:dev",
     "apex:pack": "bash scripts/apex-pack.sh dir",
     "apex:dist": "bash scripts/apex-pack.sh full",
@@ -25,7 +26,7 @@
     "electron-log": "^5.2.0"
   },
   "devDependencies": {
-    "electron": "33.2.1",
+    "electron": "^33.2.1",
     "electron-builder": "25.1.8",
     "rimraf": "^6.1.3"
   },
@@ -130,5 +131,8 @@
       "backgroundColor": "#0a0e14",
       "title": "IG Agent Apex v30"
     }
+  },
+  "allowScripts": {
+    "electron@33.2.1": true
   }
 }

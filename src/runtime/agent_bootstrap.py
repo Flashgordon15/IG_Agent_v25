@@ -849,6 +849,13 @@ def start_market_stream(
     if rest_client is None:
         return None
 
+    # Idempotent re-arm: heartbeat rehydration calls this repeatedly. Without
+    # disconnecting the previous client first, every call leaked a live
+    # IGStreamPoll thread (observed 97 threads after 10 min of SOCKET_STALE
+    # loops), which convoyed shared locks until the API event loop froze.
+    if _stream_client is not None:
+        stop_market_stream(_stream_client)
+
     from system.credentials_holder import get_credentials_holder
 
     creds = get_credentials_holder().credentials

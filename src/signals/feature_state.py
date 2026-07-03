@@ -121,9 +121,48 @@ def compile_current_feature_state(
     vec[81] = float(np.cos(2 * np.pi * hour_frac))
     vec[82] = _norm(ts_ms % 86400000.0, 0.0, 86400000.0)
 
-    # 96–111: reserved score ratios
+    # 96–111: score ratios + macro/sentiment/news steering surface
     vec[96] = vec[5] - vec[6]  # directional score delta
     vec[97] = vec[7] - vec[8]  # learning-adjusted lift
+
+    epic_key = str(epic or market or "")
+    try:
+        from trading.sentiment_momentum import sentiment_momentum_features
+
+        sfeats = sentiment_momentum_features(epic_key)
+        vec[98] = _norm(sfeats.get("long_pct", 50.0), 0.0, 100.0)
+        vec[99] = float(np.tanh(float(sfeats.get("delta_5m", 0.0)) * 600.0))
+        vec[100] = float(np.tanh(float(sfeats.get("delta_30m", 0.0)) * 1200.0))
+        vec[101] = _norm(sfeats.get("contrarian_pressure", 0.0), 0.0, 1.0)
+    except Exception:
+        pass
+    try:
+        from intelligence.macro_radar import macro_snapshot
+
+        macro = macro_snapshot()
+        vec[102] = float(np.tanh(float(macro.dxy_momentum) * 40.0))
+        vec[103] = float(np.tanh(float(macro.us10y_delta) * 30.0))
+        vec[104] = _norm(macro.cross_correlation, -1.0, 1.0)
+    except Exception:
+        pass
+    try:
+        from system.calendar_gate import news_proximity_features, quantize_news_countdown_vector
+        from system.market_data_hub import get_news_velocity_feature_slots
+
+        news = news_proximity_features(epic_key)
+        hub_slots = get_news_velocity_feature_slots(epic_key)
+        if hub_slots and len(hub_slots) >= 7:
+            for i, val in enumerate(hub_slots[:7]):
+                vec[105 + i] = float(val)
+        else:
+            vec[105] = float(news.get("countdown_norm") or 0.0)
+            vec[106] = float(news.get("news_velocity") or 0.0)
+            vec[107] = float(news.get("in_block_window") or 0.0)
+            qnews = quantize_news_countdown_vector(epic_key, dims=4)
+            for i, val in enumerate(qnews[:4]):
+                vec[108 + i] = float(val)
+    except Exception:
+        pass
 
     matrix = vec.reshape(1, FEATURE_STATE_DIM).astype(_FLOAT64, copy=False)
     return {

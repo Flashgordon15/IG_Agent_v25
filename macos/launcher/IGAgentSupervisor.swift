@@ -1,8 +1,8 @@
 #!/usr/bin/env swift
 /*
  IG Agent v41 — macOS-native one-click supervisor.
- Runs: agent_kill → agent_start → agent_verify → open dashboard.
- Work runs off the main thread so double-click never shows "Not Responding".
+ Isolated pipeline: agent_kill → agent_start → agent_verify → agent_gui
+ Splash polls logs/launcher_status.json for live stage updates.
 
  Build: macos/supervisor/build_swift.sh
 */
@@ -13,12 +13,20 @@ import UserNotifications
 
 // MARK: - Notifications
 
+/// UNUserNotificationCenter requires a real .app bundle; CLI runs must log only.
+func notificationsAvailable() -> Bool {
+    Bundle.main.bundlePath.hasSuffix(".app")
+}
+
 func requestNotificationAuth() {
+    guard notificationsAvailable() else { return }
     let center = UNUserNotificationCenter.current()
     center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
 }
 
 func notify(_ title: String, _ body: String, critical: Bool = false) {
+    fputs("[IGAgentSupervisor] \(title): \(body)\n", stderr)
+    guard notificationsAvailable() else { return }
     let content = UNMutableNotificationContent()
     content.title = title
     content.body = body
@@ -29,18 +37,50 @@ func notify(_ title: String, _ body: String, critical: Bool = false) {
         trigger: nil
     )
     UNUserNotificationCenter.current().add(req)
-    fputs("[IGAgentSupervisor] \(title): \(body)\n", stderr)
+}
+
+// MARK: - Launcher status (logs/launcher_status.json)
+
+struct LauncherStatus {
+    let stage: String
+    let step: Int
+    let totalSteps: Int
+    let status: String
+    let detail: String
+    let ok: Bool
+    let error: String?
+    let bootTier: String
+}
+
+func readLauncherStatus(root: String) -> LauncherStatus? {
+    let path = (root as NSString).appendingPathComponent("logs/launcher_status.json")
+    guard let data = FileManager.default.contents(atPath: path),
+          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        return nil
+    }
+    return LauncherStatus(
+        stage: json["stage"] as? String ?? "",
+        step: json["step"] as? Int ?? 0,
+        totalSteps: json["total_steps"] as? Int ?? 9,
+        status: json["status"] as? String ?? "",
+        detail: json["detail"] as? String ?? "",
+        ok: json["ok"] as? Bool ?? true,
+        error: json["error"] as? String,
+        bootTier: json["boot_tier"] as? String ?? ""
+    )
 }
 
 // MARK: - Progress UI (main thread only)
 
 final class LaunchProgressPanel {
     private let window: NSWindow
+    private let stepLabel: NSTextField
     private let statusLabel: NSTextField
     private let detailLabel: NSTextField
+    private let progress: NSProgressIndicator
 
     init() {
-        let rect = NSRect(x: 0, y: 0, width: 420, height: 140)
+        let rect = NSRect(x: 0, y: 0, width: 480, height: 200)
         window = NSWindow(
             contentRect: rect,
             styleMask: [.titled, .closable],
@@ -52,23 +92,37 @@ final class LaunchProgressPanel {
         window.isReleasedWhenClosed = false
         window.center()
 
-        let stack = NSStackView(frame: NSRect(x: 20, y: 20, width: 380, height: 100))
+        let stack = NSStackView(frame: NSRect(x: 24, y: 24, width: 432, height: 152))
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 8
+        stack.spacing = 10
+
+        stepLabel = NSTextField(labelWithString: "Step 0 / 9")
+        stepLabel.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        stepLabel.textColor = .tertiaryLabelColor
 
         statusLabel = NSTextField(labelWithString: "Launching IG Agent…")
-        statusLabel.font = NSFont.boldSystemFont(ofSize: 15)
+        statusLabel.font = NSFont.boldSystemFont(ofSize: 16)
 
-        detailLabel = NSTextField(labelWithString: "Preparing clean start")
+        detailLabel = NSTextField(labelWithString: "Preparing isolated clean boot")
         detailLabel.font = NSFont.systemFont(ofSize: 12)
         detailLabel.textColor = .secondaryLabelColor
         detailLabel.lineBreakMode = .byWordWrapping
-        detailLabel.maximumNumberOfLines = 3
-        detailLabel.preferredMaxLayoutWidth = 380
+        detailLabel.maximumNumberOfLines = 4
+        detailLabel.preferredMaxLayoutWidth = 432
 
+        progress = NSProgressIndicator()
+        progress.style = .bar
+        progress.isIndeterminate = false
+        progress.minValue = 0
+        progress.maxValue = 9
+        progress.doubleValue = 0
+        progress.frame.size = NSSize(width: 432, height: 8)
+
+        stack.addArrangedSubview(stepLabel)
         stack.addArrangedSubview(statusLabel)
         stack.addArrangedSubview(detailLabel)
+        stack.addArrangedSubview(progress)
         window.contentView = stack
     }
 
@@ -77,9 +131,35 @@ final class LaunchProgressPanel {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    func update(status: String, detail: String) {
+    func update(status: String, detail: String, step: Int = 0, total: Int = 9, failed: Bool = false, bootTier: String = "") {
+        stepLabel.stringValue = "Step \(step) / \(total)"
         statusLabel.stringValue = status
         detailLabel.stringValue = detail
+        progress.maxValue = Double(total)
+        progress.doubleValue = Double(min(step, total))
+        if failed {
+            statusLabel.textColor = .systemRed
+            progress.isIndeterminate = false
+        } else if bootTier == "amber" {
+            statusLabel.textColor = .systemOrange
+        } else if step >= total || bootTier == "green" {
+            statusLabel.textColor = .systemGreen
+        } else {
+            statusLabel.textColor = .labelColor
+        }
+    }
+
+    func applyStatus(_ s: LauncherStatus) {
+        let failed = s.stage == "failed" || !s.ok
+        let step = failed ? s.step : max(s.step, 1)
+        update(
+            status: s.status.isEmpty ? "Working…" : s.status,
+            detail: s.error ?? s.detail,
+            step: step,
+            total: s.totalSteps,
+            failed: failed,
+            bootTier: s.bootTier
+        )
     }
 
     func close() {
@@ -133,7 +213,7 @@ func findProjectRoot() -> String? {
 // MARK: - Script runner
 
 @discardableResult
-func runScript(root: String, name: String, required: Bool) -> Int32 {
+func runScript(root: String, name: String, required: Bool, supervisorPid: Int32) -> Int32 {
     let launcher = (root as NSString).appendingPathComponent("macos/launcher")
     let script = (launcher as NSString).appendingPathComponent(name)
     let fm = FileManager.default
@@ -150,6 +230,11 @@ func runScript(root: String, name: String, required: Bool) -> Int32 {
     env["IG_AGENT_ROOT"] = root
     env["PYTHONPATH"] = (root as NSString).appendingPathComponent("src")
     env["APP_MODE"] = env["APP_MODE"] ?? "DEMO"
+    env["LAUNCHER_DESKTOP"] = "1"
+    env["LAUNCHER_SUPERVISOR_PID"] = "\(supervisorPid)"
+    env["IG_AGENT_FROM_LAUNCHER"] = "1"
+    env["IG_AGENT_DESKTOP_LAUNCH"] = "1"
+    env["IG_NON_BLOCKING_BOOT"] = "1"
     proc.environment = env
 
     let logPath = (root as NSString).appendingPathComponent("logs/supervisor_swift.log")
@@ -183,6 +268,7 @@ func openDashboard(port: Int) {
 // MARK: - Main
 
 let port = Int(ProcessInfo.processInfo.environment["IG_API_PORT"] ?? "8080") ?? 8080
+let supervisorPid = ProcessInfo.processInfo.processIdentifier
 let panel = LaunchProgressPanel()
 
 let app = NSApplication.shared
@@ -191,53 +277,97 @@ requestNotificationAuth()
 
 DispatchQueue.main.async {
     panel.show()
-    panel.update(status: "Launching IG Agent…", detail: "Resolving project root")
+    panel.update(status: "Launching IG Agent…", detail: "Resolving project root", step: 0, total: 9)
+}
+
+var statusPollTimer: Timer?
+
+func startStatusPoll(root: String) {
+    DispatchQueue.main.async {
+        statusPollTimer?.invalidate()
+        statusPollTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { _ in
+            if let s = readLauncherStatus(root: root) {
+                panel.applyStatus(s)
+            }
+        }
+    }
+}
+
+func stopStatusPoll() {
+    DispatchQueue.main.async {
+        statusPollTimer?.invalidate()
+        statusPollTimer = nil
+    }
+}
+
+func finishFailure(root: String?, message: String, detail: String) {
+    stopStatusPoll()
+    DispatchQueue.main.async {
+        if let root, let s = readLauncherStatus(root: root), s.stage == "failed" {
+            panel.applyStatus(s)
+        } else {
+            panel.update(status: message, detail: detail, step: 0, total: 9, failed: true)
+        }
+        notify("IG Agent", detail, critical: true)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { NSApp.terminate(1) }
+    }
 }
 
 DispatchQueue.global(qos: .userInitiated).async {
     guard let root = findProjectRoot() else {
-        DispatchQueue.main.async {
-            panel.update(status: "Launch failed", detail: "Project root not found — set IG_AGENT_ROOT")
-            notify("IG Agent", "Project root not found — set IG_AGENT_ROOT", critical: true)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 4) { NSApp.terminate(nil) }
-        }
+        finishFailure(root: nil, message: "Launch failed", detail: "Project root not found — set IG_AGENT_ROOT")
         return
     }
 
-    func ui(_ status: String, _ detail: String) {
-        DispatchQueue.main.async { panel.update(status: status, detail: detail) }
-    }
+    startStatusPoll(root: root)
+    notify("IG Agent", "Isolated clean launch starting…")
 
-    notify("IG Agent", "Clean launch starting…")
-    ui("Stopping old processes…", "Freeing port \(port) and clearing locks")
-    if runScript(root: root, name: "agent_kill.sh", required: true) != 0 {
-        DispatchQueue.main.async { NSApp.terminate(2) }
+    if runScript(root: root, name: "agent_kill.sh", required: true, supervisorPid: supervisorPid) != 0 {
+        finishFailure(root: root, message: "Launch failed", detail: "Clean shutdown failed — see logs/agent_kill.log")
         return
     }
 
-    notify("IG Agent", "Running tests and starting agent…")
-    ui("Running test gate…", "This can take up to 10 minutes on first launch today")
-    if runScript(root: root, name: "agent_start.sh", required: true) != 0 {
-        DispatchQueue.main.async { NSApp.terminate(3) }
+    if runScript(root: root, name: "agent_start.sh", required: true, supervisorPid: supervisorPid) != 0 {
+        finishFailure(root: root, message: "Launch failed", detail: "Agent start failed — see logs/agent_start.log")
         return
     }
 
-    notify("IG Agent", "Verifying GUI status…")
-    ui("Verifying dashboard…", "Checking /api/gui_status")
-    if runScript(root: root, name: "agent_verify.sh", required: true) != 0 {
-        DispatchQueue.main.async { NSApp.terminate(4) }
+    if runScript(root: root, name: "agent_verify.sh", required: true, supervisorPid: supervisorPid) != 0 {
+        finishFailure(root: root, message: "Launch failed", detail: "Verification failed — see logs/agent_verify.log")
         return
     }
-
-    ui("Opening cockpit…", "Launching dashboard")
-    _ = runScript(root: root, name: "agent_gui.sh", required: false)
 
     DispatchQueue.main.async {
+        panel.update(
+            status: "Stage 9 — Opening cockpit",
+            detail: "Launching dashboard and IG Cockpit",
+            step: 9,
+            total: 9
+        )
+    }
+    _ = runScript(root: root, name: "agent_gui.sh", required: false, supervisorPid: supervisorPid)
+
+    stopStatusPoll()
+    DispatchQueue.main.async {
+        let tier = readLauncherStatus(root: root)?.bootTier ?? "green"
+        let readyTitle = tier == "amber" ? "Agent ready (degraded)" : "Agent ready"
+        let readyDetail = tier == "amber"
+            ? "Dashboard live on port \(port) — IG/feeds still hydrating"
+            : "Operational on port \(port) — opening dashboard"
+        panel.update(
+            status: readyTitle,
+            detail: readyDetail,
+            step: 9,
+            total: 9,
+            bootTier: tier
+        )
         openDashboard(port: port)
-        notify("IG Agent", "Agent ready on port \(port)")
+        notify("IG Agent", readyDetail)
         fputs("✅ IGAgentSupervisor complete\n", stderr)
-        panel.close()
-        NSApp.terminate(0)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+            panel.close()
+            NSApp.terminate(0)
+        }
     }
 }
 

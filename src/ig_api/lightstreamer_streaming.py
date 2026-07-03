@@ -53,6 +53,8 @@ class IGLightstreamerStreamingClient:
         self._auto_reconnect = False
         self._first_tick_received = False
         self._connect_attempt_ts = 0.0
+        self._last_connect_error = ""
+        self._last_http_status: int | None = None
         self._last_blank_tick_log_ts = 0.0
         self._first_valid_tick_deadline_ts = 0.0
         self._blank_tick_resubscribe_scheduled = False
@@ -162,6 +164,7 @@ class IGLightstreamerStreamingClient:
         if self._running:
             return
         self._running = True
+        register_lightstreamer_client(self)
         self._first_tick_received = False
         self._first_valid_tick_deadline_ts = 0.0
         self._blank_tick_resubscribe_scheduled = False
@@ -202,7 +205,7 @@ class IGLightstreamerStreamingClient:
                 self._teardown_lightstreamer()
                 self._first_tick_received = False
                 self._connect_lightstreamer()
-                deadline = time.time() + 10.0
+                deadline = time.time() + 3.0
                 while time.time() < deadline and self._running and not self._using_fallback:
                     if self._first_tick_received:
                         if attempt > 1:
@@ -223,8 +226,9 @@ class IGLightstreamerStreamingClient:
                     )
                 return
             except Exception as e:
+                self._last_connect_error = f"{type(e).__name__}: {e}"
                 log_engine(
-                    f"Lightstreamer connect attempt {attempt} failed: {type(e).__name__}: {e}"
+                    f"Lightstreamer connect attempt {attempt} failed: {self._last_connect_error}"
                 )
         log_engine(
             f"Lightstreamer failed after {_MAX_LS_RECONNECT} attempts — REST poll fallback"
@@ -238,21 +242,30 @@ class IGLightstreamerStreamingClient:
         reset_connecting_market_rescue()
         endpoint = self._session.lightstreamer_endpoint
         if not endpoint:
-            raise RuntimeError("No lightstreamerEndpoint in session")
+            self._last_connect_error = "No lightstreamerEndpoint in session"
+            raise RuntimeError(self._last_connect_error)
 
         # IG trading-ig sample: LightstreamerClient(endpoint, None) — no adapter set name.
         adapter_set = None
         account_id = self._session.account_id
         if not account_id:
-            raise RuntimeError("No account_id in session — required for Lightstreamer auth")
+            self._last_connect_error = "No account_id in session — required for Lightstreamer auth"
+            self._last_http_status = 401
+            raise RuntimeError(self._last_connect_error)
         ls_password = f"CST-{self._session.cst}|XST-{self._session.security_token}"
         log_engine(
             f"LS connect: endpoint={endpoint} adapter=default "
             f"user={account_id} password_format=CST-...|XST-..."
         )
-        client = LightstreamerClient(endpoint, adapter_set)
-        client.connectionDetails.setUser(account_id)
-        client.connectionDetails.setPassword(ls_password)
+        try:
+            client = LightstreamerClient(endpoint, adapter_set)
+            client.connectionDetails.setUser(account_id)
+            client.connectionDetails.setPassword(ls_password)
+        except Exception as exc:
+            self._last_connect_error = f"{type(exc).__name__}: {exc}"
+            if "auth" in str(exc).lower() or "credential" in str(exc).lower():
+                self._last_http_status = 401
+            raise
         self._connect_attempt_ts = time.time()
         outer = self
 
@@ -267,9 +280,10 @@ class IGLightstreamerStreamingClient:
                 status_u = str(status or "").upper()
                 if "DISCONNECTED" in status_u and "WILL-RETRY" not in status_u:
                     connect_age = time.time() - outer._connect_attempt_ts
+                    outer._last_connect_error = f"LS status={status}"
                     if (
                         outer._connect_attempt_ts > 0
-                        and connect_age <= 10.0
+                        and connect_age <= 3.0
                         and not outer._first_tick_received
                     ):
                         log_engine(
@@ -368,7 +382,7 @@ class IGLightstreamerStreamingClient:
                     return
                 from system.market_data_hub import get_market_data_hub
 
-                get_market_data_hub().publish(
+                get_market_data_hub().enqueue_stream_frame(
                     resolved_epic, bid, offer, source="lightstreamer"
                 )
                 log_engine_intermittent(
@@ -492,6 +506,7 @@ class IGLightstreamerStreamingClient:
 
     def disconnect(self) -> None:
         self._running = False
+        register_lightstreamer_client(None)
         self._first_tick_received = False
         self._first_valid_tick_deadline_ts = 0.0
         self._blank_tick_resubscribe_scheduled = False
@@ -513,3 +528,128 @@ class IGLightstreamerStreamingClient:
                 max_attempts=max_attempts,
                 base_delay_seconds=base_delay_seconds,
             )
+
+
+_ACTIVE_LS_CLIENT: IGLightstreamerStreamingClient | None = None
+_ACTIVE_LS_LOCK = threading.Lock()
+
+
+def register_lightstreamer_client(client: IGLightstreamerStreamingClient | None) -> None:
+    global _ACTIVE_LS_CLIENT
+    with _ACTIVE_LS_LOCK:
+        _ACTIVE_LS_CLIENT = client
+
+
+def get_lightstreamer_health() -> dict[str, Any]:
+    with _ACTIVE_LS_LOCK:
+        client = _ACTIVE_LS_CLIENT
+    if client is None:
+        return {"active": False}
+    return {
+        "active": True,
+        "using_fallback": bool(client._using_fallback),
+        "first_tick_received": bool(client._first_tick_received),
+        "connect_attempt_ts": float(client._connect_attempt_ts),
+        "last_connect_error": str(getattr(client, "_last_connect_error", "") or ""),
+        "last_http_status": getattr(client, "_last_http_status", None),
+        "epic_count": len(client._epics),
+        "running": bool(client._running),
+    }
+
+
+def force_rest_poll_failover(*, reason: str = "", category: str = "") -> bool:
+    """Atomic teardown + REST poll fallback — invoked by autonomic healer."""
+    try:
+        from system.autonomic_healer import record_transport_failure_diagnostic
+
+        record_transport_failure_diagnostic(reason=reason or category or "rest_poll_failover")
+    except Exception:
+        pass
+    with _ACTIVE_LS_LOCK:
+        client = _ACTIVE_LS_CLIENT
+    if client is None or client._using_fallback or not client._running:
+        return False
+    log_engine(f"Lightstreamer autonomic failover -> rest_poll reason={reason[:120]}")
+    try:
+        client._teardown_lightstreamer()
+    except Exception as exc:
+        log_engine(f"Lightstreamer teardown guard: {type(exc).__name__}: {exc}")
+    try:
+        import os
+
+        os.environ["IG_STREAMING_TRANSPORT"] = "rest_poll"
+    except Exception:
+        pass
+    client._start_fallback()
+    return True
+
+
+def engage_transport_failover_recovery(*, reason: str, category: str = "") -> bool:
+    """
+    Centralized transport recovery — clears token delays, flushes sessions,
+    re-arms rest_poll/yahoo feeds, and seeds hub for cockpit core epics.
+    """
+    log_engine(
+        f"Transport failover recovery engaged reason={reason[:120]} category={category[:48]}"
+    )
+    try:
+        from system.market_data_hub import set_fallback_transport_tier
+
+        set_fallback_transport_tier("rest_poll")
+    except Exception:
+        pass
+    try:
+        from system.chaos_guardian import clear_token_queue_delays
+
+        clear_token_queue_delays()
+    except Exception as exc:
+        log_engine(f"Transport recovery token clear: {type(exc).__name__}: {exc}")
+
+    try:
+        from ig_api.streaming_factory import flush_streaming_session_handles
+
+        flush_streaming_session_handles()
+    except Exception as exc:
+        log_engine(f"Transport recovery session flush: {type(exc).__name__}: {exc}")
+
+    try:
+        from system.market_data_hub import flush_hub_streaming_session_cache
+
+        flush_hub_streaming_session_cache()
+    except Exception as exc:
+        log_engine(f"Transport recovery hub cache flush: {type(exc).__name__}: {exc}")
+
+    failover_ok = force_rest_poll_failover(reason=reason, category=category)
+    if not failover_ok:
+        try:
+            import os
+
+            os.environ["IG_STREAMING_TRANSPORT"] = "rest_poll"
+            failover_ok = True
+        except Exception:
+            pass
+
+    try:
+        from system.feeds.data_feed_orchestrator import ensure_data_feed_orchestrator_running
+        from system.market_data_hub import NIGHT_MATRIX_EPICS
+
+        ensure_data_feed_orchestrator_running(NIGHT_MATRIX_EPICS)
+    except Exception as exc:
+        log_engine(f"Transport recovery feed orchestrator: {type(exc).__name__}: {exc}")
+
+    try:
+        from system.market_data_hub import execute_hub_seed_flush_for_night_matrix
+
+        execute_hub_seed_flush_for_night_matrix()
+    except Exception as exc:
+        log_engine(f"Transport recovery hub seed: {type(exc).__name__}: {exc}")
+
+    try:
+        from system.chaos_guardian import notify_channel_connected
+
+        notify_channel_connected("yahoo_feed")
+        notify_channel_connected("rest_poll")
+    except Exception as exc:
+        log_engine(f"Transport recovery channel notify: {type(exc).__name__}: {exc}")
+
+    return True

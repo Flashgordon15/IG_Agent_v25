@@ -1,5 +1,5 @@
 #!/bin/bash
-# Launch IG Cockpit (Tauri) after verify — production-hardened supervisor entry.
+# Launch IG Cockpit — native WKWebView shell only when LAUNCHER_DESKTOP=1.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -7,7 +7,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/agent_lib.sh"
 
 PORT="${IG_API_PORT:-8080}"
-COCKPIT="${IG_AGENT_ROOT}/gui/ig_cockpit"
+# shellcheck source=lib_notify.sh
+source "${SCRIPT_DIR}/lib_notify.sh"
+
 LOG="${IG_AGENT_ROOT}/logs/cockpit_launch.log"
 API_URL="http://127.0.0.1:${PORT}"
 PID_FILE="${IG_AGENT_ROOT}/logs/.cockpit.pid"
@@ -16,6 +18,14 @@ mkdir -p "${IG_AGENT_ROOT}/logs"
 exec >> "${LOG}" 2>&1
 
 log "========== agent_gui cockpit launch port=${PORT} =========="
+launcher_status_set "gui" "Stage 9 — Cockpit" "Native Flight Deck shell" 9 9
+
+# Desktop mode: parent WKWebView shell already owns the UI — never spawn browser/Tauri/2nd shell.
+if [[ "${LAUNCHER_DESKTOP:-}" == "1" ]] || [[ "${IG_DESKTOP_SHELL_ACTIVE:-}" == "1" ]] || [[ "${IG_DESKTOP_FLIGHT_DECK:-}" == "1" ]]; then
+  log "agent_gui: native shell active — deprecating browser/Tauri/legacy splash paths"
+  launcher_status_set "ready" "Launch complete" "Iron Cage WKWebView (exclusive)" 9 9 "" "green"
+  exit 0
+fi
 
 # Kill stale cockpit dev server if present
 if [[ -f "${PID_FILE}" ]]; then
@@ -33,63 +43,20 @@ if ! curl -sf --max-time 30 "${API_URL}/api/gui_status" -o /tmp/ig_cockpit_gui.j
   exit 1
 fi
 
-# Verify required gui_status fields (matches launcher verify contract)
-if ! "${IG_AGENT_PY}" -c "
-import json, sys
-required = [
-  'strategy_selector_advice', 'strategy_controller_decisions',
-  'strategy_governance', 'unified_execution_route',
-  'hard_enforcement_decisions', 'trade_pipeline_health',
-]
-d = json.load(open('/tmp/ig_cockpit_gui.json'))
-missing = [f for f in required if f not in d]
-sys.exit(1 if missing else 0)
-" 2>/dev/null; then
-  log "WARN: gui_status incomplete — launching anyway (cockpit splash will wait)"
-fi
-
 export IG_AGENT_API_URL="${API_URL}"
 export VITE_IG_AGENT_API_URL="${API_URL}"
 
-APP_RELEASE="${COCKPIT}/src-tauri/target/release/bundle/macos/IG Cockpit.app"
-APP_DEBUG="${COCKPIT}/src-tauri/target/debug/bundle/macos/IG Cockpit.app"
-SUP_RELEASE="${COCKPIT}/src-tauri/target/release/ig-cockpit"
-SUP_DEBUG="${COCKPIT}/src-tauri/target/debug/ig-cockpit"
-
-launch_env() {
-  env IG_AGENT_API_URL="${API_URL}" VITE_IG_AGENT_API_URL="${API_URL}" "$@"
-}
-
-open_browser_fallback() {
-  log "Fallback: browser dashboard"
-  "${IG_AGENT_PY}" "${SCRIPT_DIR}/launcher_core.py" --phase gui --port "${PORT}"
-}
-
-if [[ -d "${APP_RELEASE}" ]]; then
-  log "Opening release bundle: ${APP_RELEASE}"
-  launch_env open "${APP_RELEASE}"
-elif [[ -d "${APP_DEBUG}" ]]; then
-  log "Opening debug bundle: ${APP_DEBUG}"
-  launch_env open "${APP_DEBUG}"
-elif [[ -x "${SUP_RELEASE}" ]]; then
-  log "Launching release binary: ${SUP_RELEASE}"
-  launch_env nohup "${SUP_RELEASE}" >> "${LOG}" 2>&1 &
+DESKTOP_LAUNCHER="${SCRIPT_DIR}/desktop_flight_deck.sh"
+if [[ -x "${DESKTOP_LAUNCHER}" ]]; then
+  log "Launching Iron Cage native desktop shell (exclusive route)"
+  export IG_DESKTOP_FLIGHT_DECK=1
+  export IG_DESKTOP_SHELL_ACTIVE=1
+  nohup /bin/bash "${DESKTOP_LAUNCHER}" >> "${LOG}" 2>&1 &
   echo $! > "${PID_FILE}"
-elif [[ -x "${SUP_DEBUG}" ]]; then
-  log "Launching debug binary: ${SUP_DEBUG}"
-  launch_env nohup "${SUP_DEBUG}" >> "${LOG}" 2>&1 &
-  echo $! > "${PID_FILE}"
-elif [[ -f "${COCKPIT}/package.json" ]] && command -v npm >/dev/null 2>&1; then
-  log "Starting tauri:dev (background)"
-  (
-    cd "${COCKPIT}"
-    launch_env nohup npm run tauri:dev >> "${LOG}" 2>&1 &
-    echo $! > "${PID_FILE}"
-  )
-else
-  log "WARN: No Tauri cockpit found — browser fallback"
-  open_browser_fallback
+  launcher_status_set "ready" "Launch complete" "Iron Cage desktop shell active" 9 9 "" "green"
+  exit 0
 fi
 
-log "agent_gui complete (IG_AGENT_API_URL=${API_URL})"
-exit 0
+log "ERROR: desktop_flight_deck.sh missing — browser/Tauri fallback disabled in hardened build"
+launcher_status_fail "GUI failed" "Native shell launcher missing" 9
+exit 1

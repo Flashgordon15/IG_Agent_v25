@@ -143,11 +143,14 @@ def resolve_block_reason() -> str:
         pass
 
     try:
+        from system.config_loader import get_config
+        from system.demo_execution_plane import demo_throughput_active
         from system.rest_api_budget import get_rest_api_budget
 
-        budget = get_rest_api_budget()
-        if budget._preemptive_pause_active():
-            reasons.append("rest_budget_preemptive_pause")
+        if not demo_throughput_active(get_config()):
+            budget = get_rest_api_budget()
+            if budget._preemptive_pause_active():
+                reasons.append("rest_budget_preemptive_pause")
     except Exception:
         pass
 

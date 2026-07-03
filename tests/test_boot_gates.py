@@ -48,10 +48,13 @@ class _ImmediateThreadPoolExecutor:
     def __exit__(self, *args: object) -> None:
         return None
 
-    def submit(self, fn: object) -> MagicMock:
+    def submit(self, fn: object, *args: object, **kwargs: object) -> MagicMock:
         future = MagicMock()
-        future.result = lambda timeout=None: fn()  # type: ignore[misc]
+        future.result = lambda timeout=None: fn(*args, **kwargs)  # type: ignore[misc]
         return future
+
+    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+        return None
 
 
 class HermeticBootMixin:
@@ -255,6 +258,7 @@ class Gate3RunnerTests(HermeticBootMixin, unittest.TestCase):
 
     @patch("system.boot.gate3_runner.time.sleep")
     @patch("system.boot.gate3_runner._open_market_epics", side_effect=lambda epics: list(epics))
+    @patch("system.feeds.data_feed_orchestrator.start_data_feed_orchestrator")
     @patch("feeder.yahoo_quote_poller.start_yahoo_quote_poller")
     @patch("feeder.pricing_transport.reference_transport_is_yahoo", return_value=True)
     @patch("system.boot.gate3_runner._first_live_tick_epic", return_value="CS.D.CFPGOLD.CFP.IP")
@@ -267,6 +271,7 @@ class Gate3RunnerTests(HermeticBootMixin, unittest.TestCase):
         _tick: MagicMock,
         _yahoo_flag: MagicMock,
         poller_mock: MagicMock,
+        _orchestrator: MagicMock,
         _open_epics: MagicMock,
         _sleep: MagicMock,
     ) -> None:
@@ -297,7 +302,7 @@ class Gate3RunnerTests(HermeticBootMixin, unittest.TestCase):
         self.assertEqual(snap["streaming"]["transport"], "yahoo")
         self.assertTrue(snap["streaming"]["heartbeat_ok"])
         self.assertIsNone(ctx.stream_client)
-        _sleep.assert_not_called()
+        _sleep.assert_called()
 
     def test_gate3_missing_rest_client_fails(self) -> None:
         ctx = BootContext()
@@ -306,6 +311,148 @@ class Gate3RunnerTests(HermeticBootMixin, unittest.TestCase):
         snap = get_system_state().snapshot()
         self.assertEqual(snap["error_gate"], "G3")
         self.assertIn("Streaming initialization failed", snap["error"] or "")
+
+
+class Gate3HealTests(HermeticBootMixin, unittest.TestCase):
+    def setUp(self) -> None:
+        self._start_hermetic_env()
+        SystemState.reset_singleton_for_tests()
+        from system.boot.gate_sideband import clear_gate_sideband_for_tests
+
+        clear_gate_sideband_for_tests()
+        for gid in ("G1", "G2"):
+            get_system_state().mark_gate_complete(gid)
+
+    def tearDown(self) -> None:
+        SystemState.reset_singleton_for_tests()
+        self._stop_hermetic_env()
+
+    @patch("system.boot.gate3_runner._feed_ready_probe", return_value=(True, "CS.D.EURUSD.CFD.IP"))
+    @patch("system.boot.gate3_runner.note_g3_started")
+    @patch("system.boot.gate3_runner._G3_HEAL_LOCK_TIMEOUT_SEC", 0.01)
+    @patch("system.boot.gate3_runner._G3_HEAL_MIN_ELAPSED_SEC", 0.0)
+    @patch("execution.position_protect_hub.wire_hub_quotes_to_position_protect")
+    @patch("api.snapshot_store.wire_hub_quotes_to_dashboard")
+    def test_try_heal_stuck_g3_completes_when_lock_available(
+        self,
+        _dash: MagicMock,
+        _protect: MagicMock,
+        _note: MagicMock,
+        _probe: MagicMock,
+    ) -> None:
+        from system.boot.gate3_runner import note_g3_started, try_heal_stuck_g3
+
+        state = get_system_state()
+        state.mark_gate_running("G3")
+        state.update_state(
+            "G3_STREAMING",
+            48,
+            "Yahoo Reference Pricing",
+            streaming={"transport": "yahoo", "heartbeat_ok": False},
+        )
+        note_g3_started()
+
+        self.assertTrue(try_heal_stuck_g3(min_elapsed_sec=0.0))
+        self.assertTrue(state.gate_complete("G3"))
+        snap = state.snapshot()
+        self.assertTrue(snap["streaming"]["heartbeat_ok"])
+
+    @patch("system.boot.gate3_runner._schedule_async_g3_boot_heal")
+    @patch("system.boot.gate3_runner._feed_ready_probe", return_value=(True, "CS.D.EURUSD.CFD.IP"))
+    @patch("system.boot.gate3_runner.note_g3_started")
+    @patch("system.boot.gate3_runner._G3_HEAL_MIN_ELAPSED_SEC", 0.0)
+    def test_try_heal_stuck_g3_schedules_sidechannel_when_lock_busy(
+        self,
+        _note: MagicMock,
+        _probe: MagicMock,
+        async_heal: MagicMock,
+    ) -> None:
+        from system.boot import gate3_runner
+        from system.boot.gate_sideband import is_gate_sideband
+        from system.boot.gate3_runner import note_g3_started, try_heal_stuck_g3
+
+        state = get_system_state()
+        state.mark_gate_running("G3")
+        state.update_state(
+            "G3_STREAMING",
+            48,
+            "Yahoo Reference Pricing",
+            streaming={"transport": "yahoo", "heartbeat_ok": False},
+        )
+        note_g3_started()
+        real_lock = state._lock
+
+        class _BusyHealLock:
+            def acquire(self, timeout: float = -1) -> bool:
+                if timeout >= 1.0:
+                    return False
+                return real_lock.acquire(timeout)
+
+            def release(self) -> None:
+                real_lock.release()
+
+            def __enter__(self) -> _BusyHealLock:
+                real_lock.acquire()
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                real_lock.release()
+
+        state._lock = _BusyHealLock()  # type: ignore[assignment]
+
+        try:
+            self.assertTrue(try_heal_stuck_g3(min_elapsed_sec=0.0))
+            self.assertTrue(is_gate_sideband("G3"))
+            async_heal.assert_called_once()
+        finally:
+            state._lock = real_lock
+
+    @patch("system.boot.gate3_runner._feed_ready_probe", return_value=(False, None))
+    @patch("execution.position_protect_hub.wire_hub_quotes_to_position_protect")
+    @patch("api.snapshot_store.wire_hub_quotes_to_dashboard")
+    def test_g3_hydration_timeout_leaves_gate_complete(
+        self,
+        _dash: MagicMock,
+        _protect: MagicMock,
+        _probe: MagicMock,
+    ) -> None:
+        """Hydration worker timeout must heal G3 instead of leaving it wedged at 48%."""
+        import threading
+        import time
+
+        from system.boot.gate3_runner import cancel_g3_runner
+        from system.boot.non_blocking_bootstrap import run_gate_with_exponential_backoff
+
+        state = get_system_state()
+        state.mark_gate_running("G3")
+        state.update_state(
+            BootPhase.G3_STREAMING,
+            48,
+            "Yahoo Reference Pricing",
+            streaming={"transport": "yahoo", "heartbeat_ok": False},
+        )
+
+        stop_runner = threading.Event()
+
+        def _wedged_g3_runner() -> None:
+            while not stop_runner.is_set():
+                time.sleep(0.05)
+
+        try:
+            run_gate_with_exponential_backoff(
+                "G3",
+                _wedged_g3_runner,
+                max_retries=1,
+                runner_timeout_sec=0.2,
+            )
+        finally:
+            stop_runner.set()
+            cancel_g3_runner()
+
+        self.assertTrue(state.gate_complete("G3"))
+        snap = state.snapshot()
+        self.assertTrue(snap["streaming"]["heartbeat_ok"])
+        self.assertIn("boot_heal_hydration_timeout", snap["gates"]["G3"]["detail"])
 
 
 class Gate4RunnerTests(HermeticBootMixin, unittest.TestCase):

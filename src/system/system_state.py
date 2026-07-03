@@ -407,6 +407,24 @@ class SystemState:
         with self._lock:
             return self._snapshot.gates[gate_id].status == GateStatus.COMPLETE
 
+    def try_gate_complete(self, gate_id: GateId, *, timeout: float = 0.0) -> bool:
+        """Non-blocking gate completion probe for heal/watchdog paths."""
+        if self._lock.acquire(timeout=max(0.0, float(timeout))):
+            try:
+                return self._snapshot.gates[gate_id].status == GateStatus.COMPLETE
+            finally:
+                self._lock.release()
+        return is_gate_sideband_fallback(gate_id)
+
+    def try_snapshot(self, *, timeout: float = 0.5) -> dict[str, Any] | None:
+        """Best-effort snapshot without blocking boot workers indefinitely."""
+        if self._lock.acquire(timeout=max(0.0, float(timeout))):
+            try:
+                return copy.deepcopy(self._snapshot.to_dict())
+            finally:
+                self._lock.release()
+        return None
+
     def set_ready(self, *, label: str = "ACTIVE") -> None:
         """Atomic READY flip — G5 completion."""
         with self._lock:
@@ -416,6 +434,15 @@ class SystemState:
             self._snapshot.phase_label = label
             self._snapshot.error = None
             self._snapshot.error_gate = None
+
+
+def is_gate_sideband_fallback(gate_id: str) -> bool:
+    try:
+        from system.boot.gate_sideband import is_gate_sideband
+
+        return is_gate_sideband(gate_id)
+    except Exception:
+        return False
 
 
 def get_system_state() -> SystemState:

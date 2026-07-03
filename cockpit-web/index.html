@@ -258,7 +258,165 @@
   </script>
 </head>
 <body>
-  <div class="cockpit-shell">
+  <div
+    id="boot-splash-overlay"
+    class="boot-splash-overlay active"
+    role="dialog"
+    aria-modal="true"
+    aria-label="System initialization"
+  >
+    <div class="boot-splash-card" id="boot-splash-card">
+      <h2 class="boot-splash-title">IG Agent Flight Deck</h2>
+      <p class="boot-splash-sub">9-Stage RAG Boot Lifecycle Matrix</p>
+      <ul id="boot-stage-checklist" class="boot-stage-checklist" aria-live="polite">
+        <li data-stage="STAGE_1_CONFIG_SANITY">STAGE 1 · Config Sanity</li>
+        <li data-stage="STAGE_2_GUARDIAN_WAKE">STAGE 2 · Guardian Wake</li>
+        <li data-stage="STAGE_3_REGIME_HYDRATION">STAGE 3 · Regime Hydration</li>
+        <li data-stage="STAGE_4_TUNER_PRIME">STAGE 4 · Tuner Prime</li>
+        <li data-stage="STAGE_5_LAUNCH_CORE">STAGE 5 · Launch Core</li>
+        <li data-stage="STAGE_6_REST_AUTH">STAGE 6 · REST Auth</li>
+        <li data-stage="STAGE_7_STREAM_HANDSHAKE">STAGE 7 · Stream Handshake</li>
+        <li data-stage="STAGE_8_DATA_FEED_HYDRATION">STAGE 8 · Data Feed Hydration</li>
+        <li data-stage="STAGE_9_ALPHAS_ARMED">STAGE 9 · Alphas Armed</li>
+      </ul>
+      <div class="boot-ring-hydration">
+        <span class="boot-ring-label">Data ring hydration</span>
+        <span id="boot-ring-countdown" class="boot-ring-countdown">T-10</span>
+        <div class="boot-ring-track"><div id="boot-ring-bar" class="boot-ring-bar"></div></div>
+      </div>
+      <div id="boot-autonomic-banner" class="boot-autonomic-banner hidden" role="alert">
+        <span class="boot-autonomic-pulse" aria-hidden="true"></span>
+        <span id="boot-autonomic-text">AI AUTONOMIC OVERRIDE ACTIVE</span>
+      </div>
+      <p id="boot-splash-status" class="boot-splash-status">Awaiting iron cage readiness…</p>
+    </div>
+  </div>
+
+  <div id="cockpit-live-frame" class="cockpit-live-frame">
+    <aside
+      id="avionics-command-strip"
+      class="avionics-command-strip"
+      aria-label="Avionics Command Strip"
+      hidden
+    >
+      <header class="command-strip-header">
+        <span class="command-strip-glyph" aria-hidden="true">◈</span>
+        <div>
+          <h2 class="command-strip-title">Avionics Command</h2>
+          <p class="command-strip-sub">Boot + gate verification</p>
+        </div>
+        <span id="command-strip-live-badge" class="command-strip-live-badge">LIVE</span>
+      </header>
+      <div id="avionics-boot-checklist-mount" class="command-strip-section"></div>
+      <div id="avionics-expectancy-mount" class="command-strip-section" aria-live="polite"></div>
+      <div id="avionics-gates-mount" class="command-strip-section avionics-gates-compact" aria-live="polite"></div>
+      <div class="command-strip-footer">
+        <span id="command-strip-hydration" class="command-strip-hydration-badge hidden">SYNTHETIC HYDRATION</span>
+        <span id="command-strip-coalesce" class="command-strip-coalesce">TG coalesce —</span>
+      </div>
+    </aside>
+
+    <div class="cockpit-shell trading-hub-canvas" id="cockpit-main-shell">
+    <article
+      id="cognitive-reasoner-panel"
+      class="cognitive-reasoner-panel counsel-normal"
+      aria-live="polite"
+      aria-label="Avionics Strategic Counsel"
+    >
+      <header class="cognitive-reasoner-header">
+        <span class="cognitive-reasoner-glyph" aria-hidden="true">◎</span>
+        <div>
+          <h2 class="cognitive-reasoner-title">Avionics Strategic Counsel</h2>
+          <p class="cognitive-reasoner-sub">Cognitive Reasoner · live trade-hold translation</p>
+        </div>
+      </header>
+      <p id="cognitive-reasoner-text" class="cognitive-reasoner-text">
+        Awaiting strategic counsel from probability engine…
+      </p>
+      <p id="cognitive-reasoner-spread" class="cognitive-reasoner-meta hidden"></p>
+    </article>
+
+    <section id="trading-hub-telemetry-row" class="trading-hub-telemetry-row" aria-label="Unified trading hub telemetry">
+      <article id="hub-module-risk" class="hub-module hub-module-risk" aria-label="Global Risk Heat-Map">
+        <header class="hub-module-header">
+          <span class="hub-module-glyph" aria-hidden="true">▦</span>
+          <div>
+            <h2 class="hub-module-title">Global Risk Heat-Map</h2>
+            <p class="hub-module-sub">Covariance · equilibrium weights</p>
+          </div>
+          <span id="global-risk-compression-badge" class="global-risk-compression-badge">σ 1.00</span>
+        </header>
+        <div id="global-risk-heatmap-grid" class="global-risk-heatmap-grid" role="list"></div>
+        <p id="global-risk-heatmap-meta" class="global-risk-heatmap-meta">Awaiting portfolio synthesis…</p>
+      </article>
+
+      <article id="hub-module-macro" class="hub-module hub-module-macro" aria-label="Macro Sentiment and News Velocity">
+        <header class="hub-module-header">
+          <span class="hub-module-glyph" aria-hidden="true">◉</span>
+          <div>
+            <h2 class="hub-module-title">Macro Sentiment HUD</h2>
+            <p class="hub-module-sub">Headline urgency · news velocity · shadow-walk</p>
+          </div>
+          <span id="hub-headline-urgency-badge" class="hub-urgency-badge">U 0.00</span>
+        </header>
+        <div class="hub-macro-grid">
+          <div class="hub-macro-cell">
+            <span class="hub-macro-label">Headline Urgency</span>
+            <div class="hub-urgency-track" aria-hidden="true">
+              <div id="hub-headline-urgency-bar" class="hub-urgency-fill"></div>
+            </div>
+          </div>
+          <div class="hub-macro-cell">
+            <span class="hub-macro-label">News T−</span>
+            <span id="hub-macro-news-tminus" class="hub-macro-value">—</span>
+            <div class="news-progress-track" aria-hidden="true">
+              <div id="hub-macro-news-progress" class="news-progress-fill"></div>
+            </div>
+          </div>
+          <div class="hub-macro-cell">
+            <span class="hub-macro-label">5m / 15m / 1h Δ</span>
+            <span id="hub-macro-sentiment-deltas" class="hub-macro-value">—</span>
+          </div>
+          <div class="hub-macro-cell">
+            <span class="hub-macro-label">48-Bar Shadow-Walk</span>
+            <span id="hub-macro-shadow-walk" class="hub-macro-value">—</span>
+          </div>
+        </div>
+      </article>
+
+      <article id="hub-module-ingest" class="hub-module hub-module-ingest" aria-label="Multi-Feed API Ingest Status">
+        <header class="hub-module-header">
+          <span class="hub-module-glyph" aria-hidden="true">⬡</span>
+          <div>
+            <h2 class="hub-module-title">API Ingest Grid</h2>
+            <p class="hub-module-sub">Yahoo · Finnhub · IG · Sentiment</p>
+          </div>
+          <span id="hub-ingest-status-pill" class="pill pill-warn">INGEST …</span>
+        </header>
+        <ul id="hub-api-ingest-grid" class="hub-api-ingest-grid">
+          <li class="api-ingest-pill ingest-warming">Feeds warming…</li>
+        </ul>
+      </article>
+    </section>
+
+    <section id="hub-pp-trajectory-panel" class="hub-pp-trajectory-panel" aria-label="7-Day Alpha Expectation Curve">
+      <header class="hub-module-header">
+        <span class="hub-module-glyph" aria-hidden="true">⌁</span>
+        <div>
+          <h2 class="hub-module-title">7-Day Alpha Expectation Curve</h2>
+          <p class="hub-module-sub">PlatformScoreboard PP trajectory · expansion vs defense</p>
+        </div>
+        <span id="hub-pp-trajectory-badge" class="hub-pp-trend-badge trend-neutral">—</span>
+      </header>
+      <div class="hub-pp-chart-wrap">
+        <svg id="hub-pp-trajectory-svg" class="hub-pp-trajectory-svg" viewBox="0 0 400 80" preserveAspectRatio="none" aria-hidden="true">
+          <path id="hub-pp-trajectory-path" class="hub-pp-trajectory-path trend-neutral" d="" />
+        </svg>
+        <div id="hub-pp-trajectory-labels" class="hub-pp-trajectory-labels"></div>
+      </div>
+      <p id="hub-pp-trajectory-meta" class="hub-pp-trajectory-meta">Awaiting PP history…</p>
+    </section>
+
     <div
       id="master-vitals-banner"
       class="master-vitals-banner vitals-healthy"
@@ -266,7 +424,7 @@
       aria-live="polite"
       aria-label="Global system vitals"
     >
-      🟢 All systems running correctly. E2E tests passing. AI is monitoring.
+      🟢 All gates complete. Telemetry live. AI monitoring execution.
     </div>
 
     <header class="top-bar">
@@ -293,14 +451,120 @@
         <span id="log-ws-status" class="pill pill-warn">LOGS …</span>
         <span id="triage-ws-status" class="pill pill-warn">TRIAGE …</span>
         <span id="clock" class="clock" aria-live="off">--:--:--</span>
+        <button
+          id="app-exit-btn"
+          type="button"
+          class="app-exit-btn"
+          title="Gracefully close Iron Cage Flight Deck"
+        >
+          Exit
+        </button>
       </div>
     </header>
+
+    <section class="sre-command-strip" aria-label="SRE Command Telemetry">
+      <article
+        id="scoreboard-panel"
+        class="card sre-panel scoreboard-panel tier-baseline"
+        aria-label="Gamification Performance Scoreboard"
+      >
+        <header class="card-header sre-panel-header">
+          <span class="card-label">SRE</span>
+          <h2>Performance Scoreboard</h2>
+          <span id="sre-poll-status" class="pill pill-warn">SRE …</span>
+        </header>
+        <div class="scoreboard-body">
+          <div class="scoreboard-metric">
+            <span class="scoreboard-label">Performance Points</span>
+            <span id="scoreboard-pp" class="scoreboard-pp">—</span>
+          </div>
+          <div class="scoreboard-meta">
+            <span id="scoreboard-rank" class="scoreboard-rank">BASELINE</span>
+            <span id="scoreboard-win-rate" class="scoreboard-win-rate">WR —</span>
+          </div>
+          <p id="scoreboard-capacity-banner" class="capacity-banner">Capacity impact warming…</p>
+        </div>
+      </article>
+
+      <article
+        id="macro-steering-panel"
+        class="card sre-panel macro-panel"
+        aria-label="Macro Steering and Sentiment Surface"
+      >
+        <header class="card-header sre-panel-header">
+          <span class="card-label">Predict</span>
+          <h2>Macro Steering &amp; Sentiment</h2>
+          <span id="macro-epic-badge" class="forecast-badge">EUR/USD</span>
+        </header>
+        <div class="macro-matrix">
+          <div class="macro-cell">
+            <span class="macro-label">5m Sentiment Δ</span>
+            <span id="macro-delta-5m" class="macro-value">—</span>
+          </div>
+          <div class="macro-cell">
+            <span class="macro-label">30m Sentiment Δ</span>
+            <span id="macro-delta-30m" class="macro-value">—</span>
+          </div>
+          <div class="macro-cell macro-cell-wide">
+            <span class="macro-label">News Countdown</span>
+            <span id="macro-news-tminus" class="macro-value">T— —</span>
+            <div class="news-progress-track" aria-hidden="true">
+              <div id="macro-news-progress" class="news-progress-fill"></div>
+            </div>
+          </div>
+          <div class="macro-cell">
+            <span class="macro-label">48-Bar Shadow-Walk</span>
+            <span id="macro-shadow-walk" class="macro-value">—</span>
+          </div>
+        </div>
+      </article>
+
+      <article
+        id="system-health-panel"
+        class="card sre-panel health-ledger-panel"
+        aria-label="System Health Reconciliation Ledger"
+      >
+        <header class="card-header sre-panel-header">
+          <span class="card-label">Health</span>
+          <h2>Reconciliation Ledger</h2>
+          <span id="health-sync-badge" class="pill pill-warn">SYNC …</span>
+        </header>
+        <div class="ledger-grid">
+          <div class="ledger-col">
+            <h3 class="ledger-col-title">Local Position Tree</h3>
+            <ul id="ledger-local-keys" class="ledger-list">
+              <li class="ledger-empty">warming…</li>
+            </ul>
+          </div>
+          <div class="ledger-col">
+            <h3 class="ledger-col-title">Broker Registers</h3>
+            <ul id="ledger-broker-registers" class="ledger-list">
+              <li class="ledger-empty">warming…</li>
+            </ul>
+          </div>
+        </div>
+        <div id="health-alert-strip" class="health-alert-strip hidden" role="alert" aria-live="assertive">
+          <span class="health-alert-icon" aria-hidden="true">⚠</span>
+          <span id="health-alert-text">—</span>
+        </div>
+        <div class="reporting-strip">
+          <span class="reporting-label">Alert Matrix</span>
+          <span id="reporting-status-line" class="reporting-value">—</span>
+        </div>
+        <div class="api-ingest-section" aria-label="API Ingest Status Grid">
+          <h3 class="api-ingest-title">API Ingest Status</h3>
+          <ul id="api-ingest-grid" class="api-ingest-grid">
+            <li class="api-ingest-pill ingest-warming">Feeds warming…</li>
+          </ul>
+        </div>
+      </article>
+    </section>
 
     <main class="grid-layout">
       <!-- Card A: 4-Gate System (G1–G4 only) -->
       <section class="card card-gates" aria-label="Four-Gate Boot Checklist">
         <header class="card-header">
-          <span class="card-label">Card A</span>
+          <span class="card-label">Gates</span>
           <h2>4-Gate Boot Checklist</h2>
           <span class="gate-pipeline-badge">G1 → G2 → G3 → G4</span>
         </header>
@@ -309,13 +573,27 @@
           G2 complete: authenticated &amp; session bound · G3 complete: streaming live broker feed.
         </p>
         <div id="gate-grid" class="gate-grid"></div>
+        <div id="rotation-panel" class="rotation-panel" aria-label="Market rotation rank">
+          <div class="rotation-panel-header">
+            <span class="rotation-panel-title">Market Rotation</span>
+            <span id="rotation-meta-pill" class="pill pill-warn">ROTATION …</span>
+          </div>
+          <p id="rotation-meta-line" class="rotation-meta-line">Sweeping universe — ranks warming…</p>
+          <ol id="rotation-rank-list" class="rotation-rank-list">
+            <li class="ledger-empty">warming…</li>
+          </ol>
+          <p id="rotation-reject-line" class="rotation-reject-line hidden" role="status"></p>
+        </div>
       </section>
 
       <!-- Card B: Avionics HUD -->
       <section class="card card-avionics" aria-label="Avionics Telemetry">
         <header class="card-header">
-          <span class="card-label">Card B</span>
+          <span class="card-label">Avionics</span>
           <h2>Avionics Telemetry HUD</h2>
+          <span id="synthetic-hydration-badge" class="synthetic-hydration-badge hidden" role="status">
+            SYNTHETIC HYDRATION ACTIVE
+          </span>
           <span id="spread-forecast" class="forecast-badge">SPREAD FORECAST: —</span>
         </header>
         <div
@@ -329,7 +607,7 @@
       <!-- Card C: Mission + Scalping Telemetry -->
       <section class="card card-mission" aria-label="Mission Progress">
         <header class="card-header">
-          <span class="card-label">Card C</span>
+          <span class="card-label">Mission</span>
           <h2>Flight Vector &amp; Mission Progress</h2>
         </header>
         <div class="mission-stats">
@@ -509,6 +787,7 @@
         ⚠ EMERGENCY COCKPIT OVERRIDE / FLATTEN POSITIONS ⚠
       </button>
     </footer>
+    </div>
   </div>
   <script>
     (function () {

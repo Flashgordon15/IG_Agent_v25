@@ -50,10 +50,37 @@ def get_rotation_status_response() -> dict[str, Any]:
     from system.unified_runtime_state import snapshot
 
     unified = snapshot()
+    feed_state: dict[str, Any] = {}
+    try:
+        from system.feeds.data_feed_orchestrator import get_data_feed_state
+
+        feed_state = get_data_feed_state()
+    except Exception:
+        pass
+    try:
+        from runtime.market_orchestrator import MarketOrchestrator
+
+        orchestrator_ranks = MarketOrchestrator.get_global_rotation_rank_snapshot()
+        active_epics = MarketOrchestrator.get_global_active_epics()
+    except Exception:
+        orchestrator_ranks = []
+        active_epics = []
     return {
         "ok": True,
         "rotation": rot,
+        "rotation_scores": rot.get("rotation_scores") or [],
+        "rotation_history": rot.get("rotation_history") or [],
+        "orchestrator_ranks": orchestrator_ranks,
+        "active_epics": active_epics,
         "routing": unified.get("routing") or {},
+        "data_feeds": feed_state,
+        "multi_market": {
+            "universe": list(rot.get("rotation_universe") or []),
+            "active_instruments": (rot.get("active_instruments") or [])[:8],
+            "eligible_instruments": (rot.get("eligible_instruments") or [])[:8],
+            "feed_health": feed_state.get("health"),
+            "primary_feed": feed_state.get("primary_feed"),
+        },
     }
 
 

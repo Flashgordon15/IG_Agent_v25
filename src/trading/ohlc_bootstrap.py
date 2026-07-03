@@ -134,15 +134,63 @@ def local_cache_max_bars() -> int:
         return 5000
 
 
+# (path) -> (mtime, size, count); recount only when the file changes on disk
+_BAR_COUNT_CACHE: dict[str, tuple[float, int, int]] = {}
+
+_TAIL_BLOCK_SIZE = 64 * 1024
+
+
+def _count_lines_binary(path: Any) -> int:
+    count = 0
+    last_byte = b""
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(_TAIL_BLOCK_SIZE)
+            if not chunk:
+                break
+            count += chunk.count(b"\n")
+            last_byte = chunk[-1:]
+    if last_byte and last_byte != b"\n":
+        count += 1
+    return count
+
+
+def _read_tail_lines(path: Any, cap: int) -> list[str]:
+    """Last *cap* non-blank lines — identical to full-read splitlines[-cap:]."""
+    with open(path, "rb") as f:
+        f.seek(0, 2)
+        pos = f.tell()
+        buf = b""
+        while pos > 0:
+            step = min(_TAIL_BLOCK_SIZE, pos)
+            pos -= step
+            f.seek(pos)
+            buf = f.read(step) + buf
+            if pos == 0:
+                break
+            nl = buf.find(b"\n")
+            if nl == -1:
+                continue
+            complete = buf[nl + 1 :]
+            if sum(1 for ln in complete.split(b"\n") if ln.strip()) >= cap:
+                buf = complete
+                break
+    lines = [ln for ln in buf.decode("utf-8").splitlines() if ln.strip()]
+    return lines[-cap:]
+
+
 def local_cache_bar_count(epic: str, market: str = "") -> int:
     path = ohlc_cache_path(epic, market=market)
     if not path.is_file():
         return 0
     try:
-        count = 0
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                count += 1
+        stat = path.stat()
+        key = str(path)
+        cached = _BAR_COUNT_CACHE.get(key)
+        if cached is not None and cached[0] == stat.st_mtime and cached[1] == stat.st_size:
+            return cached[2]
+        count = _count_lines_binary(path)
+        _BAR_COUNT_CACHE[key] = (stat.st_mtime, stat.st_size, count)
         return count
     except OSError:
         return 0
@@ -169,15 +217,10 @@ def _bootstrap_from_cache(
     cap = max_bars if max_bars is not None else local_cache_max_bars()
     cap = max(cap, num_points)
     try:
-        lines = [
-            ln
-            for ln in cache_path.read_text(encoding="utf-8").splitlines()
-            if ln.strip()
-        ]
-        if not lines:
+        tail = _read_tail_lines(cache_path, cap)
+        if not tail:
             log_engine("OHLC bootstrap: local cache is empty")
             return 0
-        tail = lines[-cap:] if len(lines) >= cap else lines
         seeded: list[Quote] = []
         for line in tail:
             bar = json.loads(line)
@@ -270,6 +313,36 @@ def bootstrap_ohlc_for_session(
                 environment_scorer,
                 num_points,
                 max_bars=max_cache,
+            )
+
+        try:
+            from feeder.pricing_transport import reference_transport_is_yahoo
+
+            if reference_transport_is_yahoo():
+                from data.ohlc_yahoo_seeder import fetch_yahoo_ohlc_for_epic
+
+                fetch_yahoo_ohlc_for_epic(epic, market=market)
+                cached_yahoo = _bootstrap_from_cache(
+                    epic,
+                    market,
+                    signal_engine,
+                    environment_scorer,
+                    num_points,
+                    max_bars=max_cache,
+                )
+                if cached_yahoo >= MIN_CACHE_BARS_FOR_BOOTSTRAP:
+                    log_engine(
+                        f"OHLC bootstrap: Yahoo-first seeded {cached_yahoo} bars for {epic}"
+                    )
+                    return cached_yahoo
+                log_engine(
+                    f"OHLC bootstrap: Yahoo-first partial for {epic} — IG REST skipped"
+                )
+                return cached_yahoo
+        except Exception as exc:
+            log_engine(
+                f"OHLC bootstrap: Yahoo-first path failed for {epic}: "
+                f"{type(exc).__name__}: {exc}"
             )
 
         fetch = getattr(rest_client, "fetch_price_history", None)

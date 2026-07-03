@@ -304,33 +304,29 @@ def _emit_bus_for_state(row: dict[str, Any], state: str, message: str) -> None:
 
 def _arm_virtual_stop(row: dict[str, Any]) -> None:
     try:
-        from runtime.virtual_stop_loss import register_virtual_stop
+        from execution.post_fill_risk_controls import arm_post_fill_risk_controls
+        from system.config_loader import get_config
 
         entry = float(row.get("entry_level") or 0.0)
         if entry <= 0:
             return
-        register_virtual_stop(
+        cfg = get_config()
+        stop_pts = float(
+            row.get("stop_distance_pts")
+            or row.get("broker_stop_pts")
+            or getattr(cfg, "stop_distance_points", 10.0)
+            or 10.0
+        )
+        arm_post_fill_risk_controls(
             epic=str(row.get("epic") or ""),
             direction=str(row.get("direction") or "BUY"),
-            entry_level=entry,
             size=float(row.get("size") or 0.0),
+            entry_level=entry,
             deal_id=str(row.get("deal_id") or ""),
+            stop_distance_pts=stop_pts,
+            limit_distance_pts=float(row.get("limit_distance_pts") or 0.0) or None,
+            cfg=cfg,
         )
-        try:
-            from system.unified_runtime_state import update_stops_limits
-
-            update_stops_limits(
-                trailing_active=True,
-                dynamic_limit_active=True,
-                deal_id=str(row.get("deal_id") or ""),
-                trade_state={
-                    "epic": row.get("epic"),
-                    "virtual_stop_armed": True,
-                    "ceiling_pts": 2.0,
-                },
-            )
-        except Exception:
-            pass
     except Exception as exc:
         log_engine(f"Lifecycle: virtual stop arm failed: {type(exc).__name__}: {exc}")
 

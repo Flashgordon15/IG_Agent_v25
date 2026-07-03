@@ -28,6 +28,7 @@ _HARD_EXIT = 99
 _INSTALLED = False
 _INSTALL_LOCK = threading.Lock()
 _WRAPPED_IDS: set[int] = set()
+_PREV_EXCEPTHOOK: Callable[..., Any] | None = None
 _HOT_METHODS = frozenset(
     {
         "_execute_order_blocking",
@@ -69,7 +70,8 @@ def _kernel_excepthook(
     tb: Any,
 ) -> None:
     if exc_type is KeyboardInterrupt:
-        sys.__excepthook__(exc_type, exc, tb)
+        prev = _PREV_EXCEPTHOOK or sys.__excepthook__
+        prev(exc_type, exc, tb)
         return
     log_guarded_exception(
         "kernel_excepthook",
@@ -82,7 +84,8 @@ def _kernel_excepthook(
             f"KernelInterceptor HARD FAIL-CLOSED: uncaught {exc_type.__name__} — exit {_HARD_EXIT}"
         )
         sys.exit(_HARD_EXIT)
-    sys.__excepthook__(exc_type, exc, tb)
+    prev = _PREV_EXCEPTHOOK or sys.__excepthook__
+    prev(exc_type, exc, tb)
 
 
 def kernel_guard(subsystem: str) -> Callable[[F], F]:
@@ -186,10 +189,11 @@ def install_kernel_interceptor(*, force: bool = False) -> dict[str, Any]:
 
     Returns install telemetry for audit logs.
     """
-    global _INSTALLED
+    global _INSTALLED, _PREV_EXCEPTHOOK
     with _INSTALL_LOCK:
         if _INSTALLED and not force:
             return {"installed": True, "skipped": True}
+        _PREV_EXCEPTHOOK = sys.excepthook
         sys.excepthook = _kernel_excepthook
         if _bare_metal_fast_arm():
             _INSTALLED = True
@@ -238,10 +242,11 @@ def ensure_kernel_armed_for_execution() -> None:
 
 
 def reset_kernel_interceptor_for_tests() -> None:
-    global _INSTALLED
+    global _INSTALLED, _PREV_EXCEPTHOOK
     with _INSTALL_LOCK:
         _INSTALLED = False
         _WRAPPED_IDS.clear()
+        _PREV_EXCEPTHOOK = None
         sys.excepthook = sys.__excepthook__
 
 

@@ -1,7 +1,8 @@
-"""Gate 5 fast-stream hydration — REST snapshot fallback when the inbound socket is quiet."""
+"""Gate 5 fast-stream hydration — hub wait; IG REST only when not in Yahoo-primary mode."""
 
 from __future__ import annotations
 
+import os
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -55,7 +56,56 @@ def resolve_hydration_epics(
     return preferred or candidates
 
 
+def _yahoo_primary_mode(cfg: Any | None = None) -> bool:
+    try:
+        from feeder.pricing_transport import reference_transport_is_yahoo
+
+        return reference_transport_is_yahoo(cfg)
+    except Exception:
+        return os.environ.get("IG_PRICING_REFERENCE", "").strip().lower() == "yahoo"
+
+
+def _wait_for_orchestrator_feed(
+    targets: list[str],
+    *,
+    cfg: Any | None,
+    wait_sec: float,
+) -> dict[str, Any] | None:
+    """Yahoo-primary: arm orchestrator and wait for hub ticks — never IG REST on signal path."""
+    try:
+        from system.feeds.data_feed_orchestrator import (
+            ensure_data_feed_orchestrator_running,
+            wait_for_signal_feed,
+        )
+
+        ensure_data_feed_orchestrator_running(targets, cfg=cfg)
+        if wait_for_signal_feed(timeout_sec=wait_sec, min_fresh=1):
+            first_epic = _hub_has_fresh_tick(targets) or targets[0]
+            log_engine(
+                f"fast_stream_hydration: Yahoo orchestrator live epic={first_epic} "
+                f"(waited ≤{wait_sec:.0f}s)"
+            )
+            return {
+                "mode": "STREAM",
+                "hydrated_epics": targets[:1],
+                "first_tick_epic": first_epic,
+                "first_tick_at": _utc_now_iso(),
+                "wait_sec": wait_sec,
+            }
+    except Exception as exc:
+        log_engine(
+            f"fast_stream_hydration: orchestrator wait failed: {type(exc).__name__}: {exc}"
+        )
+    return None
+
+
 def _inject_rest_quotes(rest_client: Any, epics: list[str]) -> tuple[list[str], str | None]:
+    if _yahoo_primary_mode():
+        log_engine(
+            "fast_stream_hydration: IG REST quote inject blocked — Yahoo-primary signal path"
+        )
+        return [], None
+
     if rest_client is None:
         return [], None
 
@@ -105,7 +155,20 @@ def fast_stream_hydration_fallback(
     Returns a dict with ``mode`` of ``STREAM`` (natural tick) or ``LIVE_FALLBACK`` (REST).
     """
     targets = resolve_hydration_epics(cfg=cfg, epics=epics)
-    deadline = time.monotonic() + max(0.5, float(wait_sec))
+    yahoo_mode = _yahoo_primary_mode(cfg)
+    effective_wait = float(wait_sec)
+    if yahoo_mode:
+        effective_wait = max(
+            effective_wait,
+            float(os.environ.get("IG_YAHOO_HYDRATION_WAIT_SEC", "15")),
+        )
+        try:
+            from system.feeds.data_feed_orchestrator import ensure_data_feed_orchestrator_running
+
+            ensure_data_feed_orchestrator_running(targets, cfg=cfg)
+        except Exception:
+            pass
+    deadline = time.monotonic() + max(0.5, effective_wait)
     first_epic: str | None = None
 
     while time.monotonic() < deadline:
@@ -120,19 +183,39 @@ def fast_stream_hydration_fallback(
                 pass
             log_engine(
                 f"fast_stream_hydration: stream live epic={first_epic} "
-                f"(waited <{wait_sec:.0f}s)"
+                f"(waited <{effective_wait:.0f}s)"
             )
             return {
                 "mode": "STREAM",
                 "hydrated_epics": [first_epic],
                 "first_tick_epic": first_epic,
                 "first_tick_at": _utc_now_iso(),
-                "wait_sec": wait_sec,
+                "wait_sec": effective_wait,
             }
         time.sleep(_HYDRATION_POLL_SEC)
 
+    if yahoo_mode:
+        orch_result = _wait_for_orchestrator_feed(
+            targets,
+            cfg=cfg,
+            wait_sec=max(8.0, effective_wait * 0.5),
+        )
+        if orch_result is not None:
+            return orch_result
+        log_engine(
+            f"fast_stream_hydration: Yahoo-primary FAILED — no hub ticks after "
+            f"{effective_wait:.0f}s (IG REST not used on signal path)"
+        )
+        return {
+            "mode": "FAILED",
+            "hydrated_epics": [],
+            "first_tick_epic": None,
+            "first_tick_at": None,
+            "wait_sec": effective_wait,
+        }
+
     log_engine(
-        f"fast_stream_hydration: no hub tick within {wait_sec:.0f}s — "
+        f"fast_stream_hydration: no hub tick within {effective_wait:.0f}s — "
         f"REST GET /markets for {len(targets)} epic(s)"
     )
     hydrated, first_epic = _inject_rest_quotes(rest_client, targets)

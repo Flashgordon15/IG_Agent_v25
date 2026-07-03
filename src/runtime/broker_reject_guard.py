@@ -46,8 +46,13 @@ def reset_broker_reject_guard_for_tests() -> None:
 
 
 def _should_latch(norm: str) -> bool:
-    """Size and generic demo rejects are recoverable — do not 15-min latch."""
-    if norm in ("MINIMUM_ORDER_SIZE_ERROR",):
+    """Size, market-closed, and generic demo rejects are recoverable — do not 15-min latch."""
+    if norm in (
+        "MINIMUM_ORDER_SIZE_ERROR",
+        "MARKET_CLOSED_WITH_EDITS",
+        "MARKET_CLOSED",
+        "UNKNOWN",
+    ):
         return False
     try:
         from system.demo_execution_plane import demo_throughput_active
@@ -165,6 +170,43 @@ def record_broker_confirm_success(*, reason: str = "") -> None:
             _latched_until.clear()
 
 
+_post_blocked_epics: set[str] = set()
+_post_blocked_until: dict[str, float] = {}
+_POST_BLOCK_SEC = 3600.0
+
+
+def record_epic_post_block(epic: str, *, reason: str = "", ttl_sec: float | None = None) -> None:
+    """Session block for epics that fail POST (403 exchange access, invalid instrument)."""
+    key = str(epic or "").strip()
+    if not key:
+        return
+    ttl = float(ttl_sec if ttl_sec is not None else _POST_BLOCK_SEC)
+    with _lock:
+        _post_blocked_epics.add(key)
+        _post_blocked_until[key] = time.time() + max(60.0, ttl)
+    try:
+        from system.engine_log import log_engine
+
+        log_engine(f"BrokerReject: post_blocked epic={key} reason={reason or 'post_failed'}")
+    except Exception:
+        pass
+
+
+def epic_post_blocked(epic: str) -> bool:
+    key = str(epic or "").strip()
+    if not key:
+        return False
+    now = time.time()
+    with _lock:
+        until = _post_blocked_until.get(key, 0.0)
+        if until and until > now:
+            return True
+        if key in _post_blocked_epics:
+            _post_blocked_epics.discard(key)
+            _post_blocked_until.pop(key, None)
+    return False
+
+
 def broker_reject_dispatch_blocked() -> tuple[bool, str]:
     """True when instrument mismatch latch is active."""
     now = time.time()
@@ -174,7 +216,12 @@ def broker_reject_dispatch_blocked() -> tuple[bool, str]:
             _latched_until.pop(key, None)
             _consecutive.pop(key, None)
         # Size errors are recoverable — do not block dispatch for 15 minutes.
-        for size_key in ("MINIMUM_ORDER_SIZE_ERROR",):
+        for size_key in (
+            "MINIMUM_ORDER_SIZE_ERROR",
+            "MARKET_CLOSED_WITH_EDITS",
+            "MARKET_CLOSED",
+            "UNKNOWN",
+        ):
             _latched_until.pop(size_key, None)
             _consecutive.pop(size_key, None)
         if not _latched_until:

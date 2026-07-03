@@ -61,7 +61,9 @@ class BootCoordinator:
 
     def ensure_g1_complete(self) -> None:
         """Run Gate 1 if not already complete (fallback when main skipped preflight)."""
-        if not self._state.gate_complete("G1"):
+        from system.boot.gate_sideband import gate_is_done
+
+        if not gate_is_done(self._state, "G1"):
             self._run_gate("G1")
 
     def run_pipeline(self) -> None:
@@ -76,8 +78,10 @@ class BootCoordinator:
         )
 
         logger.info("BootCoordinator: pipeline started")
+        from system.boot.gate_sideband import gate_is_done
+
         try:
-            if not self._state.gate_complete("G1"):
+            if not gate_is_done(self._state, "G1"):
                 logger.warning("BootCoordinator: G1 incomplete — running Gate 1")
                 self._run_gate("G1")
                 if self._pipeline_failed():
@@ -85,7 +89,7 @@ class BootCoordinator:
 
             for gate_id in GATE_IDS[1:]:
                 previous = GATE_IDS[GATE_IDS.index(gate_id) - 1]
-                if not self._state.gate_complete(previous):
+                if not gate_is_done(self._state, previous):
                     logger.error(
                         "BootCoordinator: gatekeeper blocked %s — %s incomplete",
                         gate_id,
@@ -120,7 +124,7 @@ class BootCoordinator:
                     )
                     return
 
-            if all(self._state.gate_complete(gid) for gid in GATE_IDS):
+            if all(gate_is_done(self._state, gid) for gid in GATE_IDS):
                 if self._state.snapshot_model().ready:
                     logger.info("BootCoordinator: SystemState.READY")
                 else:
@@ -148,14 +152,61 @@ class BootCoordinator:
         return "G5"
 
     def _run_gate(self, gate_id: GateId) -> None:
+        from system.boot.gate_sideband import gate_is_done
+
+        if gate_is_done(self._state, gate_id):
+            self._sync_sideband_gate_complete(gate_id)
+            return
         runner = self._gate_runners.get(gate_id)
         if runner is None:
             raise RuntimeError(f"No runner registered for {gate_id}")
         self._state.mark_gate_running(gate_id)
         runner()
-        if self._state.snapshot_model().gates[gate_id].status != GateStatus.FAILED:
-            if not self._state.gate_complete(gate_id):
-                self._state.mark_gate_complete(gate_id)
+        if self._state.try_snapshot(timeout=0.5) is None:
+            if gate_is_done(self._state, gate_id):
+                self._sync_sideband_gate_complete(gate_id)
+                return
+        snap_dict = self._state.try_snapshot(timeout=2.0)
+        if snap_dict is None:
+            if gate_is_done(self._state, gate_id):
+                self._sync_sideband_gate_complete(gate_id)
+            return
+        gate_status = str(
+            (snap_dict.get("gates") or {}).get(gate_id, {}).get("status") or ""
+        )
+        if gate_status.lower() == GateStatus.FAILED.value:
+            return
+        if not gate_is_done(self._state, gate_id):
+            if not self._state._lock.acquire(timeout=2.0):
+                return
+            try:
+                if self._state._snapshot.gates[gate_id].status != GateStatus.FAILED:
+                    self._state.mark_gate_complete(gate_id)
+            finally:
+                self._state._lock.release()
+        else:
+            self._sync_sideband_gate_complete(gate_id)
+
+    def _sync_sideband_gate_complete(self, gate_id: GateId) -> None:
+        """Persist sideband completion into SystemState when the lock is available."""
+        from system.boot.gate_sideband import gate_is_done
+
+        if not gate_is_done(self._state, gate_id):
+            return
+        if self._state.try_gate_complete(gate_id, timeout=0.0):
+            return
+        if not self._state._lock.acquire(timeout=2.0):
+            return
+        try:
+            if self._state._snapshot.gates[gate_id].status != GateStatus.COMPLETE:
+                self._state.mark_gate_complete(gate_id, detail="sideband_sync")
+        finally:
+            self._state._lock.release()
+
+    def sync_all_sideband_gates(self) -> None:
+        """Persist any lock-free sideband completions into SystemState."""
+        for gate_id in GATE_IDS:
+            self._sync_sideband_gate_complete(gate_id)
 
     def _register_skeleton_runners(self) -> None:
         """Test-only placeholders when gates are registered manually."""
@@ -178,20 +229,30 @@ async def boot_lifespan(app: Any) -> AsyncIterator[dict[str, Any]]:
     from system.boot.boot_loop_holder import set_boot_loop
 
     set_boot_loop(loop)
-    await asyncio.to_thread(mount_deferred_routers, app, loop)
-    if hasattr(app.state, "_mount_done"):
-        app.state._mount_done.set()
+
+    async def _mount_deferred_background() -> None:
+        await asyncio.to_thread(mount_deferred_routers, app, loop)
+        if hasattr(app.state, "_mount_done"):
+            app.state._mount_done.set()
+
+    # Never block the event loop on heavy router imports before bootstrap /health
+    # can answer launcher G5 probes (<5s after bind).
+    mount_task = asyncio.create_task(
+        _mount_deferred_background(),
+        name="boot-deferred-mount",
+    )
 
     from system.boot.coordinator_factory import create_boot_coordinator
 
     preflight_ctx = getattr(app.state, "boot_context", None)
     coordinator = create_boot_coordinator(context=preflight_ctx)
+    app.state.boot_coordinator = coordinator
+    app.state.system_state = coordinator.state
+    app.state.boot_context = coordinator.context
 
-    if not coordinator.state.gate_complete("G1"):
-        try:
-            coordinator.ensure_g1_complete()
-        except Gate1FatalError:
-            logger.exception("BootCoordinator: Gate 1 failed during lifespan")
+    from system.boot.gate_watchdog import start_gate_progress_watchdog
+
+    start_gate_progress_watchdog(coordinator)
 
     from system.boot.non_blocking_bootstrap import (
         non_blocking_boot_enabled,
@@ -211,14 +272,17 @@ async def boot_lifespan(app: Any) -> AsyncIterator[dict[str, Any]]:
             name="boot-coordinator-pipeline",
         )
     else:
+        from system.boot.gate_sideband import gate_is_done
+
+        if not gate_is_done(coordinator.state, "G1"):
+            try:
+                coordinator.ensure_g1_complete()
+            except Gate1FatalError:
+                logger.exception("BootCoordinator: Gate 1 failed during lifespan")
         pipeline_task = asyncio.create_task(
             asyncio.to_thread(coordinator.run_pipeline),
             name="boot-coordinator-pipeline",
         )
-
-    app.state.boot_coordinator = coordinator
-    app.state.system_state = coordinator.state
-    app.state.boot_context = coordinator.context
 
     try:
         yield {
@@ -227,6 +291,11 @@ async def boot_lifespan(app: Any) -> AsyncIterator[dict[str, Any]]:
             "boot_context": coordinator.context,
         }
     finally:
+        if not mount_task.done():
+            try:
+                await mount_task
+            except Exception:
+                logger.exception("BootCoordinator: deferred mount failed during shutdown")
         if not pipeline_task.done():
             pipeline_task.cancel()
             try:
