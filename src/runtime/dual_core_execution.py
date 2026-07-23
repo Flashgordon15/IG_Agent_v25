@@ -2593,11 +2593,14 @@ def _dispatch_piercing_zone_order(epic: str, z_score: float, cfg: Any | None) ->
     try:
         from system.strategy_quality_gate import evaluate_entry_hour_gate
 
-        hour_ok, hour_reason, _hour_meta = evaluate_entry_hour_gate(epic, cfg=cfg)
+        hour_ok, hour_reason, _hour_meta = evaluate_entry_hour_gate(
+            epic, cfg=cfg, account_id=None
+        )
         if not hour_ok:
             set_last_gate_suppression_reason(hour_reason)
             log_engine(
-                f"ParallelStrategySweep: hour gate blocked epic={epic} reason={hour_reason}"
+                f"ParallelStrategySweep: ENTRY_HOUR_BLOCKED epic={epic} "
+                f"reason={hour_reason}"
             )
             return
     except Exception:
@@ -3635,6 +3638,25 @@ def try_instant_predictive_micro_scalp(
             "reason": "micro_scalp_instant_disabled",
             "trigger": {},
         }
+
+    try:
+        from system.strategy_quality_gate import evaluate_entry_hour_gate
+
+        hour_ok, hour_reason, _hour_meta = evaluate_entry_hour_gate(
+            key, cfg=cfg, account_id=None
+        )
+        if not hour_ok:
+            set_last_gate_suppression_reason(hour_reason)
+            log_engine(
+                f"InstantScalp: ENTRY_HOUR_BLOCKED epic={key} reason={hour_reason}"
+            )
+            return {
+                "dispatched": False,
+                "reason": hour_reason,
+                "trigger": {},
+            }
+    except Exception:
+        pass
 
     # Absolute front of pipeline — kill before trigger/order/network work.
     try:

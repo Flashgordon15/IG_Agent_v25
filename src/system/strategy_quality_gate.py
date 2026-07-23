@@ -377,16 +377,32 @@ def evaluate_entry_hour_gate(
     cfg: Any | None = None,
     confidence: float | None = None,
     now: datetime | None = None,
+    account_id: str | None = None,
 ) -> tuple[bool, str, dict[str, Any]]:
-    """Soft-block or size-cut DOW entries in historically bad London hours.
+    """Liquidity / session-hour filter for DOW entries (config-driven).
 
-    Config-driven (``entry_hour_gate``). Does **not** reintroduce night blackout —
-    night matrix / overnight slots remain allowed. Prefer-hours are advisory.
+    Modes (``entry_hour_gate``):
+    - ``prime_hours`` / ``allow_hours`` / ``prefer_hours`` — high-quality windows (always allow).
+    - ``avoid_hours`` — worst chop buckets; soft-block (or size-cut) unless strong-signal bypass.
+    - Outside prime (incl. overnight) — **not** a night blackout: allow, but when
+      ``confidence`` is supplied require ``outside_prime_min_confidence`` (higher ML bar).
+
+    Applies to CFD + SB when ``apply_accounts`` lists both (default). Does **not**
+    reintroduce weekday 20:00–06:00 blackout.
     """
     block = _entry_hour_block(cfg)
     meta: dict[str, Any] = {"enabled": bool(block.get("enabled", False))}
     if not block.get("enabled"):
         return True, "entry_hour_gate off", meta
+
+    apply_accts = {
+        str(a).strip().upper()
+        for a in (block.get("apply_accounts") or [])
+        if str(a).strip()
+    }
+    acct = str(account_id or "").strip().upper()
+    if apply_accts and acct and acct not in apply_accts:
+        return True, "account not in hour gate", meta
 
     epics = block.get("epics") or ["IX.D.DOW.IFM.IP"]
     epic_s = str(epic or "").strip()
@@ -402,37 +418,63 @@ def evaluate_entry_hour_gate(
         return True, "entry_hour_gate tz error", meta
 
     avoid = {int(h) for h in (block.get("avoid_hours") or [])}
-    prefer = {int(h) for h in (block.get("prefer_hours") or [])}
+    # Productive allowlist — prefer_hours kept as alias for backward compat.
+    prime = {
+        int(h)
+        for h in (
+            block.get("prime_hours")
+            or block.get("allow_hours")
+            or block.get("prefer_hours")
+            or []
+        )
+    }
     mode = str(block.get("mode") or "soft_block").lower()
     bypass = float(block.get("strong_signal_bypass_confidence") or 0.72)
     size_cut = float(block.get("size_cut_factor") or 0.5)
+    outside_min = float(block.get("outside_prime_min_confidence") or 0.0)
     meta.update(
         {
             "hour": hour,
             "avoid_hours": sorted(avoid),
-            "prefer_hours": sorted(prefer),
+            "prime_hours": sorted(prime),
+            "prefer_hours": sorted(prime),
             "mode": mode,
             "size_cut_factor": size_cut,
+            "outside_prime_min_confidence": outside_min,
+            "account_id": acct or None,
         }
     )
 
-    if hour in prefer:
-        return True, f"prefer_hour_{hour}", meta
-
-    if hour not in avoid:
-        return True, f"hour_{hour}_ok", meta
-
     conf = float(confidence) if confidence is not None else None
-    if conf is not None and conf >= bypass:
-        meta["bypassed"] = True
-        return True, f"avoid_hour_{hour}_strong_signal_bypass conf={conf:.2f}", meta
 
-    if mode == "size_cut":
-        meta["size_cut"] = True
-        # Soft pass — callers apply size_cut_factor via clamp helper.
-        return True, f"avoid_hour_{hour}_size_cut", meta
+    if hour in prime:
+        return True, f"prime_hour_{hour}", meta
 
-    return False, f"avoid_hour_{hour}_soft_block", meta
+    if hour in avoid:
+        if conf is not None and conf >= bypass:
+            meta["bypassed"] = True
+            return True, f"avoid_hour_{hour}_strong_signal_bypass conf={conf:.2f}", meta
+        if mode == "size_cut":
+            meta["size_cut"] = True
+            return True, f"avoid_hour_{hour}_size_cut", meta
+        return False, f"avoid_hour_{hour}_soft_block", meta
+
+    # Outside prime (overnight / off-peak): soften via higher ML bar when conf known.
+    if prime and outside_min > 0.0 and conf is not None and conf < outside_min:
+        meta["outside_prime"] = True
+        return (
+            False,
+            f"outside_prime_hour_{hour}_ml_gate conf={conf:.2f}<{outside_min:.2f}",
+            meta,
+        )
+
+    if prime:
+        meta["outside_prime"] = True
+        if conf is not None:
+            return True, f"outside_prime_hour_{hour}_ok conf={conf:.2f}", meta
+        return True, f"outside_prime_hour_{hour}_ok", meta
+
+    return True, f"hour_{hour}_ok", meta
 
 
 def hour_gate_size_factor(

@@ -17,32 +17,35 @@ CFG = {
         "enabled": True,
         "timezone": "Europe/London",
         "epics": ["IX.D.DOW.IFM.IP"],
-        "avoid_hours": [16, 18],
+        "apply_accounts": ["Z6BAH3", "Z6BAH4"],
+        "prime_hours": [7, 8, 9, 13, 14, 15, 16, 17],
         "prefer_hours": [13, 17],
+        "avoid_hours": [18, 19],
         "mode": "soft_block",
-        "strong_signal_bypass_confidence": 0.72,
+        "outside_prime_min_confidence": 0.68,
+        "strong_signal_bypass_confidence": 0.75,
         "size_cut_factor": 0.5,
     }
 }
 
 
 def test_avoid_hour_soft_blocks():
-    now = datetime(2026, 7, 21, 16, 30, tzinfo=_LONDON)
+    now = datetime(2026, 7, 21, 18, 30, tzinfo=_LONDON)
     ok, reason, meta = evaluate_entry_hour_gate(
         "IX.D.DOW.IFM.IP", cfg=CFG, now=now
     )
     assert ok is False
-    assert "avoid_hour_16" in reason
-    assert meta["hour"] == 16
+    assert "avoid_hour_18" in reason
+    assert meta["hour"] == 18
 
 
-def test_prefer_hour_allows():
+def test_prime_hour_allows():
     now = datetime(2026, 7, 21, 13, 15, tzinfo=_LONDON)
     ok, reason, _meta = evaluate_entry_hour_gate(
         "IX.D.DOW.IFM.IP", cfg=CFG, now=now
     )
     assert ok is True
-    assert "prefer_hour_13" in reason
+    assert "prime_hour_13" in reason
 
 
 def test_strong_signal_bypass():
@@ -62,7 +65,7 @@ def test_size_cut_mode():
             "mode": "size_cut",
         }
     }
-    now = datetime(2026, 7, 21, 16, 0, tzinfo=_LONDON)
+    now = datetime(2026, 7, 21, 18, 0, tzinfo=_LONDON)
     ok, reason, meta = evaluate_entry_hour_gate(
         "IX.D.DOW.IFM.IP", cfg=cfg, now=now
     )
@@ -72,21 +75,47 @@ def test_size_cut_mode():
 
 
 def test_other_epic_unaffected():
-    now = datetime(2026, 7, 21, 16, 0, tzinfo=_LONDON)
+    now = datetime(2026, 7, 21, 18, 0, tzinfo=_LONDON)
     ok, _reason, _meta = evaluate_entry_hour_gate(
         "IX.D.FTSE.IFM.IP", cfg=CFG, now=now
     )
     assert ok is True
 
 
-def test_overnight_not_blocked():
-    """Night matrix must remain — 22:00 is not in avoid_hours."""
+def test_overnight_allowed_without_confidence():
+    """Night matrix must remain — no conf ⇒ outside-prime soft allow."""
     now = datetime(2026, 7, 21, 22, 30, tzinfo=_LONDON)
-    ok, reason, _meta = evaluate_entry_hour_gate(
+    ok, reason, meta = evaluate_entry_hour_gate(
         "IX.D.DOW.IFM.IP", cfg=CFG, now=now
     )
     assert ok is True
-    assert "hour_22_ok" in reason
+    assert "outside_prime_hour_22" in reason
+    assert meta.get("outside_prime") is True
+
+
+def test_outside_prime_requires_higher_ml():
+    now = datetime(2026, 7, 21, 22, 30, tzinfo=_LONDON)
+    ok, reason, _meta = evaluate_entry_hour_gate(
+        "IX.D.DOW.IFM.IP", cfg=CFG, confidence=0.55, now=now
+    )
+    assert ok is False
+    assert "outside_prime_hour_22_ml_gate" in reason
+
+    ok2, reason2, _ = evaluate_entry_hour_gate(
+        "IX.D.DOW.IFM.IP", cfg=CFG, confidence=0.70, now=now
+    )
+    assert ok2 is True
+    assert "outside_prime_hour_22_ok" in reason2
+
+
+def test_applies_to_both_accounts():
+    now = datetime(2026, 7, 21, 18, 0, tzinfo=_LONDON)
+    for acct in ("Z6BAH3", "Z6BAH4"):
+        ok, reason, _ = evaluate_entry_hour_gate(
+            "IX.D.DOW.IFM.IP", cfg=CFG, now=now, account_id=acct
+        )
+        assert ok is False, acct
+        assert "avoid_hour_18" in reason
 
 
 def test_entry_rate_limit_cooldown():

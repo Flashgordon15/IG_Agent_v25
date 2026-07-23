@@ -489,6 +489,9 @@ def request_flatten(
                         break
                     except (TypeError, ValueError):
                         pass
+            # Leave engine_origin empty so lane/env resolves MACRO_SENTINEL /
+            # QUANT_SNIPER — do not overwrite with close-source tags like
+            # "dynamic_limit" (breaks soak style/lane inference).
             record_trade_close(
                 deal_id=did,
                 direction=direction_u,
@@ -497,7 +500,8 @@ def request_flatten(
                 realized_pnl_gbp=float(profit),
                 account_id=str(getattr(rest, "account_id", "") or ""),
                 product_type="",
-                engine_origin=str(source or "exit_gate"),
+                engine_origin="",
+                exit_reason=f"{source}:{reason}"[:160] if reason else str(source or ""),
             )
             log_engine(
                 f"ExitGate: journal recorded deal={did[:12]} pnl={float(profit):.2f}"

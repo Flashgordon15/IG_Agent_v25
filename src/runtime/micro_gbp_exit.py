@@ -477,6 +477,19 @@ def _evaluate_track(track: GbpExitTrack, pnl_gbp: float) -> None:
                 )
             track = live
 
+    from execution.tiered_profit_banks import tiered_bank_reason
+    from runtime.long_trade_runner import is_long_runner_active, sb_prefer_long_hold
+
+    long_runner = is_long_runner_active(
+        armed_at=track.armed_at,
+        peak_profit_gbp=track.peak_profit_gbp,
+        trail_trigger_gbp=track.trail_trigger_gbp,
+        cfg=cfg,
+    )
+    # SB / MACRO_SENTINEL: do not scratch with CFD scalp banks before runner age.
+    sb_long = sb_prefer_long_hold(cfg)
+    defer_scalp_banks = bool(long_runner or sb_long)
+
     # 4) Trailing profit exit — controlled giveback from peak.
     if track.peak_profit_gbp >= track.trail_trigger_gbp:
         floor = max(
@@ -484,26 +497,17 @@ def _evaluate_track(track: GbpExitTrack, pnl_gbp: float) -> None:
             _update_trail_floor(track, track.peak_profit_gbp, cfg=cfg),
         )
         if pnl_gbp <= floor:
+            trail_tag = "long_runner_profit_trail" if long_runner else "profit_trail"
             _flatten(
                 track,
                 reason=(
-                    f"profit_trail pnl={pnl_gbp:.2f} floor={floor:.2f} "
+                    f"{trail_tag} pnl={pnl_gbp:.2f} floor={floor:.2f} "
                     f"peak={track.peak_profit_gbp:.2f}"
                 ),
                 pnl_gbp=pnl_gbp,
+                exit_meta={"runner_extended": bool(long_runner)},
             )
             return
-
-    from execution.tiered_profit_banks import tiered_bank_reason
-    from runtime.long_trade_runner import is_long_runner_active
-
-    # Once long-trade mode engages, skip scalp-sized tier banks — trail/4R owns exit.
-    long_runner = is_long_runner_active(
-        armed_at=track.armed_at,
-        peak_profit_gbp=track.peak_profit_gbp,
-        trail_trigger_gbp=track.trail_trigger_gbp,
-        cfg=cfg,
-    )
 
     pct_decision = None
     try:
@@ -522,7 +526,7 @@ def _evaluate_track(track: GbpExitTrack, pnl_gbp: float) -> None:
                 cfg=cfg,
             )
             if pct_decision is not None:
-                if pct_decision.runner_extended or long_runner:
+                if pct_decision.runner_extended or defer_scalp_banks:
                     return
                 _flatten(
                     track,
@@ -539,7 +543,7 @@ def _evaluate_track(track: GbpExitTrack, pnl_gbp: float) -> None:
     except Exception:
         pass
 
-    if not long_runner:
+    if not defer_scalp_banks:
         tier_reason = tiered_bank_reason(
             peak=track.peak_profit_gbp,
             pnl=pnl_gbp,
@@ -551,7 +555,8 @@ def _evaluate_track(track: GbpExitTrack, pnl_gbp: float) -> None:
             return
 
     # 5) Quick win bank — optional; disabled when let_winners_run (trail handles exits).
-    quick_win_enabled = True
+    # SB long-prefer lane skips this so positions can age into long_trade_runner.
+    quick_win_enabled = not sb_long
     try:
         from system.config_loader import get_config
 
@@ -562,6 +567,7 @@ def _evaluate_track(track: GbpExitTrack, pnl_gbp: float) -> None:
         pass
     if (
         quick_win_enabled
+        and not long_runner
         and track.peak_profit_gbp >= track.min_bank_win_gbp
         and track.peak_profit_gbp < track.trail_trigger_gbp
         and pnl_gbp <= track.peak_profit_gbp * 0.50
@@ -580,10 +586,12 @@ def _evaluate_track(track: GbpExitTrack, pnl_gbp: float) -> None:
     # 6) Hard target cap — extended when long-runner is active.
     target = _effective_target(track, cfg)
     if pnl_gbp >= target:
+        tag = "long_runner_target_profit" if long_runner else "target_profit"
         _flatten(
             track,
-            reason=f"target_profit pnl={pnl_gbp:.2f} tgt={target:.2f}",
+            reason=f"{tag} pnl={pnl_gbp:.2f} tgt={target:.2f}",
             pnl_gbp=pnl_gbp,
+            exit_meta={"runner_extended": bool(long_runner)},
         )
 
 

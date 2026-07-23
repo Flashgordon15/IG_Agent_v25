@@ -362,7 +362,15 @@
     "widened_giveback_ratio": 0.4,
     "relaxed_lock_ratio": 0.65,
     "skip_max_age_on_profit": true,
-    "_note": "After 3m with peak>=trail_trigger_gbp (2.5): target 4R, 40% giveback, 65% lock — longer trades coexist with gated scalp; hard-cap still 1 open/account"
+    "sb_prefer_long_hold": true,
+    "skip_scalp_banks_for_sb": true,
+    "sb_accounts": [
+      "Z6BAH3"
+    ],
+    "sb_engine_origins": [
+      "MACRO_SENTINEL"
+    ],
+    "_note": "After 3m with peak>=trail_trigger_gbp (2.5): target 4R, 40% giveback, 65% lock. SB/MACRO_SENTINEL skips scalp tier/quick_win banks so positions can age into long-runner; CFD sniper keeps scalp banks. Hard-cap still per-account."
   },
   "broker_upl_hard_floor": {
     "enabled": true,
@@ -378,18 +386,33 @@
     "epics": [
       "IX.D.DOW.IFM.IP"
     ],
-    "avoid_hours": [
-      18
+    "apply_accounts": [
+      "Z6BAH3",
+      "Z6BAH4"
+    ],
+    "prime_hours": [
+      7,
+      8,
+      9,
+      13,
+      14,
+      15,
+      16,
+      17
     ],
     "prefer_hours": [
       13,
       17
     ],
+    "avoid_hours": [
+      18,
+      19
+    ],
     "mode": "soft_block",
-    "strong_signal_bypass_confidence": 0.72,
+    "outside_prime_min_confidence": 0.68,
+    "strong_signal_bypass_confidence": 0.75,
     "size_cut_factor": 0.5,
-    "_note": "Soft-block DOW at historically weak London hours 16:00/18:00. Prefer 13:00/17:00. No night blackout \u2014 night matrix stays.",
-    "_soak_note": "Temporarily dropped hour-16 soft_block for DELETE-fix soak; hour-18 remains. Revisit after 5-success milestone."
+    "_note": "DOW liquidity filter (BST/Europe/London): prime allowlist for productive hours; soft-block late-evening chop 18-19; overnight allowed with higher ML bar when confidence known. CFD+SB. No night blackout — night matrix stays."
   },
   "entry_rate_limit": {
     "enabled": true,

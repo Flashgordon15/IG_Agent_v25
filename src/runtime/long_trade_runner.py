@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from typing import Any
 
@@ -22,6 +23,60 @@ def _runner_block(cfg: Any | None) -> dict[str, Any]:
 
 def runner_enabled(cfg: Any | None = None) -> bool:
     return bool(_runner_block(cfg).get("enabled", True))
+
+
+def sb_prefer_long_hold(
+    cfg: Any | None = None,
+    *,
+    account_id: str | None = None,
+    product_type: str | None = None,
+    engine_origin: str | None = None,
+) -> bool:
+    """True when this lane should skip scalp scratch banks and age into long-runner.
+
+    CFD sniper keeps tiered/quick-win banks. SB / MACRO_SENTINEL (Z6BAH3) must
+    be able to hold past ~3m so 4R / 40% giveback can engage — CFD chop gates
+    must not short-circuit this path.
+    """
+    block = _runner_block(cfg)
+    if not block.get("enabled", True):
+        return False
+    if not bool(block.get("sb_prefer_long_hold", True)):
+        return False
+    if not bool(block.get("skip_scalp_banks_for_sb", True)):
+        return False
+
+    acct = str(
+        account_id
+        or os.environ.get("IG_ACCOUNT_ID")
+        or ""
+    ).strip().upper()
+    origin = str(
+        engine_origin
+        or os.environ.get("IG_ENGINE_ORIGIN")
+        or ""
+    ).strip().upper()
+    product = str(product_type or "").strip().upper()
+
+    sb_accounts = {
+        str(a).strip().upper()
+        for a in (block.get("sb_accounts") or ["Z6BAH3"])
+        if str(a).strip()
+    }
+    sb_origins = {
+        str(o).strip().upper()
+        for o in (block.get("sb_engine_origins") or ["MACRO_SENTINEL"])
+        if str(o).strip()
+    }
+
+    if acct and acct in sb_accounts:
+        return True
+    if origin and origin in sb_origins:
+        return True
+    if product in ("SPREADBET", "SPREAD_BET"):
+        return True
+    # Dual-port SB process with env unset in unit tests — fail closed (not SB).
+    return False
 
 
 def position_age_sec(armed_at: float) -> float:

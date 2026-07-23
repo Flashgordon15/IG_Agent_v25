@@ -35,6 +35,8 @@ _HEADER = [
     "AccountID",
     "ProductType",
     "EngineOrigin",
+    "ExitReason",
+    "HoldSec",
 ]
 _QUEUE_MAX = 2048
 
@@ -59,6 +61,8 @@ class _JournalEvent:
     account_id: str = ""
     product_type: str = ""
     engine_origin: str = ""
+    exit_reason: str = ""
+    hold_sec: float | None = None
 
 
 def reset_performance_journal_for_tests() -> None:
@@ -113,6 +117,8 @@ def ensure_benchmark_offset(*, path: Path | None = None) -> Path:
                 "",
                 "",
                 "0.0",
+                "",
+                "",
                 "",
                 "",
                 "",
@@ -232,6 +238,8 @@ def _append_row(ev: _JournalEvent) -> None:
         meta["account_id"],
         meta["product_type"],
         meta["engine_origin"],
+        str(ev.exit_reason or ""),
+        _fmt(None if ev.hold_sec is None else round(float(ev.hold_sec), 1)),
     ]
     with _lock:
         with path.open("a", encoding="utf-8", newline="") as fh:
@@ -318,6 +326,8 @@ def record_trade_close(
     product_type: str | None = None,
     engine_origin: str | None = None,
     engine_id: str | None = None,
+    exit_reason: str | None = None,
+    hold_sec: float | None = None,
 ) -> None:
     """Hot-path safe — enqueue one journal line for a closed deal."""
     meta = _resolve_event_metadata(
@@ -338,6 +348,8 @@ def record_trade_close(
             account_id=meta["account_id"],
             product_type=meta["product_type"],
             engine_origin=meta["engine_origin"],
+            exit_reason=str(exit_reason or ""),
+            hold_sec=float(hold_sec) if hold_sec is not None else None,
         )
     )
     try:
