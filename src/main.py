@@ -1,8 +1,9 @@
 """
-IG Agent v29 entry point — launchd / manual start.
+IG Trading Desk v31.1 entry point — launchd / Trading Desk / manual start.
 
 Preflight: emergency lock, config validation, demo guard, instance lock, credentials.
 Runtime: trading loop (background) + FastAPI on profile API port (foreground).
+Canonical desktop: Trading_Desk.app → scripts/trading_desk_silent.sh → Quantum Terminal :3000.
 """
 
 from __future__ import annotations
@@ -41,6 +42,28 @@ _SINGLETON_BIND_RETRIES = 5
 _SINGLETON_BIND_RETRY_SEC = 2.0
 
 
+_v32_dual_port_mode_cached: bool | None = None
+
+
+def _skip_v32_singleton_lock() -> bool:
+    """True when v32 dual-port CLI triplet is active — twin engines must not collide."""
+    global _v32_dual_port_mode_cached
+    if _v32_dual_port_mode_cached is not None:
+        return _v32_dual_port_mode_cached
+    if os.environ.get("IG_V32_DUAL_PORT", "").strip() == "1":
+        _v32_dual_port_mode_cached = True
+        return True
+    try:
+        from system.engine_cli import parse_engine_cli
+
+        dual = parse_engine_cli().dual_port_mode
+        _v32_dual_port_mode_cached = dual
+        return dual
+    except Exception:
+        _v32_dual_port_mode_cached = False
+        return False
+
+
 def enforce_absolute_socket_singleton() -> None:
     """
     Fail closed when a live twin holds the singleton port.
@@ -51,6 +74,8 @@ def enforce_absolute_socket_singleton() -> None:
     unexplained "agent process died".
     """
     global _singleton_socket, _singleton_socket_bound
+    if _skip_v32_singleton_lock():
+        return
     if _singleton_socket_bound:
         return
     last_err: OSError | None = None
@@ -231,6 +256,23 @@ def _log_engine(message: str) -> None:
     from system.engine_log import log_engine
 
     log_engine(message)
+
+
+def _uvicorn_config_with_reuseport(
+    app: Any,
+    *,
+    host: str,
+    port: int,
+    log_level: str = "info",
+) -> tuple[Any, socket.socket | None]:
+    from system.socket_bind import build_uvicorn_config
+
+    return build_uvicorn_config(
+        app,
+        host=host,
+        port=int(port),
+        log_level=log_level,
+    )
 
 
 def _parse_harness_ticks(argv: list[str] | None = None) -> int | None:
@@ -564,6 +606,11 @@ def _pre_startup_kill_orphan_agents(*, wait_sec: float = 1.0) -> list[int]:
     if os.environ.get("IG_AGENT_SKIP_ORPHAN_KILL", "").strip() in ("1", "true", "yes"):
         _log_engine("pre-startup: orphan kill skipped (IG_AGENT_SKIP_ORPHAN_KILL=1)")
         return []
+    if _skip_v32_singleton_lock():
+        _log_engine(
+            "pre-startup: orphan kill skipped (v32 dual-port — sibling engine protected)"
+        )
+        return []
     try:
         from simulation.testbed_daemon import zombie_protection_enabled
 
@@ -647,14 +694,18 @@ def _pre_startup_cleanup() -> None:
     os.environ["IG_API_PORT"] = str(port)
     lock_target = RuntimeIdentity.get_lock_path()
 
-    if not _is_test_harness_mode() and not _is_daemon_cycle_mode():
+    if (
+        not _is_test_harness_mode()
+        and not _is_daemon_cycle_mode()
+        and not _skip_v32_singleton_lock()
+    ):
         _pre_startup_kill_orphan_agents()
 
     if os.environ.get("IG_AGENT_CLEAR_PYCACHE", "").strip().lower() in (
         "1",
         "true",
         "yes",
-    ):
+    ) and not _skip_v32_singleton_lock():
         _clear_pycache()
 
     if os.environ.get("TESTBED_ALLOW_ZOMBIE", "").strip().lower() not in (
@@ -668,6 +719,18 @@ def _pre_startup_cleanup() -> None:
             from system.shutdown_cleanup import clear_manual_stop
 
             clear_manual_stop()
+        if parallel_track not in ("live", "shadow") and not orchestrator_child:
+            try:
+                from system.startup_hold_clear import clear_stale_entry_holds_if_flat
+
+                port = int(os.environ.get("IG_API_PORT", os.environ.get("PORT", "8080")))
+                result = clear_stale_entry_holds_if_flat(port=port, reason="main_pre_startup")
+                if result.get("cleared") or result.get("deploy_hold_cleared"):
+                    _log_engine(f"pre-startup: stale entry holds cleared {result}")
+            except Exception as exc:
+                _log_engine(
+                    f"pre-startup: startup_hold_clear skipped: {type(exc).__name__}: {exc}"
+                )
     _init_telegram_from_config()
 
     if not _is_test_harness_mode():
@@ -679,17 +742,18 @@ def _pre_startup_cleanup() -> None:
             _log_engine(f"pre-startup: supervision sanitize skipped: {type(exc).__name__}: {exc}")
 
     my_pid = os.getpid()
-    holder = read_lock_holder(lock_target)
-    if holder is not None and holder != my_pid and pid_alive(holder):
-        _log_engine(
-            f"pre-startup FAIL-CLOSED: live sibling pid={holder} holds {lock_target.name}"
-        )
-        sys.exit(15)
+    if not _skip_v32_singleton_lock():
+        holder = read_lock_holder(lock_target)
+        if holder is not None and holder != my_pid and pid_alive(holder):
+            _log_engine(
+                f"pre-startup FAIL-CLOSED: live sibling pid={holder} holds {lock_target.name}"
+            )
+            sys.exit(15)
 
-    ok, msg = acquire_instance_lock()
-    if not ok:
-        _log_engine(f"pre-startup FAIL-CLOSED: {msg}")
-        sys.exit(15)
+        ok, msg = acquire_instance_lock()
+        if not ok:
+            _log_engine(f"pre-startup FAIL-CLOSED: {msg}")
+            sys.exit(15)
 
     try:
         from system.overnight_supervision import launchd_watchdog_active
@@ -759,6 +823,13 @@ def _ensure_watchdog_running() -> None:
     """Start scripts/watchdog.sh when absent — skip if launchd already owns supervision."""
     from system.paths import logs_dir, project_root
 
+    if _skip_v32_singleton_lock():
+        _log_engine(
+            "startup: v32 dual-port — skipping standalone watchdog.sh "
+            "(v32_runtime_start / com.igagent.v32.dual owns supervision)"
+        )
+        return
+
     try:
         from system.overnight_supervision import launchd_watchdog_active
 
@@ -824,9 +895,23 @@ def _force_cleanup_port(port: int | None = None) -> None:
     reclaim_api_port(port if port is not None else _api_port())
 
 
+def _arm_boot_sot_fallback_circuit(reason: str = "main_preflight") -> None:
+    """Arm stale-cache SoT fallback — hydrate from broker_snapshot on network stall."""
+    try:
+        from runtime.boot_sot_fallback import arm_boot_fallback_circuit
+        from runtime.desk_stability_harness import note_boot_started
+
+        note_boot_started()
+        arm_boot_fallback_circuit(reason=reason)
+        _log_engine(f"boot_sot_fallback: circuit armed ({reason})")
+    except Exception as e:
+        _log_engine(f"boot_sot_fallback: arm skipped: {type(e).__name__}: {e}")
+
+
 def run_preflight() -> int:
     """Steps 1–4. Returns exit code (0 = continue)."""
-    enforce_absolute_socket_singleton()
+    if not _skip_v32_singleton_lock():
+        enforce_absolute_socket_singleton()
     try:
         from system.env_loader import prepare_boot_env
         from system.node_profile import apply_node_profile_to_environ
@@ -835,6 +920,8 @@ def run_preflight() -> int:
         apply_node_profile_to_environ()
     except Exception as e:
         _log_engine(f"boot env prepare skipped: {type(e).__name__}: {e}")
+
+    _arm_boot_sot_fallback_circuit("main_preflight")
 
     api_port = _api_port()
     from system.boot.port_eviction import reclaim_and_wait
@@ -923,6 +1010,8 @@ def run_minimal_preflight() -> int:
         apply_node_profile_to_environ()
     except Exception as e:
         _log_engine(f"boot env prepare skipped: {type(e).__name__}: {e}")
+
+    _arm_boot_sot_fallback_circuit("main_minimal_preflight")
 
     api_port = _api_port()
     from system.boot.port_eviction import reclaim_and_wait
@@ -1030,6 +1119,7 @@ class AgentRuntime:
         self._shutting_down = False
         self._boot_context = boot_context
         self._uvicorn_server: Any | None = None
+        self._uvicorn_listen_socket: socket.socket | None = None
         self._boot_degraded = False
 
     def mark_boot_degraded(self, reason: str) -> None:
@@ -1125,9 +1215,10 @@ class AgentRuntime:
 
             import uvicorn
 
-            config = uvicorn.Config(
+            config, hold_sock = _uvicorn_config_with_reuseport(
                 app, host=_API_HOST, port=bind_port, log_level="warning"
             )
+            self._uvicorn_listen_socket = hold_sock
             server = uvicorn.Server(config)
             self._uvicorn_server = server
 
@@ -1224,9 +1315,10 @@ class AgentRuntime:
             _log_engine(
                 f"DAEMON-CYCLE: API binding :{bind_port} interval={interval_sec:.0f}s"
             )
-            config = uvicorn.Config(
+            config, hold_sock = _uvicorn_config_with_reuseport(
                 app, host=_API_HOST, port=bind_port, log_level="info"
             )
+            self._uvicorn_listen_socket = hold_sock
             server = uvicorn.Server(config)
             self._uvicorn_server = server
 
@@ -1420,7 +1512,10 @@ class AgentRuntime:
         _start_pre_bind_watchdog()
         bind_started = time.monotonic()
         _log_engine(f"immutable_boot: fast-bind API on :{bind_port}")
-        config = uvicorn.Config(app, host=_API_HOST, port=bind_port, log_level="info")
+        config, hold_sock = _uvicorn_config_with_reuseport(
+            app, host=_API_HOST, port=bind_port, log_level="info"
+        )
+        self._uvicorn_listen_socket = hold_sock
         server = uvicorn.Server(config)
         self._uvicorn_server = server
 
@@ -1457,7 +1552,8 @@ class AgentRuntime:
 
         schedule_post_bind_maintenance(
             boot_context=self._boot_context,
-            purge_bytecode=_defer_heavy_pre_bind_work(),
+            purge_bytecode=_defer_heavy_pre_bind_work()
+            and not _skip_v32_singleton_lock(),
             install_kernel=_defer_heavy_pre_bind_work(),
         )
         if _defer_heavy_pre_bind_work():
@@ -1532,9 +1628,10 @@ class AgentRuntime:
             bind_port = _api_port()
             _start_pre_bind_watchdog()
             _log_engine(f"API server: blocking legacy bind on port {bind_port}")
-            config = uvicorn.Config(
+            config, hold_sock = _uvicorn_config_with_reuseport(
                 app, host=_API_HOST, port=bind_port, log_level="info"
             )
+            self._uvicorn_listen_socket = hold_sock
             server = uvicorn.Server(config)
             self._uvicorn_server = server
             try:
@@ -1562,7 +1659,17 @@ def _install_signal_handlers(runtime: AgentRuntime) -> None:
 
 
 def main() -> None:
-    global _boot_milestone_t0
+    global _boot_milestone_t0, _v32_dual_port_mode_cached
+    from system.engine_cli import bootstrap_engine_cli, is_v32_dual_port_mode, reapply_engine_cli_env
+
+    _engine_cli = bootstrap_engine_cli()
+    _v32_dual_port_mode_cached = _engine_cli.dual_port_mode
+    try:
+        from system.core_affinity import pin_current_process_to_engine
+
+        pin_current_process_to_engine(_engine_cli.origin)
+    except Exception as exc:
+        _log_engine(f"core_affinity: bootstrap pin skipped ({type(exc).__name__})")
     os.environ.setdefault("IG_AGENT_IN_PROCESS", "1")
     # ~100 runtime threads contend for the GIL; at the default 5ms switch
     # interval a 100ms Yahoo HTTPS fetch stretched to 2-3s inside this process
@@ -1580,7 +1687,10 @@ def main() -> None:
     # Step 0 — evict stale port listeners + SHM before singleton lock or heavy boot
     from system.identity.process_orchestrator import os_surface_cleanse
 
-    os_surface_cleanse()
+    if not is_v32_dual_port_mode():
+        os_surface_cleanse()
+    else:
+        os_surface_cleanse(api_port=_engine_cli.port)
     _boot_milestone("os_surface_cleanse")
     # Step 1 — kernel singleton lock (SO_REUSEADDR for TIME_WAIT recovery)
     enforce_absolute_socket_singleton()
@@ -1679,6 +1789,8 @@ def main() -> None:
     )
     load_dotenv(override=_from_launcher)
     prepare_boot_env()
+    if _engine_cli.dual_port_mode:
+        reapply_engine_cli_env(_engine_cli)
     _force_launcher_non_blocking_boot()
     _boot_milestone("dotenv_prepared")
 
@@ -1765,7 +1877,7 @@ def main() -> None:
     if not _harness_entry and not _daemon_entry:
         if not _defer_pre_bind:
             _exchange_rollover_emergence_pause()
-            if not non_blocking_boot_enabled():
+            if not non_blocking_boot_enabled() and not _skip_v32_singleton_lock():
                 _purge_workspace_bytecode()
             else:
                 _log_engine("non_blocking_boot: bytecode purge deferred to post-bind")
@@ -1788,6 +1900,15 @@ def main() -> None:
         _pre_startup_cleanup()
 
     _boot_milestone("pre_runtime")
+
+    try:
+        from runtime.pid_registry import write_agent_pid
+
+        written = write_agent_pid()
+        if written:
+            _log_engine(f"pid_registry: agent.pid mirrored → {', '.join(written)}")
+    except Exception as exc:
+        _log_engine(f"pid_registry: write skipped ({type(exc).__name__})")
 
     boot_ctx = None
     if _desktop_fast_bind or non_blocking_boot_enabled() or _defer_pre_bind:

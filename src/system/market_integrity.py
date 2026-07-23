@@ -16,12 +16,81 @@ from typing import Any
 
 from system.engine_log import log_engine_intermittent
 
-# Hot-path budget — strategy pauses when hub quote age exceeds this (seconds).
+# Hot-path budget — true sub-second WS / Lightstreamer sniper arming.
 LIVE_QUOTE_MAX_AGE_SEC = 0.5
 LIVE_QUOTE_MAX_AGE_MS = LIVE_QUOTE_MAX_AGE_SEC * 1000.0
 
+# Yahoo / rest_poll (Mac Mini) — never tighter than poll cadence; never looser than this.
+REST_POLL_QUOTE_MAX_AGE_SEC = 45.0
+DEFAULT_REST_POLL_ENTRY_VETO_SEC = 10.0
+
 # Dashboard display — mark stream STALE after this when market is open.
 UI_STALE_AFTER_SEC = 2.0
+
+
+def streaming_transport_is_rest_poll(cfg: Any | None = None) -> bool:
+    """True when IG Lightstreamer is not the primary quote transport."""
+    try:
+        raw = None
+        if cfg is not None:
+            if isinstance(cfg, dict):
+                raw = cfg.get("streaming_transport")
+            else:
+                raw = getattr(cfg, "streaming_transport", None)
+                if raw is None and hasattr(cfg, "get"):
+                    raw = cfg.get("streaming_transport")
+        if raw is None:
+            from system.config_loader import get_config
+
+            c = get_config()
+            raw = c.get("streaming_transport") if hasattr(c, "get") else None
+            if raw is None:
+                data = getattr(c, "_data", None) or {}
+                if isinstance(data, dict):
+                    raw = data.get("streaming_transport")
+        mode = str(raw or "").strip().lower()
+        if mode in ("rest_poll", "rest", "yahoo", "poll"):
+            return True
+        # Reference pricing on Yahoo implies poll cadence (Mini default).
+        try:
+            from feeder.pricing_transport import reference_transport_is_yahoo
+
+            if reference_transport_is_yahoo(cfg):
+                return True
+        except Exception:
+            pass
+        return False
+    except Exception:
+        return False
+
+
+def effective_entry_quote_budget_sec(cfg: Any | None = None) -> float:
+    """Transport-aware entry / sniper quote-age budget.
+
+    Lightstreamer WS keeps the rigid 500ms ceiling. Yahoo/rest_poll uses
+    ``feed_quality.entry_veto_age_sec`` (config default 10s) so a healthy 2s
+    Yahoo poll can arm — previously ``min(configured, 0.5)`` made entries
+    permanently fail-closed on the Mini.
+    """
+    if not streaming_transport_is_rest_poll(cfg):
+        return float(LIVE_QUOTE_MAX_AGE_SEC)
+    configured = DEFAULT_REST_POLL_ENTRY_VETO_SEC
+    try:
+        fq = None
+        if cfg is not None:
+            fq = cfg.get("feed_quality") if hasattr(cfg, "get") else None
+            if fq is None and isinstance(cfg, dict):
+                fq = cfg.get("feed_quality")
+        if fq is None:
+            from system.config_loader import get_config
+
+            c = get_config()
+            fq = c.get("feed_quality") if hasattr(c, "get") else None
+        if isinstance(fq, dict) and fq.get("entry_veto_age_sec") is not None:
+            configured = float(fq.get("entry_veto_age_sec") or configured)
+    except Exception:
+        pass
+    return max(0.5, min(float(configured), float(REST_POLL_QUOTE_MAX_AGE_SEC)))
 
 _lock = threading.RLock()
 _last_open: dict[str, bool] = {}
@@ -313,7 +382,7 @@ def note_market_status(epic: str, open_now: bool) -> None:
 
 def should_publish_live_quote(epic: str, *, source: str = "") -> bool:
     """Ingestion gate — block synthetic/live republish when exchange is closed."""
-    if str(source or "").lower() in ("replay", "harness"):
+    if str(source or "").lower() in ("replay", "harness", "sandbox"):
         return True
     if os.environ.get("IG_TEST_HARNESS", "").strip() == "1":
         return True

@@ -22,6 +22,23 @@ def _reset_guard():
     reset_desktop_process_guard_for_tests()
 
 
+def test_resolve_window_bounds_fits_display():
+    from cockpit.desktop_app_shell import (
+        WINDOW_MIN_HEIGHT,
+        WINDOW_MIN_WIDTH,
+        _resolve_window_bounds,
+    )
+
+    width, height, min_size, should_maximize = _resolve_window_bounds()
+    assert width >= WINDOW_MIN_WIDTH
+    assert height >= WINDOW_MIN_HEIGHT
+    assert min_size[0] >= WINDOW_MIN_WIDTH
+    assert min_size[1] >= WINDOW_MIN_HEIGHT
+    assert width <= 3840
+    assert height <= 2160
+    assert isinstance(should_maximize, bool)
+
+
 def test_splash_html_nine_stage_checklist():
     from cockpit.desktop_splash_assets import LAUNCHER_STAGES, build_splash_html
 
@@ -36,6 +53,16 @@ def test_splash_html_nine_stage_checklist():
     assert "#F59E0B" in html
     for row in LAUNCHER_STAGES:
         assert row["id"] in html
+
+
+def test_splash_html_trading_desk_branding():
+    from cockpit.desktop_splash_assets import build_splash_html
+
+    html = build_splash_html(trading_desk=True)
+    assert "IG Trading Agent — Trading Desk" in html
+    assert "Iron Cage" not in html
+    assert "Trading Desk" in html
+    assert ":3000/desk" in html
 
 
 def test_launcher_stage_index_maps_nine_steps():
@@ -426,9 +453,11 @@ def test_boot_acceptance_tier_only_tcp_fallback():
 def test_run_gui_cold_start_port_audit_before_window():
     from cockpit import desktop_app_shell as shell
 
-    with patch.object(shell, "audit_and_purge_bound_ports", return_value={"purged_pids": [999]}) as mock_audit, patch(
-        "webview.create_window"
-    ), patch("webview.start"), patch.object(shell, "_spawn_launcher_supervisor"):
+    with patch.dict(os.environ, {"IG_TRADING_DESK_NATIVE": ""}, clear=False), patch.object(
+        shell, "audit_and_purge_bound_ports", return_value={"purged_pids": [999]}
+    ) as mock_audit, patch("webview.create_window"), patch("webview.start"), patch.object(
+        shell, "_spawn_launcher_supervisor"
+    ):
         shell.run_gui(launch_supervisor=True)
         mock_audit.assert_called_once()
 
@@ -455,30 +484,27 @@ def test_agent_gui_desktop_mode_exits_without_browser_launch():
     assert "open http" not in combined.lower()
 
 
-def test_install_igagent_app_launches_flight_deck_shell():
+def test_install_igagent_app_launches_trading_desk():
     root = Path(__file__).resolve().parents[1]
     script = root / "macos" / "install_igagent_app.sh"
     text = script.read_text(encoding="utf-8")
-    assert "desktop_flight_deck.sh" in text
-    assert "cockpit.desktop_app_shell" in text or "desktop_flight_deck.sh" in text
-    assert "CFBundleDisplayName" in text
-    assert "Iron Cage Flight Deck" in text
+    assert "trading_desk_silent.sh" in text
+    assert "IG Trading Desk" in text
+    assert "31.1" in text
 
 
-def test_setup_desktop_shortcut_targets_flight_deck():
+def test_setup_desktop_shortcut_targets_trading_desk():
     root = Path(__file__).resolve().parents[1]
     script = root / "macos" / "setup_desktop_shortcut.sh"
     text = script.read_text(encoding="utf-8")
-    assert "Iron Cage Flight Deck.app" in text
-    assert "install_igagent_app.sh" in text
+    assert "install_trading_desk_app.sh" in text
 
 
-def test_desktop_flight_deck_script_runs_port_audit():
+def test_desktop_flight_deck_script_routes_to_trading_desk():
     root = Path(__file__).resolve().parents[1]
     script = root / "macos" / "launcher" / "desktop_flight_deck.sh"
     text = script.read_text(encoding="utf-8")
-    assert "audit_and_purge_bound_ports" in text
-    assert "IG_DESKTOP_SHELL_ACTIVE=1" in text
+    assert "trading_desk_silent.sh" in text
 
 
 def test_cache_bust_cockpit_url_includes_monotonic_tokens():
@@ -575,7 +601,47 @@ def test_transition_to_cockpit_starts_clearance_monitor():
 
     assert shell._COCKPIT_EMBEDDED is True
     mock_win.load_html.assert_called_once()
+    mock_win.load_url.assert_not_called()
     mock_monitor.assert_called_once()
+
+
+def test_resolve_embed_cockpit_url_trading_desk_uses_3000():
+    from cockpit import desktop_app_shell as shell
+
+    with patch.dict(os.environ, {"IG_TRADING_DESK_NATIVE": "1"}, clear=False):
+        url = shell._resolve_embed_cockpit_url()
+    assert url.startswith("http://127.0.0.1:3000")
+
+
+def test_resolve_embed_cockpit_url_flight_deck_uses_8787():
+    from cockpit import desktop_app_shell as shell
+
+    with patch.dict(os.environ, {}, clear=True):
+        os.environ.pop("IG_TRADING_DESK_NATIVE", None)
+        url = shell._resolve_embed_cockpit_url()
+    assert url.startswith("http://127.0.0.1:8787")
+
+
+def test_transition_to_trading_desk_uses_load_url_not_cockpit_html():
+    """Quantum Terminal on :3000 must not inject cockpit-web v29 HTML."""
+    from cockpit import desktop_app_shell as shell
+
+    mock_win = MagicMock()
+    shell._WINDOW = mock_win
+    shell._COCKPIT_EMBEDDED = False
+    shell._CLEARANCE_MONITOR_STARTED = False
+
+    with patch.dict(os.environ, {"IG_TRADING_DESK_NATIVE": "1"}, clear=False), patch.object(
+        shell, "_read_cache_busted_cockpit_html", return_value="<html>flight deck</html>"
+    ) as mock_read, patch.object(shell, "_ensure_cockpit_clearance_monitor"), patch.object(
+        shell, "_evaluate"
+    ), patch.object(shell, "_append_terminal"), patch("cockpit.desktop_app_shell.threading.Thread"):
+        shell._transition_to_cockpit("http://127.0.0.1:3000/")
+
+    mock_read.assert_not_called()
+    mock_win.load_url.assert_called_once()
+    assert mock_win.load_url.call_args[0][0].startswith("http://127.0.0.1:3000/")
+    mock_win.load_html.assert_not_called()
 
 
 def test_launcher_desktop_mode_starts_web_server_not_browser():

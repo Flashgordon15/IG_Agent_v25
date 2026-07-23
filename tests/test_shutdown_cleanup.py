@@ -64,6 +64,7 @@ def test_kill_other_agent_processes_still_targets_other_pids(
 ) -> None:
     """Self is skipped but genuine orphan PIDs are still SIGTERM'd."""
     monkeypatch.delenv("IG_AGENT_PYTEST", raising=False)
+    monkeypatch.delenv("IG_V32_DUAL_PORT", raising=False)
 
     my_pid = os.getpid()
     orphan_pid = 99999
@@ -83,6 +84,7 @@ def test_kill_other_agent_processes_still_targets_other_pids(
         ),
         patch("system.shutdown_cleanup.os.kill", side_effect=track_kill),
         patch("system.shutdown_cleanup.log_engine"),
+        patch("system.shutdown_cleanup._dual_port_orphan_kill_skip", return_value=False),
     ):
         from system.shutdown_cleanup import kill_other_agent_processes
 
@@ -94,3 +96,45 @@ def test_kill_other_agent_processes_still_targets_other_pids(
     assert killed == [orphan_pid]
     assert (my_pid, signal.SIGTERM) not in kill_calls
     assert (orphan_pid, signal.SIGTERM) in kill_calls
+
+
+def test_kill_other_agent_processes_skips_v32_dual_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Twin-engine shutdown must not SIGTERM the sibling main.py."""
+    monkeypatch.delenv("IG_AGENT_PYTEST", raising=False)
+    monkeypatch.setenv("IG_V32_DUAL_PORT", "1")
+
+    orphan_pid = 88888
+    pgrep_result = MagicMock()
+    pgrep_result.stdout = f"{orphan_pid}\n"
+    pgrep_result.returncode = 0
+
+    kill_calls: list[tuple[int, int]] = []
+
+    def track_kill(pid: int, sig: int) -> None:
+        kill_calls.append((pid, sig))
+
+    with (
+        patch(
+            "system.shutdown_cleanup.subprocess.run",
+            return_value=pgrep_result,
+        ),
+        patch("system.shutdown_cleanup.os.kill", side_effect=track_kill),
+        patch("system.shutdown_cleanup.log_engine"),
+    ):
+        from system.shutdown_cleanup import kill_other_agent_processes
+
+        killed = kill_other_agent_processes(sigkill_survivors=True)
+
+    assert killed == []
+    assert kill_calls == []
+
+
+def test_dual_port_orphan_kill_skip_from_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("IG_V32_DUAL_PORT", "1")
+    from system.shutdown_cleanup import _dual_port_orphan_kill_skip
+
+    assert _dual_port_orphan_kill_skip() is True

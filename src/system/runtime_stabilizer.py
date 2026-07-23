@@ -103,7 +103,13 @@ def _inject_cycle_ticks(epics: list[str], count: int) -> int:
     for i in range(count):
         epic = epics[i % len(epics)]
         base = 100.0 + (i % 17) * 0.01
-        hub.publish(epic, bid=base, offer=base + 0.02, quote_time=time.time())
+        hub.publish(
+            epic,
+            bid=base,
+            offer=base + 0.02,
+            quote_time=time.time(),
+            source="synthetic",
+        )
         injected += 1
     return injected
 

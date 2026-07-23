@@ -17,6 +17,10 @@
 		<string>__IG_AGENT_ROOT__</string>
 		<key>PYTHONPATH</key>
 		<string>__IG_AGENT_ROOT__/src</string>
+		<key>APP_MODE</key>
+		<string>DEMO</string>
+		<key>IG_AGENT_CONFIG</key>
+		<string>config/config_v31_demo_throughput.json</string>
 	</dict>
 	<key>RunAtLoad</key>
 	<true/>

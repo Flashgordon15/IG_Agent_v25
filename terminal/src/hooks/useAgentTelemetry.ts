@@ -8,16 +8,20 @@ export type WsState = "connecting" | "live" | "stale" | "offline";
 
 const BACKOFF_MS = [500, 1000, 2000, 4000, 8000];
 
+/**
+ * WebSocket connection state for DATA FEED indicator.
+ * Payload is kept in a ref so high-frequency frames do not re-render the shell.
+ */
 export function useAgentTelemetry() {
-  const [payload, setPayload] = useState<TelemetryPayload | null>(null);
   const [wsState, setWsState] = useState<WsState>("connecting");
+  const payloadRef = useRef<TelemetryPayload | null>(null);
   const lastFrameRef = useRef(0);
   const attemptRef = useRef(0);
 
   const onFrame = useCallback((raw: TelemetryPayload) => {
+    payloadRef.current = raw;
     lastFrameRef.current = Date.now();
-    setPayload(raw);
-    setWsState("live");
+    setWsState((prev) => (prev === "live" ? prev : "live"));
   }, []);
 
   useEffect(() => {
@@ -28,7 +32,7 @@ export function useAgentTelemetry() {
 
     const connect = () => {
       if (cancelled) return;
-      setWsState("connecting");
+      setWsState((prev) => (prev === "connecting" ? prev : "connecting"));
       const url = `${agentWsBase()}/api/telemetry/stream`;
       try {
         ws = new WebSocket(url);
@@ -75,7 +79,7 @@ export function useAgentTelemetry() {
     staleTimer = setInterval(() => {
       const age = Date.now() - lastFrameRef.current;
       if (lastFrameRef.current > 0 && age > STREAM_STALE_MS) {
-        setWsState("stale");
+        setWsState((prev) => (prev === "stale" ? prev : "stale"));
       }
     }, 2000);
 
@@ -87,5 +91,5 @@ export function useAgentTelemetry() {
     };
   }, [onFrame]);
 
-  return { payload, wsState };
+  return { payloadRef, wsState };
 }

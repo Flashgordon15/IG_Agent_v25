@@ -70,10 +70,54 @@ def enrich_tick_runtime(tick: dict[str, Any]) -> dict[str, Any]:
             "calls_last_minute", 0
         )
         out.update(rest_poll_fields())
+        # Surface REST pressure for FE sniper-arm truth (CRITICAL → SUPPRESSED)
+        level = str(metrics.get("pressure_level") or "").upper()
+        if not level:
+            level = (
+                "CRITICAL"
+                if util >= 95
+                else "HIGH"
+                if util >= 80
+                else "ELEVATED"
+                if util >= 60
+                else "OK"
+            )
+        out["rest_pressure_level"] = level
+        out["rest_pressure"] = level in ("ELEVATED", "HIGH", "CRITICAL")
     except Exception:
         pass
+    try:
+        from runtime.trading_path_readiness import compute_trading_path_readiness
+
+        path = compute_trading_path_readiness()
+        out["trading_path_live"] = bool(path.get("trading_path_live"))
+        out["trading_path_badge"] = str(path.get("badge") or "")
+        out["entries_blocked"] = not bool(path.get("trading_path_live")) or bool(
+            out.get("rest_pressure")
+        )
+    except Exception:
+        out.setdefault("trading_path_live", False)
+        out.setdefault("entries_blocked", True)
     if "trading_healthy" not in out:
         out["trading_healthy"] = loops and not is_paused()
+    try:
+        from execution.risk_manager import get_volatility_bracket_snapshot
+
+        vb = get_volatility_bracket_snapshot()
+        if vb:
+            out.setdefault("institutional", {})["volatility_bracket"] = vb
+    except Exception:
+        pass
+    try:
+        from datetime import datetime, timezone, timedelta
+
+        _bst = timezone(timedelta(hours=1))
+        now_bst = datetime.now(_bst)
+        wd, hh = now_bst.weekday(), now_bst.hour
+        weekend = (wd == 4 and hh >= 22) or wd == 5 or (wd == 6 and hh < 21)
+        out["exchange_online"] = not weekend
+    except Exception:
+        out["exchange_online"] = True
     return out
 
 

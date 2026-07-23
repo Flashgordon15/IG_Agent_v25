@@ -73,6 +73,15 @@ def get_effective_overlay() -> dict[str, Any]:
 
 def ml_veto_settings() -> dict[str, Any]:
     block = load_v26_overlay().get("ml_veto") or {}
+    # Demo / v31 overlays can set ml_veto on the merged config.
+    try:
+        from system.config_loader import get_config
+
+        cfg_block = get_config().get("ml_veto")
+        if isinstance(cfg_block, dict) and cfg_block:
+            block = {**block, **cfg_block}
+    except Exception:
+        pass
     return {
         "enabled": bool(block.get("enabled", False)),
         "mode": str(block.get("mode") or "veto"),
@@ -80,9 +89,9 @@ def ml_veto_settings() -> dict[str, Any]:
         "min_probability_high_conf": float(
             block.get("min_probability_high_conf") or 0.55
         ),
-        "min_labelled_rows": int(block.get("min_labelled_rows") or 500),
+        "min_labelled_rows": int(block.get("min_labelled_rows") or 30),
         "per_epic": dict(block.get("per_epic") or {}),
-        "use_s4_models": bool(block.get("use_s4_models", True)),
+        "use_s4_models": bool(block.get("use_s4_models", False)),
     }
 
 

@@ -101,6 +101,13 @@ def ig_radio_silence_blocks_rest(method: str, path: str) -> bool:
         return False
     if _boot_hydration_rest_allowed():
         return False
+    try:
+        from system.agent_execution_mode import demo_sandbox_unblock_active
+
+        if demo_sandbox_unblock_active():
+            return False
+    except Exception:
+        pass
     with _MONITORING_LOCK:
         if not _MONITORING_MODE:
             return False
@@ -239,14 +246,49 @@ def dispatch_atomic_market_order(
 
     Applies integer lot floor before broker dispatch.
     """
+    from execution.maintenance_detachment import is_core_detached, suppress_order_dispatch
+    from execution.order_in_flight_mutex import (
+        hard_cap_blocks_entry,
+        mutex_veto_payload,
+        release_order_mutex,
+        try_acquire_order_mutex,
+    )
+
+    if is_core_detached():
+        return suppress_order_dispatch(
+            source="atomic_gateway",
+            epic=str(epic),
+            direction=str(direction),
+            action="entry",
+            shadow=False,
+            dispatch_size_int=int(size),
+        )
+
     hold = assert_execution_allowed()
     if hold:
         return {"status": "REJECTED", "rejection_reason": hold, "shadow": False}
+
+    account_id = str(getattr(client, "account_id", "") or "").strip().upper()
+    cap_blocked, cap_reason = hard_cap_blocks_entry(account_id, rest=client)
+    if cap_blocked:
+        log_engine(cap_reason)
+        return {
+            "status": "REJECTED",
+            "rejection_reason": cap_reason,
+            "shadow": False,
+            "account_hard_cap": True,
+        }
+
+    if not try_acquire_order_mutex(
+        account_id, epic=str(epic), source="atomic_gateway"
+    ):
+        return mutex_veto_payload(account_id=account_id, source="atomic_gateway")
 
     size_int, under_min = floor_contract_size(size)
     if under_min:
         reason = under_min_lot_detail(size_int)
         log_engine(reason)
+        release_order_mutex(account_id, reason="under_min_lot", filled=False)
         return {"status": "REJECTED", "rejection_reason": reason, "shadow": False}
 
     risk_block = validate_risk_envelope(
@@ -254,34 +296,70 @@ def dispatch_atomic_market_order(
     )
     if risk_block:
         log_engine(risk_block)
+        release_order_mutex(account_id, reason="risk_envelope", filled=False)
         return {"status": "REJECTED", "rejection_reason": risk_block, "shadow": False}
 
     stop = float(stop_distance)
     if trailing_distance_points is not None and float(trailing_distance_points) > 0:
         stop = max(stop, float(trailing_distance_points))
 
+    terminal = False
+    filled = False
     t0 = time.perf_counter()
-    with order_dispatch_lane():
-        result = client.place_market_order(
-            epic=epic,
-            direction=direction,
-            size=float(size_int),
-            stop_distance=stop,
-            limit_distance=limit_distance,
-            currency_code=currency_code,
-        )
-    elapsed_ms = (time.perf_counter() - t0) * 1000.0
-    if isinstance(result, dict):
-        result["gateway_latency_ms"] = round(elapsed_ms, 3)
-        result["dispatch_size_int"] = size_int
-        if elapsed_ms > LATENCY_FLOOR_MS:
-            log_engine(
-                f"AtomicGateway: dispatch latency {elapsed_ms:.1f}ms "
-                f"exceeds {LATENCY_FLOOR_MS:.0f}ms floor epic={epic}"
+    try:
+        with order_dispatch_lane():
+            result = client.place_market_order(
+                epic=epic,
+                direction=direction,
+                size=float(size_int),
+                stop_distance=stop,
+                limit_distance=limit_distance,
+                currency_code=currency_code,
             )
-    return result
+        terminal = True
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        if isinstance(result, dict):
+            result["gateway_latency_ms"] = round(elapsed_ms, 3)
+            result["dispatch_size_int"] = size_int
+            if elapsed_ms > LATENCY_FLOOR_MS:
+                log_engine(
+                    f"AtomicGateway: dispatch latency {elapsed_ms:.1f}ms "
+                    f"exceeds {LATENCY_FLOOR_MS:.0f}ms floor epic={epic}"
+                )
+            # Hard-cap accounts already reserved a ledger slot in try_acquire;
+            # only note opens for uncapped accounts (legacy path).
+            if result.get("dealReference"):
+                filled = True
+                from execution.order_in_flight_mutex import (
+                    resolve_account_hard_open_cap,
+                    note_account_open,
+                )
+
+                if resolve_account_hard_open_cap(account_id) is None:
+                    try:
+                        note_account_open(account_id, delta=1)
+                    except Exception:
+                        pass
+        return result
+    except (ConnectionError, TimeoutError, BrokenPipeError, OSError):
+        terminal = False
+        raise
+    except Exception:
+        terminal = True
+        raise
+    finally:
+        if terminal:
+            release_order_mutex(
+                account_id, reason="broker_confirm_or_reject", filled=filled
+            )
 
 
 def reset_gateway_for_tests() -> None:
     set_monitoring_mode(True)
     _ORDER_LANE_DEPTH.n = 0
+    try:
+        from execution.order_in_flight_mutex import reset_order_mutex_for_tests
+
+        reset_order_mutex_for_tests()
+    except Exception:
+        pass

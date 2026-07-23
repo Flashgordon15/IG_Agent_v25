@@ -18,6 +18,29 @@ class IGOrderError(IGAPIError):
     """Order placement, confirmation, or position update failed."""
 
 
+class InstrumentSuspendedException(IGOrderError):
+    """IG instrument is EDITS_ONLY / restricted — fail-closed, non-blocking.
+
+    Dual-core and soft-loss paths must catch this and mark deal/epic
+    ``SUSPENDED`` instead of retrying on the worker thread.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        epic: str = "",
+        status: str = "EDITS_ONLY",
+        deal_id: str | None = None,
+        status_code: int | None = 400,
+        body: str | None = None,
+    ) -> None:
+        super().__init__(message, status_code=status_code, body=body)
+        self.epic = str(epic or "")
+        self.status = str(status or "EDITS_ONLY").upper()
+        self.deal_id = str(deal_id) if deal_id else None
+
+
 class IGStreamError(IGAPIError):
     """Lightstreamer connection, subscription, or reconnect failure."""
 

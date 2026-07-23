@@ -41,12 +41,18 @@ from cockpit.desktop_splash_assets import (
 )
 from system.engine_log import log_engine
 
-WINDOW_TITLE = "Iron Cage - Flight Deck Control Center"
-WINDOW_WIDTH = 1440
-WINDOW_HEIGHT = 900
+WINDOW_TITLE = "IG Trading Desk v34"
+WINDOW_WIDTH_DEFAULT = 1920
+WINDOW_HEIGHT_DEFAULT = 1080
+WINDOW_MIN_WIDTH = 1280
+WINDOW_MIN_HEIGHT = 720
 BACKGROUND = "#0D0E12"
 COCKPIT_PORT = 8787
 API_PORT = 8080
+SB_API_PORT = 8081
+TERMINAL_UI_PORT = 3000
+TERMINAL_UI_URL_PREFIX = f"http://localhost:{TERMINAL_UI_PORT}"
+DEFAULT_TRADING_DESK_URL = f"{TERMINAL_UI_URL_PREFIX}/boot"
 POLL_MS = 450
 LOG_POLL_MS = 350
 _COCKPIT_CLEARANCE_HOLD_SEC = 3.0
@@ -206,6 +212,47 @@ def _cache_bust_cockpit_url(url: str) -> str:
     nonce = os.urandom(4).hex()
     base = str(url or "").split("?")[0].rstrip("/") + "/"
     return f"{base}?v={mono}&_cb={nonce}&t={mono}"
+
+
+def _is_trading_desk_mode() -> bool:
+    return os.environ.get("IG_TRADING_DESK_NATIVE", "").strip().lower() in ("1", "true", "yes")
+
+
+def _is_flight_deck_embed_url(url: str) -> bool:
+    try:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(str(url or "").strip())
+        if parsed.port:
+            return int(parsed.port) == int(COCKPIT_PORT)
+        return False
+    except (TypeError, ValueError):
+        return False
+
+
+def _should_use_load_url(url: str) -> bool:
+    return not _is_flight_deck_embed_url(url)
+
+
+def _is_trading_desk_embed_url(url: str) -> bool:
+    return _should_use_load_url(url)
+
+
+def _resolve_embed_cockpit_url() -> str:
+    """Quantum Terminal (:3000) boot splash or legacy Flight Deck (:8787)."""
+    if _is_trading_desk_mode():
+        explicit = (os.environ.get("IG_COCKPIT_URL") or "").strip()
+        if explicit and not _is_flight_deck_embed_url(explicit):
+            try:
+                from urllib.parse import urlparse
+
+                port = urlparse(explicit).port
+                if port is None or int(port) != int(API_PORT):
+                    return explicit
+            except (TypeError, ValueError):
+                return explicit
+        return DEFAULT_TRADING_DESK_URL
+    return f"http://127.0.0.1:{COCKPIT_PORT}/"
 
 
 def _read_cache_busted_cockpit_html(*, base_url: str) -> str | None:
@@ -421,12 +468,16 @@ def _should_transition_to_cockpit(
 
 
 def _ensure_cockpit_web_server() -> bool:
-    """
-  Wait for the agent-owned cockpit on :8787.
+    """Wait for embed target — Quantum Terminal (:3000) or legacy Flight Deck (:8787)."""
+    if _is_trading_desk_mode():
+        health_url = f"http://127.0.0.1:{API_PORT}/api/health"
+        terminal_url = f"{TERMINAL_UI_URL_PREFIX}/boot"
+        for _ in range(40):
+            if _url_alive(health_url) and _url_alive(terminal_url):
+                return True
+            time.sleep(0.25)
+        return _url_alive(health_url) and _url_alive(terminal_url)
 
-  Never spawn a decoupled cockpit process here — that binds the port without
-  agent telemetry and leaves the dashboard stuck on pending gates / 0.00 quotes.
-    """
     cockpit_url = f"http://127.0.0.1:{COCKPIT_PORT}/"
     if _url_alive(cockpit_url):
         return True
@@ -467,10 +518,19 @@ def _handoff_contract_satisfied(
 
 
 def _try_embed_cockpit(url: str, *, force: bool = False, reason: str = "") -> bool:
-    """Embed cockpit-web; return True when navigation was started."""
+    """Embed cockpit-web or Quantum Terminal; return True when navigation started."""
     global _HANDOFF_ELIGIBLE_SINCE, _HANDOFF_BLOCK_LOGGED
 
-    if not _ensure_cockpit_web_server() or not _url_alive(url):
+    if not _url_alive(url):
+        return False
+
+    if _is_trading_desk_embed_url(url):
+        _transition_to_cockpit(url)
+        _HANDOFF_ELIGIBLE_SINCE = None
+        _HANDOFF_BLOCK_LOGGED = False
+        return True
+
+    if not _ensure_cockpit_web_server():
         return False
     coupled = _cockpit_coupled_to_agent()
     if not force and not coupled:
@@ -650,7 +710,7 @@ def _status_poll_loop() -> None:
 
     last_stage = ""
     stage = ""
-    cockpit_url = f"http://127.0.0.1:{COCKPIT_PORT}/"
+    cockpit_url = _resolve_embed_cockpit_url()
     while _RUNNING.is_set():
         try:
             status = _read_launcher_status()
@@ -753,18 +813,25 @@ def _transition_to_cockpit(url: str) -> None:
 
     global _WINDOW, _COCKPIT_EMBEDDED
     bust_url = _cache_bust_cockpit_url(url)
-    _append_terminal(f"Flight Deck LIVE — embedding {bust_url}", level="ok")
+    use_load_url = _should_use_load_url(bust_url)
+    label = "Quantum Terminal LIVE" if use_load_url else "Flight Deck LIVE"
+    _append_terminal(f"{label} — embedding {bust_url}", level="ok")
     _evaluate("window.__desktopShell && window.__desktopShell.setTier('live');")
     try:
         win = _WINDOW or (webview.windows[0] if webview.windows else None)
         if win is not None:
-            html = _read_cache_busted_cockpit_html(base_url=bust_url)
-            base_uri = bust_url
-            if html is not None:
-                win.load_html(html, base_uri=base_uri)
-                _append_terminal("cache-busted index.html injected from disk", level="ok")
-            else:
+            if use_load_url:
                 win.load_url(bust_url)
+                _append_terminal("Quantum Terminal loaded via load_url", level="ok")
+                _evaluate("window.__IG_TRADING_DESK_NATIVE__ = true;")
+            else:
+                html = _read_cache_busted_cockpit_html(base_url=bust_url)
+                base_uri = bust_url
+                if html is not None:
+                    win.load_html(html, base_uri=base_uri)
+                    _append_terminal("cache-busted index.html injected from disk", level="ok")
+                else:
+                    win.load_url(bust_url)
         _COCKPIT_EMBEDDED = True
         _ensure_cockpit_clearance_monitor()
         threading.Thread(
@@ -832,7 +899,7 @@ def _spawn_launcher_supervisor() -> None:
 
 def _on_loaded() -> None:
     _append_terminal("Iron Cage desktop shell initialized", level="ok")
-    _append_terminal(f"canvas {WINDOW_WIDTH}x{WINDOW_HEIGHT} · background {BACKGROUND}")
+    _append_terminal(f"canvas {WINDOW_WIDTH_DEFAULT}x{WINDOW_HEIGHT_DEFAULT} · background {BACKGROUND}")
     threading.Thread(target=_status_poll_loop, name="desktop-status-poll", daemon=True).start()
     threading.Thread(target=_log_poll_loop, name="desktop-log-poll", daemon=True).start()
 
@@ -936,23 +1003,30 @@ def run_gui(*, launch_supervisor: bool = False, cockpit_url: str | None = None) 
         return 1
 
     os.environ["IG_DESKTOP_SHELL_ACTIVE"] = "1"
-    os.environ["IG_DESKTOP_FLIGHT_DECK"] = "1"
+    trading_desk = _is_trading_desk_mode()
+    if trading_desk:
+        os.environ["IG_DESKTOP_TRADING_DESK"] = "1"
+    else:
+        os.environ["IG_DESKTOP_FLIGHT_DECK"] = "1"
 
-    purge = audit_and_purge_bound_ports(preserve_pid=os.getpid())
-    log_engine(f"DesktopShell cold-start port audit: {purge.get('purged_pids', [])}")
+    if trading_desk:
+        log_engine("DesktopShell: Trading Desk mode — preserving live agent on :8080")
+    else:
+        purge = audit_and_purge_bound_ports(preserve_pid=os.getpid())
+        log_engine(f"DesktopShell cold-start port audit: {purge.get('purged_pids', [])}")
 
     global _WINDOW
     _RUNNING.set()
     api = DesktopShellApi()
-    splash = build_splash_html()
+    splash = build_splash_html(trading_desk=trading_desk)
 
     _WINDOW = webview.create_window(
         WINDOW_TITLE,
         html=splash,
         js_api=api,
-        width=WINDOW_WIDTH,
-        height=WINDOW_HEIGHT,
-        min_size=(1280, 720),
+        width=WINDOW_WIDTH_DEFAULT,
+        height=WINDOW_HEIGHT_DEFAULT,
+        min_size=(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT),
         background_color=BACKGROUND,
         frameless=True,
         easy_drag=True,
@@ -964,9 +1038,13 @@ def run_gui(*, launch_supervisor: bool = False, cockpit_url: str | None = None) 
         threading.Thread(target=_spawn_launcher_supervisor, name="launcher-spawn", daemon=True).start()
 
     target = (cockpit_url or os.environ.get("IG_COCKPIT_URL", "")).strip()
+    if not target and trading_desk:
+        target = DEFAULT_TRADING_DESK_URL
     if target and _url_alive(target):
+        delay = 1.2 if trading_desk else 0.6
+
         def _fast_load() -> None:
-            time.sleep(0.6)
+            time.sleep(delay)
             _transition_to_cockpit(target)
 
         threading.Thread(target=_fast_load, name="cockpit-fast-load", daemon=True).start()
@@ -998,7 +1076,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.smoke_test:
         return run_smoke_test()
-    url = args.cockpit_url.strip() or f"http://127.0.0.1:{COCKPIT_PORT}/"
+    if args.cockpit_url.strip():
+        url = args.cockpit_url.strip()
+    elif _is_trading_desk_mode():
+        url = os.environ.get("IG_COCKPIT_URL", "").strip() or DEFAULT_TRADING_DESK_URL
+    else:
+        url = f"http://127.0.0.1:{COCKPIT_PORT}/"
     return run_gui(launch_supervisor=bool(args.launch_supervisor), cockpit_url=url)
 
 

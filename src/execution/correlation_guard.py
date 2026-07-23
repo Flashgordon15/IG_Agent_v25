@@ -99,18 +99,22 @@ def _us_index_epics() -> frozenset[str]:
     return _DEFAULT_US_INDEX_EPICS
 
 
-def _max_open_positions_global() -> int:
+def _max_open_positions_global() -> int | None:
     cfg = _correlation_guard_config()
     try:
-        cap = int(cfg.get("max_open_positions_global") or 0)
-        if cap > 0:
-            return cap
+        cap = cfg.get("max_open_positions_global")
+        if cap is None and "max_open_positions_global" in cfg:
+            return None
+        cap_i = int(cap or 0)
+        if cap_i > 0:
+            return cap_i
     except (TypeError, ValueError):
         pass
     try:
         from system.config_loader import get_config
+        from system.engine_lane import global_max_open_positions
 
-        return max(1, int(get_config().max_open_positions))
+        return global_max_open_positions(get_config())
     except Exception:
         return 2
 
@@ -186,7 +190,11 @@ def check_open_book_limits(
     open_total = len(positions)
     max_global = _max_open_positions_global()
 
-    if not open_on_epic and open_total >= max_global:
+    if (
+        max_global is not None
+        and not open_on_epic
+        and open_total >= max_global
+    ):
         return (
             False,
             f"correlation guard: global open book {open_total} >= max {max_global}",

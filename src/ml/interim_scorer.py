@@ -286,6 +286,19 @@ def ml_clean_training_rows(cfg: Config) -> int:
 
 
 def should_use_interim_scorer(cfg: Config) -> bool:
+    """
+    Interim scorer runs until a trained XGBoost model is ready.
+
+    Previously this only checked row count, leaving a dead zone when
+    records >= threshold but model.pkl was missing (rules-only, no ML).
+    """
+    try:
+        from trading.ml_scorer import get_ml_scorer
+
+        if not get_ml_scorer().is_trained():
+            return True
+    except Exception:
+        return True
     return ml_clean_training_rows(cfg) < ml_min_rows_for_model(cfg)
 
 

@@ -50,6 +50,7 @@ _snapshot: dict[str, Any] = {
     "heartbeat_ts": "",
     "heartbeat_mono": 0.0,
     "agent_version": "",
+    "core_detached": False,
 }
 
 _refresher_thread: threading.Thread | None = None
@@ -173,6 +174,13 @@ def _refresh_snapshot() -> None:
         snap["agent_version"] = APP_VERSION_LABEL
     except Exception:
         snap["agent_version"] = ""
+
+    try:
+        from execution.maintenance_detachment import is_core_detached
+
+        snap["core_detached"] = is_core_detached()
+    except Exception:
+        snap["core_detached"] = False
 
     # Execution loop active — stacked thread alive + tpm or sweep advancing
     try:

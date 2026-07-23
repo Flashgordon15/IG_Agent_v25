@@ -7,6 +7,33 @@ from typing import Any
 
 import threading
 import time
+from datetime import datetime, timezone
+
+_WEEKEND_EPIC_MAP: dict[str, str] = {
+    "IX.D.DOW.IFM.IP": "IX.D.SUNDOW.IFS.IP",
+    "IX.D.FTSE.IFM.IP": "IX.D.SUNFUN.IFM.IP",
+    "IX.D.DAX.IFM.IP": "IX.D.SUNDAX.IFS.IP",
+    "IX.D.NIKKEI.IFM.IP": "IX.D.SUNNAS.IFS.IP",
+    "CS.D.CRUDE.CFD.IP": "IX.D.SUNCL.UMP.IP",
+}
+
+
+def _is_weekend() -> bool:
+    return datetime.now(timezone.utc).weekday() >= 5
+
+
+def resolve_weekend_epic(epic: str) -> str:
+    """Remap standard epic to IG weekend equivalent on Sat/Sun in DEMO mode."""
+    if not _is_weekend():
+        return epic
+    try:
+        from system.agent_execution_mode import demo_sandbox_unblock_active
+        if not demo_sandbox_unblock_active():
+            return epic
+    except Exception:
+        return epic
+    return _WEEKEND_EPIC_MAP.get(epic, epic)
+
 
 # Canonical CFD keys → IG spread-bet daily epics (UK DEMO/LIVE).
 _CFD_TO_SPREADBET_TODAY: dict[str, str] = {
@@ -283,6 +310,7 @@ def resolve_order_epic_safe(
     key = str(epic or "").strip()
     if not key:
         return key
+    key = resolve_weekend_epic(key)
     product = resolve_account_product(rest=rest, cfg=cfg)
     if rest is None:
         return resolve_order_epic(key, account_product=product)

@@ -40,11 +40,21 @@ def _cfg() -> Config:
 class InterimScorerTests(unittest.TestCase):
     def test_interim_scorer_activates_below_50_rows(self) -> None:
         with patch("ml.interim_scorer.ml_clean_training_rows", return_value=14):
-            self.assertTrue(should_use_interim_scorer(_cfg()))
+            with patch("trading.ml_scorer.get_ml_scorer") as mock_scorer:
+                mock_scorer.return_value.is_trained.return_value = False
+                self.assertTrue(should_use_interim_scorer(_cfg()))
 
-    def test_ml_model_activates_at_50_rows(self) -> None:
+    def test_interim_scorer_activates_when_model_missing_despite_rows(self) -> None:
+        with patch("ml.interim_scorer.ml_clean_training_rows", return_value=102):
+            with patch("trading.ml_scorer.get_ml_scorer") as mock_scorer:
+                mock_scorer.return_value.is_trained.return_value = False
+                self.assertTrue(should_use_interim_scorer(_cfg()))
+
+    def test_ml_model_activates_at_50_rows_when_trained(self) -> None:
         with patch("ml.interim_scorer.ml_clean_training_rows", return_value=50):
-            self.assertFalse(should_use_interim_scorer(_cfg()))
+            with patch("trading.ml_scorer.get_ml_scorer") as mock_scorer:
+                mock_scorer.return_value.is_trained.return_value = True
+                self.assertFalse(should_use_interim_scorer(_cfg()))
 
     def test_trend_score_strong_trend_returns_high(self) -> None:
         scorer = InterimConfidenceScorer()

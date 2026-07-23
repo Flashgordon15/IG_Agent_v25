@@ -276,13 +276,70 @@ def test_ml_failover_sovereignty_writes_overrides():
 def test_forex_rotation_locked_disables_auto_rotation():
     from runtime.dual_core_execution import (
         epic_allowed_on_hot_path,
-        lock_forex_rotation_session,
         multi_source_auto_rotation_enabled,
+        reset_dual_core_for_tests,
     )
 
-    cfg = {"dual_core": {"forex_rotation_locked": True}}
+    reset_dual_core_for_tests()
+    cfg = {"dual_core": {"forex_rotation_locked": True, "multi_source_auto_rotation": False}}
     assert multi_source_auto_rotation_enabled(cfg) is False
-    lock_forex_rotation_session(reason="test")
-    assert multi_source_auto_rotation_enabled() is False
-    assert epic_allowed_on_hot_path("CS.D.EURUSD.CFD.IP", cfg) is True
+    # Config-level forex lock keeps DOW off the hot path.
     assert epic_allowed_on_hot_path("IX.D.DOW.IFM.IP", cfg) is False
+    reset_dual_core_for_tests()
+
+
+def test_dow_hot_path_not_blocked_by_empty_stack():
+    """DOW must stay dispatchable when not excluded — stack races must not starve fills."""
+    from runtime.dual_core_execution import (
+        epic_allowed_on_hot_path,
+        reset_dual_core_for_tests,
+    )
+
+    reset_dual_core_for_tests()
+    cfg = {
+        "dual_core": {
+            "exclude_from_hot_path": [
+                "IX.D.NIKKEI.IFM.IP",
+                "CS.D.EURUSD.CFD.IP",
+            ]
+        }
+    }
+    with patch(
+        "runtime.dual_core_execution.get_active_stack_epics",
+        return_value=("CS.D.CFPGOLD.CFP.IP",),
+    ):
+        assert epic_allowed_on_hot_path("IX.D.DOW.IFM.IP", cfg) is True
+        assert epic_allowed_on_hot_path("IX.D.NIKKEI.IFM.IP", cfg) is False
+    reset_dual_core_for_tests()
+
+
+def test_multi_source_auto_rotation_reads_config_flag():
+    from runtime.dual_core_execution import multi_source_auto_rotation_enabled
+
+    assert multi_source_auto_rotation_enabled({"dual_core": {"multi_source_auto_rotation": True}})
+    assert not multi_source_auto_rotation_enabled(
+        {"dual_core": {"multi_source_auto_rotation": False}}
+    )
+
+
+def test_rotate_to_high_velocity_stack_pins_open_epics():
+    from runtime.dual_core_execution import (
+        PRIMARY_STACKED_EPIC,
+        _rotate_to_high_velocity_stack,
+        get_active_stack_epics,
+    )
+
+    with patch(
+        "runtime.dual_core_execution._epics_with_open_positions",
+        return_value={PRIMARY_STACKED_EPIC},
+    ), patch(
+        "runtime.dual_core_execution.resolve_tradeable_stack_epics",
+        return_value=(PRIMARY_STACKED_EPIC, "IX.D.NIKKEI.IFM.IP"),
+    ):
+        _rotate_to_high_velocity_stack(
+            reason="test_pin",
+            cfg={"dual_core": {"active_stack_slots": 2}},
+        )
+        stack = get_active_stack_epics()
+
+    assert PRIMARY_STACKED_EPIC in stack

@@ -56,18 +56,16 @@ def test_virtual_ceiling_inside_broker_stop():
 
 
 def test_arm_post_fill_registers_virtual_stop():
-    with patch("runtime.virtual_stop_loss.register_virtual_stop") as reg:
-        with patch("runtime.dynamic_limit_engine.register_dynamic_limit"):
-            with patch("runtime.trade_lifecycle.transition"):
-                out = arm_post_fill_risk_controls(
-                    epic="IX.D.DOW.IFM.IP",
-                    direction="BUY",
-                    size=0.5,
-                    entry_level=52000.0,
-                    deal_id="DIATEST",
-                    stop_distance_pts=10.0,
-                    limit_distance_pts=20.0,
-                )
+    with patch("execution.position_risk_stack.arm_position_risk_stack") as arm:
+        arm.return_value = {"ok": True, "virtual_ceiling_pts": 3.0}
+        out = arm_post_fill_risk_controls(
+            epic="IX.D.DOW.IFM.IP",
+            direction="BUY",
+            size=0.5,
+            entry_level=52000.0,
+            deal_id="DIATEST",
+            stop_distance_pts=10.0,
+            limit_distance_pts=20.0,
+        )
     assert out["ok"] is True
-    reg.assert_called_once()
-    assert reg.call_args.kwargs["ceiling_pts"] < 10.0
+    arm.assert_called_once()

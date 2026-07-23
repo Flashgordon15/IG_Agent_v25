@@ -269,6 +269,10 @@ def normalize_hub_quote_source(source: str) -> str:
         return "ig_execution"
     if raw in ("yahoo", "yahoo_reference", "yahoo_poll", "yahoo_heartbeat"):
         return "yahoo"
+    if raw in ("finnhub", "finnhub_ws"):
+        return "finnhub"
+    if raw in ("twelve_data", "twelvedata", "twelve"):
+        return "twelve_data"
     if raw in ("synthetic", "mock", "stream_b", "macro_synthetic", "stream_a"):
         return "synthetic"
     if raw in ("rest", "stream", "ig", "ig_rest", "rest_poll", "lightstreamer"):
@@ -305,6 +309,42 @@ def _is_execution_only_ig_source(source: str) -> bool:
 
 def _is_ig_rest_quote_source(source: str) -> bool:
     return normalize_hub_quote_source(source) == "ig_rest"
+
+
+def _is_signal_feed_source(source: str) -> bool:
+    """True for Yahoo / Finnhub / Twelve Data ticks on the signal path."""
+    if _is_execution_only_ig_source(source):
+        return False
+    s = str(source or "").strip().lower()
+    if s in ("sandbox", "replay", "harness", "test", "synthetic"):
+        return False
+    if any(tok in s for tok in ("yahoo", "finnhub", "twelve")):
+        return True
+    norm = normalize_hub_quote_source(source)
+    return norm in ("yahoo", "finnhub", "twelve_data")
+
+
+def _should_reject_stale_signal_publish(
+    existing: QuoteSnapshot | None,
+    incoming_epoch: float,
+    incoming_source: str,
+) -> bool:
+    """FPTP ingest guard — reject a slower signal tick that would clobber a fresher hub winner.
+
+    The multi-feed racer may deliver Finnhub/Yahoo/Twelve Data out of order; only the
+    newest tick epoch may update the hub snapshot used for signals and entry gates.
+    """
+    if existing is None:
+        return False
+    if not _is_signal_feed_source(incoming_source):
+        return False
+    if not _is_signal_feed_source(existing.source):
+        return False
+    existing_epoch = existing._reference_epoch()
+    # Small epsilon tolerates same-second batch publishes from one provider.
+    if float(incoming_epoch) + 0.05 < float(existing_epoch):
+        return True
+    return False
 
 
 def _should_block_ig_signal_publish(
@@ -568,15 +608,31 @@ class MarketDataHub:
         )
         self._stream_consumer_thread.start()
 
+    def _stream_coalesce_sec(self) -> float:
+        """Event-driven mode uses near-zero coalesce to avoid multi-ms TWMA lag."""
+        try:
+            from system.config_loader import get_config
+
+            cfg = get_config()
+            block = cfg.get("event_driven_tick") if hasattr(cfg, "get") else None
+            if isinstance(block, dict) and bool(block.get("enabled", True)):
+                return max(0.0, float(block.get("coalesce_sec", 0.0) or 0.0))
+        except Exception:
+            pass
+        return 0.05
+
     def _stream_consumer_loop(self) -> None:
-        """Drain zero-copy ring with 50ms batch coalescing — last epic tick wins per batch."""
+        """Drain zero-copy ring; event-driven coalesce≈0 — raw last tick per epic."""
         while not self._stream_consumer_stop.is_set():
-            deadline = time.monotonic() + 0.05
+            coalesce = self._stream_coalesce_sec()
+            deadline = time.monotonic() + max(coalesce, 0.001)
             batch: dict[str, tuple[float, float, str, float | None]] = {}
             while time.monotonic() < deadline:
                 view = self._zero_copy_ring.drain_batch(max_items=512)
                 if view.size == 0:
-                    time.sleep(0.002)
+                    if coalesce <= 0.0:
+                        break
+                    time.sleep(0.001)
                     continue
                 for row in view:
                     epic_key = self._zero_copy_ring.epic_for_id(int(row["epic_id"]))
@@ -591,8 +647,10 @@ class MarketDataHub:
                         source,
                         qtime,
                     )
+                if coalesce <= 0.0 and batch:
+                    break
             if not batch:
-                time.sleep(0.02)
+                time.sleep(0.005 if coalesce <= 0.0 else 0.02)
                 continue
             for epic_key, item in batch.items():
                 bid, offer, source, quote_time = item
@@ -661,7 +719,8 @@ class MarketDataHub:
         epic_key = epic.strip() if epic else ""
         if not epic_key:
             return None
-        if bid > 0.0 and offer > 0.0:
+        _sandbox = str(source or "").lower() in ("sandbox", "replay", "harness")
+        if bid > 0.0 and offer > 0.0 and not _sandbox:
             try:
                 _record_latency_stage(epic=epic_key, stage="feed_hub")
             except Exception:
@@ -694,6 +753,8 @@ class MarketDataHub:
             if _should_block_ig_signal_publish(epic_key, existing, source):
                 return existing
             if _should_block_ig_overwrite_primary(existing, source):
+                return existing
+            if _should_reject_stale_signal_publish(existing, epoch, source):
                 return existing
             if existing is not None and existing.epic == epic_key:
                 existing.refresh(
@@ -962,27 +1023,14 @@ def night_matrix_signal_fresh_count(
     max_age_sec: float = 45.0,
     epics: tuple[str, ...] | list[str] | None = None,
 ) -> tuple[int, int]:
-    """Hub quote OR dual-core ingest pulse within max_age counts as signal-fresh."""
-    import time
+    """Hub quote age only — dual-core pulse must not fake signal-fresh.
 
+    Pulse-as-fresh previously made health_light / iron_cage report trade_ready
+    while Gate 3 correctly waited on 200s+ hub ages.
+    """
     universe = tuple(epics or NIGHT_MATRIX_EPICS)
     hub = get_market_data_hub()
-    now = time.time()
-    pulse_at: dict[str, float] = {}
-    try:
-        from runtime.dual_core_execution import get_socket_heartbeat_state
-
-        pulse_at = (get_socket_heartbeat_state() or {}).get("last_fresh_tick_at") or {}
-    except Exception:
-        pulse_at = {}
-    fresh = 0
-    for epic in universe:
-        if hub.is_fresh(epic, max_age=max_age_sec):
-            fresh += 1
-            continue
-        ts = pulse_at.get(epic)
-        if ts and (now - float(ts)) <= max_age_sec:
-            fresh += 1
+    fresh = sum(1 for epic in universe if hub.is_fresh(epic, max_age=max_age_sec))
     return fresh, len(universe)
 
 

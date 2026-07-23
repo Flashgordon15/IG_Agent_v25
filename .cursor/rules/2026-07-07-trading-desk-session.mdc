@@ -1,0 +1,62 @@
+---
+description: 2026-07-07 demo trading desk — position supervision, sizes, rotation
+alwaysApply: true
+---
+
+# Trading Desk Session — 2026-07-07 (updated 2026-07-19)
+
+**Config:** `config/config_v31_demo_throughput.json`  
+**Hot path (authoritative):** DOW only — Nikkei excluded until JPY PnL certified  
+**Desktop:** `Trading_Desk.app` → Quantum Terminal `:3000` (not Flight Deck `:8787`)  
+**Targets:** 70% session WR, £1k daily on £10k capital  
+**Data root:** `src/data/v31-production/` (`IG_DATA_ROOT` = `data_dir()`)
+
+## Position sizes (spreadbet demo)
+
+| Epic | Transmit size |
+|------|----------------|
+| IX.D.DOW.IFM.IP | 0.5 £/pt |
+| IX.D.NIKKEI.IFM.IP | 0.5 £/pt (entries blocked via exclude_from_hot_path) |
+| CS.D.CFPGOLD.CFP.IP | 10.0 £/pt (if ever opened) |
+
+Canary cap = IG minimum. `resolve_executable_lot_size` is authoritative.
+
+## Open-position supervision (Trading Desk)
+
+Every broker open must have: GBP exit track + virtual stop + dynamic trail.
+
+| Component | Role |
+|-----------|------|
+| `OpenPositionManager` | In-process daemon ~10s when agent up |
+| `trade_support_wrapper` | Broker-authoritative supervisor (SoT for opens) |
+| `manage_live_positions.py --supervise` | Offline/CLI: arm stack + flatten breaches |
+| `GET /api/positions/live` | GUI — trust `verdict` / `broker_open_sot` / `critical`, not count alone |
+
+**Operator commands:**
+```bash
+IG_AGENT_CONFIG=config/config_v31_demo_throughput.json \
+  PYTHONPATH=src python3 scripts/manage_live_positions.py --supervise
+
+IG_AGENT_CONFIG=config/config_v31_demo_throughput.json \
+  PYTHONPATH=src python3 scripts/session_ready.py --start-agent
+```
+
+## Rotation + longer trades
+
+- `dual_core.multi_source_auto_rotation: true` — 500ms DOW↔Nikkei sweep
+- `long_trade_runner` — after 3m profit: 4R target, 40% giveback
+- Open epics **pinned** on stack during rotation (no evict while live)
+
+## Health checks
+
+```bash
+curl -s http://127.0.0.1:8080/api/positions/live
+curl -s http://127.0.0.1:8080/api/position_manager/status
+curl -s http://127.0.0.1:8080/api/rotation_state
+```
+
+## Safety
+
+- Never `kill -9` main.py — use anti-zombie protocol from `.cursorrules`
+- Learning DB `closed_at IS NULL` rows ≠ broker opens — run `reconcile_phantom_opens.py` after sessions
+- `max_open_positions: 6` — desk enforces cap breach flatten via `enforce_cap_breach`

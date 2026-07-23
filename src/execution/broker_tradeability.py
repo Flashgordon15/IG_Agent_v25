@@ -81,10 +81,18 @@ def broker_new_deal_allowed(
 ) -> tuple[bool, str]:
     """
     True only when IG reports TRADEABLE/OPEN — rejects EDITS_ONLY/CLOSED.
+    In DEMO sandbox mode, bypass pre-check and let IG API accept/reject directly.
     """
     key = str(epic or "").strip()
     if not key:
         return False, "missing_epic"
+    try:
+        from system.agent_execution_mode import demo_sandbox_unblock_active
+
+        if demo_sandbox_unblock_active():
+            return True, ""
+    except Exception:
+        pass
     try:
         if cfg is not None and hasattr(cfg, "get"):
             dual = cfg.get("dual_core") or {}

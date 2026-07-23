@@ -414,11 +414,12 @@ def _apply_trail(rest: Any, *, deal_id: str, epic: str, direction: str, level: f
 
 
 def _close_deal(rest: Any, *, deal_id: str, epic: str, direction: str, size: float) -> bool:
-    close_dir = "SELL" if direction.upper() == "BUY" else "BUY"
+    # close_position expects OPEN side and inverts once — never pass close_dir.
+    open_side = str(direction or "BUY").upper()
     try:
         rest.close_position(
             deal_id,
-            direction=close_dir,
+            direction=open_side,
             size=size,
             epic=epic,
             verify=False,

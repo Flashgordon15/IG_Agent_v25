@@ -446,12 +446,13 @@ async def _trailing_stress_loop(
                         from execution.atomic_gateway import order_dispatch_lane
 
                         rest.login()
-                        close_dir = "SELL" if direction == "BUY" else "BUY"
+                        # close_position expects OPEN side and inverts once.
+                        open_side = str(direction or "BUY").upper()
                         size = float(pos.get("size") or _epic_micro_lot(epic, index_lot=index_lot, fx_lot=fx_lot))
                         with order_dispatch_lane():
                             rest.close_position(
                                 deal_id,
-                                direction=close_dir,
+                                direction=open_side,
                                 size=size,
                                 epic=epic,
                                 verify=False,

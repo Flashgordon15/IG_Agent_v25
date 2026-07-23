@@ -10,25 +10,34 @@ type Props = {
 
 export function TransactionLedger({ rows, fault }: Props) {
   return (
-    <div className="relative cq-panel flex h-full min-h-0 flex-col overflow-hidden">
+    <div className="cq-panel relative flex h-full min-h-0 flex-col overflow-hidden">
       <SysStreamPending active={fault} />
-      <div className="border-b border-[#1f1f24] px-2 py-1">
-        <span className="cq-label">Transaction Ledger</span>
+      <div
+        className="border-b border-[var(--color-desk-line)]"
+        style={{ padding: "0.7rem 1rem" }}
+      >
+        <div className="cq-label">Ledger</div>
+        <div className="mt-1 text-[length:var(--desk-type-sm)] font-semibold">
+          Recent fills
+        </div>
       </div>
       <div className="flex-1 overflow-auto">
         <table className="w-full text-left">
-          <thead className="sticky top-0 bg-[#0f0f12]">
-            <tr className="cq-label border-b border-[#1f1f24]">
-              <th className="px-2 py-1 font-medium">Timestamp</th>
-              <th className="px-2 py-1 font-medium">Side</th>
-              <th className="px-2 py-1 font-medium">Size</th>
-              <th className="px-2 py-1 font-medium">Venue</th>
+          <thead className="sticky top-0 bg-[var(--color-desk-panel)]">
+            <tr className="cq-label border-b border-[var(--color-desk-line)]">
+              <th className="px-3 py-2 font-medium">Time</th>
+              <th className="px-2 py-2 font-medium">Side</th>
+              <th className="px-2 py-2 font-medium">Size</th>
+              <th className="px-2 py-2 font-medium">Venue</th>
             </tr>
           </thead>
           <tbody>
             {rows.length === 0 && (
               <tr>
-                <td colSpan={4} className="cq-mono px-2 py-3 text-[10px] text-[#71717a]">
+                <td
+                  colSpan={4}
+                  className="cq-mono px-3 py-4 text-[length:var(--desk-type-sm)] text-[var(--color-desk-mute)]"
+                >
                   No fills in rolling window
                 </td>
               </tr>
@@ -36,27 +45,27 @@ export function TransactionLedger({ rows, fault }: Props) {
             {rows.map((row, i) => (
               <tr
                 key={`${row.timestamp}-${row.epic}-${i}`}
-                className="border-b border-[#1f1f24]/50 hover:bg-[#141418]"
+                className="cq-row border-b border-[var(--color-desk-line)]"
               >
-                <td className="cq-mono px-2 py-1 text-[10px] text-[#e8ecf4]">
+                <td className="cq-mono px-3 py-2 text-[length:var(--desk-type-xs)] text-[var(--color-desk-mute)]">
                   {row.timestamp}
                 </td>
-                <td className="px-2 py-1">
+                <td className="px-2 py-2">
                   <span
-                    className={`cq-mono rounded-none px-1.5 py-0.5 text-[10px] font-bold ${
+                    className={`cq-mono rounded-md px-2 py-0.5 text-[length:var(--desk-type-xs)] font-semibold ${
                       row.side === "BUY"
-                        ? "bg-[#00f5d4]/15 text-[#00f5d4]"
-                        : "bg-[#ff0055]/15 text-[#ff0055]"
+                        ? "bg-[rgba(61,220,151,0.12)] text-[var(--color-desk-good)]"
+                        : "bg-[rgba(255,77,109,0.12)] text-[var(--color-desk-bad)]"
                     }`}
                   >
                     {row.side}
                   </span>
                 </td>
-                <td className="cq-mono px-2 py-1 text-[10px]">
-                  {row.size.toFixed(2)}
+                <td className="cq-mono px-2 py-2 text-[length:var(--desk-type-sm)]">
+                  {row.size}
                 </td>
-                <td className="cq-mono px-2 py-1 text-[10px] text-[#71717a]">
-                  [{row.venue}]
+                <td className="cq-mono px-2 py-2 text-[length:var(--desk-type-xs)] text-[var(--color-desk-mute)]">
+                  {row.venue}
                 </td>
               </tr>
             ))}

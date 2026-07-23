@@ -10,10 +10,16 @@ def _live_config_restrictions() -> dict[str, Any]:
         from system.config_loader import get_config
 
         cfg = get_config()
-        max_open = int(cfg.max_open_positions)
+        raw = cfg.max_open_positions
+        # null / None = no global cap (dual-engine uses engine_position_caps).
+        # Never coerce via int(None) → 0 — that falsely standby-locks the desk.
+        if raw is None:
+            max_open = None
+        else:
+            max_open = int(raw)
         rotation_on = bool(cfg.get("enforce_top3_rotation_filter", True))
     except Exception:
-        max_open = 0
+        max_open = None
         rotation_on = True
     return {
         "max_open_positions": max_open,

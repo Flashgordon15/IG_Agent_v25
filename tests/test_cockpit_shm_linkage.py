@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -17,6 +18,8 @@ from system.ipc.cockpit_shm_passive import (
     LINK_STALE_SHM,
     classify_cockpit_shm,
     pid_is_alive,
+    resolve_cockpit_shm_name,
+    resolve_cockpit_shm_name_for_reader,
 )
 
 
@@ -57,6 +60,34 @@ class CockpitShmLinkageTests(unittest.TestCase):
         view = {"agent_pid": os.getpid(), "ticks_cached": 100}
         state, _ = classify_cockpit_shm(view)
         self.assertEqual(state, LINK_LIVE)
+
+    def test_dual_port_cockpit_shm_names_are_distinct(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "IG_V32_DUAL_PORT": "1",
+                "IG_ACCOUNT_ID": "Z6BAH4",
+                "IG_COCKPIT_SHM_NAME": "",
+            },
+            clear=False,
+        ):
+            cfd = resolve_cockpit_shm_name()
+        with patch.dict(
+            os.environ,
+            {
+                "IG_V32_DUAL_PORT": "1",
+                "IG_ACCOUNT_ID": "Z6BAH3",
+                "IG_COCKPIT_SHM_NAME": "",
+            },
+            clear=False,
+        ):
+            sb = resolve_cockpit_shm_name()
+        self.assertNotEqual(cfd, sb)
+        self.assertEqual(cfd, "ig_agent_v33_cockpit_Z6BAH4")
+        self.assertEqual(sb, "ig_agent_v33_cockpit_Z6BAH3")
+        with patch.dict(os.environ, {"IG_V32_DUAL_PORT": "1"}, clear=False):
+            reader = resolve_cockpit_shm_name_for_reader()
+        self.assertEqual(reader, "ig_agent_v33_cockpit_Z6BAH4")
 
     def test_desktop_classify_agent_offline(self) -> None:
         mod = _load_desktop_cockpit()

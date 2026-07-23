@@ -68,6 +68,9 @@ class ExecutionEngine:
             points_engine=points_engine,
             environment_scorer=environment_scorer,
         )
+        from execution.ml_training_hooks import warm_ml_row_cache
+
+        warm_ml_row_cache(config)
         self._validator = OrderValidator(
             config,
             self._adaptive,
@@ -1085,21 +1088,69 @@ class ExecutionEngine:
         )
 
     def _pre_entry_position_check(self, signal: TradeSignal) -> tuple[bool, str]:
+        # Un-bypassable per-account hard cap (Z6BAH4 → max 1 open).
+        try:
+            from execution.order_in_flight_mutex import hard_cap_blocks_entry
+            from system.engine_lane import (
+                DEFAULT_ACCOUNT_CFD,
+                resolve_journal_metadata,
+            )
+
+            meta = resolve_journal_metadata(cfg=self.config)
+            acct = str(meta.get("account_id") or DEFAULT_ACCOUNT_CFD)
+            blocked, reason = hard_cap_blocks_entry(acct)
+            if blocked:
+                return True, reason
+        except Exception:
+            pass
+
+        # Permanent hard gate: shared broker_snapshot count — blocks storms even
+        # when IgPositionSync / REST are starved under coalesce pressure.
+        try:
+            from runtime.broker_snapshot import open_count_from_snapshot, read_snapshot
+            from trading.position_ladder import base_max_per_epic
+            from system.engine_lane import count_cap_for_engine, resolve_active_engine_id
+
+            engine_id = resolve_active_engine_id(self.config)
+            max_total = count_cap_for_engine(engine_id, self.config)
+            max_pos = base_max_per_epic(self.config)
+            snap_n = open_count_from_snapshot(max_age_sec=300.0)
+            if (
+                max_total is not None
+                and snap_n is not None
+                and snap_n >= max_total
+            ):
+                return True, (
+                    f"broker_snapshot open={snap_n} >= engine_cap={max_total}"
+                )
+            snap = read_snapshot(max_age_sec=300.0)
+            if snap is not None:
+                epic = str(getattr(signal, "epic", "") or "")
+                epic_n = sum(
+                    1
+                    for p in (snap.get("positions") or [])
+                    if str(p.get("epic") or "") == epic
+                )
+                if epic and epic_n >= max_pos:
+                    return True, (
+                        f"broker_snapshot {epic_n} open on {epic} "
+                        f"(max {max_pos} per epic)"
+                    )
+        except Exception:
+            pass
+
         sync = self._position_sync
         if sync is None:
             return False, ""
         try:
-            from trading.position_ladder import effective_max_per_epic
+            from trading.position_ladder import base_max_per_epic
 
             local = int(self._tracker.count_open_for_epic(signal.epic))
-            max_pos, _ = effective_max_per_epic(
-                cfg=self.config,
-                epic=signal.epic,
-                open_count=local,
-                points_engine=self._points,
-                tracker=self._tracker,
-            )
-            max_total = max(1, int(self.config.max_open_positions))
+            max_pos = base_max_per_epic(self.config)
+            from system.engine_lane import count_cap_for_engine, resolve_active_engine_id
+
+            engine_id = resolve_active_engine_id(self.config)
+            max_total = count_cap_for_engine(engine_id, self.config)
             ig = int(sync.count_for_epic(signal.epic))
             total = int(self._tracker.count_open_total())
             if ig != local and hasattr(sync, "sync_once"):
@@ -1107,18 +1158,14 @@ class ExecutionEngine:
                 ig = int(sync.count_for_epic(signal.epic))
                 local = int(self._tracker.count_open_for_epic(signal.epic))
                 total = int(self._tracker.count_open_total())
-                max_pos, _ = effective_max_per_epic(
-                    cfg=self.config,
-                    epic=signal.epic,
-                    open_count=local,
-                    points_engine=self._points,
-                    tracker=self._tracker,
-                )
             if ig >= max_pos:
                 return True, (
                     f"IG confirms {ig} open on {signal.epic} (max {max_pos} per epic)"
                 )
-            if total >= max_total:
+            if (
+                max_total is not None
+                and total >= max_total
+            ):
                 return True, (f"Total open positions {total} (max {max_total})")
         except Exception:
             pass

@@ -562,11 +562,12 @@ class TestSession4PreLaunchValidation:
                 return self._state
 
         class _MockTracker:
-            def __init__(self, positions=None) -> None:
+            def __init__(self, positions=None, ig_fresh=True) -> None:
                 self._positions = positions or []
+                self._ig_fresh = ig_fresh
 
             def snapshot(self) -> dict:
-                return {"positions": self._positions}
+                return {"positions": self._positions, "ig_fresh": self._ig_fresh}
 
         loop = object.__new__(TradingLoop)
         loop._epic = "IX.D.FTSE.IFM.IP"
@@ -591,6 +592,15 @@ class TestSession4PreLaunchValidation:
         pos_mature = [{"epic": loop._epic, "pnl_gbp": 5.0, "open_mins": 25}]
         cap, reason = loop._dynamic_max_per_epic(2, 1, _MockTracker(pos_mature))
         assert cap == 4, f"HEALTHY/profitable/mature: expected base_cap+2=4, got {cap}"
+
+        # HEALTHY + profitable BUT stale broker state → must NOT unlock.
+        # Stale-positive P&L on a position that has actually turned into a loser
+        # is what let DOW/Nikkei stack to 4x and bleed ~£1.5k during an outage.
+        cap, reason = loop._dynamic_max_per_epic(
+            2, 1, _MockTracker(pos_mature, ig_fresh=False)
+        )
+        assert cap == 2, f"stale broker state: expected base_cap=2, got {cap}"
+        assert "stale" in reason, f"Reason should mention stale, got: {reason!r}"
 
     # ------------------------------------------------------------------
     # Test D: Dashboard positions aggregation

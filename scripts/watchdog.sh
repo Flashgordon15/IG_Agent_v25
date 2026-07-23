@@ -6,6 +6,8 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=lib/detach_exec.sh
+source "${SCRIPT_DIR}/lib/detach_exec.sh"
 if [ -n "${IG_AGENT_ROOT:-}" ]; then
     AGENT_DIR="${IG_AGENT_ROOT}"
 else
@@ -20,6 +22,11 @@ START_SCRIPT="$AGENT_DIR/scripts/start_agent_background.sh"
 MAX_RESTARTS_PER_HOUR=10
 CHECK_INTERVAL=30
 STARTUP_GRACE_SEC=720
+# A live main.py that has not bound the API port within this window is a hung
+# boot (Gate2 hydration stall etc). Reap it and force a clean restart instead of
+# deferring on "booting" indefinitely — the trap behind the 76-minute outage.
+BOOT_HANG_SEC=300
+boot_first_seen=0
 
 # Resolved each cycle from the global lock pointer (no hardcoded port/lock).
 LOCK_FILE=""
@@ -73,6 +80,33 @@ resolve_runtime_targets() {
     mkdir -p "$AGENT_DIR/src/data/logs"
 }
 
+legacy_watchdog_paused() {
+    local marker="${AGENT_DIR}/src/data/v31-production/state/v32_legacy_watchdog_paused.json"
+    [[ -f "$marker" ]]
+}
+
+v32_dual_port_active() {
+    if [[ "${IG_V32_DUAL_PORT:-}" == "1" ]]; then
+        return 0
+    fi
+    local marker="${AGENT_DIR}/src/data/v31-production/state/v32_dual_supervision.json"
+    if [[ -f "$marker" ]]; then
+        return 0
+    fi
+    if lsof -iTCP:8080 -sTCP:LISTEN -t >/dev/null 2>&1 \
+        && lsof -iTCP:8081 -sTCP:LISTEN -t >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
+v32_dual_ports_healthy() {
+    local cfd sb
+    cfd="$(curl -sf --max-time 2 "http://127.0.0.1:8080/api/health" 2>/dev/null || true)"
+    sb="$(curl -sf --max-time 2 "http://127.0.0.1:8081/api/health" 2>/dev/null || true)"
+    [[ -n "$cfd" && -n "$sb" ]]
+}
+
 watchdog_already_running() {
     if [ ! -f "$PID_FILE" ]; then
         return 1
@@ -93,6 +127,11 @@ trap 'rm -f "$PID_FILE"; log "WATCHDOG: received SIGTERM — exiting cleanly"; e
 trap 'rm -f "$PID_FILE"; log "WATCHDOG: received SIGINT — exiting cleanly"; exit 0' INT
 
 resolve_runtime_targets
+
+if legacy_watchdog_paused && [[ "${IG_V32_DUAL_PORT:-}" != "1" ]]; then
+    log "WATCHDOG: v32 legacy pause marker active — exiting (dual desk owns supervision)"
+    exit 0
+fi
 
 if watchdog_already_running; then
     log "WATCHDOG: already running pid=$(tr -d '[:space:]' < "$PID_FILE") — exiting duplicate"
@@ -142,6 +181,43 @@ main_py_booting() {
     [ -n "${pids}" ]
 }
 
+clear_stale_session_lock() {
+    # The instance/port lock ($LOCK_FILE) is only half the story. main.py also
+    # holds an account-scoped SESSION lock (src/data/<profile>/session_ig_*.lock).
+    # When the agent dies leaving a stale session lock, every restart collides on
+    # it and the boot aborts — the classic restart-fail loop. Clear it here using
+    # the same helper main.py uses (only removes locks held by dead/zombie PIDs).
+    local PY
+    PY="$(resolve_python_bin)"
+    if [ -z "${PY}" ]; then
+        return 0
+    fi
+    APP_MODE="${APP_MODE:-DEMO}" \
+    IG_AGENT_CONFIG="${IG_AGENT_CONFIG:-config/config_v31_demo_throughput.json}" \
+    PYTHONPATH="${AGENT_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PY}" - <<'PYEOF' >> "$LOG" 2>&1 || true
+import sys
+from pathlib import Path
+
+try:
+    from runtime.app_mode import resolve_app_mode, resolve_data_root
+    from runtime.session_lock import (
+        clear_stale_lock,
+        lock_path_for_scope,
+        resolve_account_scope,
+    )
+
+    mode = resolve_app_mode()
+    scope = resolve_account_scope(mode)
+    root = Path(resolve_data_root(mode))
+    path = lock_path_for_scope(scope, root)
+    if clear_stale_lock(path):
+        print(f"WATCHDOG: cleared stale session lock ({path})")
+except Exception as exc:  # never block restart on cleanup failure
+    print(f"WATCHDOG: session lock clear skipped: {type(exc).__name__}: {exc}")
+PYEOF
+}
+
 clear_stale_agent_lock() {
     if [ ! -f "$LOCK_FILE" ]; then
         return 0
@@ -175,10 +251,8 @@ clear_stale_agent_lock() {
 clear_stale_agent_lock
 
 manual_stop_active() {
-    local flag="$AGENT_DIR/src/data/state/manual_stop.json"
-    if [ ! -f "$flag" ]; then
-        return 1
-    fi
+    # Prefer Python dual-path helper (data_dir + legacy). Bash OR-fallback keeps
+    # launchd safe if import fails mid-deploy.
     local PY="python3"
     for candidate in \
         "${AGENT_DIR}/.venv/bin/python3" \
@@ -190,7 +264,23 @@ manual_stop_active() {
             break
         fi
     done
-    "$PY" -c "
+    if PYTHONPATH="${AGENT_DIR}/src" "$PY" -c \
+        "from system.shutdown_cleanup import manual_stop_active" \
+        2>/dev/null
+    then
+        PYTHONPATH="${AGENT_DIR}/src" "$PY" -c \
+            "import sys; from system.shutdown_cleanup import manual_stop_active as a; sys.exit(0 if a() else 1)" \
+            2>/dev/null
+        return $?
+    fi
+    # Import failed — probe both on-disk markers (OR semantics).
+    local flag
+    for flag in \
+        "$AGENT_DIR/src/data/state/manual_stop.json" \
+        "$AGENT_DIR/src/data/v31-production/state/manual_stop.json"
+    do
+        [ -f "$flag" ] || continue
+        if "$PY" -c "
 import json, sys, time
 from pathlib import Path
 p = Path(sys.argv[1])
@@ -200,7 +290,12 @@ try:
     sys.exit(0 if 0 <= age < 600 else 1)
 except Exception:
     sys.exit(0)
-" "$flag"
+" "$flag" 2>/dev/null
+        then
+            return 0
+        fi
+    done
+    return 1
 }
 
 supervisor_managed() {
@@ -301,6 +396,12 @@ cleanup_stale() {
         rm -f "$LOCK_FILE"
         log "WATCHDOG: removed stale lock file ($LOCK_FILE)"
     fi
+
+    # Also clear the account-scoped session lock — the real cause of the
+    # restart-fail loop when a dead PID leaves it behind.
+    if ! main_py_booting; then
+        clear_stale_session_lock
+    fi
 }
 
 restart_agent() {
@@ -327,14 +428,15 @@ restart_agent() {
     cd "$AGENT_DIR" || { log "WATCHDOG: ERROR — cannot cd to $AGENT_DIR"; return 1; }
 
     export IG_AGENT_ROOT="$AGENT_DIR"
+    export APP_MODE="${APP_MODE:-DEMO}"
+    export IG_AGENT_CONFIG="${IG_AGENT_CONFIG:-config/config_v31_demo_throughput.json}"
     export IG_AGENT_FROM_LAUNCHER=1
     export IG_AGENT_SKIP_DEPLOY_CHECK=1
     export PYTHONPATH="${AGENT_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
-    log "WATCHDOG: restarting agent via start_agent_launchd.py (python=${PY})"
-    nohup "${PY}" "$START_LAUNCHD" >> "$RESTART_LOG" 2>&1 &
-    local new_pid=$!
-    disown "$new_pid" 2>/dev/null || true
+    log "WATCHDOG: restarting agent via start_agent_launchd.py (python=${PY} APP_MODE=${APP_MODE})"
+    detach_exec --log "$RESTART_LOG" -- "${PY}" "$START_LAUNCHD"
+    local new_pid="${DETACH_PID}"
     last_restart_epoch=$(date +%s)
     log "WATCHDOG: agent restart launched — pid=$new_pid (grace ${STARTUP_GRACE_SEC}s)"
 }
@@ -369,6 +471,17 @@ declare -a restart_times=()
 while true; do
     resolve_runtime_targets
 
+    if v32_dual_port_active; then
+        if v32_dual_ports_healthy; then
+            log "WATCHDOG: v32 dual-port mode — both :8080 and :8081 healthy; deferring single-engine restart"
+            sleep "$CHECK_INTERVAL"
+            continue
+        fi
+        log "WATCHDOG: v32 dual-port mode — twin not fully healthy; deferring legacy :${PORT} restart (use v32_runtime_start.sh)"
+        sleep "$CHECK_INTERVAL"
+        continue
+    fi
+
     if supervisor_managed && ! agent_alive; then
         log "WATCHDOG: daemon_supervisor booting — deferring port cleanup/restart"
         last_restart_epoch=$(date +%s)
@@ -380,6 +493,7 @@ while true; do
     restart_reason=""
 
     if agent_alive; then
+        boot_first_seen=0
         if trading_healthy; then
             UNHEALTHY_STREAK=0
             log "WATCHDOG: agent alive on port $PORT (lock present, trading healthy)"
@@ -402,17 +516,30 @@ while true; do
         UNHEALTHY_STREAK=0
     else
         if main_py_booting; then
-            log "WATCHDOG: main.py booting (port $PORT not ready) — waiting"
-            sleep "$CHECK_INTERVAL"
-            continue
-        fi
-        if in_startup_grace; then
+            now_epoch=$(date +%s)
+            (( boot_first_seen == 0 )) && boot_first_seen=$now_epoch
+            boot_elapsed=$(( now_epoch - boot_first_seen ))
+            if (( boot_elapsed < BOOT_HANG_SEC )); then
+                log "WATCHDOG: main.py booting (port $PORT not ready, ${boot_elapsed}s) — waiting"
+                sleep "$CHECK_INTERVAL"
+                continue
+            fi
+            log "WATCHDOG: HUNG BOOT — main.py ${boot_elapsed}s without binding port ${PORT}; reaping tree"
+            notify_telegram "🚨 Watchdog: hung boot ${boot_elapsed}s — reaping and restarting (manual intervention if it recurs)"
+            for p in $(agent_main_pids); do kill -TERM "$p" 2>/dev/null || true; done
+            sleep 3
+            for p in $(agent_main_pids); do kill -9 "$p" 2>/dev/null || true; done
+            boot_first_seen=0
+            need_restart=1
+            restart_reason="hung boot (${boot_elapsed}s, port ${PORT} never bound)"
+        elif in_startup_grace; then
             log "WATCHDOG: agent not up yet — startup grace (${STARTUP_GRACE_SEC}s)"
             sleep "$CHECK_INTERVAL"
             continue
+        else
+            need_restart=1
+            restart_reason="agent down (port $PORT not bound or lock missing)"
         fi
-        need_restart=1
-        restart_reason="agent down (port $PORT not bound or lock missing)"
     fi
 
     if (( need_restart )); then

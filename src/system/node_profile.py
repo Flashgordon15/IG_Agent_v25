@@ -115,8 +115,16 @@ def _build_profile(kind: NodeKind) -> NodeProfile:
         )
     analytics = analytics_dir()
     triage = triage_db_path()
-    v30_monolith = str(APP_VERSION).startswith("30.")
-    version_label = "30.0.0" if v30_monolith else "v29.1.0"
+    ver = str(APP_VERSION)
+    if ver.startswith("31."):
+        version_label = ver
+        v30_monolith = True
+    elif ver.startswith("30."):
+        version_label = "30.0.0"
+        v30_monolith = True
+    else:
+        version_label = "v29.1.0"
+        v30_monolith = False
     if kind == "shadow":
         api_port = int(os.environ.get("IG_API_PORT", "9090"))
         return NodeProfile(

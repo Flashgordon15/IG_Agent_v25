@@ -73,6 +73,61 @@ def _quote_pulse_total(ring_tel: dict[str, Any]) -> int:
     return total
 
 
+def _hub_quote_freshness_gate(
+    *,
+    budget_sec: float | None = None,
+) -> tuple[float | None, bool, float]:
+    """Return (max_hub_age_sec, fresh, budget_sec). Transport-aware fail-close."""
+    try:
+        from system.market_data_hub import get_market_data_hub
+        from system.market_integrity import (
+            LIVE_QUOTE_MAX_AGE_SEC,
+            effective_entry_quote_budget_sec,
+        )
+
+        budget = float(
+            budget_sec
+            if budget_sec is not None
+            else effective_entry_quote_budget_sec()
+        )
+        if budget <= 0:
+            budget = float(LIVE_QUOTE_MAX_AGE_SEC)
+        hub = get_market_data_hub()
+        epics: list[str] = []
+        try:
+            from runtime.dual_core_execution import get_active_stack_epics
+
+            epics = list(get_active_stack_epics() or [])
+        except Exception:
+            epics = []
+        if not epics:
+            # Desk hot path defaults
+            epics = [
+                "IX.D.DOW.IFM.IP",
+                "IX.D.NIKKEI.IFM.IP",
+                "CS.D.CFPGOLD.CFP.IP",
+                "CS.D.EURUSD.CFD.IP",
+            ]
+        ages: list[float] = []
+        for epic in epics:
+            try:
+                snap = hub.get_snapshot(str(epic))
+            except Exception:
+                snap = None
+            if snap is None:
+                continue
+            try:
+                ages.append(float(snap.age_seconds()))
+            except Exception:
+                continue
+        if not ages:
+            return None, False, budget
+        worst = max(ages)
+        return worst, worst <= budget, budget
+    except Exception:
+        return None, False, float(budget_sec or 0.5)
+
+
 def _extract_velocity_metrics(
     *,
     matrix_stage: dict[str, Any],
@@ -316,8 +371,13 @@ def get_gate_diagnostics_payload() -> dict[str, Any]:
     return {"by_epic": by_epic, "last": last}
 
 
+_LAST_GOOD_MARKET_QUOTES: dict[str, dict[str, Any]] = {}
+
+
 def _market_quotes_from_ring(ring_tel: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    out: dict[str, dict[str, Any]] = {}
+    from system.quote_sanity import filter_market_quotes, plausible_mid_for_epic
+
+    raw: dict[str, dict[str, Any]] = {}
     for row in ring_tel.get("quote_ring") or []:
         if not isinstance(row, dict):
             continue
@@ -332,7 +392,7 @@ def _market_quotes_from_ring(ring_tel: dict[str, Any]) -> dict[str, dict[str, An
             bid = offer = mid = 0.0
         if mid <= 0 and bid > 0 and offer > 0:
             mid = (bid + offer) / 2.0
-        out[epic] = {
+        raw[epic] = {
             "epic": epic,
             "bid": bid,
             "offer": offer,
@@ -340,6 +400,15 @@ def _market_quotes_from_ring(ring_tel: dict[str, Any]) -> dict[str, dict[str, An
             "last_price": mid,
             "source": str(row.get("source") or "ring"),
         }
+    out = filter_market_quotes(raw, prior=_LAST_GOOD_MARKET_QUOTES)
+    # Refresh last-good cache with currently plausible quotes only
+    for epic, q in out.items():
+        try:
+            m = float(q.get("mid") or 0)
+        except (TypeError, ValueError):
+            continue
+        if plausible_mid_for_epic(epic, m) and not q.get("stale_fallback"):
+            _LAST_GOOD_MARKET_QUOTES[epic] = dict(q)
     return out
 
 
@@ -804,6 +873,24 @@ def _build_fulfillment_snapshot() -> dict[str, Any]:
         dual_core = dual_core_status_dict()
     except Exception:
         dual_core = {}
+    # Transport-aware quote freshness — fail-close sniper when hub ticks are stale.
+    quote_age_sec, quotes_fresh, quote_budget = _hub_quote_freshness_gate()
+    try:
+        from system.memory_context import get_memory_context
+
+        get_memory_context().set_quote_freshness(quote_age_sec, budget_sec=quote_budget)
+    except Exception:
+        pass
+    # Sniper / entry arming: hub quote freshness is authoritative under Yahoo/
+    # rest_poll. Multi-feed stage lights (2/3 velocity) must not veto when the
+    # trading hub is within budget — that caused permanent ASSET IDLE.
+    velocity_stall = bool(data_velocity.get("stall_active"))
+    all_ready = bool(quotes_fresh and not velocity_stall)
+    # MEMORY CTX must not claim TRUE SYNC when hub quotes are fail-closed.
+    ring_aligned = bool(ring_tel.get("thread_aligned"))
+    memory_alignment = (
+        "TRUE SYNC" if ring_aligned and quotes_fresh else ("WARMING" if ring_aligned else "DESYNC")
+    )
     return {
         "mode": "UNIFIED_FULFILLMENT",
         "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -811,10 +898,16 @@ def _build_fulfillment_snapshot() -> dict[str, Any]:
         "stages": stages,
         "traffic_light_hub": traffic,
         "data_velocity": data_velocity,
-        "trading_paused": bool(data_velocity.get("trading_paused")),
+        "trading_paused": bool(data_velocity.get("trading_paused")) or not quotes_fresh,
         "critical_alert": data_velocity.get("critical_alert"),
         "ticks_cached": int(data_velocity.get("ticks_cached") or 0),
-        "all_ready": all(s.get("ok") for s in stages) and not data_velocity.get("stall_active"),
+        "all_ready": all_ready,
+        "quote_freshness": {
+            "budget_sec": quote_budget,
+            "age_sec": quote_age_sec,
+            "fresh": quotes_fresh,
+            "fail_closed": not quotes_fresh,
+        },
         "stream_mapping_banner": feed.get(
             "stream_mapping_banner",
             "🟢 Yahoo + Finnhub + Twelve Data Mapped (Absolute Feed Resilience)",
@@ -826,7 +919,7 @@ def _build_fulfillment_snapshot() -> dict[str, Any]:
         "alpha_frontier_tracker": frontier,
         "gate_diagnostics": gate_payload,
         "market_quotes": _market_quotes_from_ring(ring_tel),
-        "memory_alignment": "TRUE SYNC" if bool(ring_tel.get("thread_aligned")) else "WARMING",
+        "memory_alignment": memory_alignment,
         "execution_mode": dual_core.get("execution_mode"),
         "volatility_z_score": dual_core.get("volatility_z_score"),
         "dual_core_status": dual_core,

@@ -134,11 +134,13 @@ class ApexIpcBridge:
 
     def _accept_loop(self) -> None:
         assert self._server is not None
+        _consecutive_errors = 0
         while self._running:
             try:
                 self._server.settimeout(1.0)
                 conn, _addr = self._server.accept()
                 conn.setblocking(True)
+                _consecutive_errors = 0
                 with self._lock:
                     if len(self._clients) >= _MAX_CLIENTS:
                         conn.close()
@@ -146,11 +148,16 @@ class ApexIpcBridge:
                     self._clients.append(conn)
                 log_engine("Apex IPC: client connected")
             except TimeoutError:
+                _consecutive_errors = 0
                 continue
             except OSError:
-                if self._running:
-                    time.sleep(0.1)
-                break
+                if not self._running:
+                    break
+                _consecutive_errors += 1
+                time.sleep(min(2.0, 0.1 * _consecutive_errors))
+                if _consecutive_errors > 50:
+                    log_engine("Apex IPC: accept loop terminated after 50 consecutive errors")
+                    break
 
     def _on_tick(self, tick: dict[str, Any]) -> None:
         self.broadcast(tick)

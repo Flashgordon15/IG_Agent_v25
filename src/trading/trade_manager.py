@@ -1212,6 +1212,15 @@ class TradeManager:
             self._telegram_alert(warn_msg)
         if age_mins < float(max_age):
             return []
+        try:
+            from runtime.long_trade_runner import skip_max_age_close_for_runner
+
+            if skip_max_age_close_for_runner(
+                side=side, entry=float(entry), px=float(px), cfg=self._cfg
+            ):
+                return []
+        except Exception:
+            pass
         from system.pnl_math import classify_result, realised_pnl_points
 
         exit_price = px
@@ -1240,7 +1249,14 @@ class TradeManager:
         )
         if ig_deal and self._rest is not None and hasattr(self._rest, "close_position"):
             try:
-                self._rest.close_position(ig_deal, side=side, size=float(tr["size"]))
+                # close_position expects OPEN side (keyword: direction=).
+                self._rest.close_position(
+                    ig_deal,
+                    direction=str(side or "BUY").upper(),
+                    size=float(tr["size"]),
+                    epic=epic or None,
+                    verify=True,
+                )
             except Exception as e:
                 log_engine(f"Max-age IG close failed for {ig_deal}: {e}")
         msg = (
@@ -1301,7 +1317,14 @@ class TradeManager:
         )
         if ig_deal and self._rest is not None and hasattr(self._rest, "close_position"):
             try:
-                self._rest.close_position(ig_deal, side=side, size=float(tr["size"]))
+                # close_position expects OPEN side (keyword: direction=).
+                self._rest.close_position(
+                    ig_deal,
+                    direction=str(side or "BUY").upper(),
+                    size=float(tr["size"]),
+                    epic=epic or None,
+                    verify=True,
+                )
             except Exception as e:
                 log_engine(f"Friday auto-close IG REST failed for {ig_deal}: {e}")
         msg = (

@@ -103,9 +103,37 @@ class IgPositionSync:
         self._recent_close_log: dict[str, float] = {}
         self._last_logged_interval: float | None = None
         self._run_guard = SyncTaskGuard("IG position sync")
+        self._wake = threading.Event()
 
     def register_on_changed(self, callback: Callable[[], None]) -> None:
         self._on_changed = callback
+
+    def seed_local_fill(
+        self,
+        *,
+        deal_id: str,
+        epic: str,
+        direction: str,
+        size: float,
+        level: float,
+        deal_reference: str = "",
+    ) -> None:
+        """Remember fill context before the next IG poll — fast scalps close between polls."""
+        did = str(deal_id or "").strip()
+        if not did or float(level) <= 0:
+            return
+        pos = SyncedPosition(
+            deal_id=did,
+            epic=str(epic or ""),
+            direction=str(direction or "BUY").upper(),
+            size=float(size or 0),
+            level=float(level),
+            upl=0.0,
+            deal_reference=str(deal_reference or ""),
+        )
+        with self._lock:
+            self._last_known[did] = pos
+            self._seen_on_ig.add(did)
 
     def _configured_account_id(self) -> str:
         return str(getattr(self._rest, "account_id", "") or "").strip().upper()
@@ -139,10 +167,15 @@ class IgPositionSync:
             )
         return kept
 
+    def request_refresh(self) -> None:
+        """Signal the background loop to sync sooner (non-blocking for API callers)."""
+        self._wake.set()
+
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
+        self._wake.clear()
         self._thread = threading.Thread(
             target=self._loop, daemon=True, name="IgPositionSync"
         )
@@ -401,7 +434,7 @@ class IgPositionSync:
                         f"IG position sync session/account mismatch: "
                         f"configured={configured} session={session_acct}"
                     )
-                raw = self._rest.open_positions()
+                raw = self._rest.open_positions(budget_priority=True)
                 ig_positions = self._positions_for_sync(self._parse_positions(raw))
                 for p in ig_positions:
                     self._seen_on_ig.add(p.deal_id)
@@ -413,6 +446,19 @@ class IgPositionSync:
                     self._snapshot.last_error = ""
                     self._last_sync_ts = time.time()
                     new_upl = float(self._snapshot.account_upl)
+                # Publish authoritative broker book to the shared snapshot so the
+                # GUI endpoint and out-of-process supervisors read one truth and
+                # skip redundant /positions polls (shared REST budget).
+                try:
+                    from runtime import broker_snapshot
+
+                    broker_snapshot.write_snapshot(
+                        source="ig_position_sync",
+                        items=list(raw or []),
+                        account_upl=new_upl,
+                    )
+                except Exception:
+                    pass
                 from execution.entry_inflight import clear_entry_on_reconciled_position
                 from execution.exit_inflight import clear_exit_on_reconciled_close
                 from execution.pending_order_reconcile import (
@@ -494,6 +540,12 @@ class IgPositionSync:
                     "SYNC", "IgPositionSync.sync_once", decision=f"error: {err}"
                 )
         self._update_diagnostics()
+        try:
+            from execution.position_risk_stack import ensure_risk_stack_coverage
+
+            ensure_risk_stack_coverage(self._rest, cfg=None, force=False)
+        except Exception:
+            pass
         if (changed or ui_refresh) and self._on_changed:
             try:
                 self._on_changed()
@@ -508,7 +560,9 @@ class IgPositionSync:
     def _loop(self) -> None:
         while not self._stop.is_set():
             self.sync_once()
-            self._stop.wait(self._effective_interval())
+            interval = self._effective_interval()
+            if self._wake.wait(timeout=interval):
+                self._wake.clear()
 
     @staticmethod
     def _position_upl(pos: dict[str, Any], mkt: dict[str, Any]) -> float:
@@ -643,6 +697,10 @@ class IgPositionSync:
         ig_close_deal_id: str | None = None
 
         if self._txn_sync:
+            try:
+                self._txn_sync.sync_once(force=True, fetch_activity=True)
+            except Exception as e:
+                log_engine(f"IG transaction sync on close failed: {e}")
             ig_row = None
             if hasattr(self._txn_sync, "lookup_row"):
                 ig_row = self._txn_sync.lookup_row(deal_id, deal_ref)
@@ -658,27 +716,22 @@ class IgPositionSync:
                     ).strip()
                     or None
                 )
+            if ig_pnl_currency is None and hasattr(self._txn_sync, "lookup_row"):
+                ig_row = self._txn_sync.lookup_row(deal_id, deal_ref)
+                if ig_row:
+                    ig_pnl_currency = ig_row.get("ig_pnl_currency")
+                    if ig_pnl_currency is not None:
+                        ig_pnl_currency = float(ig_pnl_currency)
+                    ig_close_deal_id = (
+                        str(
+                            ig_row.get("ig_deal_id")
+                            or ig_row.get("deal_reference")
+                            or ""
+                        ).strip()
+                        or None
+                    )
             if ig_pnl_currency is None:
-                try:
-                    self._txn_sync.sync_once(force=True, fetch_activity=True)
-                except Exception as e:
-                    log_engine(f"IG transaction sync on close failed: {e}")
-                if hasattr(self._txn_sync, "lookup_row"):
-                    ig_row = self._txn_sync.lookup_row(deal_id, deal_ref)
-                    if ig_row:
-                        ig_pnl_currency = ig_row.get("ig_pnl_currency")
-                        if ig_pnl_currency is not None:
-                            ig_pnl_currency = float(ig_pnl_currency)
-                        ig_close_deal_id = (
-                            str(
-                                ig_row.get("ig_deal_id")
-                                or ig_row.get("deal_reference")
-                                or ""
-                            ).strip()
-                            or None
-                        )
-                if ig_pnl_currency is None:
-                    ig_pnl_currency = self._txn_sync.lookup_pnl(deal_id, deal_ref)
+                ig_pnl_currency = self._txn_sync.lookup_pnl(deal_id, deal_ref)
 
         if ig_pnl_currency is not None:
             pnl = float(ig_pnl_currency)
@@ -698,7 +751,18 @@ class IgPositionSync:
         exit_px, pnl_pts, result = close_from_ig_position(
             side, entry, size, level=ig_level, upl=ig_upl
         )
-        if result == "BREAKEVEN" and last is None:
+        if (
+            result == "BREAKEVEN"
+            and ig_pnl_currency is None
+            and ig_level > 0
+            and abs(float(ig_level) - float(entry)) >= 0.01
+        ):
+            pnl_pts = (float(ig_level) - float(entry)) * (
+                1.0 if str(side).upper() == "BUY" else -1.0
+            )
+            exit_px = float(ig_level)
+            result = classify_result(pnl_pts)
+        if result == "BREAKEVEN" and last is None and ig_pnl_currency is None:
             result = "UNKNOWN"
         return exit_px, pnl_pts, result, None, ig_close_deal_id
 

@@ -99,11 +99,11 @@ def _place_and_close_demo_order(*, epic: str, size: float, stop: float) -> int:
             continue
         side = str(pos.get("direction") or "BUY").upper()
         pos_size = float(pos.get("size") or 0)
-        close_dir = "SELL" if side == "BUY" else "BUY"
-        print(f"Closing deal_id={deal_id} {side} size={pos_size} ...")
+        # close_position expects OPEN side and inverts once — never pass close_dir.
+        print(f"Closing deal_id={deal_id} open_side={side} size={pos_size} ...")
         rest.close_position(
             deal_id,
-            direction=close_dir,
+            direction=side,
             size=pos_size,
             epic=epic,
             currency_code=cfg.currency_code,

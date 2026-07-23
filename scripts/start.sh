@@ -4,6 +4,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+# shellcheck source=lib/detach_exec.sh
+source "${ROOT}/scripts/lib/detach_exec.sh"
 export PATH="${ROOT}/.venv/bin:${PATH}"
 export PYTHONPATH="${ROOT}/src"
 
@@ -184,15 +186,13 @@ HEALTH_URL="http://127.0.0.1:${PORT}/api/health"
 
 if [[ "${APP_MODE}" == "TESTBED" ]]; then
   echo "🚀 TESTBED direct launch on :${PORT}..."
-  nohup "${PY}" -u src/main.py >> "${IG_DATA_ROOT}/logs/agent_stdout.log" 2>&1 &
-  AGENT_PID=$!
+  detach_exec --log "${IG_DATA_ROOT}/logs/agent_stdout.log" -- "${PY}" -u src/main.py
+  AGENT_PID="${DETACH_PID}"
   echo "${AGENT_PID}" > "${IG_DATA_ROOT}/agent.pid"
 else
-  export DAEMON_SUPERVISOR_REDIRECT=1
-  nohup ./scripts/daemon_supervisor.sh >> "${SUP_LOG}" 2>&1 &
-  SUP_PID=$!
-  echo "${SUP_PID}" > "${IG_DATA_ROOT}/supervisor.pid"
-  echo "🚀 DAEMON SUPERVISOR DEPLOYED (PID ${SUP_PID}) — polling :${PORT} for G5..."
+  ./scripts/daemon_supervisor.sh
+  SUP_PID="$(tr -d '[:space:]' < "${IG_DATA_ROOT}/supervisor.pid" 2>/dev/null || true)"
+  echo "🚀 DAEMON SUPERVISOR DEPLOYED (PID ${SUP_PID:-?}) — polling :${PORT} for G5..."
 fi
 
 for _ in $(seq 1 60); do

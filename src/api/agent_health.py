@@ -768,6 +768,12 @@ def build_health_status() -> dict[str, Any]:
             **supervision_drift,
         }
     )
+    try:
+        from execution.maintenance_detachment import is_core_detached
+
+        result["core_detached"] = is_core_detached()
+    except Exception:
+        result["core_detached"] = False
     record_timing("health.total", (time.perf_counter() - t0) * 1000.0)
     return result
 

@@ -181,17 +181,23 @@ class OrderValidator:
                 reasons.append(f"Max positions reached ({count}/{max_pos}){suffix}")
             checks["position_limit"] = pos_ok
 
-            max_total = max(1, int(cfg.max_open_positions))
-            total_count = 0
-            if open_total_count is not None:
-                total_raw = open_total_count()
-                if isinstance(total_raw, (int, float)):
-                    total_count = int(total_raw)
-            total_ok = total_count < max_total
-            if not total_ok:
-                reasons.append(
-                    f"Total open positions reached ({total_count}/{max_total})"
-                )
+            raw_max_total = getattr(cfg, "max_open_positions", None)
+            if raw_max_total is None:
+                # null global cap (v32 dual) — do not coerce to 0/1 via int(None)
+                max_total = None
+                total_ok = True
+            else:
+                max_total = max(1, int(raw_max_total))
+                total_count = 0
+                if open_total_count is not None:
+                    total_raw = open_total_count()
+                    if isinstance(total_raw, (int, float)):
+                        total_count = int(total_raw)
+                total_ok = total_count < max_total
+                if not total_ok:
+                    reasons.append(
+                        f"Total open positions reached ({total_count}/{max_total})"
+                    )
             checks["total_position_limit"] = total_ok
 
             if count > 0 and count < max_pos:

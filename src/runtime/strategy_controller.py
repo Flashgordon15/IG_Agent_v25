@@ -124,6 +124,7 @@ def _paths_for_ownership(
     ownership: StrategyOwnership,
     *,
     advice_row: dict[str, Any] | None,
+    epic: str = "",
 ) -> tuple[list[ExecutionPath], list[ExecutionPath], list[str], str]:
     flags: list[str] = []
     reason_suffix = ""
@@ -171,13 +172,28 @@ def _paths_for_ownership(
                 recommended == RecommendedStrategyProfile.SCALP.value
                 and advice_conf >= ROTATION_SCALP_MICRO_THRESHOLD
             )
-        if scalp_advice:
+        # Dual-core desk enters via MICRO. With multi_source_auto_rotation always
+        # on, ownership stays ROTATION — blocking MICRO forever freezes DOW.
+        hot_path_micro = False
+        try:
+            from runtime.dual_core_execution import epic_allowed_on_hot_path
+
+            hot_path_micro = bool(epic_allowed_on_hot_path(str(epic or "")))
+        except Exception:
+            hot_path_micro = False
+        if scalp_advice or hot_path_micro:
             allowed.append(ExecutionPath.MICRO)
-            flags.append("ROTATION_MICRO_SELECTOR_EXCEPTION")
-            reason_suffix = (
-                f"ROTATION active — sweep allowed; micro allowed via SCALP advice "
-                f">= {ROTATION_SCALP_MICRO_THRESHOLD}"
-            )
+            if scalp_advice:
+                flags.append("ROTATION_MICRO_SELECTOR_EXCEPTION")
+                reason_suffix = (
+                    f"ROTATION active — sweep allowed; micro allowed via SCALP advice "
+                    f">= {ROTATION_SCALP_MICRO_THRESHOLD}"
+                )
+            else:
+                flags.append("ROTATION_HOT_PATH_MICRO")
+                reason_suffix = (
+                    "ROTATION active — hot-path epic may use MICRO (dual_core desk lane)"
+                )
         else:
             blocked.append(ExecutionPath.MICRO)
             reason_suffix = "ROTATION active — sweep only; micro blocked without high-confidence SCALP advice"
@@ -241,7 +257,9 @@ def decide_epic(
 ) -> StrategyOwnershipDecision:
     epic = str(epic_row.get("epic") or "")
     ownership, confidence, base_reason = _resolve_ownership(epic_row, advice_row)
-    allowed, blocked, flags, path_reason = _paths_for_ownership(ownership, advice_row=advice_row)
+    allowed, blocked, flags, path_reason = _paths_for_ownership(
+        ownership, advice_row=advice_row, epic=epic
+    )
     reason = path_reason or base_reason
     return StrategyOwnershipDecision(
         epic=epic,

@@ -346,6 +346,7 @@ class IgTransactionSync:
                     float(row["ig_pnl_currency"] or 0),
                     row.get("result") or "CLOSED",
                     ig_close_deal_id=close_ref,
+                    closed_at=str(row.get("closed_at") or "") or None,
                 ):
                     updated += 1
 
@@ -453,13 +454,14 @@ class IgTransactionSync:
             return 0
         from system.account_currency import account_currency_symbol
 
-        local_rows = self._store.recent_closed_trades(120)
+        local_rows = self._store.recent_closed_trades(500)
         claimed_close_refs: set[str] = set()
         reconciled = 0
         sym = account_currency_symbol()
 
         for local in local_rows:
-            if local.get("ig_pnl_currency") is not None:
+            # £0 entry==exit stubs are unconfirmed phantoms — keep matching.
+            if not self._local_needs_ig_cash(local):
                 continue
             open_id = str(local.get("ig_deal_id") or "").strip()
             order_ref = str(local.get("deal_reference") or "").strip()
@@ -483,6 +485,17 @@ class IgTransactionSync:
                     pnl,
                     result,
                     ig_close_deal_id=close_ref,
+                    exit_price=(
+                        float(ig_row["exit"])
+                        if ig_row.get("exit") is not None
+                        else None
+                    ),
+                    entry_price=(
+                        float(ig_row["entry"])
+                        if ig_row.get("entry") is not None
+                        else None
+                    ),
+                    closed_at=str(ig_row.get("closed_at") or "") or None,
                 )
             else:
                 ok = False
@@ -545,36 +558,134 @@ class IgTransactionSync:
         return reconciled
 
     @staticmethod
+    def _local_needs_ig_cash(local: dict[str, Any]) -> bool:
+        """True when local close still needs broker cash confirmation."""
+        cash = local.get("ig_pnl_currency")
+        if cash is None:
+            return True
+        try:
+            if abs(float(cash)) > 1e-9:
+                return False
+        except (TypeError, ValueError):
+            return True
+        try:
+            entry = float(local.get("entry") or 0)
+            exit_ = float(local.get("exit") or 0)
+        except (TypeError, ValueError):
+            return True
+        # £0 with entry==exit = phantom stub (not a real breakeven settle).
+        return abs(entry - exit_) < 1e-9
+
+    @staticmethod
+    def _market_bucket(epic: str = "", market: str = "") -> str:
+        blob = f"{epic} {market}".lower()
+        if "dow" in blob or "wall street" in blob or "wallstreet" in blob:
+            return "DOW"
+        if "nikkei" in blob or "japan" in blob:
+            return "NIKKEI"
+        if "gold" in blob:
+            return "GOLD"
+        if "eur" in blob and "usd" in blob:
+            return "EURUSD"
+        if "ftse" in blob or "uk 100" in blob:
+            return "FTSE"
+        return (epic or market or "").strip().upper()[:24]
+
+    @staticmethod
     def _heuristic_match(
         local: dict[str, Any],
         ig_rows: list[dict[str, Any]],
         claimed: set[str],
     ) -> dict[str, Any] | None:
-        """Match open DIAAA deal to IG close ref when ids differ (e.g. LBH6GFAG)."""
+        """Match open DIAAA deal to IG close ref when ids differ (e.g. LBH6GFAG).
+
+        Prefer openLevel/side/size identity — IG transaction dates are often
+        midnight-only so a pure time window match fails.
+        """
         epic = str(local.get("epic") or "")
+        market = str(local.get("market") or "")
         closed_dt = IgTransactionSync._parse_closed_ts(
             str(local.get("closed_at") or "")
         )
         open_id = str(local.get("ig_deal_id") or "").strip()
-        if not closed_dt or not open_id:
+        if not open_id:
             return None
+        try:
+            local_entry = float(local.get("entry") or 0)
+        except (TypeError, ValueError):
+            local_entry = 0.0
+        try:
+            local_size = float(local.get("size") or 0)
+        except (TypeError, ValueError):
+            local_size = 0.0
+        local_side = str(local.get("side") or "").upper()
+        local_bucket = IgTransactionSync._market_bucket(epic, market)
+        local_day = str(local.get("closed_at") or "")[:10]
+
         best: dict[str, Any] | None = None
-        best_delta = 999999.0
+        best_score = -1.0
         for ig in ig_rows:
             close_ref = str(
                 ig.get("ig_deal_id") or ig.get("deal_reference") or ""
             ).upper()
             if not close_ref or close_ref in claimed:
                 continue
-            if epic and str(ig.get("epic") or "") and str(ig.get("epic") or "") != epic:
+            ig_epic = str(ig.get("epic") or "")
+            if epic and ig_epic and ig_epic != epic:
                 continue
-            ig_dt = IgTransactionSync._parse_closed_ts(str(ig.get("closed_at") or ""))
-            if not ig_dt:
+            ig_bucket = IgTransactionSync._market_bucket(
+                ig_epic, str(ig.get("market") or "")
+            )
+            if local_bucket and ig_bucket and local_bucket != ig_bucket:
                 continue
-            delta = abs((closed_dt - ig_dt).total_seconds())
-            if delta <= 900 and delta < best_delta:
+            try:
+                ig_entry = float(ig.get("entry") or 0)
+            except (TypeError, ValueError):
+                ig_entry = 0.0
+            try:
+                ig_size = float(ig.get("size") or 0)
+            except (TypeError, ValueError):
+                ig_size = 0.0
+            ig_side = str(ig.get("side") or "").upper()
+            level_hit = (
+                local_entry > 0
+                and ig_entry > 0
+                and abs(local_entry - ig_entry) < 0.051
+            )
+            size_hit = local_size <= 0 or ig_size <= 0 or abs(local_size - ig_size) < 1e-6
+            side_hit = not local_side or not ig_side or local_side == ig_side
+            ig_day = str(ig.get("closed_at") or "")[:10]
+            day_hit = not local_day or not ig_day or local_day == ig_day
+            if not (level_hit and size_hit and side_hit and day_hit):
+                # Fall back to tight time window when levels unavailable.
+                if not closed_dt or level_hit:
+                    continue
+                ig_dt = IgTransactionSync._parse_closed_ts(
+                    str(ig.get("closed_at") or "")
+                )
+                if not ig_dt:
+                    continue
+                delta = abs((closed_dt - ig_dt).total_seconds())
+                if delta > 900 or not size_hit or not side_hit:
+                    continue
+                score = 1000.0 - delta
+            else:
+                score = 5000.0 - abs(local_entry - ig_entry) * 10.0
+                if closed_dt:
+                    ig_dt = IgTransactionSync._parse_closed_ts(
+                        str(ig.get("closed_at") or "")
+                    )
+                    if ig_dt is not None:
+                        # Prefer same-day clock proximity when IG has a real time.
+                        if not (
+                            ig_dt.hour == 0 and ig_dt.minute == 0 and ig_dt.second == 0
+                        ):
+                            score += max(
+                                0.0, 200.0 - abs((closed_dt - ig_dt).total_seconds())
+                            )
+            if score > best_score:
                 best = ig
-                best_delta = delta
+                best_score = score
         return best
 
     def get_display_rows(

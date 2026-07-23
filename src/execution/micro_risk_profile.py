@@ -18,6 +18,16 @@ class MicroRiskProfile:
     min_profit_target_pts: float
     max_loss_cap_pts: float
     virtual_stop_ceiling_pts: float
+    trail_profit_lock_ratio: float = 0.70
+    trail_trigger_pts: float = 1.5
+    trail_trigger_gbp: float = 1.5
+    min_bank_win_gbp: float = 1.0
+    soft_loss_ratio: float = 0.55
+    max_giveback_ratio: float = 0.30
+    gbp_poll_sec: float = 0.35
+    omit_broker_limit_at_entry: bool = True
+    # Demo soak default: ratchet in software; do not PUT broker trail edits.
+    omit_broker_trail_updates: bool = True
 
 
 def _load_profile(cfg: Any | None) -> MicroRiskProfile:
@@ -33,12 +43,21 @@ def _load_profile(cfg: Any | None) -> MicroRiskProfile:
             block = {}
     return MicroRiskProfile(
         risk_per_trade_gbp=float(block.get("risk_per_trade_gbp", 5.0)),
-        target_r_multiple=float(block.get("target_r_multiple", 1.5)),
+        target_r_multiple=float(block.get("target_r_multiple", 2.5)),
         min_profit_target_pts=float(block.get("min_profit_target_pts", 1.0)),
         max_loss_cap_pts=float(block.get("max_loss_cap_pts", 4.0)),
         virtual_stop_ceiling_pts=float(
             block.get("virtual_stop_ceiling_pts", block.get("max_loss_cap_pts", 4.0))
         ),
+        trail_profit_lock_ratio=float(block.get("trail_profit_lock_ratio", 0.70)),
+        trail_trigger_pts=float(block.get("trail_trigger_pts", 1.5)),
+        trail_trigger_gbp=float(block.get("trail_trigger_gbp", 1.5)),
+        min_bank_win_gbp=float(block.get("min_bank_win_gbp", 1.0)),
+        soft_loss_ratio=float(block.get("soft_loss_ratio", 0.55)),
+        max_giveback_ratio=float(block.get("max_giveback_ratio", 0.30)),
+        gbp_poll_sec=float(block.get("gbp_poll_sec", 0.35)),
+        omit_broker_limit_at_entry=bool(block.get("omit_broker_limit_at_entry", True)),
+        omit_broker_trail_updates=bool(block.get("omit_broker_trail_updates", True)),
     )
 
 
@@ -116,6 +135,22 @@ INSTRUMENT_PNL_SPEC: dict[str, dict[str, float | str]] = {
     "IX.D.DAX.IFM.IP": {"point_value": 1.0, "currency": "EUR"},
     "IX.D.NIKKEI.IFM.IP": {"point_value": 1.0, "currency": "JPY"},
 }
+
+
+def omit_broker_limit_at_entry(cfg: Any | None) -> bool:
+    return _load_profile(cfg).omit_broker_limit_at_entry
+
+
+def omit_broker_trail_updates(cfg: Any | None = None) -> bool:
+    """When True, DynamicLimit ratchets in-process only (no broker PUT trail)."""
+    if cfg is None:
+        try:
+            from system.config_loader import get_config
+
+            cfg = get_config()
+        except Exception:
+            cfg = None
+    return _load_profile(cfg).omit_broker_trail_updates
 
 
 def resolve_micro_tp_sl_for_epic(

@@ -153,6 +153,40 @@ def _feed_record(name: str) -> dict[str, Any]:
     return rec
 
 
+def _hub_epic_quote_rows(*, max_age: float = _SIGNAL_MAX_AGE_SEC) -> list[dict[str, Any]]:
+    """Per-epic hub winners — source, age, freshness for operator confidence."""
+    from system.market_data_hub import normalize_hub_quote_source
+
+    hub = get_market_data_hub()
+    rows: list[dict[str, Any]] = []
+    for epic in NIGHT_MATRIX_EPICS:
+        snap = hub.get_snapshot(epic)
+        if snap is None or float(snap.bid or 0) <= 0 or float(snap.offer or 0) <= 0:
+            rows.append(
+                {
+                    "epic": epic,
+                    "fresh": False,
+                    "age_sec": None,
+                    "source": "",
+                    "bid": None,
+                    "offer": None,
+                }
+            )
+            continue
+        age = float(snap.age_seconds())
+        rows.append(
+            {
+                "epic": epic,
+                "fresh": age <= max_age,
+                "age_sec": round(age, 1),
+                "source": normalize_hub_quote_source(snap.source),
+                "bid": round(float(snap.bid), 4),
+                "offer": round(float(snap.offer), 4),
+            }
+        )
+    return rows
+
+
 def _compose_state() -> dict[str, Any]:
     fresh, total, primary = _hub_fresh_counts()
     feeds = {name: _feed_record(name) for name in _PRIMARY_ORDER}
@@ -225,7 +259,29 @@ def _compose_state() -> dict[str, Any]:
         "retry_backoff_sec": round(retry_backoff_sec, 1),
         "retry_counts": {k: feeds[k]["retry_count"] for k in feeds},
         "started_at": _state.get("started_at") or "",
+        "epic_quotes": _hub_epic_quote_rows(),
+        "ingest_policy": {
+            "signal_race": "first_past_post",
+            "stale_incoming_rejected": True,
+            "ig_blocked_on_signal_path": True,
+            "execution_path": "ig_rest_only",
+            "tracking_pnl": "broker_upl_authoritative",
+            "entry_stale_veto_sec": _entry_stale_veto_sec(),
+        },
     }
+
+
+def _entry_stale_veto_sec() -> float:
+    try:
+        from system.config_loader import get_config
+
+        cfg = get_config()
+        fq = cfg.get("feed_quality") if hasattr(cfg, "get") else {}
+        if isinstance(fq, dict) and fq.get("entry_gate_enabled", True):
+            return float(fq.get("entry_veto_age_sec", 25.0) or 25.0)
+    except Exception:
+        pass
+    return 25.0
 
 
 def get_data_feed_state() -> dict[str, Any]:

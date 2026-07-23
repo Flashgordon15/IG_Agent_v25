@@ -85,7 +85,8 @@ MULTI_SOURCE_AUTO_ROTATION = True
 MICRO_SCALP_INSTANT_MIN_SCORE = 45.0
 MICRO_SCALP_TARGET_MIN_PTS = 1.5
 MICRO_SCALP_TARGET_MAX_PTS = 4.0
-MICRO_SCALP_INSTANT_CADENCE_SEC = 2.0
+# Event-driven default: no multi-second cadence smoothing on the tick lane.
+MICRO_SCALP_INSTANT_CADENCE_SEC = 0.0
 _micro_scalper_lane_registered = False
 _micro_scalper_lane_unsub: Callable[[], None] | None = None
 _last_instant_scalp_at: dict[str, float] = {}
@@ -98,11 +99,21 @@ def multi_source_auto_rotation_enabled(
     _lock_held: bool = False,
 ) -> bool:
     """False when config or runtime forex lock pins EUR/USD + GBP/USD hot path."""
+    if cfg is None:
+        try:
+            from system.config_loader import get_config
+
+            cfg = get_config()
+        except Exception:
+            cfg = None
     try:
         if cfg is not None and hasattr(cfg, "get"):
             dual = cfg.get("dual_core") or {}
-            if isinstance(dual, dict) and dual.get("forex_rotation_locked"):
-                return False
+            if isinstance(dual, dict):
+                if dual.get("forex_rotation_locked"):
+                    return False
+                if "multi_source_auto_rotation" in dual:
+                    return bool(dual.get("multi_source_auto_rotation"))
     except Exception:
         pass
     if _lock_held:
@@ -113,6 +124,23 @@ def multi_source_auto_rotation_enabled(
             if _forex_rotation_locked:
                 return False
     return MULTI_SOURCE_AUTO_ROTATION
+
+
+def _epics_with_open_positions() -> set[str]:
+    """Epics with live lifecycle trades — pinned on stack during rotation."""
+    pinned: set[str] = set()
+    try:
+        from runtime.trade_lifecycle import snapshot as lifecycle_snapshot
+
+        for trade in (lifecycle_snapshot().get("active") or {}).values():
+            if not isinstance(trade, dict):
+                continue
+            epic = str(trade.get("epic") or "").strip()
+            if epic:
+                pinned.add(epic)
+    except Exception:
+        pass
+    return pinned
 
 
 def _resolve_stack_rest_client(cfg: Any | None = None) -> Any | None:
@@ -232,10 +260,83 @@ def refresh_active_stack_tradeability(*, cfg: Any | None = None, rest: Any | Non
 
 
 def epic_allowed_on_hot_path(epic: str, cfg: Any | None = None) -> bool:
-    """Reject dispatch on epics outside active stack or on exclude list."""
+    """Reject dispatch on epics outside active stack or on exclude list.
+
+    Config ``exclude_from_hot_path`` is authoritative. The desk hot-path epic
+    (DOW) must never be false-blocked by in-memory stack races or chop freeze —
+    those gates belong downstream (regime veto / strategy matrix), not here.
+    Misleading ``hot_path_epic_excluded`` logs for DOW starve fills while
+    ``trading_path_live`` stays green.
+
+    Forex-rotation lock remains a hard override (indices off).
+    """
     key = str(epic or "").strip()
     if not key:
         return False
+
+    excluded: set[str] = set()
+    try:
+        if cfg is not None and hasattr(cfg, "get"):
+            dual = cfg.get("dual_core") or {}
+            if isinstance(dual, dict):
+                excluded = {
+                    str(e).strip() for e in (dual.get("exclude_from_hot_path") or [])
+                }
+                if dual.get("forex_rotation_locked"):
+                    # Config-level forex lock — only EUR/GBP stack (handled below
+                    # via active stack / exploration); DOW is not authoritative.
+                    if key == "IX.D.DOW.IFM.IP":
+                        return False
+    except Exception:
+        excluded = set()
+    if key in excluded:
+        return False
+
+    # multi_market_promote: prepared gates stay OFF until enabled; Nikkei never
+    # auto-promotes (nikkei_hot_path must be explicit true + removed from exclude).
+    try:
+        if cfg is not None and hasattr(cfg, "get"):
+            promo = cfg.get("multi_market_promote") or {}
+            if isinstance(promo, dict):
+                if key == "IX.D.NIKKEI.IFM.IP" and not bool(promo.get("nikkei_hot_path")):
+                    return False
+                prepared = promo.get("prepared_gates") or {}
+                if isinstance(prepared, dict) and key in prepared:
+                    gate = prepared.get(key) or {}
+                    if not bool(gate.get("enabled")):
+                        return False
+                hot = promo.get("hot_path_epics")
+                if isinstance(hot, list) and hot and key not in {
+                    str(e).strip() for e in hot
+                }:
+                    # Non-listed epics still need exploration / route allow below
+                    # unless they are the authoritative DOW hot path.
+                    if key != "IX.D.DOW.IFM.IP":
+                        pass
+    except Exception:
+        pass
+
+    try:
+        if is_forex_failover_active() and key == "IX.D.DOW.IFM.IP":
+            return False
+    except Exception:
+        pass
+
+    # Authoritative demo/live hot path — DOW stays dispatchable when not excluded
+    # and forex failover is off.
+    if key == "IX.D.DOW.IFM.IP":
+        return True
+
+    try:
+        if cfg is not None and hasattr(cfg, "get"):
+            ehp = cfg.get("engine_hot_path") or {}
+            if isinstance(ehp, dict) and bool(ehp.get("enabled")):
+                armed = {str(e).strip() for e in (ehp.get("epics") or [])}
+                if key in armed and key in get_active_stack_epics():
+                    return True
+    except Exception:
+        pass
+
     try:
         from runtime.portfolio_exploration_engine import exploration_allows_hot_path
 
@@ -260,15 +361,6 @@ def epic_allowed_on_hot_path(epic: str, cfg: Any | None = None) -> bool:
         pass
     if key not in get_active_stack_epics():
         return False
-    try:
-        if cfg is not None and hasattr(cfg, "get"):
-            dual = cfg.get("dual_core") or {}
-            if isinstance(dual, dict):
-                excluded = {str(e).strip() for e in (dual.get("exclude_from_hot_path") or [])}
-                if key in excluded:
-                    return False
-    except Exception:
-        pass
     return True
 
 
@@ -424,6 +516,7 @@ def _ingest_fresh_quote(
     key = str(epic or "").strip()
     if not key or bid <= 0 or offer <= 0:
         return None
+    published = False
     try:
         get_market_data_hub().publish(
             key,
@@ -432,12 +525,29 @@ def _ingest_fresh_quote(
             source=str(source or "yahoo"),
             quote_time=quote_time,
         )
+        published = True
     except Exception:
-        pass
+        published = False
     mid = (float(bid) + float(offer)) / 2.0
     snap = ingest_hub_mid(key, mid, cfg=cfg)
-    _mark_fresh_tick(key)
-    _record_quote_pulse(key)
+    # Never pulse "fresh" on a failed publish or a republished stale epoch —
+    # that was masking 200s+ hub ages as LIVE TPM / health_light trade_ready.
+    if published:
+        try:
+            from system.market_integrity import effective_entry_quote_budget_sec
+
+            budget = float(effective_entry_quote_budget_sec(cfg))
+        except Exception:
+            budget = 10.0
+        age = 0.0
+        if quote_time is not None:
+            try:
+                age = max(0.0, time.time() - float(quote_time))
+            except (TypeError, ValueError):
+                age = 0.0
+        if age <= budget:
+            _mark_fresh_tick(key)
+            _record_quote_pulse(key)
     return snap
 
 
@@ -566,8 +676,8 @@ def _trigger_non_blocking_stream_rehydration(stale_epics: list[str]) -> None:
             # is restarted from scratch.
             start_yahoo_quote_poller(epics, poll_sec=yahoo_poll_seconds(cfg_dict))
             _rearm_ig_stream_with_retry(cfg_obj)
-            for epic in stale_epics:
-                _mark_fresh_tick(epic)
+            # Do NOT _mark_fresh_tick here — rehydrate only restarts pollers;
+            # freshness must come from a successful hub.publish with a live epoch.
         except Exception as exc:
             log_engine(f"SocketHeartbeat: rehydrate failed {type(exc).__name__}: {exc}")
         finally:
@@ -868,8 +978,18 @@ def get_rotation_state_locked() -> dict[str, Any]:
     now = time.time()
     for epic, since in _stagnant_since_by_epic.items():
         stagnant[epic] = round(max(0.0, now - since), 1)
+    try:
+        from system.config_loader import get_config
+
+        cfg = get_config()
+    except Exception:
+        cfg = None
+    dead_zone_sec = _resolve_stagnant_dead_zone_sec(cfg)
+    pinned = sorted(_epics_with_open_positions())
     return {
-        "multi_source_auto_rotation": multi_source_auto_rotation_enabled(_lock_held=True),
+        "multi_source_auto_rotation": multi_source_auto_rotation_enabled(
+            cfg, _lock_held=True
+        ),
         "rotation_universe": list(ROTATION_UNIVERSE),
         "rotation_sweep_sec": ROTATION_SWEEP_SEC,
         "last_rotation_at": _last_rotation_at,
@@ -877,7 +997,8 @@ def get_rotation_state_locked() -> dict[str, Any]:
         "rotation_sweep_count": _rotation_sweep_count,
         "stagnant_dead_zone_epics": stagnant,
         "stagnant_z_band": [STAGNANT_Z_MIN, STAGNANT_Z_MAX],
-        "stagnant_dead_zone_sec": STAGNANT_DEAD_ZONE_SEC,
+        "stagnant_dead_zone_sec": dead_zone_sec,
+        "pinned_open_epics": pinned,
         "rotation_escape_active": bool(_rotation_escape_active),
         **_rotation_eligibility_unlocked(),
         "boot_grace_active": (
@@ -949,7 +1070,8 @@ def _fetch_multi_source_quote(
     except Exception:
         pass
 
-    # Yahoo unavailable — fall back to hub if still within 45s
+    # Yahoo unavailable — fall back to hub ONLY while still fresh.
+    # Never re-ingest hub_stale into the sweep (was pumping TPM / fake LIVE).
     if hub_fresh:
         return (
             float(quote.bid),
@@ -957,15 +1079,6 @@ def _fetch_multi_source_quote(
             str(getattr(quote, "source", None) or "hub"),
             now - hub_age,
         )
-    if quote is not None and float(getattr(quote, "bid", 0) or 0) > 0:
-        offer = float(getattr(quote, "offer", 0) or 0)
-        if offer > 0:
-            return (
-                float(quote.bid),
-                offer,
-                str(getattr(quote, "source", None) or "hub_stale"),
-                now - hub_age,
-            )
     return None
 
 
@@ -1188,9 +1301,17 @@ def _rotate_to_high_velocity_stack(
     tradeable_set = set(resolve_tradeable_stack_epics(rest, cfg))
     ranked = _rank_universe_by_velocity(cfg=cfg)
     slots = get_active_stack_slots(cfg)
-    picks = [
-        epic for epic, _ in ranked if epic not in exclude and epic in tradeable_set
-    ][:slots]
+    pinned = _epics_with_open_positions()
+    picks: list[str] = []
+    for epic in pinned:
+        if epic in tradeable_set and epic not in exclude and epic not in picks:
+            picks.append(epic)
+    for epic, _ in ranked:
+        if epic not in exclude and epic in tradeable_set and epic not in picks:
+            picks.append(epic)
+        if len(picks) >= slots:
+            break
+    picks = picks[:slots]
     if len(picks) < slots:
         for epic in resolve_tradeable_stack_epics(rest, cfg):
             if epic not in picks and epic not in exclude:
@@ -1314,12 +1435,15 @@ def evaluate_multi_source_rotation_sweep(*, cfg: Any | None = None) -> dict[str,
 
     _check_tpm_zero_rehydrate(cfg=cfg)
 
-    if stagnant_flags and multi_source_auto_rotation_enabled(cfg):
-        for epic in stagnant_flags:
+    pinned = _epics_with_open_positions()
+    rotatable_stagnant = [epic for epic in stagnant_flags if epic not in pinned]
+
+    if rotatable_stagnant and multi_source_auto_rotation_enabled(cfg):
+        for epic in rotatable_stagnant:
             _evict_epic_from_active_memory(epic, STAGNANT_DEAD_ZONE_REASON)
         _rotate_to_high_velocity_stack(
             reason=STAGNANT_DEAD_ZONE_REASON,
-            exclude=set(stagnant_flags),
+            exclude=set(rotatable_stagnant),
             cfg=cfg,
             rest=rest,
         )
@@ -1413,20 +1537,14 @@ def _check_universe_escape_hatch(*, cfg: Any | None = None) -> None:
 
 
 def resolve_max_spread_pts(epic: str, cfg: Any | None = None) -> float:
-    """Per-epic spread ceiling from config overlay or sensible defaults."""
+    """Per-epic spread ceiling from ContractAssetNormalizer + config overlay."""
+    from execution.contract_asset_normalizer import resolve_max_spread_pts as _norm_max_spread
+
     key = str(epic or "").strip()
-    if cfg is not None:
-        try:
-            markets = cfg.get("markets", {}) if hasattr(cfg, "get") else {}
-            if isinstance(markets, dict):
-                for _mk, row in markets.items():
-                    if not isinstance(row, dict):
-                        continue
-                    if str(row.get("epic") or "") == key:
-                        return float(row.get("max_spread_pts") or _DEFAULT_MAX_SPREAD_PTS.get(key, 8.0))
-        except Exception:
-            pass
-    return float(_DEFAULT_MAX_SPREAD_PTS.get(key, 8.0))
+    try:
+        return float(_norm_max_spread(key, cfg))
+    except Exception:
+        return float(_DEFAULT_MAX_SPREAD_PTS.get(key, 8.0))
 
 
 def _ticks_per_minute(epic: str) -> int:
@@ -1763,6 +1881,81 @@ def lite_valve_block_status() -> str:
     except Exception:
         pass
     try:
+        from runtime.deploy_hold import is_deploy_hold_active
+
+        if is_deploy_hold_active():
+            reasons.append("deploy_hold_active")
+    except Exception:
+        pass
+    try:
+        from runtime.feed_health_watchdog import entries_blocked_by_feed_health
+
+        if entries_blocked_by_feed_health():
+            reasons.append("feed_health_unhealthy")
+    except Exception:
+        pass
+    try:
+        from system.rest_api_budget import entries_blocked_by_rest_pressure
+
+        blocked, reason = entries_blocked_by_rest_pressure()
+        if blocked:
+            reasons.append(reason or "rest_pressure_entry_pause")
+    except Exception:
+        pass
+    try:
+        # Un-bypassable per-account hard cap (Z6BAH4 → 1 open).
+        from execution.order_in_flight_mutex import hard_cap_blocks_entry
+        from system.engine_lane import DEFAULT_ACCOUNT_CFD, resolve_journal_metadata
+        from system.config_loader import get_config
+
+        cfg = get_config()
+        meta = resolve_journal_metadata(cfg=cfg)
+        acct = str(meta.get("account_id") or DEFAULT_ACCOUNT_CFD)
+        blocked, cap_reason = hard_cap_blocks_entry(acct)
+        if blocked:
+            reasons.append(cap_reason)
+    except Exception:
+        pass
+    try:
+        # Hard snapshot cap — storms cannot recur even when sync/REST starved.
+        from runtime.broker_snapshot import open_count_from_snapshot
+        from system.config_loader import get_config
+        from system.engine_lane import count_cap_for_engine, resolve_active_engine_id
+
+        cfg = get_config()
+        engine_id = resolve_active_engine_id(cfg)
+        engine_cap = count_cap_for_engine(engine_id, cfg)
+        raw_max = getattr(cfg, "max_open_positions", None)
+        if engine_cap is not None:
+            max_open = int(engine_cap)
+        elif raw_max is None:
+            max_open = None
+        else:
+            max_open = max(1, int(raw_max or 6))
+        snap_n = open_count_from_snapshot(max_age_sec=300.0)
+        if max_open is not None and snap_n is not None and snap_n >= max_open:
+            reasons.append(f"broker_snapshot_cap:{snap_n}>={max_open}")
+    except Exception:
+        pass
+    try:
+        from pathlib import Path
+        import json as _json
+
+        from system.paths import state_dir
+
+        for flag_name, default_reason in (
+            ("entry_halt.json", "entry_halt"),
+            ("trading_paused.json", "trading_paused"),
+        ):
+            halt = Path(state_dir()) / flag_name
+            if not halt.is_file():
+                continue
+            raw = _json.loads(halt.read_text(encoding="utf-8"))
+            if bool(raw.get("active")):
+                reasons.append(str(raw.get("reason") or default_reason))
+    except Exception:
+        pass
+    try:
         from system.config_loader import get_config
         from system.demo_execution_plane import demo_throughput_active
 
@@ -2074,7 +2267,22 @@ def evaluate_strategy_execution(
             _record_execution_telemetry(plan)
             return plan
     except Exception as exc:
-        log_engine(f"StrategyMatrix: gate check {type(exc).__name__}: {exc}")
+        # Fail-CLOSED — never build an executable plan when gates throw.
+        log_engine(f"StrategyMatrix: gate FAIL-CLOSED {type(exc).__name__}: {exc}")
+        plan = StrategyExecutionPlan(
+            route="blocked",
+            epic=key,
+            direction=dir_u,
+            order_type="NONE",
+            limit_price=None,
+            size=size,
+            max_chase_ticks=0,
+            kelly_cap=0.0,
+            approved=False,
+            reason=f"entry_gate_fail_closed:{type(exc).__name__}",
+        )
+        _record_execution_telemetry(plan)
+        return plan
 
     route_path = ROUTE_LIMIT_CHASE_HF
     kelly_cap = KELLY_CAP_LIMIT_CHASE
@@ -2377,6 +2585,27 @@ def _dispatch_piercing_zone_order(epic: str, z_score: float, cfg: Any | None) ->
             f"ParallelStrategySweep: dispatch blocked epic={epic} reason=hot_path_epic_excluded"
         )
         return
+    try:
+        from system.strategy_quality_gate import evaluate_entry_hour_gate
+
+        hour_ok, hour_reason, _hour_meta = evaluate_entry_hour_gate(epic, cfg=cfg)
+        if not hour_ok:
+            set_last_gate_suppression_reason(hour_reason)
+            log_engine(
+                f"ParallelStrategySweep: hour gate blocked epic={epic} reason={hour_reason}"
+            )
+            return
+    except Exception:
+        pass
+    try:
+        from runtime.entry_rate_limit import check_entry_rate_limit
+
+        rate_ok, rate_reason = check_entry_rate_limit(epic, cfg=cfg)
+        if not rate_ok:
+            set_last_gate_suppression_reason(rate_reason)
+            return
+    except Exception:
+        pass
     with _sweep_dispatch_lock:
         if is_api_trading_paused():
             set_last_gate_suppression_reason("api_trading_paused")
@@ -3086,6 +3315,9 @@ def ingest_hub_mid(epic: str, mid: float, cfg: Any | None = None) -> DualCoreSna
         from runtime.virtual_stop_loss import on_streaming_mid_tick
 
         on_streaming_mid_tick(key, float(mid))
+        from runtime.dynamic_limit_engine import on_streaming_mid_tick as on_profit_trail_tick
+
+        on_profit_trail_tick(key, float(mid))
     except Exception:
         pass
     return snap
@@ -3131,9 +3363,8 @@ def canary_lot_size(epic: str, cfg: Any | None = None) -> float:
 def resolve_micro_stop_limit_points(
     rest_client: Any, epic: str, *, size: float = 1.0, cfg: Any | None = None
 ) -> tuple[float, float]:
-    """TP/SL from configurable GBP risk profile + broker floors."""
+    """TP/SL from adaptive ATR bracket (fallback: GBP micro_risk) + broker floors."""
     from execution.live_broker_order_router import floor_stop_distance_points
-    from execution.micro_risk_profile import resolve_micro_tp_sl_for_epic
     from runtime.virtual_stop_loss import stretch_broker_stop_distance
 
     try:
@@ -3148,9 +3379,19 @@ def resolve_micro_stop_limit_points(
             cfg = get_config()
         except Exception:
             cfg = None
-    tp_pts, sl_pts, _profile = resolve_micro_tp_sl_for_epic(
-        epic, size, cfg, volatility_z=z
-    )
+    try:
+        from execution.adaptive_atr_bracket import resolve_adaptive_entry_bracket
+
+        bracket = resolve_adaptive_entry_bracket(
+            epic, "BUY", float(size), cfg, volatility_z=z
+        )
+        tp_pts, sl_pts = float(bracket.tp_pts), float(bracket.sl_pts)
+    except Exception:
+        from execution.micro_risk_profile import resolve_micro_tp_sl_for_epic
+
+        tp_pts, sl_pts, _profile = resolve_micro_tp_sl_for_epic(
+            epic, size, cfg, volatility_z=z
+        )
     tp = floor_stop_distance_points(rest_client, epic, tp_pts).effective_points
     sl = stretch_broker_stop_distance(rest_client, epic, sl_pts)
     return float(tp), float(sl)
@@ -3230,7 +3471,17 @@ def evaluate_predictive_micro_scalp_trigger(
         empty["reason"] = "direction_flat"
         return empty
 
-    if not flow_aligned:
+    # Depthless Yahoo books report order_flow_aligned=False with OBI≈0 forever.
+    # Only hard-block when OBI is informative against the side (|obi| ≥ epic threshold).
+    obi_ratio = float(mt.get("obi_ratio") or 0.0)
+    obi_thr = 0.22
+    try:
+        from system.memory_context import resolve_asset_profile
+
+        obi_thr = float(resolve_asset_profile(str(epic or "")).obi_threshold or 0.22)
+    except Exception:
+        obi_thr = 0.22
+    if not flow_aligned and abs(obi_ratio) >= obi_thr:
         empty.update(
             {
                 "score_pct": score,
@@ -3257,14 +3508,15 @@ def evaluate_predictive_micro_scalp_trigger(
 
 
 def _resolve_instant_scalp_cadence_sec(cfg: Any | None = None) -> float:
+    """Event-driven tick lane: zero cadence (raw WS). Optional floor from config."""
     try:
-        from system.demo_execution_plane import demo_order_cadence_sec, demo_throughput_active
-
-        if demo_throughput_active(cfg):
-            return demo_order_cadence_sec(cfg, default=MICRO_SCALP_INSTANT_CADENCE_SEC)
+        if cfg is not None and hasattr(cfg, "get"):
+            block = cfg.get("event_driven_tick") or {}
+            if isinstance(block, dict) and bool(block.get("enabled", True)):
+                return max(0.0, float(block.get("min_entry_interval_sec") or 0.0))
     except Exception:
         pass
-    return MICRO_SCALP_INSTANT_CADENCE_SEC
+    return float(MICRO_SCALP_INSTANT_CADENCE_SEC)
 
 
 def try_instant_predictive_micro_scalp(
@@ -3274,16 +3526,59 @@ def try_instant_predictive_micro_scalp(
     *,
     cfg: Any | None = None,
 ) -> dict[str, Any]:
-    """Execute hyper-fast limit-chase micro-scalp when predictive alpha arms."""
+    """Execute hyper-fast IOC/FOK limit micro-scalp on raw tick (no TWMA lag)."""
+    key = str(epic or "").strip()
+    if cfg is None:
+        try:
+            from system.config_loader import get_config
+
+            cfg = get_config()
+        except Exception:
+            cfg = None
+
+    # Absolute front of pipeline — kill before trigger/order/network work.
+    try:
+        from execution.pre_entry_regime_veto import evaluate_pre_entry_regime_veto
+
+        # Direction unknown until trigger; use BUY as conservative crash-guard
+        # then re-check with real direction below.
+        ok_pre, pre_reason = evaluate_pre_entry_regime_veto(
+            key, "BUY", bid=bid, offer=offer, cfg=cfg
+        )
+        # Spread% veto is direction-agnostic; OBI crash guard on BUY is the
+        # strict default for long-biased desk. Full direction check after arm.
+        if not ok_pre and "spread" in pre_reason:
+            set_last_gate_suppression_reason(pre_reason)
+            return {"dispatched": False, "reason": pre_reason, "trigger": {}}
+    except Exception as exc:
+        reason = f"regime_veto_fail_closed:{type(exc).__name__}"
+        set_last_gate_suppression_reason(reason)
+        return {"dispatched": False, "reason": reason, "trigger": {}}
+
     trigger = evaluate_predictive_micro_scalp_trigger(epic=epic, bid=bid, offer=offer)
     if not trigger.get("armed"):
         return {"dispatched": False, "trigger": trigger}
 
-    key = str(epic or "").strip()
+    direction = str(trigger["direction"])
+    try:
+        from execution.pre_entry_regime_veto import evaluate_pre_entry_regime_veto
+
+        ok_dir, dir_reason = evaluate_pre_entry_regime_veto(
+            key, direction, bid=bid, offer=offer, cfg=cfg
+        )
+        if not ok_dir:
+            set_last_gate_suppression_reason(dir_reason)
+            return {"dispatched": False, "trigger": trigger, "reason": dir_reason}
+    except Exception as exc:
+        reason = f"regime_veto_fail_closed:{type(exc).__name__}"
+        set_last_gate_suppression_reason(reason)
+        return {"dispatched": False, "trigger": trigger, "reason": reason}
+
     now = time.time()
     with _micro_scalper_lane_lock:
         last = _last_instant_scalp_at.get(key, 0.0)
-        if now - last < _resolve_instant_scalp_cadence_sec(cfg):
+        cadence = _resolve_instant_scalp_cadence_sec(cfg)
+        if cadence > 0 and now - last < cadence:
             return {
                 "dispatched": False,
                 "trigger": trigger,
@@ -3293,15 +3588,6 @@ def try_instant_predictive_micro_scalp(
 
     if not epic_allowed_on_hot_path(key, cfg):
         return {"dispatched": False, "trigger": trigger, "reason": "hot_path_excluded"}
-
-    direction = str(trigger["direction"])
-    if cfg is None:
-        try:
-            from system.config_loader import get_config
-
-            cfg = get_config()
-        except Exception:
-            cfg = None
 
     size = float(getattr(cfg, "trade_size", 0.1) if cfg and hasattr(cfg, "trade_size") else 0.1)
     if cfg is not None and hasattr(cfg, "get"):
@@ -3317,8 +3603,11 @@ def try_instant_predictive_micro_scalp(
     except Exception as exc:
         return {"dispatched": False, "trigger": trigger, "reason": f"gate_check_{type(exc).__name__}"}
 
+    # Enqueue only — do NOT acquire/redeem here. Premature fast-pass redeem
+    # burned vouchers on cadence no-ops and stole ig_orders refill so the wire
+    # POST (/positions/otc) waited 30s then failed token-bucket exhausted.
     try:
-        from system.chaos_guardian import acquire_outbound_token, enqueue_fast_pass_token
+        from system.chaos_guardian import enqueue_fast_pass_token
 
         enqueue_fast_pass_token(
             epic=key,
@@ -3326,14 +3615,6 @@ def try_instant_predictive_micro_scalp(
             score=float(trigger.get("score_pct") or 0.0),
             reason="predictive_micro_scalp",
         )
-        if not acquire_outbound_token(
-            "ig",
-            category="order",
-            priority="fast_pass",
-            epic=key,
-            max_wait_sec=0.25,
-        ):
-            return {"dispatched": False, "trigger": trigger, "reason": "fast_pass_token_exhausted"}
     except Exception as exc:
         return {"dispatched": False, "trigger": trigger, "reason": f"fast_pass_{type(exc).__name__}"}
 

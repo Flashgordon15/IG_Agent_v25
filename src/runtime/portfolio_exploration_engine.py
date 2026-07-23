@@ -623,6 +623,8 @@ def regime_direction_aligned(
     direction: str,
     *,
     z_score: float | None = None,
+    bid: float = 0.0,
+    offer: float = 0.0,
 ) -> tuple[bool, str]:
     """WHEN gate — localized direction must align with Markov regime classification."""
     try:
@@ -632,6 +634,20 @@ def regime_direction_aligned(
             return True, ""
     except Exception:
         pass
+    if float(bid) > 0 and float(offer) > float(bid):
+        try:
+            from execution.pre_entry_regime_veto import sovereign_ml_obi_bypass_qualifies
+
+            bypass_ok, bypass_detail = sovereign_ml_obi_bypass_qualifies(
+                str(epic or ""),
+                str(direction or "BUY"),
+                bid=float(bid),
+                offer=float(offer),
+            )
+            if bypass_ok:
+                return True, bypass_detail
+        except Exception:
+            pass
     try:
         from runtime.regime_switch_engine import evaluate_epic_regime
 
@@ -668,47 +684,132 @@ def passes_strategy_entry_gates(
     *,
     z_score: float | None = None,
 ) -> tuple[bool, str]:
-    """Unified WHAT/WHEN/HOW-MUCH pre-check for strategy execution matrix."""
+    """Unified WHAT/WHEN/HOW-MUCH pre-check for strategy execution matrix.
+
+    Profitability/safety gates (slot, session cap, thin ML) always apply —
+    even when demo soak relaxes secondary guards.
+    """
+    key = str(epic or "").strip()
+
+    # --- Always-on desk profitability gates (DualCore + pierce + micro) ---
+    # Fail-CLOSED: any telemetry / gate exception blocks the entry.
+    try:
+        from system.config_loader import get_config
+
+        cfg = get_config()
+    except Exception as exc:
+        return False, f"config_fail_closed:{type(exc).__name__}"
+
+    # Instantaneous book for pre-network regime veto (no REST).
+    try:
+        from execution.pre_entry_regime_veto import evaluate_pre_entry_regime_veto
+        from system.market_data_hub import get_market_data_hub
+
+        snap = get_market_data_hub().get_snapshot(key)
+        bid = float(getattr(snap, "bid", 0) or 0) if snap else 0.0
+        offer = float(getattr(snap, "offer", 0) or 0) if snap else 0.0
+        ok_rv, rv_reason = evaluate_pre_entry_regime_veto(
+            key, str(direction or "BUY"), bid=bid, offer=offer, cfg=cfg
+        )
+        if not ok_rv:
+            return False, rv_reason or "regime_veto"
+    except Exception as exc:
+        return False, f"regime_veto_fail_closed:{type(exc).__name__}"
+
+    try:
+        from execution.entry_gate_hardening import evaluate_entry_hardening
+
+        hard_ok, hard_reason = evaluate_entry_hardening(
+            key, str(direction or "BUY"), cfg=cfg
+        )
+        if not hard_ok:
+            return False, hard_reason or "entry_hardening_blocked"
+    except Exception as exc:
+        return False, f"entry_hardening_fail_closed:{type(exc).__name__}"
+
+    try:
+        from system.strategy_quality_gate import evaluate_entry_slot_gate
+
+        slot_ok, slot_reason = evaluate_entry_slot_gate(
+            cfg,
+            epic=key,
+            direction=str(direction or "BUY"),
+            bid=bid,
+            offer=offer,
+        )
+        if not slot_ok:
+            return False, slot_reason or "entry_slot_blocked"
+    except Exception as exc:
+        return False, f"slot_gate_fail_closed:{type(exc).__name__}"
+
+    try:
+        from trading.entry_protection import check_session_trade_cap
+
+        blocked, cap_reason = check_session_trade_cap(key, cfg)
+        if blocked:
+            return False, cap_reason or "session_trade_cap"
+    except Exception as exc:
+        return False, f"session_cap_fail_closed:{type(exc).__name__}"
+
+    try:
+        from ml.core_b_entry_gate import core_b_ml_allows_entry
+
+        ml_ok, ml_reason = core_b_ml_allows_entry(
+            key, str(direction or "BUY"), cfg=cfg
+        )
+        if not ml_ok:
+            return False, ml_reason or "core_b_ml_veto"
+    except Exception as exc:
+        return False, f"core_b_ml_fail_closed:{type(exc).__name__}"
+
     try:
         from system.demo_execution_plane import execution_guards_relaxed
 
-        if execution_guards_relaxed(epic=str(epic or "").strip()):
+        if execution_guards_relaxed(epic=key):
             return True, ""
-    except Exception:
-        pass
-    key = str(epic or "").strip()
-    open_book = _load_open_book()
-    margin_used = _estimate_margin_used(open_book)
-    frozen, freeze_reason = is_margin_entry_frozen(margin_used)
-    if frozen:
-        return False, freeze_reason
+    except Exception as exc:
+        return False, f"demo_relax_fail_closed:{type(exc).__name__}"
 
-    rank_row: dict[str, Any] = {}
-    with _lock:
-        for row in _ranked_universe:
-            if row.get("epic") == key:
-                rank_row = dict(row)
-                break
+    try:
+        open_book = _load_open_book()
+        margin_used = _estimate_margin_used(open_book)
+        frozen, freeze_reason = is_margin_entry_frozen(margin_used)
+        if frozen:
+            return False, freeze_reason
 
-    score = float(rank_row.get("score") or 0.0)
-    if rank_row and score <= EXPECTATION_SCORE_MIN:
-        return False, f"expectation_score_{score:.3f}_lte_{EXPECTATION_SCORE_MIN}"
+        rank_row: dict[str, Any] = {}
+        with _lock:
+            for row in _ranked_universe:
+                if row.get("epic") == key:
+                    rank_row = dict(row)
+                    break
 
-    hvn_ok, hvn_reason = volume_profile_aligns_with_hvn(key)
-    if not hvn_ok:
-        return False, hvn_reason or "hvn_volume_misaligned"
+        score = float(rank_row.get("score") or 0.0)
+        if rank_row and score <= EXPECTATION_SCORE_MIN:
+            return False, f"expectation_score_{score:.3f}_lte_{EXPECTATION_SCORE_MIN}"
 
-    aligned, align_reason = regime_direction_aligned(key, direction, z_score=z_score)
-    if not aligned:
-        return False, align_reason
+        hvn_ok, hvn_reason = volume_profile_aligns_with_hvn(key)
+        if not hvn_ok:
+            return False, hvn_reason or "hvn_volume_misaligned"
 
-    blocked, corr_reason, _ = correlation_blocks_entry(key, direction, open_book)
-    if blocked:
-        return False, corr_reason or "correlation_guard"
+        aligned, align_reason = regime_direction_aligned(
+            key, direction, z_score=z_score, bid=bid, offer=offer
+        )
+        if not aligned:
+            return False, align_reason
 
-    proposed = margin_used + regime_adjusted_margin_per_trade()
-    if proposed > HARD_MARGIN_LIMIT_GBP:
-        return False, f"margin_ceiling_{proposed:.0f}_gt_{HARD_MARGIN_LIMIT_GBP:.0f}"
+        blocked, corr_reason, _ = correlation_blocks_entry(key, direction, open_book)
+        if blocked:
+            return False, corr_reason or "correlation_guard"
+
+        proposed = margin_used + regime_adjusted_margin_per_trade()
+        if proposed > HARD_MARGIN_LIMIT_GBP:
+            return (
+                False,
+                f"margin_ceiling_{proposed:.0f}_gt_{HARD_MARGIN_LIMIT_GBP:.0f}",
+            )
+    except Exception as exc:
+        return False, f"portfolio_gate_fail_closed:{type(exc).__name__}"
 
     return True, ""
 

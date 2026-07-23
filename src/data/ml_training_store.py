@@ -53,6 +53,51 @@ REQUIRED_FIELDS = (
 _lock = threading.RLock()
 _path_override: Path | None = None
 _entry_buffer: dict[str, dict[str, Any]] = {}
+_BUFFER_FILENAME = "ml_entry_buffer.json"
+
+
+def _buffer_path() -> Path:
+    p = data_dir() / "state" / _BUFFER_FILENAME
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _load_entry_buffer_from_disk() -> None:
+    global _entry_buffer
+    path = _buffer_path()
+    if not path.is_file():
+        return
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            with _lock:
+                _entry_buffer.update(
+                    {str(k): v for k, v in raw.items() if isinstance(v, dict)}
+                )
+            log_engine(
+                f"ml_training_store: restored {len(_entry_buffer)} pending entry buffer(s)"
+            )
+    except Exception as e:
+        log_engine(
+            f"ml_training_store buffer restore failed: {type(e).__name__}: {e}"
+        )
+
+
+def _persist_entry_buffer() -> None:
+    path = _buffer_path()
+    try:
+        with _lock:
+            payload = dict(_entry_buffer)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception as e:
+        log_engine(
+            f"ml_training_store buffer persist failed: {type(e).__name__}: {e}"
+        )
+
+
+_load_entry_buffer_from_disk()
 
 
 def default_store_path() -> Path:
@@ -123,6 +168,19 @@ def _normalize_record(
         "source": str(merged.get("source", "agent")),
         "version": str(merged.get("version", ML_VERSION)),
     }
+    for opt_key in (
+        "profit_tier_pct",
+        "peak_pct_of_target",
+        "profit_pct_of_target",
+        "hold_sec",
+    ):
+        if merged.get(opt_key) is not None:
+            try:
+                record[opt_key] = float(merged[opt_key])
+            except (TypeError, ValueError):
+                pass
+    if merged.get("session_slot"):
+        record["session_slot"] = str(merged["session_slot"])
     return record
 
 
@@ -235,6 +293,7 @@ class MLTrainingStore:
                 return
             with _lock:
                 _entry_buffer[did] = data
+            _persist_entry_buffer()
         except Exception as e:
             log_engine(
                 f"ml_training_store record_entry failed deal={deal_id}: "
@@ -252,6 +311,20 @@ class MLTrainingStore:
             with _lock:
                 entry = _entry_buffer.get(did)
             if entry is None:
+                try:
+                    from execution.ml_training_hooks import hydrate_ml_entry_from_deal
+
+                    entry = hydrate_ml_entry_from_deal(did)
+                    if entry:
+                        with _lock:
+                            _entry_buffer[did] = entry
+                        _persist_entry_buffer()
+                except Exception as exc:
+                    log_engine(
+                        f"ml_training_store hydrate entry failed deal={did}: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+            if entry is None:
                 log_engine(
                     f"ml_training_store exit skipped — no entry buffer deal={did}"
                 )
@@ -260,6 +333,7 @@ class MLTrainingStore:
             if _is_excluded(did, {**entry, **exit_payload}):
                 with _lock:
                     _entry_buffer.pop(did, None)
+                _persist_entry_buffer()
                 log_engine(f"ml_training_store exit skipped (excluded) deal={did}")
                 return
 
@@ -267,6 +341,20 @@ class MLTrainingStore:
             ig_pnl = exit_payload.get("ig_pnl_currency")
             if ig_pnl is not None:
                 exit_payload["gbp_pnl"] = float(ig_pnl)
+                confirmed = True
+            result = str(exit_payload.get("result") or "").upper()
+            pts_pnl = float(exit_payload.get("pts_pnl") or 0.0)
+            gbp_pnl = exit_payload.get("gbp_pnl")
+            if str(exit_payload.get("source") or "") == "agent" and result in (
+                "WIN",
+                "LOSS",
+                "BREAKEVEN",
+            ):
+                confirmed = True
+            if abs(pts_pnl) >= 0.001 and gbp_pnl is None:
+                exit_payload["gbp_pnl"] = pts_pnl
+                confirmed = True
+            if gbp_pnl is not None and abs(float(gbp_pnl)) >= 0.001:
                 confirmed = True
             exit_payload["confirmed"] = confirmed
 
@@ -288,8 +376,20 @@ class MLTrainingStore:
                 log_engine(
                     f"milestone notification hook failed: {type(exc).__name__}: {exc}"
                 )
+            try:
+                from ml.auto_trainer import maybe_auto_train_after_close
+                from ml.setup_memory import invalidate_setup_memory_cache
+                from system.config_loader import get_config
+
+                invalidate_setup_memory_cache()
+                maybe_auto_train_after_close(prev_count, new_count, get_config())
+            except Exception as exc:
+                log_engine(
+                    f"ml auto-train hook failed: {type(exc).__name__}: {exc}"
+                )
             with _lock:
                 _entry_buffer.pop(did, None)
+            _persist_entry_buffer()
         except Exception as e:
             log_engine(
                 f"ml_training_store record_exit failed deal={deal_id}: "

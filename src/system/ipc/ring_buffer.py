@@ -695,6 +695,7 @@ class CockpitShmHeader(ctypes.Structure):
     ]
 
 
+from system.ipc.cockpit_shm_passive import resolve_cockpit_shm_name
 from system.ipc.string_diagnostics import (  # noqa: E402
     P1_NULL_TUPLE,
     P1_SOCKET,
@@ -719,6 +720,10 @@ _COCKPIT_WRITE_SEQ = 0
 _STRING_DIAG_VIEW: StringPhaseDiag | None = None
 
 
+def _active_cockpit_shm_name() -> str:
+    return _normalize_shm_segment_name(resolve_cockpit_shm_name())
+
+
 def _normalize_shm_segment_name(name: str) -> str:
     """
     Cross-platform segment id — strip Linux ``/dev/shm/`` paths and leading slashes.
@@ -735,32 +740,41 @@ def _normalize_shm_segment_name(name: str) -> str:
 
 
 def _cockpit_shm_namespace_label() -> str:
-    seg = _normalize_shm_segment_name(COCKPIT_SHM_NAME)
+    seg = _active_cockpit_shm_name()
     if sys.platform == "darwin":
         return f"Darwin-POSIX:{seg}"
     return f"posix-shm:{seg}"
 
 
+def _release_cockpit_shm_views() -> None:
+    global _STRING_DIAG_VIEW
+    _STRING_DIAG_VIEW = None
+
+
 def _close_cockpit_shm_singleton(*, unlink: bool = False) -> None:
-    global _COCKPIT_SHM, _STRING_DIAG_VIEW
+    global _COCKPIT_SHM
     if _COCKPIT_SHM is None:
         return
+    _release_cockpit_shm_views()
     try:
         _COCKPIT_SHM.close()
+    except BufferError:
+        pass
     except Exception:
         pass
     if unlink:
         try:
             _COCKPIT_SHM.unlink()
+        except BufferError:
+            pass
         except Exception:
             pass
     _COCKPIT_SHM = None
-    _STRING_DIAG_VIEW = None
 
 
 def cockpit_shm_map_status() -> dict[str, Any]:
     """Boot/cockpit diagnostic — confirm Darwin namespace mapping without /dev/shm."""
-    name = _normalize_shm_segment_name(COCKPIT_SHM_NAME)
+    name = _active_cockpit_shm_name()
     mapped = False
     nbytes = 0
     try:
@@ -845,20 +859,18 @@ def _evict_zombie_cockpit_shm(name: str) -> None:
         pid = int(hdr.agent_pid)
         current = int(os.getpid()) & 0xFFFFFFFF
         stale_pid = not pid_is_alive(pid)
-        pid_restart = pid > 0 and pid != current
-        if not stale_pid and not pid_restart:
+        if not stale_pid:
             return
         try:
             from system.engine_log import log_engine
 
-            reason = "publisher dead" if stale_pid else f"pid restart {pid}->{current}"
-            log_engine(f"CockpitSHM: evicting stale segment pid={pid} ({reason})")
+            log_engine(f"CockpitSHM: evicting stale segment pid={pid} (publisher dead)")
         except Exception:
             pass
         try:
             probe.unlink()
             broadcast_cockpit_shm_reconnect(
-                reason="publisher dead" if stale_pid else f"pid_restart_{pid}_{current}"
+                reason="publisher dead"
             )
         except Exception:
             pass
@@ -869,7 +881,7 @@ def _evict_zombie_cockpit_shm(name: str) -> None:
 
 def _attach_cockpit_shm(*, create: bool) -> shared_memory.SharedMemory:
     global _COCKPIT_SHM
-    name = _normalize_shm_segment_name(COCKPIT_SHM_NAME)
+    name = _active_cockpit_shm_name()
     size = COCKPIT_SHM_ALLOC_BYTES
 
     if _COCKPIT_SHM is not None:
@@ -889,20 +901,27 @@ def _attach_cockpit_shm(*, create: bool) -> shared_memory.SharedMemory:
                 seg = shared_memory.SharedMemory(name=name, create=True, size=size)
             except FileExistsError:
                 seg = shared_memory.SharedMemory(name=name, create=False)
-                hdr_probe = CockpitShmHeader.from_buffer(seg.buf)
-                if int(hdr_probe.agent_pid) != (int(os.getpid()) & 0xFFFFFFFF):
-                    seg.close()
-                    try:
-                        seg.unlink()
-                    except Exception:
-                        pass
-                    seg = shared_memory.SharedMemory(name=name, create=True, size=size)
+                hdr_probe = CockpitShmHeader.from_buffer_copy(
+                    bytes(seg.buf[: ctypes.sizeof(CockpitShmHeader)])
+                )
+                foreign_pid = int(hdr_probe.agent_pid)
+                if foreign_pid != (int(os.getpid()) & 0xFFFFFFFF):
+                    from system.ipc.cockpit_shm_passive import pid_is_alive
+
+                    if not pid_is_alive(foreign_pid):
+                        seg.close()
+                        try:
+                            seg.unlink()
+                        except Exception:
+                            pass
+                        seg = shared_memory.SharedMemory(name=name, create=True, size=size)
         except FileNotFoundError:
             seg = shared_memory.SharedMemory(name=name, create=True, size=size)
     else:
         seg = shared_memory.SharedMemory(name=name, create=False)
 
     _COCKPIT_SHM = seg
+    _release_cockpit_shm_views()
     hdr = CockpitShmHeader.from_buffer(seg.buf)
     if hdr.magic != COCKPIT_SHM_MAGIC:
         hdr.magic = COCKPIT_SHM_MAGIC
@@ -981,13 +1000,16 @@ def _repair_cockpit_shm_namespace() -> None:
     global _COCKPIT_SHM
     if _COCKPIT_SHM is None:
         return
-    name = _normalize_shm_segment_name(COCKPIT_SHM_NAME)
+    name = _active_cockpit_shm_name()
     try:
         probe = shared_memory.SharedMemory(name=name, create=False)
         probe.close()
     except (FileNotFoundError, OSError):
         try:
+            _release_cockpit_shm_views()
             _COCKPIT_SHM.close()
+        except BufferError:
+            pass
         except Exception:
             pass
         _COCKPIT_SHM = None
@@ -1132,7 +1154,7 @@ def publish_live_probe_cockpit(
 
 def read_cockpit_shm() -> dict[str, Any] | None:
     """Naked reader — attach existing Darwin segment, unpack ctypes registry."""
-    name = _normalize_shm_segment_name(COCKPIT_SHM_NAME)
+    name = _active_cockpit_shm_name()
     try:
         seg = shared_memory.SharedMemory(name=name, create=False)
     except FileNotFoundError:

@@ -103,6 +103,12 @@ def main() -> int:
 
     os.chdir(root)
     os.environ["IG_AGENT_ROOT"] = str(root)
+    # Watchdog / launchd often inherit a bare env — without APP_MODE main.py
+    # aborts in <1s and the desk looks like a permanent restart storm.
+    os.environ.setdefault("APP_MODE", "DEMO")
+    os.environ.setdefault(
+        "IG_AGENT_CONFIG", "config/config_v31_demo_throughput.json"
+    )
     os.environ.setdefault("IG_AGENT_FROM_LAUNCHER", "1")
     os.environ.setdefault("IG_AGENT_SKIP_DEPLOY_CHECK", "1")
     os.environ.setdefault("IG_AGENT_SKIP_ORPHAN_KILL", "1")

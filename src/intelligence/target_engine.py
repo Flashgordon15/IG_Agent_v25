@@ -158,12 +158,13 @@ class TargetSeekingEngine:
             return 0.0
         return round(total, 2)
 
-    def resolve_p_day_total_gbp(self) -> float:
-        """Realised + open unrealized P&L in GBP for target/risk compression."""
-        return round(self.resolve_p_day_realised() + self.resolve_open_unrealized_gbp(), 2)
-
     def resolve_p_day_realised(self) -> float:
-        """Daily realised profit — learning store primary (signed), session delta fallback."""
+        """Daily realised profit — learning store primary (signed), session delta fallback.
+
+        For *display/compression* uses max(store, balance) so we do not under-report.
+        Capital-preservation engagement uses ``resolve_p_day_for_preservation`` which
+        requires broker balance confirmation when REST is bound.
+        """
         from decimal import Decimal, ROUND_HALF_UP
 
         from system.balance_pnl_decimal import decimal_to_float, money_decimal
@@ -197,6 +198,55 @@ class TargetSeekingEngine:
         # Target compression uses realised gains only (non-negative); drawdown guard uses signed path.
         combined = max(p_store, p_balance)
         return decimal_to_float(combined.quantize(two, rounding=ROUND_HALF_UP))
+
+    def resolve_broker_session_pnl_gbp(self) -> float | None:
+        """Broker balance session delta — authoritative for capital preservation."""
+        from decimal import Decimal
+
+        from system.balance_pnl_decimal import decimal_to_float, money_decimal
+
+        # Prefer live REST balance vs session_start when available.
+        if self._rest_client is not None and self.session_start_balance is not None:
+            try:
+                bal = self.refresh_balance_from_rest()
+                if bal is not None:
+                    return round(float(bal) - float(self.session_start_balance), 2)
+            except Exception:
+                pass
+        try:
+            from system.drawdown_monitor import snapshot_decimal_debug
+
+            snap = snapshot_decimal_debug()
+            if snap.get("last_balance_field_used") == "balance":
+                session_pnl = money_decimal(snap.get("session_pnl_decimal"), field="session_pnl")
+                if session_pnl is not None:
+                    return decimal_to_float(session_pnl)
+        except Exception:
+            pass
+        return None
+
+    def resolve_p_day_for_preservation(self) -> float:
+        """
+        P&L used to engage capital preservation.
+
+        When REST is bound: require broker session balance delta confirmation.
+        Inflated learning-store / cascade unrealized alone cannot trip the halt.
+        When REST is unbound (unit tests): fall back to realised store path.
+        """
+        realised = float(self.resolve_p_day_realised() or 0.0)
+        if self._rest_client is not None:
+            broker_pnl = self.resolve_broker_session_pnl_gbp()
+            if broker_pnl is None:
+                # No broker confirmation yet — do not halt on journal alone.
+                return 0.0
+            # Dual-confirm: broker must itself show target hit. Journal may be
+            # higher (phantoms/cascade) but cannot engage preservation alone.
+            return float(broker_pnl)
+        return realised
+
+    def resolve_p_day_total_gbp(self) -> float:
+        """Realised + open unrealized P&L in GBP for target/risk compression display."""
+        return round(self.resolve_p_day_realised() + self.resolve_open_unrealized_gbp(), 2)
 
     def _uk_today(self) -> str:
         return datetime.now(tz=_LONDON).date().isoformat()
@@ -263,29 +313,46 @@ class TargetSeekingEngine:
         self._maybe_reset_uk_midnight()
         if force_balance:
             self.refresh_balance_from_rest()
-        p_day = self.resolve_p_day_total_gbp()
-        factor = risk_compression_factor(max(0.0, p_day), self.target_daily_gbp)
-        preservation = p_day >= self.target_daily_gbp
+        # Display / compression still track total; preservation uses broker-confirmed path.
+        p_day_display = self.resolve_p_day_total_gbp()
+        p_day_preserve = self.resolve_p_day_for_preservation()
+        factor = risk_compression_factor(max(0.0, p_day_display), self.target_daily_gbp)
+        preservation = p_day_preserve >= self.target_daily_gbp
 
         prev_preservation = self.capital_preservation
-        self.last_p_day = p_day
+        self.last_p_day = p_day_display
         self.last_factor = factor
         self.capital_preservation = preservation
         self.last_refresh_ts = time.time()
 
         if preservation and not prev_preservation:
             self.mission_accomplished = True
-            self._record_victory_ledger(p_day)
+            self._record_victory_ledger(p_day_preserve)
             log_engine(
-                f"TARGET ACHIEVED: P_day=£{p_day:.2f} >= £{self.target_daily_gbp:.2f} "
-                "— Capital Preservation Mode engaged"
+                f"TARGET ACHIEVED: broker_confirmed P_day=£{p_day_preserve:.2f} "
+                f">= £{self.target_daily_gbp:.2f} "
+                f"(display=£{p_day_display:.2f}) — Capital Preservation Mode engaged"
             )
         elif preservation:
             self.mission_accomplished = True
+        elif prev_preservation and not preservation:
+            # Broker no longer confirms target — clear false-positive halt.
+            self.mission_accomplished = False
+            self._entry_block_applied = False
+            try:
+                from system.qmm_process_supervisor import clear_process_entry_block
+
+                clear_process_entry_block()
+            except Exception:
+                pass
+            log_engine(
+                f"Target engine: capital preservation cleared "
+                f"(broker P_day=£{p_day_preserve:.2f} < £{self.target_daily_gbp:.2f})"
+            )
         if self.capital_harvest_milestone_snap_active():
             log_engine(
                 "CAPITAL_HARVEST [PARABOLIC_SNAP] milestone >= 75% — "
-                f"P_day=£{p_day:.2f} floor=£{self.capital_harvest_lock_floor_gbp():.2f} engaged"
+                f"P_day=£{p_day_display:.2f} floor=£{self.capital_harvest_lock_floor_gbp():.2f} engaged"
             )
         self._apply_entry_block_if_needed()
         return self.snapshot()

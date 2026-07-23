@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from multiprocessing import shared_memory
@@ -24,6 +25,8 @@ from system.ipc.string_diagnostics import StringPhaseDiag, decode_string_diag, s
 COCKPIT_SHM_NAME = "ig_agent_v30_shm"
 COCKPIT_SHM_MAGIC = 0x30334749  # 'IG30'
 COCKPIT_SHM_FILL_SLOTS = 5
+# CFD primary for desktop SHM when dual-port marker present (no env override).
+_DUAL_CFD_COCKPIT_ACCOUNT = "Z6BAH4"
 
 VALVE_SCANNING = 0
 VALVE_WIN_ZONE = 1
@@ -89,6 +92,53 @@ def _normalize_shm_segment_name(name: str) -> str:
     return raw or COCKPIT_SHM_NAME
 
 
+def _sanitize_shm_token(raw: str) -> str:
+    token = re.sub(r"[^A-Za-z0-9_]", "_", str(raw or "").strip())
+    return token.strip("_") or "default"
+
+
+def resolve_cockpit_shm_name() -> str:
+    """
+    Per-engine cockpit segment — avoids twin collision on dual-port desk.
+
+    Priority: ``IG_COCKPIT_SHM_NAME`` → dual lane (cfd_8080/sb_8081) → account → legacy default.
+    """
+    override = os.environ.get("IG_COCKPIT_SHM_NAME", "").strip()
+    if override:
+        return _normalize_shm_segment_name(override)
+    if os.environ.get("IG_V32_DUAL_PORT", "").strip() == "1":
+        try:
+            from kernel.ring_buffer import resolve_dual_port_shm_lane_token
+
+            lane = resolve_dual_port_shm_lane_token()
+            if lane:
+                return f"ig_agent_v33_cockpit_{lane}"
+        except Exception:
+            pass
+        account = os.environ.get("IG_ACCOUNT_ID", "").strip().upper()
+        if account:
+            return f"ig_agent_v33_cockpit_{_sanitize_shm_token(account)}"
+        port = os.environ.get("IG_API_PORT", os.environ.get("PORT", "")).strip()
+        origin = os.environ.get("IG_ENGINE_ORIGIN", "").strip().upper()
+        if origin and port.isdigit():
+            return (
+                f"ig_agent_v33_cockpit_{_sanitize_shm_token(origin.lower())}_{port}"
+            )
+        if origin:
+            return f"ig_agent_v33_cockpit_{_sanitize_shm_token(origin.lower())}"
+    return COCKPIT_SHM_NAME
+
+
+def resolve_cockpit_shm_name_for_reader() -> str:
+    """Passive reader default — CFD twin on dual desk unless env names segment."""
+    override = os.environ.get("IG_COCKPIT_SHM_NAME", "").strip()
+    if override:
+        return _normalize_shm_segment_name(override)
+    if os.environ.get("IG_V32_DUAL_PORT", "").strip() == "1":
+        return f"ig_agent_v33_cockpit_{_sanitize_shm_token(_DUAL_CFD_COCKPIT_ACCOUNT)}"
+    return COCKPIT_SHM_NAME
+
+
 def pid_is_alive(pid: int) -> bool:
     """True when the publishing agent process is still running."""
     if int(pid or 0) <= 0:
@@ -111,7 +161,8 @@ def classify_cockpit_shm(view: dict[str, Any] | None) -> tuple[str, str]:
     Returns (link_state, detail). STALE_SHM means a zombie segment from a dead PID.
     """
     if view is None:
-        return LINK_NO_SEGMENT, "POSIX segment ig_agent_v30_shm not published"
+        seg = resolve_cockpit_shm_name_for_reader()
+        return LINK_NO_SEGMENT, f"POSIX segment {seg} not published"
     pid = int(view.get("agent_pid") or 0)
     if not pid_is_alive(pid):
         ticks = int(view.get("ticks_cached") or 0)
@@ -123,7 +174,7 @@ def classify_cockpit_shm(view: dict[str, Any] | None) -> tuple[str, str]:
 
 
 def cockpit_shm_map_status() -> dict[str, str]:
-    seg = _normalize_shm_segment_name(COCKPIT_SHM_NAME)
+    seg = _normalize_shm_segment_name(resolve_cockpit_shm_name_for_reader())
     if sys.platform == "darwin":
         return {"namespace": f"Darwin-POSIX:{seg}", "segment": seg}
     return {"namespace": f"posix-shm:{seg}", "segment": seg}
@@ -131,7 +182,7 @@ def cockpit_shm_map_status() -> dict[str, str]:
 
 def read_cockpit_shm() -> dict[str, Any] | None:
     """Attach existing segment, unpack header + fill rows, close — read-only."""
-    name = _normalize_shm_segment_name(COCKPIT_SHM_NAME)
+    name = _normalize_shm_segment_name(resolve_cockpit_shm_name_for_reader())
     try:
         seg = shared_memory.SharedMemory(name=name, create=False)
     except FileNotFoundError:

@@ -8,17 +8,20 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PA
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck source=lib/detach_exec.sh
+source "${SCRIPT_DIR}/lib/detach_exec.sh"
 TERMINAL_DIR="${REPO_ROOT}/terminal"
 UI_PORT=3000
 UI_URL="http://127.0.0.1:${UI_PORT}"
-HEALTH_URLS=("${UI_URL}/" "${UI_URL}/health")
+HEALTH_URLS=("${UI_URL}/boot" "${UI_URL}/" "${UI_URL}/desk")
 PID_FILE="${REPO_ROOT}/src/data/state/ui_terminal_3000.pid"
 LOG_FILE="${REPO_ROOT}/src/data/logs/ui_terminal_3000.log"
 
 mkdir -p "$(dirname "$PID_FILE")" "$(dirname "$LOG_FILE")"
 
 log() {
-  printf '[UI-BG] %s\n' "$*" | tee -a "$LOG_FILE"
+  # Prefer appending to LOG_FILE; never abort the launcher if tee/xattr fails.
+  printf '[UI-BG] %s\n' "$*" | tee -a "$LOG_FILE" 2>/dev/null || printf '[UI-BG] %s\n' "$*"
 }
 
 resolve_npm() {
@@ -39,21 +42,28 @@ lsof -t -i:"${UI_PORT}" 2>/dev/null | xargs kill -9 2>/dev/null || true
 sleep 1
 
 cd "${TERMINAL_DIR}"
-log "purging .next cache"
-rm -rf .next
 
 if [ ! -d node_modules ]; then
   log "installing npm dependencies"
   npm install >>"$LOG_FILE" 2>&1
 fi
 
-log "launching detached Next.js dev daemon on :${UI_PORT}"
-if command -v setsid >/dev/null 2>&1; then
-  setsid nohup sh -c "cd '${TERMINAL_DIR}' && exec ./node_modules/.bin/next dev --port ${UI_PORT}" >>"$LOG_FILE" 2>&1 &
-else
-  nohup sh -c "cd '${TERMINAL_DIR}' && exec ./node_modules/.bin/next dev --port ${UI_PORT}" >>"$LOG_FILE" 2>&1 &
+# Production boot splash needs BUILD_ID + required-server-files.json.
+# Do NOT purge a healthy .next or fall back to next dev (Tailwind v4 breaks webpack).
+if [ ! -f .next/BUILD_ID ] || [ ! -f .next/required-server-files.json ]; then
+  log "production build missing — running npm run build"
+  rm -rf .next
+  npm run build >>"$LOG_FILE" 2>&1
 fi
-UI_PID=$!
+
+if [ ! -f .next/BUILD_ID ] || [ ! -f .next/required-server-files.json ]; then
+  log "FATAL: terminal/.next production artifacts missing after build"
+  exit 1
+fi
+
+log "launching detached Next.js production server on :${UI_PORT}"
+detach_exec --log "$LOG_FILE" -- sh -c "cd '${TERMINAL_DIR}' && exec ./node_modules/.bin/next start --port ${UI_PORT}"
+UI_PID="${DETACH_PID}"
 disown -h "$UI_PID" 2>/dev/null || true
 echo "$UI_PID" >"$PID_FILE"
 log "background PID=${UI_PID}"

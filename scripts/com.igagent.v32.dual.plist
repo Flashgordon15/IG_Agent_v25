@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.igagent.v32.dual</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/chrisgordon/Projects/IG_Agent_v25/.venv/bin/python3</string>
+    <string>/Users/chrisgordon/Projects/IG_Agent_v25/scripts/watchdog_launchd.py</string>
+    <string>--dual-port</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/chrisgordon/Projects/IG_Agent_v25</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>IG_AGENT_ROOT</key>
+    <string>/Users/chrisgordon/Projects/IG_Agent_v25</string>
+    <key>PYTHONPATH</key>
+    <string>/Users/chrisgordon/Projects/IG_Agent_v25/src</string>
+    <key>APP_MODE</key>
+    <string>DEMO</string>
+    <key>IG_AGENT_CONFIG</key>
+    <string>config/config_v31_demo_throughput.json</string>
+    <key>IG_V32_DUAL_PORT</key>
+    <string>1</string>
+    <key>IG_V32_WATCH_PORTS</key>
+    <string>8080,8081</string>
+    <key>CORE_DETACHED</key>
+    <string>FALSE</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>KeepAlive</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>/Users/chrisgordon/Projects/IG_Agent_v25/src/data/v31-production/logs/watchdog_v32_dual.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/chrisgordon/Projects/IG_Agent_v25/src/data/v31-production/logs/watchdog_v32_dual.log</string>
+</dict>
+</plist>

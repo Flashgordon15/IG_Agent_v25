@@ -32,5 +32,13 @@
     "telegram_heartbeat_interval_seconds": 3600,
     "telegram_substantial_loss_points": 50.0,
     "_note": "Routine Telegram traffic batches hourly; critical/risk-shield alerts stay immediate"
+  },
+  "intelligence_layer": {
+    "cockpit": {
+      "enabled": false,
+      "auto_launch_after_gate4": false,
+      "web_port": 8787,
+      "_note": "v31 Trading Desk — React dashboard on :8080 only; legacy :8787 Flight Deck retired"
+    }
   }
 }

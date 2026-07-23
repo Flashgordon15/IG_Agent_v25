@@ -23,7 +23,7 @@ _PRICE_STALE_LOGGED: set[str] = set()
 # Non-GBP CFD specs — point_value is in position currency per index point (per contract).
 INSTRUMENT_PNL_SPEC: dict[str, dict[str, float | str]] = {
     "IX.D.DOW.IFM.IP": {"point_value": 2.0, "currency": "USD"},
-    "IX.D.NIKKEI.IFM.IP": {"point_value": 1.0, "currency": "GBP"},
+    "IX.D.NIKKEI.IFM.IP": {"point_value": 1.0, "currency": "JPY"},
     "IX.D.SPTRD.IFE.IP": {"point_value": 1.0, "currency": "USD"},
     "CS.D.CFPGOLD.CFP.IP": {"point_value": 1.0, "currency": "USD"},
     "IX.D.DAX.IFM.IP": {"point_value": 1.0, "currency": "EUR"},

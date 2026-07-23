@@ -16,11 +16,23 @@ _cred_key: tuple[str, str, str] | None = None
 
 
 def _credential_key(credentials: Credentials) -> tuple[str, str, str]:
+    from runtime.session_registry import resolve_process_account_id
+
+    account_id = resolve_process_account_id(credentials)
     return (
         credentials.ig_api_key,
-        credentials.ig_account_id,
+        account_id,
         credentials.account_type,
     )
+
+
+def _use_session_registry() -> bool:
+    try:
+        from runtime.session_registry import registry_enabled
+
+        return registry_enabled()
+    except Exception:
+        return bool(__import__("os").environ.get("IG_ACCOUNT_ID", "").strip())
 
 
 def get_shared_rest_client(credentials: Credentials) -> Any:
@@ -41,14 +53,27 @@ def get_shared_rest_client(credentials: Credentials) -> Any:
     except Exception:
         pass
 
+    if _use_session_registry():
+        from runtime.session_registry import get_session_registry
+
+        return get_session_registry().get_client_for_process(credentials)
+
     from ig_api.rest_client import IGRestClient
 
     key = _credential_key(credentials)
     with _lock:
         if _client is None or _cred_key != key:
-            _client = IGRestClient(credentials)
+            scoped = credentials
+            account_id = key[1]
+            if credentials.ig_account_id.strip().upper() != account_id:
+                from dataclasses import replace
+
+                scoped = replace(credentials, ig_account_id=account_id)
+            _client = IGRestClient(scoped, account_id=account_id)
             _cred_key = key
-            log_engine("IG REST shared session: new client created")
+            log_engine(
+                f"IG REST shared session: new client created account={account_id}"
+            )
         return _client
 
 
@@ -92,6 +117,17 @@ def ensure_shared_authenticated(credentials: Credentials) -> Any:
 def clear_shared_rest_client() -> None:
     """Drop cached client (e.g. after credential change)."""
     global _client, _cred_key
+    if _use_session_registry():
+        try:
+            from runtime.session_registry import get_session_registry
+            from system.credentials_holder import get_credentials_holder
+
+            holder = get_credentials_holder()
+            if holder.credentials is not None:
+                get_session_registry().clear_process_account(holder.credentials)
+                return
+        except Exception:
+            pass
     with _lock:
         _client = None
         _cred_key = None
@@ -104,6 +140,17 @@ def evict_mock_shared_session() -> None:
         from ig_api.mock_clients import MockIGRest
     except Exception:
         return
+    if _use_session_registry():
+        try:
+            from runtime.session_registry import get_session_registry
+
+            registry = get_session_registry()
+            with registry._lock:  # noqa: SLF001 — scoped mock eviction
+                for aid, client in list(registry._clients.items()):
+                    if isinstance(client, MockIGRest):
+                        registry.clear_account(aid)
+        except Exception:
+            pass
     with _lock:
         if isinstance(_client, MockIGRest):
             _client = None

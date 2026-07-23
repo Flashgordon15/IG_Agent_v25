@@ -114,6 +114,14 @@ def dynamic_max_per_epic(
         return base_cap, "base"
 
     snap = tracker.snapshot()
+    # Only unlock above the base cap on FRESH broker state. Stale P&L (after an
+    # outage or REST starvation) can read stale-positive on a position that has
+    # actually turned into a loser — unlocking then stacks size into losing
+    # trades. This is the mechanism that let DOW/Nikkei reach 4x and bleed. When
+    # data is not fresh, hold at base cap so supervision can catch up first.
+    if not snap.get("ig_fresh", False):
+        return base_cap, "base (stale broker state)"
+
     epic_pos = [p for p in snap.get("positions", []) if p.get("epic") == epic]
     if not epic_pos:
         return base_cap, "base"

@@ -116,7 +116,7 @@ def reclaim_api_port(port: int | None = None, *, force: bool = False) -> list[in
     killed: list[int] = []
     try:
         result = subprocess.run(
-            ["lsof", "-iTCP", f":{bind_port}", "-sTCP:LISTEN", "-t"],
+            ["lsof", f"-iTCP:{bind_port}", "-sTCP:LISTEN", "-t"],
             capture_output=True,
             text=True,
             timeout=5,

@@ -5,10 +5,10 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-APP_VERSION = "30.0.0"
-APP_VERSION_LABEL = "v30.0"
-APP_DISPLAY_NAME = "IG Agent Apex"
-APP_SHORT_NAME = "IG Agent Apex"
+APP_VERSION = "31.1.0"
+APP_VERSION_LABEL = "v31.1"
+APP_DISPLAY_NAME = "IG Trading Agent"
+APP_SHORT_NAME = "IG Trading Agent"
 
 # Legacy lock basenames cleared on acquire (idempotent migration).
 LEGACY_LOCK_FILES: tuple[str, ...] = (
@@ -20,7 +20,7 @@ LEGACY_LOCK_FILES: tuple[str, ...] = (
 )
 
 # Canonical pattern — actual path includes resolved port suffix.
-INSTANCE_LOCK_FILE = ".ig_agent_v30_port_{port}.lock"
+INSTANCE_LOCK_FILE = ".ig_agent_v31_port_{port}.lock"
 
 LAUNCHD_WATCHDOG_LABEL = "com.igagent.v25.watchdog"
 LAUNCHD_CAFF_LABEL = "com.igagent.v25.caffeinate"

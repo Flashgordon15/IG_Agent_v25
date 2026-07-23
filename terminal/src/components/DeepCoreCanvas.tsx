@@ -35,8 +35,11 @@ export function DeepCoreCanvas({
   );
 
   return (
-    <div className="col-span-7 grid h-full min-h-0 grid-rows-[65fr_35fr] gap-1">
-      <div className="flex min-h-0 gap-1">
+    <div
+      className="col-span-7 grid h-full min-h-0 grid-rows-[68fr_32fr]"
+      style={{ gap: "var(--desk-gap)" }}
+    >
+      <div className="flex min-h-0" style={{ gap: "var(--desk-gap)" }}>
         <CandlestickFrame epic={focusEpic} history={focusHistory} />
         <OrderBookLadder
           epic={focusEpic}

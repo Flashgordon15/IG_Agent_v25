@@ -6,6 +6,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 AGENT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck source=lib/detach_exec.sh
+source "${SCRIPT_DIR}/lib/detach_exec.sh"
 LOG_DIR="${AGENT_DIR}/src/data/logs"
 mkdir -p "${LOG_DIR}"
 
@@ -41,6 +43,7 @@ if command -v caffeinate >/dev/null 2>&1; then
 fi
 
 export IG_AGENT_ROOT="${AGENT_DIR}"
+export APP_MODE="${APP_MODE:-DEMO}"
 export IG_AGENT_FROM_LAUNCHER=1
 export IG_AGENT_SKIP_DEPLOY_CHECK=1
 export IG_AGENT_SKIP_ORPHAN_KILL=1
@@ -64,8 +67,11 @@ cd "${AGENT_DIR}"
 find . -name "*.pyc" -delete 2>/dev/null || true
 find . -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 
+AGENT_LOG="${LOG_DIR}/agent_stdout.log"
 if ((${#CAFF_ARGS[@]})); then
-  exec "${CAFF_ARGS[@]}" "${PY}" src/main.py
+  detach_exec --log "${AGENT_LOG}" -- "${CAFF_ARGS[@]}" "${PY}" src/main.py
 else
-  exec "${PY}" src/main.py
+  detach_exec --log "${AGENT_LOG}" -- "${PY}" src/main.py
 fi
+log "start_agent_background: detached pid=${DETACH_PID}"
+exit 0

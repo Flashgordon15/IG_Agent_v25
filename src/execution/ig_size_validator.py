@@ -290,6 +290,23 @@ def resolve_executable_lot_size(
             validation=validated,
         )
 
+    try:
+        from system.strategy_quality_gate import clamp_size_until_rolling_wr
+
+        capped, cap_reason = clamp_size_until_rolling_wr(str(epic or ""), adjusted, cfg=cfg)
+        if capped + 1e-9 < adjusted:
+            try:
+                from system.engine_log import log_engine
+
+                log_engine(
+                    f"lot_size clamp epic={epic} {adjusted:.4f}->{capped:.4f} ({cap_reason})"
+                )
+            except Exception:
+                pass
+            adjusted = float(capped)
+    except Exception:
+        pass
+
     if fractional_lot_execution_enabled(cfg):
         return ExecutableLotResult(
             ok=True,

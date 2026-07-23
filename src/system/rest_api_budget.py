@@ -23,6 +23,9 @@ ESSENTIAL_REST_CATEGORIES = frozenset({"positions", "orders"})
 # are exempt and do not count toward the cap. This prevents IG rate-limit hits even
 # when Lightstreamer is healthy (preemptive throttle is stream-stale-only).
 HARD_CAP_DEFAULT = 3
+# Positions *reads* (GET) must never use priority bypass — that was the desk's
+# permanent API-limit breach (false "confirm_deal" bypass storm).
+_PRIORITY_BYPASS_CATEGORIES = frozenset({"orders"})
 PREEMPTIVE_CONSECUTIVE_READINGS = 3
 PREEMPTIVE_PAUSE_SEC = 30.0
 PREEMPTIVE_PAUSE_MAX_SEC = (
@@ -30,6 +33,166 @@ PREEMPTIVE_PAUSE_MAX_SEC = (
 )
 PREEMPTIVE_UTILIZATION_RATIO = 0.8
 FRESH_STREAM_TICK_MAX_AGE_SEC = 45.0
+# Global shared-ledger soft cap for GET /positions across agent+wrappers.
+POSITIONS_SHARED_MAX_PER_MINUTE = 2
+# Post-boot / post-deploy: tighter cap so trade_support + OPM + sync do not storm.
+POST_BOOT_POSITIONS_MAX_PER_MINUTE = 1
+POST_BOOT_GRACE_SEC = 90.0
+
+_process_boot_mono: float = time.monotonic()
+_post_boot_override_until: float = 0.0
+_post_boot_lock = threading.Lock()
+
+
+def mark_post_boot_rest_guard(*, grace_sec: float | None = None) -> float:
+    """Arm a tighter positions-poll cap for ``grace_sec`` (deploy / session_ready)."""
+    global _post_boot_override_until
+    sec = float(POST_BOOT_GRACE_SEC if grace_sec is None else grace_sec)
+    with _post_boot_lock:
+        _post_boot_override_until = time.time() + max(5.0, sec)
+        return _post_boot_override_until
+
+
+def post_boot_rest_guard_active() -> bool:
+    """True only after ``mark_post_boot_rest_guard`` (session_ready / deploy).
+
+    Entry pauses must not auto-fire for every young process (wrappers, pytest).
+    """
+    with _post_boot_lock:
+        return time.time() < float(_post_boot_override_until)
+
+
+def _process_youth_positions_cap() -> bool:
+    """Tighten GET /positions soft-cap for the first POST_BOOT_GRACE_SEC of life."""
+    return (time.monotonic() - _process_boot_mono) < float(POST_BOOT_GRACE_SEC)
+
+
+def positions_poll_limit_per_min() -> float:
+    """Shared GET /positions soft cap — 1/min during post-boot/youth, else 2/min."""
+    if post_boot_rest_guard_active() or _process_youth_positions_cap():
+        return float(POST_BOOT_POSITIONS_MAX_PER_MINUTE)
+    return float(POSITIONS_SHARED_MAX_PER_MINUTE)
+
+
+def priority_bypass_allowed(label: str, *, priority: bool) -> bool:
+    """True only for real order-path traffic — never for GET /positions polls."""
+    if not priority:
+        return False
+    text = str(label or "").strip()
+    upper = text.upper()
+    # Absolute deny: any GET positions / working-orders list poll.
+    if upper.startswith("GET ") and (
+        "/POSITION" in upper or "WORKINGORDER" in upper or "WORKING-ORDER" in upper
+    ):
+        return False
+    cat = categorize_rest_label(text)
+    if cat in _PRIORITY_BYPASS_CATEGORIES:
+        return True
+    # Explicit mutate verbs on positions (close / attach stop) may bypass.
+    if any(upper.startswith(p) for p in ("POST ", "PUT ", "DELETE ")):
+        if "/POSITION" in upper or "/CONFIRMS" in upper or "DEAL" in upper:
+            return True
+    return False
+
+
+def positions_poll_deferred(*, limit_per_min: float | None = None) -> bool:
+    """True when shared+local pressure says skip another GET /positions."""
+    lim = float(
+        positions_poll_limit_per_min() if limit_per_min is None else limit_per_min
+    )
+    try:
+        from system import shared_rest_budget
+
+        if shared_rest_budget.over_global_limit("ig_positions", lim):
+            return True
+    except Exception:
+        pass
+    try:
+        metrics = get_rest_api_budget().metrics()
+        pos_n = int((metrics.get("by_category_last_minute") or {}).get("positions") or 0)
+        if pos_n >= lim:
+            return True
+        label = str(metrics.get("pressure_level") or "")
+        # Only defer on true overrun — ELEVATED (=at warn ceiling) is allowed.
+        if label in ("HIGH", "CRITICAL"):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def entries_blocked_by_rest_pressure() -> tuple[bool, str]:
+    """Block NEW entries when REST is ELEVATED/HIGH/CRITICAL — reserve budget for closes.
+
+    Returns (blocked, reason). Closes / confirms keep priority bypass; this gate
+    is entries-only so a 31-open storm cannot keep spending the 3/min budget.
+
+    Do **not** gate entries on ``positions_poll_deferred()``. That helper fires at
+    the designed 2/min positions soft-cap during healthy supervision and would
+    permanently false-red ``trading_path_live`` while ``pressure_level`` stays OK.
+    Poll coalesce remains for GET /positions deferral only.
+
+    Demo throughput: ELEVATED (= warn ceiling) is normal Mini supervision traffic —
+    only HIGH/CRITICAL pause entries. Positions coalesce storm threshold is raised
+    so trade_support + OPM polling an open book does not false-red the path.
+
+    Post-boot / cool-down: always block new entries so they never compete with
+    supervise fanout or rate-limit recovery.
+    """
+    if post_boot_rest_guard_active():
+        return True, "rest_post_boot_entry_pause"
+    try:
+        if get_rest_api_budget()._preemptive_pause_active():
+            return True, "rest_cool_down_entry_pause"
+    except Exception:
+        pass
+    demo = _demo_throughput_rest_bypass()
+    try:
+        metrics = get_rest_api_budget().metrics()
+        level = str(metrics.get("pressure_level") or "IDLE").upper()
+        block_levels = ("HIGH", "CRITICAL") if demo else ("ELEVATED", "HIGH", "CRITICAL")
+        if level in block_levels:
+            return True, f"rest_pressure_{level.lower()}"
+    except Exception:
+        pass
+    # Real positions storm only (well over soft cap) — not the designed ceiling.
+    try:
+        from system import shared_rest_budget
+
+        mult = 4.0 if demo else 2.0
+        storm_lim = float(POSITIONS_SHARED_MAX_PER_MINUTE) * mult
+        if shared_rest_budget.recent_count("ig_positions") > storm_lim:
+            return True, "rest_positions_coalesce_pressure"
+    except Exception:
+        pass
+    return False, ""
+
+
+def pressure_level_from_counts(
+    *,
+    calls_last_minute: int,
+    warn_per_minute: int,
+    hard_cap: int,
+) -> str:
+    """IDLE | OK | ELEVATED | HIGH | CRITICAL — single SoT for UI.
+
+    Essential GET /positions at the designed ceiling (warn/min) is ELEVATED,
+    not HIGH — HIGH means we are *over* the advisory budget.
+    """
+    n = max(0, int(calls_last_minute))
+    warn = max(1, int(warn_per_minute))
+    hard = max(1, int(hard_cap))
+    if n <= 0:
+        return "IDLE"
+    if n >= max(hard * 2, warn + 3):
+        return "CRITICAL"
+    if n > warn:
+        return "HIGH"
+    if n >= warn:
+        return "ELEVATED"
+    if n >= max(1, warn - 1):
+        return "OK"
+    return "OK"
 
 
 def _demo_throughput_rest_bypass() -> bool:
@@ -393,15 +556,16 @@ class RestApiBudget:
     def acquire(self, *, label: str = "", priority: bool = False) -> None:
         """Block until the next REST slot is available.
 
-        Pass ``priority=True`` for critical order-path calls (e.g. confirm_deal)
-        that must not be queued behind the minimum-interval or hard-cap guards.
-        The bypass is logged and the slot timestamp is still updated so subsequent
-        non-priority callers observe the correct spacing.
+        ``priority=True`` may bypass min-interval / hard-cap **only** for real
+        order-path calls (confirm / place / close / stop PUT). GET /positions
+        polls never bypass — that false confirm_deal bypass was the permanent
+        IG traffic-governor breach on the Mini desk.
         """
         from system.rate_limit_manager import get_rate_limit_manager
 
         cat = categorize_rest_label(label)
-        if not priority and cat not in ESSENTIAL_REST_CATEGORIES:
+        allow_priority = priority_bypass_allowed(label, priority=priority)
+        if not allow_priority and cat not in ESSENTIAL_REST_CATEGORIES:
             self._raise_if_non_essential_paused(cat, label=label)
 
         get_rate_limit_manager().check_rest_allowed()
@@ -428,10 +592,8 @@ class RestApiBudget:
         # the early check in _raise_if_non_essential_paused is approximate (reads
         # completed calls before any lock); this check is definitive and prevents
         # concurrent threads from all passing the cap simultaneously.
-        # priority=True bypasses both the min_interval wait and the hard cap so
-        # that confirm_deal can always complete regardless of budget saturation.
         _exempt_cap = (
-            priority
+            allow_priority
             or execution_snapshot_rest_active()
             or cat in ESSENTIAL_REST_CATEGORIES
             or e2e_diagnostics_rest_active()
@@ -443,12 +605,13 @@ class RestApiBudget:
             with self._lock:
                 now = time.time()
                 elapsed = now - self._last_ts
-                if priority or elapsed >= _slot_interval:
+                ready = allow_priority or elapsed >= _slot_interval
+                if ready:
                     if not _exempt_cap and self._hard_cap_exceeded_locked(now):
                         raise RestBudgetPausedError("hard_rate_cap")
-                    if priority and elapsed < _slot_interval:
+                    if allow_priority and elapsed < _slot_interval:
                         log_engine(
-                            f"REST budget: bypassing cap for critical confirm_deal "
+                            f"REST budget: priority bypass for order-path "
                             f"(label={label!r}, skipped {_slot_interval - elapsed:.1f}s wait)"
                         )
                     self._last_ts = now  # Reserve this slot
@@ -693,12 +856,21 @@ class RestApiBudget:
         return out
 
     def status_label(self) -> str:
+        level = self.pressure_level()
         count = self.calls_last_minute()
-        if count >= self._warn_per_minute:
-            return f"HIGH ({count}/min)"
-        if count >= max(1, self._warn_per_minute - 2):
-            return f"OK ({count}/min)"
-        return f"OK ({count}/min)" if count else "OK (idle)"
+        if level == "IDLE":
+            return "OK (idle)"
+        return f"{level} ({count}/min)"
+
+    def pressure_level(self) -> str:
+        with self._lock:
+            now = time.time()
+            recent = self._prune_locked(now)
+            return pressure_level_from_counts(
+                calls_last_minute=len(recent),
+                warn_per_minute=self._warn_per_minute,
+                hard_cap=self._hard_cap,
+            )
 
     def metrics(self) -> dict[str, Any]:
         with self._lock:
@@ -706,6 +878,11 @@ class RestApiBudget:
             recent = self._prune_locked(now)
             by_cat = self._by_category_locked()
             hard_cap_calls = len(self._hard_cap_calls_locked(now))
+            level = pressure_level_from_counts(
+                calls_last_minute=len(recent),
+                warn_per_minute=self._warn_per_minute,
+                hard_cap=self._hard_cap,
+            )
             return {
                 "min_interval_sec": self._min_interval,
                 "warn_per_minute": self._warn_per_minute,
@@ -718,8 +895,14 @@ class RestApiBudget:
                 "throttled_waits": self._total_waits,
                 "calls_last_minute": len(recent),
                 "by_category_last_minute": by_cat,
-                "status_label": self.status_label(),
+                "pressure_level": level,
+                "status_label": (
+                    "OK (idle)" if level == "IDLE" else f"{level} ({len(recent)}/min)"
+                ),
                 "last_labels": [r.label for r in recent[-5:]],
+                "positions_shared_max_per_minute": positions_poll_limit_per_min(),
+                "post_boot_rest_guard": post_boot_rest_guard_active(),
+                "preemptive_pause_active": self._preemptive_pause_active(),
             }
 
     def snapshot(self) -> dict[str, Any]:

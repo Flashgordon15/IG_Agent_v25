@@ -607,6 +607,33 @@ class DualCoreCoordinator:
                 f"DualCoreCoordinator: dispatch blocked epic={epic} reason={code}"
             )
 
+        # Pre-network regime veto — local tick math only, before any REST.
+        entry_route = "MARKET"
+        wo_touch_level: float | None = None
+        try:
+            from execution.pre_entry_regime_veto import evaluate_pre_entry_regime_decision
+            from system.market_data_hub import get_market_data_hub
+
+            snap_q = get_market_data_hub().get_snapshot(epic)
+            bid0 = float(getattr(snap_q, "bid", 0) or 0) if snap_q else 0.0
+            offer0 = float(getattr(snap_q, "offer", 0) or 0) if snap_q else 0.0
+            regime = evaluate_pre_entry_regime_decision(
+                epic, direction, bid=bid0, offer=offer0, cfg=self._cfg
+            )
+            if not regime.allowed:
+                _block(regime.reason)
+                return
+            entry_route = str(regime.entry_route or "MARKET")
+            wo_touch_level = regime.touch_level
+            if entry_route == "WORKING_ORDER":
+                log_engine(
+                    f"DualCoreCoordinator: spread elasticity → WORKING_ORDER "
+                    f"epic={epic} touch={wo_touch_level} ({regime.reason})"
+                )
+        except Exception as exc:
+            _block(f"regime_veto_fail_closed:{type(exc).__name__}")
+            return
+
         from execution.ig_execution_guard import ig_execution_allowed, log_execution_paused_if_needed
 
         allowed, ig_reason = ig_execution_allowed()
@@ -689,12 +716,35 @@ class DualCoreCoordinator:
             _block("rest_client_unavailable")
             return
         try:
+            from execution.instrument_suspension import is_epic_suspended
+
+            if is_epic_suspended(epic):
+                _block("instrument_suspended:EDITS_ONLY")
+                return
+        except Exception:
+            pass
+        try:
             from execution.broker_tradeability import broker_new_deal_allowed
 
             ok_trade, trade_reason = broker_new_deal_allowed(
                 self._rest, epic, cfg=self._cfg
             )
             if not ok_trade:
+                if "EDITS_ONLY" in str(trade_reason).upper() or "not_tradeable" in str(
+                    trade_reason
+                ).lower():
+                    try:
+                        from execution.instrument_suspension import mark_epic_suspended
+
+                        mark_epic_suspended(
+                            epic,
+                            status="EDITS_ONLY",
+                            detail=str(trade_reason),
+                        )
+                    except Exception:
+                        pass
+                    _block(f"instrument_suspended:{trade_reason}")
+                    return
                 _block(trade_reason)
                 return
         except Exception as exc:
@@ -778,9 +828,73 @@ class DualCoreCoordinator:
             return
         size = float(check.get("adjusted_size") or size)
         deal_ref = f"MICRO-{epic[-8:]}-{int(time.time())}"
-        tp_pts, sl_pts = resolve_micro_stop_limit_points(
-            self._rest, broker_epic, size=size, cfg=self._cfg
-        )
+        # Adaptive ATR / asymmetric 3:1 R:R — size + TP/SL from bracket.
+        tp_pts: float
+        sl_pts: float
+        try:
+            from execution.adaptive_atr_bracket import resolve_adaptive_entry_bracket
+
+            bracket = resolve_adaptive_entry_bracket(
+                epic, direction, size, self._cfg
+            )
+            if bracket.size_scale < 1.0 - 1e-9:
+                log_engine(
+                    f"DualCoreCoordinator: ATR vol size scale epic={epic} "
+                    f"{size}->{bracket.size:.4f} ({bracket.reason})"
+                )
+            size = float(bracket.size)
+            tp_pts = float(bracket.tp_pts)
+            sl_pts = float(bracket.sl_pts)
+            if bracket.mode == "asymmetric_rr_elevated_vol":
+                log_engine(
+                    f"DualCoreCoordinator: asymmetric R:R epic={epic} "
+                    f"tp={tp_pts:.2f} sl={sl_pts:.2f} ({bracket.reason})"
+                )
+        except Exception as exc:
+            log_engine(
+                f"DualCoreCoordinator: adaptive ATR skipped "
+                f"{type(exc).__name__}: {exc}"
+            )
+            tp_pts, sl_pts = resolve_micro_stop_limit_points(
+                self._rest, broker_epic, size=size, cfg=self._cfg
+            )
+        else:
+            # Adaptive ATR path previously skipped broker floors → DOW 4pt stop
+            # rejected as ATTACHED_ORDER_LEVEL_ERROR when min_stop_distance=6.
+            from execution.live_broker_order_router import floor_stop_distance_points
+            from runtime.virtual_stop_loss import stretch_broker_stop_distance
+
+            sl_req = float(sl_pts)
+            tp_pts = floor_stop_distance_points(
+                self._rest, broker_epic, float(tp_pts)
+            ).effective_points
+            sl_pts = stretch_broker_stop_distance(
+                self._rest, broker_epic, sl_req
+            )
+            if sl_pts > sl_req + 1e-9:
+                log_engine(
+                    f"DualCoreCoordinator: floored broker stop epic={epic} "
+                    f"{sl_req:g}→{sl_pts:g} pts"
+                )
+        from execution.micro_risk_profile import clamp_size_for_stop_risk
+        from execution.size_floors import hard_min_deal_size
+
+        risk_size = clamp_size_for_stop_risk(epic, size, sl_pts, self._cfg)
+        if risk_size < size - 1e-9:
+            log_engine(
+                f"DualCoreCoordinator: size clamped for stop risk epic={epic} "
+                f"{size}->{risk_size:.4f} sl={sl_pts:.2f}pt"
+            )
+            size = float(risk_size)
+        # Broker-min stop widen can push risk-clamp below IG min deal (e.g. 0.4 < 0.5)
+        # → MINIMUM_ORDER_SIZE_ERROR. Prefer legal min size over illegal attach-tight stop.
+        min_deal = float(hard_min_deal_size(broker_epic, cfg=self._cfg))
+        if size + 1e-12 < min_deal:
+            log_engine(
+                f"DualCoreCoordinator: size raised to IG min epic={epic} "
+                f"{size:.4f}→{min_deal:g} (broker stop floor forced)"
+            )
+            size = min_deal
         log_engine(
             f"DualCoreCoordinator: {ENGINE_B_MICRO_SCALPER} {direction} epic={epic} "
             f"broker_product={broker_product} broker_epic={broker_epic} "
@@ -815,16 +929,97 @@ class DualCoreCoordinator:
             result: dict[str, Any] = {}
             confirm: dict[str, Any] = {}
             ref = deal_ref
+            from execution.micro_risk_profile import omit_broker_limit_at_entry
+
+            broker_limit = None if omit_broker_limit_at_entry(self._cfg) else tp_pts
             try:
-                result = self._rest.place_market_order(
-                    epic=broker_epic,
-                    direction=direction,
-                    size=size,
-                    stop_distance=sl_pts,
-                    limit_distance=tp_pts,
+                from execution.asymmetric_ioc_router import (
+                    asymmetric_ioc_enabled,
+                    dispatch_asymmetric_ioc_limit,
                 )
+
+                touch_bid = float(quote.bid) if quote is not None else 0.0
+                touch_offer = float(quote.offer) if quote is not None else 0.0
+                if entry_route == "WORKING_ORDER" and wo_touch_level and wo_touch_level > 0:
+                    from execution.resting_working_order import (
+                        dispatch_resting_working_order,
+                    )
+
+                    result = dispatch_resting_working_order(
+                        self._rest,
+                        epic=broker_epic,
+                        direction=direction,
+                        size=size,
+                        level=float(wo_touch_level),
+                        stop_distance=sl_pts,
+                        limit_distance=broker_limit,
+                        currency_code=str(
+                            getattr(self._cfg, "currency_code", None) or "GBP"
+                        ),
+                    )
+                elif (
+                    asymmetric_ioc_enabled(self._cfg)
+                    and touch_bid > 0
+                    and touch_offer > touch_bid
+                ):
+                    _obi_hint = None
+                    try:
+                        from execution.entry_gate_hardening import _obi_from_microkernel
+
+                        _obi_hint, _ = _obi_from_microkernel(broker_epic)
+                    except Exception:
+                        _obi_hint = None
+                    result = dispatch_asymmetric_ioc_limit(
+                        self._rest,
+                        epic=broker_epic,
+                        direction=direction,
+                        size=size,
+                        bid=touch_bid,
+                        offer=touch_offer,
+                        stop_distance=sl_pts,
+                        limit_distance=broker_limit,
+                        currency_code=str(
+                            getattr(self._cfg, "currency_code", None) or "GBP"
+                        ),
+                        cfg=self._cfg,
+                        obi=_obi_hint,
+                    )
+                else:
+                    from execution.atomic_gateway import dispatch_atomic_market_order
+
+                    result = dispatch_atomic_market_order(
+                        self._rest,
+                        epic=broker_epic,
+                        direction=direction,
+                        size=size,
+                        stop_distance=sl_pts,
+                        limit_distance=broker_limit,
+                        currency_code=str(
+                            getattr(self._cfg, "currency_code", None) or "GBP"
+                        ),
+                    )
                 place_ok = True
             except Exception as exc:
+                # EDITS_ONLY / instrument restriction — non-blocking SUSPENDED lane
+                try:
+                    from execution.instrument_suspension import (
+                        handle_dispatch_suspension,
+                        is_instrument_restriction,
+                    )
+                    from ig_api.exceptions import InstrumentSuspendedException
+
+                    if isinstance(exc, InstrumentSuspendedException) or is_instrument_restriction(
+                        exc
+                    ):
+                        code = handle_dispatch_suspension(exc, epic=epic)
+                        set_last_gate_suppression_reason(code)
+                        log_engine(
+                            f"DualCoreCoordinator: dispatch blocked epic={epic} "
+                            f"reason={code} (non-blocking SUSPENDED)"
+                        )
+                        return
+                except Exception:
+                    pass
                 set_last_gate_suppression_reason(f"micro_order_failed:{type(exc).__name__}")
                 try:
                     from execution.broker_error_log import append_broker_rejection
@@ -919,7 +1114,7 @@ class DualCoreCoordinator:
                                 direction=direction,
                                 size=size,
                                 stop_distance=sl_pts,
-                                limit_distance=tp_pts,
+                                limit_distance=broker_limit,
                             )
                             ref = str(
                                 result.get("dealReference")
@@ -1010,27 +1205,40 @@ class DualCoreCoordinator:
             from execution.post_fill_risk_controls import arm_post_fill_risk_controls
 
             if entry_mid > 0 and status not in ("REJECTED",):
+                from execution.broker_fill_level import resolve_broker_fill_level
+
+                fill_level = resolve_broker_fill_level(confirm, hub_mid=entry_mid)
+                if fill_level <= 0:
+                    fill_level = entry_mid
                 lid = deal_ref
                 try:
                     transition(
                         lid,
                         LifecycleState.ORDER_ACCEPTED,
                         message=f"IG {status}",
-                        extra={"entry_level": entry_mid, "deal_id": deal_id or ref},
+                        extra={"entry_level": fill_level, "deal_id": deal_id or ref},
                     )
                     transition(lid, LifecycleState.ACTIVE, message="Position tracking")
                 except Exception:
                     pass
-                arm_post_fill_risk_controls(
-                    epic=epic,
-                    direction=direction,
-                    size=size,
-                    entry_level=entry_mid,
-                    deal_id=str(deal_id or ref or ""),
-                    stop_distance_pts=float(sl_pts),
-                    limit_distance_pts=float(tp_pts),
-                    cfg=self._cfg,
-                )
+                if not deal_id:
+                    try:
+                        from execution.position_risk_stack import ensure_risk_stack_coverage
+
+                        ensure_risk_stack_coverage(self._rest, cfg=self._cfg, force=True)
+                    except Exception:
+                        pass
+                else:
+                    arm_post_fill_risk_controls(
+                        epic=epic,
+                        direction=direction,
+                        size=size,
+                        entry_level=fill_level,
+                        deal_id=str(deal_id),
+                        stop_distance_pts=float(sl_pts),
+                        limit_distance_pts=None if omit_broker_limit_at_entry(self._cfg) else float(tp_pts),
+                        cfg=self._cfg,
+                    )
         except Exception as exc:
             set_last_gate_suppression_reason(f"micro_order_failed:{type(exc).__name__}")
             phase = "confirm_exception" if place_ok else "place_exception"

@@ -2017,6 +2017,31 @@ class TradingLoop:
     def _get_gate_signal(self) -> SignalResult:
         """Single signal evaluation per tick — reused across gate stack (§20 latency)."""
         if getattr(self, "_gate_signal_cache", None) is None:
+            try:
+                from execution.signal_injection import consume_injection
+
+                inj = consume_injection(getattr(self, "_epic", ""))
+                if inj is not None:
+                    from system.engine_log import log_engine
+
+                    log_engine(
+                        f"SIGNAL_INJECT: operator {inj['direction']} for {inj['epic']} "
+                        f"— routing through full gate stack"
+                    )
+                    sig = SignalResult(
+                        signal=inj["direction"],
+                        raw_confidence=95.0,
+                        adjusted_confidence=95.0,
+                        learning_delta=0.0,
+                        setup_key="MANUAL_INJECT",
+                        notes=f"operator inject at {inj['ts']:.0f}",
+                        snapshot={},
+                    )
+                    return self._cache_promoted_signal(sig)
+            except ImportError:
+                pass
+            except Exception as exc:
+                log_guarded_exception("signal_injection_consume", exc)
             sig = self._signal_engine.evaluate(self._market)
             return self._cache_promoted_signal(sig)
         return self._gate_signal_cache
@@ -2505,6 +2530,30 @@ class TradingLoop:
         elif signal.signal not in ("BUY", "SELL"):
             wait_reason = f"ALPHA_MATRIX: direction {signal.signal}"
             all_passed = False
+
+        # Desk profitability gates — slots + session cap ALWAYS (incl. matrix_win_injection).
+        if all_passed:
+            try:
+                from system.strategy_quality_gate import evaluate_entry_slot_gate
+
+                slot_ok, slot_reason = evaluate_entry_slot_gate(self._cfg)
+                if not slot_ok:
+                    wait_reason = f"ALPHA_MATRIX: {slot_reason}"
+                    all_passed = False
+            except Exception:
+                pass
+            if all_passed:
+                try:
+                    from trading.entry_protection import check_session_trade_cap
+
+                    blocked, cap_reason = check_session_trade_cap(
+                        str(self._epic or ""), self._cfg
+                    )
+                    if blocked:
+                        wait_reason = f"ALPHA_MATRIX: {cap_reason}"
+                        all_passed = False
+                except Exception:
+                    pass
 
         if wait_reason and not all_passed:
             try:
@@ -3755,6 +3804,78 @@ class TradingLoop:
         except Exception as exc:
             log_guarded_exception("trading_loop", exc)
 
+        try:
+            from runtime.deploy_hold import is_deploy_hold_active
+
+            if is_deploy_hold_active():
+                return self._hard_block_all_gates(
+                    "deploy_hold_active", primary_gate="broker_feed"
+                )
+            from runtime.feed_health_watchdog import entries_blocked_by_feed_health
+
+            if entries_blocked_by_feed_health():
+                return self._hard_block_all_gates(
+                    "feed_health_unhealthy", primary_gate="broker_feed"
+                )
+            from system.rest_api_budget import entries_blocked_by_rest_pressure
+
+            rest_blocked, rest_reason = entries_blocked_by_rest_pressure()
+            if rest_blocked:
+                return self._hard_block_all_gates(
+                    rest_reason or "rest_pressure_entry_pause",
+                    primary_gate="broker_feed",
+                )
+            from execution.order_in_flight_mutex import hard_cap_blocks_entry
+            from system.engine_lane import DEFAULT_ACCOUNT_CFD, resolve_journal_metadata
+
+            meta = resolve_journal_metadata(cfg=self.config)
+            acct = str(meta.get("account_id") or DEFAULT_ACCOUNT_CFD)
+            cap_blocked, cap_reason = hard_cap_blocks_entry(acct)
+            if cap_blocked:
+                return self._hard_block_all_gates(
+                    cap_reason or "account_hard_cap",
+                    primary_gate="broker_feed",
+                )
+
+            from runtime.broker_snapshot import open_count_from_snapshot
+            from system.engine_lane import count_cap_for_engine, resolve_active_engine_id
+
+            snap_n = open_count_from_snapshot(max_age_sec=300.0)
+            engine_cap = count_cap_for_engine(
+                resolve_active_engine_id(self.config), self.config
+            )
+            raw_max = getattr(self.config, "max_open_positions", None)
+            if engine_cap is not None:
+                max_open = int(engine_cap)
+            elif raw_max is None:
+                max_open = None
+            else:
+                max_open = max(1, int(raw_max or 6))
+            if max_open is not None and snap_n is not None and snap_n >= max_open:
+                return self._hard_block_all_gates(
+                    f"broker_snapshot_cap:{snap_n}>={max_open}",
+                    primary_gate="broker_feed",
+                )
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
+
+        try:
+            from pathlib import Path
+            import json as _json
+
+            from system.paths import state_dir
+
+            halt = Path(state_dir()) / "entry_halt.json"
+            if halt.is_file():
+                raw = _json.loads(halt.read_text(encoding="utf-8"))
+                if bool(raw.get("active")):
+                    return self._hard_block_all_gates(
+                        str(raw.get("reason") or "entry_halt"),
+                        primary_gate="broker_feed",
+                    )
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
+
         breaker = self.entry_circuit_breaker()
         try:
             from system.agent_execution_mode import demo_sandbox_unblock_active
@@ -3871,6 +3992,7 @@ class TradingLoop:
             "signal_confidence",
             "ml_veto",
             "risk_validation",
+            "session_win_rate",
             "expectancy_ok",
             "calendar_ok",
             "execution",
@@ -3896,6 +4018,8 @@ class TradingLoop:
                     results.append(self._gate_risk_validation(quote))
                 elif name == "expectancy_ok":
                     results.append(self._gate_expectancy_ok())
+                elif name == "session_win_rate":
+                    results.append(self._gate_session_win_rate_ok())
                 elif name == "calendar_ok":
                     results.append(self._gate_calendar_ok())
                 elif name == "signal_confidence":
@@ -4017,6 +4141,13 @@ class TradingLoop:
         )
 
     def _gate_session_open(self) -> GateResult:
+        if getattr(self._config, "sandbox_mode_enabled", False):
+            return GateResult(
+                name="session_open",
+                passed=True,
+                value={"open": True, "sandbox": True},
+                detail="SANDBOX mode — session forced open",
+            )
         try:
             from system.agent_execution_mode import demo_sandbox_unblock_active
 
@@ -4174,6 +4305,13 @@ class TradingLoop:
         )
 
     def _gate_session_blackout(self) -> GateResult:
+        if getattr(self._config, "sandbox_mode_enabled", False):
+            return GateResult(
+                name="session_blackout",
+                passed=True,
+                value={"blocked": False, "sandbox": True},
+                detail="SANDBOX mode — blackout bypassed",
+            )
         try:
             from system.agent_execution_mode import demo_sandbox_unblock_active
 
@@ -5210,6 +5348,17 @@ class TradingLoop:
             detail=detail,
         )
 
+    def _gate_session_win_rate_ok(self) -> GateResult:
+        from system.strategy_quality_gate import evaluate_session_win_rate_gate
+
+        passed, detail, value = evaluate_session_win_rate_gate(self._config)
+        return GateResult(
+            name="session_win_rate",
+            passed=passed,
+            value=value,
+            detail=detail,
+        )
+
     def _apply_hierarchical_probability_gate(
         self, sig: SignalResult, quote: Quote, threshold: float
     ) -> tuple[SignalResult, float, GateResult | None]:
@@ -5331,8 +5480,84 @@ class TradingLoop:
             )
         return sig, threshold, None
 
+    def _feed_freshness_entry_block(self) -> GateResult | None:
+        """Block a NEW entry when this epic's signal quote is stale.
+
+        A stale reference quote prices entries off a level the market has already
+        left — the root cause of the phantom small losses observed during feed
+        starvation (entry at a stale price, IG fills at the live price, position
+        opens underwater). This is per-epic and feed-source-agnostic: it reads
+        the authoritative hub age rather than aggregate ``fresh_count`` or a
+        quote's own ``time`` field, so a stale Nikkei quote is blocked even while
+        DOW is fresh. Entry-only — open positions are still managed/exited by the
+        position supervisors, so this never traps a live trade.
+        """
+        try:
+            fq = self._config.get("feed_quality")
+            fq = dict(fq) if isinstance(fq, dict) else {}
+            if not fq.get("entry_gate_enabled", True):
+                return None
+            # Transport-aware budget: 500ms on Lightstreamer WS; config
+            # entry_veto_age_sec (typ. 10s) under Yahoo/rest_poll so a healthy
+            # poll cadence can arm. Never clamp rest_poll down to 500ms.
+            from system.market_integrity import effective_entry_quote_budget_sec
+
+            veto_age = float(effective_entry_quote_budget_sec(self._config))
+            require_non_ig = bool(fq.get("entry_require_non_ig_source", False))
+            epic = str(getattr(self, "_epic", "") or "")
+            if not epic or veto_age <= 0:
+                return None
+            from system.market_data_hub import get_market_data_hub
+
+            snap = get_market_data_hub().get_snapshot(epic)
+            if snap is None or snap.bid <= 0 or snap.offer <= 0:
+                return GateResult(
+                    name="signal_confidence",
+                    passed=False,
+                    value={"feed_stale": True, "reason": "no_quote"},
+                    detail="feed_stale: no signal quote for epic",
+                )
+            age = float(snap.age_seconds())
+            src = str(getattr(snap, "source", "") or "").lower()
+            if age > veto_age:
+                return GateResult(
+                    name="signal_confidence",
+                    passed=False,
+                    value={
+                        "feed_stale": True,
+                        "age_sec": round(age, 1),
+                        "source": src,
+                        "veto_age_sec": veto_age,
+                    },
+                    detail=(
+                        f"feed_stale: quote age {age:.0f}s > {veto_age:.0f}s "
+                        f"({src or 'unknown'}) — entry blocked to avoid stale-price fill"
+                    ),
+                )
+            if require_non_ig and src in (
+                "ig",
+                "ig_rest",
+                "rest",
+                "rest_poll",
+                "lightstreamer",
+            ):
+                return GateResult(
+                    name="signal_confidence",
+                    passed=False,
+                    value={"feed_stale": True, "source": src, "reason": "ig_source"},
+                    detail=f"feed_stale: signal quote from execution feed ({src})",
+                )
+            return None
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
+            return None
+
     def _gate_signal_confidence(self, quote: Quote) -> GateResult:
         sig = self._get_gate_signal()
+        fresh_block = self._feed_freshness_entry_block()
+        if fresh_block is not None:
+            self._gate_signal_cache = sig
+            return fresh_block
         threshold = float(self._points.trade_confidence_threshold(self._config))
         try:
             from system.gate_relaxation import effective_trade_confidence_threshold
@@ -5438,99 +5663,32 @@ class TradingLoop:
         conf = float(sig.adjusted_confidence)
         rules_conf = conf
         ml_prob: float | None = None
-        interim_active = False
         if bool(self._config.get("USE_ML_SIGNAL", False)):
             try:
-                from ml.interim_scorer import (
-                    get_interim_scorer,
-                    ml_clean_training_rows,
-                    ml_min_rows_for_model,
+                from ml.decision_engine import blend_ml_confidence
+
+                ml_decision = blend_ml_confidence(
+                    cfg=self._config,
+                    market=self._market,
+                    direction=str(sig.signal or "WAIT"),
+                    snapshot=sig.snapshot or {},
+                    store=self._store,
+                    rules_conf=rules_conf,
+                    setup_key=str(sig.setup_key or ""),
+                    quote=quote,
+                    epic=str(getattr(self, "_epic", "") or ""),
                 )
-                from trading.ml_scorer import get_ml_scorer
-
-                scorer = get_ml_scorer()
-
-                # Session-scoped count — refreshed on position open/close only.
-                _ml_records = ml_clean_training_rows(self._config)
-                min_model_rows = ml_min_rows_for_model(self._config)
-                snap = sig.snapshot or {}
-                if _ml_records < min_model_rows:
-                    interim_active = True
-                    log_engine("[INTERIM SCORER] active")
-                    interim = get_interim_scorer().score(
-                        cfg=self._config,
-                        market=self._market,
-                        direction=str(sig.signal or "WAIT"),
-                        snapshot=snap,
-                        store=self._store,
-                    )
-                    conf = float(interim.total)
-                    ml_prob = conf / 100.0
-                elif scorer.is_trained() and _ml_records >= min_model_rows:
-                    log_engine("[ML MODEL] active")
-                    last = snap.get("last")
-                    _last = last if (last is not None and hasattr(last, "get")) else {}
-                    _atr = float(_last.get("atr", 0) or 0)
-                    # Normalise ATR by configured stop distance so it is dimensionless
-                    # and comparable across instruments (Wall St ~80pt stop vs Gold
-                    # ~10pt stop vs FX sub-pip stop).
-                    _stop = max(1.0, float(self._config.stop_distance_points))
-                    # Keys must exactly match the model's training feature names
-                    features = {
-                        "adjusted_score": rules_conf,
-                        "raw_score": float(snap.get("raw_confidence", rules_conf)),
-                        "rsi": float(_last.get("rsi", 0) or 0),
-                        "atr_ratio": _atr / _stop,
-                    }
-                    # Only blend if all model features are present
-                    if all(f in features for f in scorer.feature_names):
-                        ml_prob = scorer.score(
-                            features,
-                            use_ml_signal=True,
-                            timeout_s=0.5,
-                        )
-                        if ml_prob > 0.0:
-                            # Only blend when the model has meaningful conviction
-                            # (≥15% deviation from 50%). Near-50% means the model
-                            # is out-of-distribution or has no signal — don't let it
-                            # veto a strong rules score.
-                            _ML_CONVICTION = 0.15
-                            blended = False
-                            if abs(ml_prob - 0.5) >= _ML_CONVICTION:
-                                conf = (rules_conf * 0.6) + (ml_prob * 100.0 * 0.4)
-                                conf = max(0.0, min(100.0, conf))
-                                blended = True
-                                log_engine(
-                                    f"ML score {ml_prob:.3f} rules {rules_conf:.1f} blended {conf:.1f}"
-                                )
-                            else:
-                                log_engine(
-                                    f"ML score {ml_prob:.3f} near-50% (no conviction) — using rules {rules_conf:.1f}"
-                                )
-                            # Record for the dashboard ML decision log
-                            entry = {
-                                "ts": datetime.now().strftime("%H:%M:%S"),
-                                "market": self._market,
-                                "direction": sig.signal,
-                                "ml_prob": round(float(ml_prob), 3),
-                                "rules_conf": round(rules_conf, 1),
-                                "confidence": round(conf, 1),
-                                "blended": blended,
-                                "blend_note": (
-                                    f"→ blended {conf:.1f}%"
-                                    if blended
-                                    else "near-50%, rules used"
-                                ),
-                                "setup": sig.setup_key,
-                            }
-                            self._ml_decision_log.append(entry)
-                            if len(self._ml_decision_log) > 20:
-                                self._ml_decision_log = self._ml_decision_log[-20:]
-                elif scorer.is_trained():
+                conf = float(ml_decision.confidence)
+                ml_prob = ml_decision.ml_prob
+                if ml_decision.setup_veto:
                     log_engine(
-                        f"ML blend skipped: {_ml_records} training records "
-                        f"(need {min_model_rows})"
+                        f"[ML SETUP VETO] blocked {sig.setup_key[:48]} — "
+                        f"{ml_decision.notes}"
                     )
+                if ml_decision.log_entry:
+                    self._ml_decision_log.append(ml_decision.log_entry)
+                    if len(self._ml_decision_log) > 20:
+                        self._ml_decision_log = self._ml_decision_log[-20:]
             except Exception as e:
                 log_engine(f"ML gate blend skipped: {type(e).__name__}: {e}")
 
@@ -6090,10 +6248,10 @@ class TradingLoop:
             side = str(row["side"] or "BUY").upper()
             size = float(row["size"] or 0)
             epic = str(row["epic"] or self._epic)
-            close_dir = "SELL" if side == "BUY" else "BUY"
+            # close_position expects OPEN side and inverts once — never pass close_dir.
             rest.close_position(
                 deal_id,
-                direction=close_dir,
+                direction=side,
                 size=size,
                 epic=epic,
                 currency_code=self._config.currency_code,
@@ -6181,8 +6339,8 @@ class TradingLoop:
             try:
                 from system.market_data_hub import get_market_data_hub
                 from system.market_integrity import (
-                    LIVE_QUOTE_MAX_AGE_SEC,
                     UI_STALE_AFTER_SEC,
+                    effective_entry_quote_budget_sec,
                     epic_market_open,
                 )
                 from system.stream_ready import is_stream_ready
@@ -6202,7 +6360,7 @@ class TradingLoop:
                         stale_after = float(self._config.refresh_seconds) * 2.0
                     if is_stream_ready():
                         stale_after = max(stale_after, 60.0)
-                    hot_stale = LIVE_QUOTE_MAX_AGE_SEC
+                    hot_stale = float(effective_entry_quote_budget_sec(self._config))
                     if snap and snap.age_seconds() <= hot_stale:
                         stream_status = "LIVE"
                     elif snap and snap.age_seconds() <= min(stale_after, UI_STALE_AFTER_SEC):

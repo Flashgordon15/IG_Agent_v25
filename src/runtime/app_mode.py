@@ -173,7 +173,19 @@ def apply_app_mode_to_environ() -> AppMode:
         os.environ["IG_AGENT_CONFIG"] = default_config_path(mode)
 
     os.environ["IG_BROKER_PLANE"] = broker_plane_for(mode)
-    os.environ["IG_DATA_ROOT"] = resolve_data_root(mode)
+    data_root = resolve_data_root(mode)
+    os.environ["IG_DATA_ROOT"] = data_root
+    # Keep data_dir() and health data_root on the same tree (Tier-0 unify).
+    if not os.environ.get("IG_AGENT_DATA_DIR", "").strip():
+        os.environ["IG_AGENT_DATA_DIR"] = data_root
+    try:
+        from pathlib import Path
+
+        from system.paths import bridge_legacy_data_into
+
+        bridge_legacy_data_into(Path(data_root))
+    except Exception:
+        pass
 
     if mode is AppMode.TESTBED:
         os.environ["IG_APEX_RUNTIME_MODE"] = "HARDENED_TESTBED"

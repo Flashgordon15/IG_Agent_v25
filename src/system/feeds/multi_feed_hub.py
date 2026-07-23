@@ -39,6 +39,15 @@ TWELVE_DATA_KEY = os.environ.get("TWELVE_DATA_KEY", "").strip() or (
 _FRAME_TIMEOUT_SEC = float(os.environ.get("IG_FEED_FRAME_TIMEOUT_SEC", "3.0") or 3.0)
 _YAHOO_POLL_SEC = 2.0
 
+# Reconnect backoff for WS feeds. A rejected/throttled connection (HTTP 429,
+# auth failure) must NOT be retried every 2s — that hammers an exhausted key and
+# produced the observed 27x Finnhub retry storm. Exponential backoff, capped;
+# rejections that indicate the key is bad back off much harder.
+_FEED_RECONNECT_BASE_SEC = 2.0
+_FEED_RECONNECT_CAP_SEC = 120.0
+_FEED_REJECT_MIN_BACKOFF_SEC = 30.0
+_FEED_REJECT_CAP_SEC = 300.0
+
 
 def _resolve_finnhub_key() -> str:
     return (
@@ -330,6 +339,31 @@ class RacingMultiFeedHub:
         st["timeouts"] = int(st.get("timeouts") or 0) + 1
         st["connected"] = False
 
+    async def _sleep_backoff(
+        self, provider: str, exc: BaseException, backoff: float
+    ) -> float:
+        """Sleep with exponential backoff; back off hard on 429/auth rejections.
+
+        Returns the next backoff value. A connection the server rejects (429,
+        401, 403, "rejected") means retrying fast is pointless and abusive — jump
+        to a long floor so an exhausted/invalid key stops storming the provider.
+        """
+        detail = str(exc).lower()
+        rejected = any(
+            tok in detail
+            for tok in ("429", " 401", " 403", "http 401", "http 403", "rejected")
+        )
+        if rejected:
+            wait = max(backoff, _FEED_REJECT_MIN_BACKOFF_SEC)
+            nxt = min(wait * 2.0, _FEED_REJECT_CAP_SEC)
+            st = _FEED_STATUS.setdefault(provider, {})
+            st["throttled"] = True
+        else:
+            wait = backoff
+            nxt = min(backoff * 2.0, _FEED_RECONNECT_CAP_SEC)
+        await asyncio.sleep(wait)
+        return nxt
+
     def _publish_race_win(
         self,
         epic: str,
@@ -341,14 +375,22 @@ class RacingMultiFeedHub:
         source_id: float,
     ) -> None:
         ring = get_alpha_ring_buffer()
-        if not ring.write_quote_race_win(
-            epic, bid=bid, offer=offer, mid=mid, source_id=source_id
-        ):
-            return
-        _RACE_STATS["total_wins"] = int(_RACE_STATS.get("total_wins") or 0) + 1
-        st = _FEED_STATUS.setdefault(provider, {})
-        st["wins"] = int(st.get("wins") or 0) + 1
-        self._touch_heartbeat(provider)
+        ring_ok = False
+        try:
+            ring_ok = bool(
+                ring.write_quote_race_win(
+                    epic, bid=bid, offer=offer, mid=mid, source_id=source_id
+                )
+            )
+        except Exception as exc:
+            log_guarded_exception("multi_feed_hub_ring_write", exc)
+        if ring_ok:
+            _RACE_STATS["total_wins"] = int(_RACE_STATS.get("total_wins") or 0) + 1
+            st = _FEED_STATUS.setdefault(provider, {})
+            st["wins"] = int(st.get("wins") or 0) + 1
+            self._touch_heartbeat(provider)
+        # ALWAYS bridge race-win prices into MarketDataHub — ring buffer
+        # fullness must never starve the trading quote path (Gate 3 / entries).
         try:
             hub = get_market_data_hub()
             hub.publish(epic, bid, offer, source=provider)
@@ -390,6 +432,13 @@ class RacingMultiFeedHub:
                     mid = await asyncio.to_thread(fetch_yahoo_mid, symbol)
                     if mid is None or mid <= 0:
                         continue
+                    try:
+                        from system.quote_sanity import plausible_mid_for_epic
+
+                        if not plausible_mid_for_epic(epic, float(mid)):
+                            continue
+                    except Exception:
+                        pass
                     bid, offer = self._mid_to_bid_offer(epic, float(mid), yahoo_symbol=symbol)
                     self._publish_race_win(
                         epic,
@@ -420,10 +469,12 @@ class RacingMultiFeedHub:
         symbols = [_EPIC_FINNHUB[e] for e in NIGHT_MATRIX_EPICS if e in _EPIC_FINNHUB]
         symbol_to_epic = {v: k for k, v in _EPIC_FINNHUB.items()}
 
+        backoff = _FEED_RECONNECT_BASE_SEC
         while not _HUB_STOP.is_set():
             try:
                 async with websockets.connect(url, ping_interval=20, close_timeout=5) as ws:
                     self._touch_heartbeat("finnhub", connected=True)
+                    backoff = _FEED_RECONNECT_BASE_SEC  # reset on successful connect
                     for sym in symbols:
                         await ws.send(json.dumps({"type": "subscribe", "symbol": sym}))
                     log_engine(f"MultiFeedHub: Finnhub WS subscribed {len(symbols)} symbols")
@@ -468,11 +519,11 @@ class RacingMultiFeedHub:
                     return
                 self._record_timeout("finnhub")
                 log_guarded_exception("multi_feed_finnhub", exc)
-                await asyncio.sleep(2.0)
+                backoff = await self._sleep_backoff("finnhub", exc, backoff)
             except Exception as exc:
                 self._record_timeout("finnhub")
                 log_guarded_exception("multi_feed_finnhub", exc)
-                await asyncio.sleep(2.0)
+                backoff = await self._sleep_backoff("finnhub", exc, backoff)
 
     async def _twelve_data_ws_loop(self) -> None:
         if not self._twelve_key:
@@ -484,10 +535,12 @@ class RacingMultiFeedHub:
         symbols = [_EPIC_TWELVE_DATA[e] for e in NIGHT_MATRIX_EPICS if e in _EPIC_TWELVE_DATA]
         symbol_to_epic = {v: k for k, v in _EPIC_TWELVE_DATA.items()}
 
+        backoff = _FEED_RECONNECT_BASE_SEC
         while not _HUB_STOP.is_set():
             try:
                 async with websockets.connect(url, ping_interval=20, close_timeout=5) as ws:
                     self._touch_heartbeat("twelvedata", connected=True)
+                    backoff = _FEED_RECONNECT_BASE_SEC  # reset on successful connect
                     await ws.send(
                         json.dumps({"action": "subscribe", "params": {"symbols": ",".join(symbols)}})
                     )
@@ -530,11 +583,11 @@ class RacingMultiFeedHub:
                     return
                 self._record_timeout("twelvedata")
                 log_guarded_exception("multi_feed_twelvedata", exc)
-                await asyncio.sleep(2.0)
+                backoff = await self._sleep_backoff("twelvedata", exc, backoff)
             except Exception as exc:
                 self._record_timeout("twelvedata")
                 log_guarded_exception("multi_feed_twelvedata", exc)
-                await asyncio.sleep(2.0)
+                backoff = await self._sleep_backoff("twelvedata", exc, backoff)
 
     async def _heartbeat_watchdog(self) -> None:
         """Monitor provider heartbeats — failover without stopping other streams."""

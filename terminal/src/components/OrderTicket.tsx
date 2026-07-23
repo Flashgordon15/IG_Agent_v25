@@ -7,6 +7,9 @@ type Props = {
   defaultEpic: string;
 };
 
+const fieldClass =
+  "cq-mono w-full rounded-[calc(var(--desk-radius)-4px)] border border-[var(--color-desk-line)] bg-[var(--color-desk-void)] px-3 py-2 text-[length:var(--desk-type-sm)] text-[var(--color-desk-text)] outline-none transition focus:border-[rgba(61,220,151,0.45)]";
+
 export function OrderTicket({ defaultEpic }: Props) {
   const [epic, setEpic] = useState(defaultEpic);
   const [size, setSize] = useState("1.0");
@@ -17,17 +20,20 @@ export function OrderTicket({ defaultEpic }: Props) {
   const epics = Object.keys(EPIC_LABELS);
 
   return (
-    <div className="cq-panel flex flex-1 flex-col overflow-hidden">
-      <div className="border-b border-[#1f1f24] px-2 py-1">
-        <span className="cq-label">Order Ticket</span>
+    <div className="cq-panel flex h-full flex-1 flex-col overflow-hidden">
+      <div
+        className="border-b border-[var(--color-desk-line)]"
+        style={{ padding: "0.65rem 0.9rem" }}
+      >
+        <div className="cq-label">Order ticket</div>
       </div>
-      <div className="flex flex-1 flex-col gap-2 p-2">
-        <label className="flex flex-col gap-1">
+      <div className="flex flex-1 flex-col gap-3 overflow-auto p-3">
+        <label className="flex flex-col gap-1.5">
           <span className="cq-label">Instrument</span>
           <select
             value={epic}
             onChange={(e) => setEpic(e.target.value)}
-            className="cq-mono rounded-none border border-[#1f1f24] bg-[#050505] px-2 py-1.5 text-[11px] text-[#e8ecf4] outline-none focus:border-[#00f5d4]"
+            className={fieldClass}
           >
             {epics.map((e) => (
               <option key={e} value={e}>
@@ -41,10 +47,10 @@ export function OrderTicket({ defaultEpic }: Props) {
           <button
             type="button"
             onClick={() => setDirection("BUY")}
-            className={`cq-mono rounded-none border px-2 py-2 text-[11px] font-bold transition-colors ${
+            className={`cq-mono rounded-[calc(var(--desk-radius)-4px)] border px-2 py-2.5 text-[length:var(--desk-type-sm)] font-bold transition ${
               direction === "BUY"
-                ? "border-[#00f5d4] bg-[#00f5d4]/15 text-[#00f5d4]"
-                : "border-[#1f1f24] text-[#71717a] hover:bg-[#141418]"
+                ? "border-[rgba(61,220,151,0.55)] bg-[rgba(61,220,151,0.12)] text-[var(--color-desk-good)]"
+                : "border-[var(--color-desk-line)] text-[var(--color-desk-mute)] hover:bg-white/3"
             }`}
           >
             BUY
@@ -52,51 +58,52 @@ export function OrderTicket({ defaultEpic }: Props) {
           <button
             type="button"
             onClick={() => setDirection("SELL")}
-            className={`cq-mono rounded-none border px-2 py-2 text-[11px] font-bold transition-colors ${
+            className={`cq-mono rounded-[calc(var(--desk-radius)-4px)] border px-2 py-2.5 text-[length:var(--desk-type-sm)] font-bold transition ${
               direction === "SELL"
-                ? "border-[#ff0055] bg-[#ff0055]/15 text-[#ff0055]"
-                : "border-[#1f1f24] text-[#71717a] hover:bg-[#141418]"
+                ? "border-[rgba(255,77,109,0.55)] bg-[rgba(255,77,109,0.12)] text-[var(--color-desk-bad)]"
+                : "border-[var(--color-desk-line)] text-[var(--color-desk-mute)] hover:bg-white/3"
             }`}
           >
             SELL
           </button>
         </div>
 
-        <label className="flex flex-col gap-1">
-          <span className="cq-label">Size (lots)</span>
-          <input
-            type="text"
-            value={size}
-            onChange={(e) => setSize(e.target.value)}
-            className="cq-mono rounded-none border border-[#1f1f24] bg-[#050505] px-2 py-1.5 text-[11px] outline-none focus:border-[#00f5d4]"
-          />
-        </label>
-
-        <label className="flex flex-col gap-1">
-          <span className="cq-label">Stop (pts)</span>
-          <input
-            type="text"
-            value={stopPts}
-            onChange={(e) => setStopPts(e.target.value)}
-            className="cq-mono rounded-none border border-[#1f1f24] bg-[#050505] px-2 py-1.5 text-[11px] outline-none focus:border-[#00f5d4]"
-          />
-        </label>
+        <div className="grid grid-cols-2 gap-2">
+          <label className="flex flex-col gap-1.5">
+            <span className="cq-label">Size</span>
+            <input
+              type="text"
+              value={size}
+              onChange={(e) => setSize(e.target.value)}
+              className={fieldClass}
+            />
+          </label>
+          <label className="flex flex-col gap-1.5">
+            <span className="cq-label">Stop (pts)</span>
+            <input
+              type="text"
+              value={stopPts}
+              onChange={(e) => setStopPts(e.target.value)}
+              className={fieldClass}
+            />
+          </label>
+        </div>
 
         <div>
-          <span className="cq-label mb-1 block">Leverage</span>
-          <div className="grid grid-cols-4 gap-1">
+          <span className="cq-label mb-1.5 block">Leverage</span>
+          <div className="grid grid-cols-4 gap-1.5">
             {LEVERAGE_TILES.map((x) => (
               <button
                 key={x}
                 type="button"
                 onClick={() => setLeverage(x)}
-                className={`cq-mono rounded-none border py-1.5 text-[10px] font-semibold transition-colors ${
+                className={`cq-mono rounded-[calc(var(--desk-radius)-4px)] border py-2 text-[length:var(--desk-type-xs)] font-semibold transition ${
                   leverage === x
-                    ? "border-[#00f5d4] bg-[#00f5d4]/20 text-[#00f5d4]"
-                    : "border-[#1f1f24] text-[#71717a] hover:bg-[#00f5d4]/10 hover:text-[#00f5d4]"
+                    ? "border-[rgba(91,141,239,0.55)] bg-[rgba(91,141,239,0.14)] text-[var(--color-desk-info)]"
+                    : "border-[var(--color-desk-line)] text-[var(--color-desk-mute)] hover:bg-white/3"
                 }`}
               >
-                [{x}x]
+                {x}×
               </button>
             ))}
           </div>
@@ -104,13 +111,13 @@ export function OrderTicket({ defaultEpic }: Props) {
 
         <button
           type="button"
-          className={`cq-mono mt-auto rounded-none border py-2 text-[11px] font-bold transition-colors ${
+          className={`cq-mono mt-auto rounded-[calc(var(--desk-radius)-2px)] border py-2.5 text-[length:var(--desk-type-sm)] font-bold tracking-wide transition ${
             direction === "BUY"
-              ? "border-[#00f5d4] bg-[#00f5d4]/10 text-[#00f5d4] hover:bg-[#00f5d4]/20"
-              : "border-[#ff0055] bg-[#ff0055]/10 text-[#ff0055] hover:bg-[#ff0055]/20"
+              ? "border-[rgba(61,220,151,0.5)] bg-[rgba(61,220,151,0.1)] text-[var(--color-desk-good)] hover:bg-[rgba(61,220,151,0.16)]"
+              : "border-[rgba(255,77,109,0.5)] bg-[rgba(255,77,109,0.1)] text-[var(--color-desk-bad)] hover:bg-[rgba(255,77,109,0.16)]"
           }`}
         >
-          ARM {direction} · {EPIC_LABELS[epic] ?? epic} · {leverage}x
+          ARM {direction} · {EPIC_LABELS[epic] ?? epic} · {leverage}×
         </button>
       </div>
     </div>

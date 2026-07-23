@@ -4,6 +4,8 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LOG="${ROOT}/src/data/logs/ops_monitor.log"
+# shellcheck source=lib/detach_exec.sh
+source "${ROOT}/scripts/lib/detach_exec.sh"
 PY="${ROOT}/.venv/bin/python3"
 END=$((SECONDS + 1800))
 
@@ -26,9 +28,8 @@ while (( SECONDS < END )); do
     export IG_AGENT_FROM_LAUNCHER=1
     export IG_AGENT_SKIP_DEPLOY_CHECK=1
     export PYTHONPATH="${ROOT}/src"
-    nohup caffeinate -i -s bash "${ROOT}/scripts/start_agent_background.sh" \
-      >>"${ROOT}/src/data/logs/agent_restart.log" 2>&1 &
-    disown 2>/dev/null || true
+    detach_exec --log "${ROOT}/src/data/logs/agent_restart.log" -- \
+      caffeinate -i -s bash "${ROOT}/scripts/start_agent_background.sh"
     sleep 30
     continue
   fi

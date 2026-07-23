@@ -1,17 +1,21 @@
 ---
-description: Mac Mini 24/7 host — migration handoff (Jun 2026)
+description: Mac Mini 24/7 host — Trading Desk v31.1 handoff
 alwaysApply: true
 ---
 
-# Mac Mini — IG Agent v29 host
+# Mac Mini — IG Agent v31.1 Trading Desk host
 
 - Project: `/Users/chrisgordon/Projects/IG_Agent_v25`
 - MacBook agent: **stopped**; Mini is 24/7 host
-- Dashboard: `ssh -L 8080:127.0.0.1:8080 chrisgordon@192.168.6.44` → http://localhost:8080
-- Flight Deck web cockpit: http://127.0.0.1:8787/ (auto-opens after Gate 4)
-- Launch: `./flight_deck_launch.sh` (pre-flight → 45 tests → port cleanup → genesis → agent)
+- **Product desktop:** `Trading_Desk.app` → `scripts/trading_desk_silent.sh` → Quantum Terminal `:3000` + agent `:8080`
+- Tunnel: `ssh -L 8080:127.0.0.1:8080 chrisgordon@192.168.6.44` → http://localhost:8080 (Vite dist / API)
+- **Config:** `config/config_v31_demo_throughput.json`
+- **Data root:** `src/data/v31-production/` (`IG_DATA_ROOT` / `data_dir()`)
 - `streaming_transport`: **rest_poll** in config_v25.json (Lightstreamer fails on Mini)
 - Telegram tokens in `config/credentials/credentials.json`
 - Health: `curl -s http://127.0.0.1:8080/api/health`
+- Open risk: `curl -s http://127.0.0.1:8080/api/trade_support/status` then `/api/positions/live`
+- Deploy: `./scripts/desk_deploy.sh audit|deploy` — never `kill -9` main
 - **Night matrix 24/7 lockdown (PERMANENT):** Gold, Wall St, Nikkei, EUR/USD — legacy weekday blackout 20:00–06:00 BST **deleted**; only rollover lock **21:58–22:05 BST**
-- Full notes: `docs/MAC_MINI_HANDOFF.md`
+- Hot-path entries (current overlay): **DOW only** until Nikkei JPY PnL certified
+- Full notes: `docs/DESK_DEPLOY_RUNBOOK.md`, `docs/MAC_MINI_HANDOFF.md`

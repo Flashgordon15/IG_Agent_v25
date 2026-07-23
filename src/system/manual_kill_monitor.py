@@ -57,10 +57,10 @@ def _flatten_open_positions_nonblocking() -> None:
                 size = float(pos.get("size") or 0)
                 if not deal_id or size <= 0:
                     continue
-                close_dir = "SELL" if side == "BUY" else "BUY"
+                # close_position expects OPEN side and inverts once — never pass close_dir.
                 rest.close_position(
                     deal_id,
-                    direction=close_dir,
+                    direction=side,
                     size=size,
                     epic=epic or None,
                     currency_code=cfg.currency_code,

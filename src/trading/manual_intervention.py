@@ -324,11 +324,11 @@ def force_terminate_position(
         size = float(pos.get("size") or 0)
         if not deal_id or size <= 0:
             continue
-        close_dir = "SELL" if side == "BUY" else "BUY"
+        # _do_close_position expects OPEN side and inverts once — never pass close_dir.
         try:
             result = rest._do_close_position(
                 deal_id,
-                direction=close_dir,
+                direction=side,
                 size=size,
                 epic=epic_key,
                 currency_code=cfg.currency_code,

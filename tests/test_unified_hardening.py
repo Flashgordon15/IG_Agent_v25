@@ -8,10 +8,12 @@ import pytest
 
 from execution.ig_size_validator import pre_trade_check
 from runtime.dynamic_limit_engine import (
+    on_streaming_mid_tick,
     register_dynamic_limit,
     reset_dynamic_limit_for_tests,
     snapshot,
     start_dynamic_limit_engine,
+    update_from_mid,
 )
 from runtime.trade_lifecycle import LifecycleState, begin_trade, transition
 from system.boot.gate2_async_hydration import hydration_complete, start_gate2_background_hydration
@@ -74,6 +76,59 @@ def test_dynamic_limit_engine_register():
     snap = snapshot()
     assert snap["active"] is True
     assert "D1" in snap["tracks"]
+
+
+def test_dynamic_limit_trails_profit_beyond_initial_cap():
+    """Profit trail ratchets limit_pts as mid moves favorably — no fixed £20 TP."""
+    start_dynamic_limit_engine()
+    epic = "CS.D.CFPGOLD.CFP.IP"
+    entry = 2000.0
+    register_dynamic_limit(
+        deal_id="D1",
+        epic=epic,
+        direction="BUY",
+        entry_level=entry,
+        limit_pts=2.0,
+        trail_trigger_ig_pts=1.5,
+        trail_lock_ratio=0.70,
+    )
+    # +3 IG points favorable on Gold (pip=0.1 → +0.3 price)
+    from system.pnl_math import ig_points_to_price_delta
+
+    mid = entry + ig_points_to_price_delta(epic, 3.0)
+    update_from_mid(epic, mid)
+    pts = snapshot()["tracks"]["D1"]["limit_pts"]
+    assert pts > 2.0
+    assert snapshot()["tracks"]["D1"]["peak_profit_ig_pts"] == pytest.approx(3.0, abs=0.05)
+
+
+def test_dynamic_limit_flatten_on_trail_touch():
+    rest = MagicMock()
+    start_dynamic_limit_engine()
+    from runtime.dynamic_limit_engine import bind_rest_client
+
+    bind_rest_client(rest)
+    epic = "CS.D.CFPGOLD.CFP.IP"
+    entry = 2000.0
+    register_dynamic_limit(
+        deal_id="D1",
+        epic=epic,
+        direction="BUY",
+        entry_level=entry,
+        limit_pts=2.0,
+        size=1.0,
+        trail_trigger_ig_pts=1.0,
+        trail_lock_ratio=0.70,
+    )
+    from system.pnl_math import ig_points_to_price_delta
+
+    # Run up then pull back through ratcheted trail
+    on_streaming_mid_tick(epic, entry + ig_points_to_price_delta(epic, 4.0))
+    on_streaming_mid_tick(epic, entry + ig_points_to_price_delta(epic, 1.0))
+    import time
+
+    time.sleep(0.15)
+    rest.close_position.assert_called()
 
 
 def test_lifecycle_multimarket_independent():

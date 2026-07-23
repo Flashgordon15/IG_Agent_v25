@@ -228,15 +228,28 @@ def fetch_yahoo_mids_batch(
     return mids
 
 
-def yahoo_quote_from_mid(epic: str, mid: float, symbol: str) -> YahooQuoteSample:
-    spread = default_spread_for_yahoo_symbol(symbol, mid)
+def yahoo_quote_from_mid(epic: str, mid: float, symbol: str) -> YahooQuoteSample | None:
+    """Build a Yahoo sample — returns None when mid is outside the epic band."""
+    from system.quote_sanity import plausible_mid_for_epic
+
+    try:
+        m = float(mid)
+    except (TypeError, ValueError):
+        return None
+    if not plausible_mid_for_epic(epic, m):
+        log_engine(
+            f"YahooQuotePoller: reject implausible mid epic={epic} "
+            f"symbol={symbol} mid={m}"
+        )
+        return None
+    spread = default_spread_for_yahoo_symbol(symbol, m)
     half = spread * 0.5
     return YahooQuoteSample(
         epic=epic,
         symbol=symbol,
-        mid=mid,
-        bid=mid - half,
-        offer=mid + half,
+        mid=m,
+        bid=m - half,
+        offer=m + half,
     )
 
 
@@ -274,13 +287,31 @@ class YahooQuotePoller:
     def stats(self) -> dict[str, int]:
         return dict(self._stats)
 
+    def _should_skip_publish(self, epic: str, hub: Any) -> bool:
+        """Prefer fresher Finnhub/TwelveData hub quotes over Yahoo hammering."""
+        try:
+            snap = hub.get_snapshot(epic)
+            if snap is None or float(getattr(snap, "bid", 0) or 0) <= 0:
+                return False
+            src = str(getattr(snap, "source", "") or "").lower()
+            if src in ("yahoo", "synthetic", "synthetic_hydration", "replay"):
+                return False
+            age = float(snap.age_seconds()) if hasattr(snap, "age_seconds") else 999.0
+            # Fresh non-Yahoo race winner — do not burn Yahoo / overwrite with stale.
+            return age <= 4.0
+        except Exception:
+            return False
+
     def poll_epic(self, epic: str) -> QuoteSnapshot | None:
-        sample = fetch_yahoo_quote(epic, timeout_sec=self._timeout_sec)
         self._stats["polls"] += 1
+        hub = get_market_data_hub()
+        if self._should_skip_publish(epic, hub):
+            return hub.get_snapshot(epic)
+        sample = fetch_yahoo_quote(epic, timeout_sec=self._timeout_sec)
         if sample is None:
             self._stats["errors"] += 1
             return None
-        snap = get_market_data_hub().publish(
+        snap = hub.publish(
             sample.epic,
             sample.bid,
             sample.offer,
@@ -298,25 +329,36 @@ class YahooQuotePoller:
             if (sym := yahoo_symbol_for_epic(epic))
         }
         self._stats["polls"] += 1
-        mids = fetch_yahoo_mids_batch(list(symbol_by_epic.values()))
-        published = 0
         hub = get_market_data_hub()
-        for epic, symbol in symbol_by_epic.items():
+        # Skip Yahoo entirely when the race array already covers the stack.
+        pending = {
+            epic: sym
+            for epic, sym in symbol_by_epic.items()
+            if not self._should_skip_publish(epic, hub)
+        }
+        if not pending:
+            return 0
+        mids = fetch_yahoo_mids_batch(list(pending.values()))
+        published = 0
+        for epic, symbol in pending.items():
             mid = mids.get(symbol)
             if mid is None:
                 self._stats["errors"] += 1
                 continue
             sample = yahoo_quote_from_mid(epic, mid, symbol)
+            if sample is None:
+                self._stats["errors"] += 1
+                continue
             snap = hub.publish(sample.epic, sample.bid, sample.offer, source="yahoo")
             if snap is not None:
                 self._stats["published"] += 1
                 published += 1
         if not mids:
             # Batch endpoint unavailable — fall back to sequential chart polls.
-            for idx, epic in enumerate(self._epics):
+            for idx, epic in enumerate(pending):
                 if self.poll_epic(epic) is not None:
                     published += 1
-                if idx + 1 < len(self._epics) and not yahoo_rate_limited():
+                if idx + 1 < len(pending) and not yahoo_rate_limited():
                     time.sleep(0.15)
         return published
 

@@ -68,6 +68,8 @@ class LiveExecutor:
         self._client = rest_client
         self._workers_lock = threading.Lock()
         self._pending_workers: list[threading.Thread] = []
+        # Mirrors per-account mutex — True while this executor's account is locked.
+        self.order_in_flight: bool = False
 
     def _resolve_order_size(
         self,
@@ -117,6 +119,32 @@ class LiveExecutor:
         mode: ExecutionMode = ExecutionMode.LIVE,
     ) -> ExecutionResult:
         from execution.atomic_gateway import assert_execution_allowed
+        from execution.maintenance_detachment import is_core_detached, suppress_order_dispatch
+
+        if is_core_detached():
+            mock = suppress_order_dispatch(
+                source="live_executor.execute",
+                epic=str(signal.epic or ""),
+                direction=str(signal.direction or ""),
+                action="entry",
+            )
+            trace_execution(
+                "ORDER",
+                "LiveExecutor.execute",
+                decision="core_detached — order dispatch suppressed",
+                params={"epic": signal.epic, "dealReference": mock.get("dealReference")},
+            )
+            return ExecutionResult(
+                success=True,
+                action="MAINTENANCE_DETACHED",
+                deal_reference=str(mock.get("dealReference") or ""),
+                execution_params={
+                    **execution_params,
+                    "core_detached": True,
+                    "mock_confirm": True,
+                },
+                messages=["CORE_DETACHED — mock confirm, no IG REST dispatch"],
+            )
 
         hold = assert_execution_allowed()
         if hold:
@@ -129,6 +157,49 @@ class LiveExecutor:
             )
 
         cfg = self._cfg
+        account_id = str(getattr(self._client, "account_id", "") or "").strip().upper()
+        try:
+            from execution.order_in_flight_mutex import (
+                MUTEX_REJECT_LOG,
+                get_order_mutex,
+                hard_cap_blocks_entry,
+                log_mutex_reject,
+            )
+
+            cap_blocked, cap_reason = hard_cap_blocks_entry(account_id)
+            if cap_blocked:
+                update_demo_diagnostics(last_rejection=cap_reason)
+                trace_execution(
+                    "ORDER",
+                    "LiveExecutor.execute",
+                    decision=f"REJECTED: {cap_reason}",
+                )
+                return ExecutionResult(
+                    success=False,
+                    action="REJECTED",
+                    rejection_reason=cap_reason,
+                    execution_params=execution_params,
+                )
+            # Peek only — acquire happens on the worker/network boundary so the
+            # async order thread owns the lock (avoids cross-thread nest races).
+            if get_order_mutex().is_locked(account_id):
+                log_mutex_reject(account_id=account_id, source="live_executor")
+                self.order_in_flight = True
+                update_demo_diagnostics(last_rejection=MUTEX_REJECT_LOG)
+                trace_execution(
+                    "ORDER",
+                    "LiveExecutor.execute",
+                    decision=f"REJECTED: {MUTEX_REJECT_LOG}",
+                )
+                return ExecutionResult(
+                    success=False,
+                    action="REJECTED",
+                    rejection_reason=MUTEX_REJECT_LOG,
+                    execution_params=execution_params,
+                )
+        except Exception:
+            pass
+
         client_type = getattr(self._client, "account_type", cfg.account_type)
         is_demo = client_type == "DEMO" or mode == ExecutionMode.DEMO
 
@@ -584,7 +655,9 @@ class LiveExecutor:
     ) -> None:
         from system.rest_api_budget import begin_order_in_flight, end_order_in_flight
 
+        account_id = str(getattr(self._client, "account_id", "") or "").strip().upper()
         begin_order_in_flight()
+        self.order_in_flight = True
         try:
             try:
                 result = self._execute_order_blocking(
@@ -661,6 +734,14 @@ class LiveExecutor:
         finally:
             clear_entry(signal.epic)
             end_order_in_flight()
+            # Network-boundary mutex (atomic_gateway / asymmetric) releases on
+            # terminal confirm; sync mirror for Terminal / ops status.
+            try:
+                from execution.order_in_flight_mutex import get_order_mutex
+
+                self.order_in_flight = get_order_mutex().is_locked(account_id)
+            except Exception:
+                self.order_in_flight = False
 
     def _execute_order_blocking(
         self,
@@ -998,16 +1079,80 @@ class LiveExecutor:
                 else:
                     if allow_fractional:
                         from execution.atomic_gateway import order_dispatch_lane
+                        from execution.order_in_flight_mutex import (
+                            MUTEX_REJECT_LOG,
+                            mutex_veto_payload,
+                            release_order_mutex,
+                            try_acquire_order_mutex,
+                        )
 
-                        with order_dispatch_lane():
-                            result = self._client.place_market_order(
-                                epic=signal.epic,
-                                direction=signal.direction,
-                                size=size,
-                                stop_distance=stop_distance,
-                                limit_distance=limit_distance,
-                                currency_code=cfg.currency_code,
+                        acct = str(account_id or "").strip().upper()
+                        from execution.order_in_flight_mutex import (
+                            hard_cap_blocks_entry,
+                        )
+
+                        cap_blocked, cap_reason = hard_cap_blocks_entry(acct)
+                        if cap_blocked:
+                            return ExecutionResult(
+                                success=False,
+                                action="REJECTED",
+                                rejection_reason=str(cap_reason or "account_hard_cap"),
+                                execution_params=execution_params,
                             )
+                        if not try_acquire_order_mutex(
+                            acct,
+                            epic=str(signal.epic or ""),
+                            source="live_executor.fractional",
+                        ):
+                            veto = mutex_veto_payload(
+                                account_id=acct, source="live_executor.fractional"
+                            )
+                            return ExecutionResult(
+                                success=False,
+                                action="REJECTED",
+                                rejection_reason=str(
+                                    veto.get("rejection_reason") or MUTEX_REJECT_LOG
+                                ),
+                                execution_params=execution_params,
+                            )
+                        frac_terminal = False
+                        frac_filled = False
+                        try:
+                            with order_dispatch_lane():
+                                result = self._client.place_market_order(
+                                    epic=signal.epic,
+                                    direction=signal.direction,
+                                    size=size,
+                                    stop_distance=stop_distance,
+                                    limit_distance=limit_distance,
+                                    currency_code=cfg.currency_code,
+                                )
+                            frac_terminal = True
+                            if isinstance(result, dict) and result.get("dealReference"):
+                                frac_filled = True
+                                from execution.order_in_flight_mutex import (
+                                    note_account_open,
+                                    resolve_account_hard_open_cap,
+                                )
+
+                                if resolve_account_hard_open_cap(acct) is None:
+                                    try:
+                                        note_account_open(acct, delta=1)
+                                    except Exception:
+                                        pass
+                        except (ConnectionError, TimeoutError, BrokenPipeError, OSError):
+                            frac_terminal = False
+                            raise
+                        except Exception:
+                            frac_terminal = True
+                            raise
+                        finally:
+                            if frac_terminal:
+                                release_order_mutex(
+                                    acct,
+                                    reason="broker_confirm_or_reject",
+                                    filled=frac_filled,
+                                )
                     else:
                         from execution.atomic_gateway import dispatch_atomic_market_order
 
@@ -1383,6 +1528,24 @@ class LiveExecutor:
                     f"{type(e).__name__}: {e}"
                 )
             try:
+                from runtime.agent_bootstrap import get_ig_position_sync
+
+                sync = get_ig_position_sync()
+                if sync is not None:
+                    sync.seed_local_fill(
+                        deal_id=deal_id,
+                        epic=str(signal.market or signal.quote.epic or ""),
+                        direction=str(signal.direction or "BUY"),
+                        size=float(size),
+                        level=float(signal.quote.mid),
+                        deal_reference=str(ref or ""),
+                    )
+            except Exception as e:
+                log_engine(
+                    f"ig_position_sync seed_local_fill skipped deal={deal_id}: "
+                    f"{type(e).__name__}: {e}"
+                )
+            try:
                 from execution.portfolio_hooks import record_portfolio_entry_from_signal
 
                 record_portfolio_entry_from_signal(
@@ -1414,6 +1577,7 @@ class LiveExecutor:
             except Exception:
                 pass
             try:
+                from execution.micro_risk_profile import omit_broker_limit_at_entry
                 from execution.post_fill_risk_controls import arm_post_fill_risk_controls
 
                 fill_px = float(signal.quote.mid or 0.0)
@@ -1423,6 +1587,7 @@ class LiveExecutor:
                         if str(signal.direction or "").upper() == "BUY"
                         else signal.quote.bid
                     )
+                omit_limit = omit_broker_limit_at_entry(cfg)
                 arm_post_fill_risk_controls(
                     epic=str(signal.epic or ""),
                     direction=str(signal.direction or "BUY"),
@@ -1430,7 +1595,7 @@ class LiveExecutor:
                     entry_level=fill_px,
                     deal_id=deal_id,
                     stop_distance_pts=float(stop_distance),
-                    limit_distance_pts=float(limit_distance or 0.0),
+                    limit_distance_pts=None if omit_limit else float(limit_distance or 0.0),
                     cfg=cfg,
                 )
             except Exception as exc:

@@ -1,7 +1,6 @@
 /**
- * IG Agent v30.0 — Project Apex Monolith
- * Native frameless shell · IOPMAssertion · shadow sidecar · Unix-socket IPC.
- * v30 Apex shadow monolith — native shell only; production v29 is never contacted.
+ * IG Trading Agent v34 — Desktop Shell
+ * Native frameless 4K shell · multiplex desk :3000/desk · dual-port :8080/:8081.
  */
 
 require("fs").appendFileSync(
@@ -9,7 +8,7 @@ require("fs").appendFileSync(
   `${new Date().toISOString()} module start\n`
 );
 
-const { app, BrowserWindow, ipcMain, session, utilityProcess } = require("electron");
+const { app, BrowserWindow, ipcMain, session, utilityProcess, screen } = require("electron");
 const { spawn, execSync, spawnSync } = require("child_process");
 const fs = require("fs");
 const net = require("net");
@@ -25,9 +24,9 @@ const DEFAULT_SHELL = {
     titleBarStyle: "hidden",
     autoHideMenuBar: true,
     backgroundThrottling: false,
-    width: 1440,
-    height: 900,
-    minWidth: 1100,
+    width: 1920,
+    height: 1080,
+    minWidth: 1280,
     minHeight: 720,
   },
   runtime: {
@@ -100,11 +99,11 @@ function bootTrace(message) {
       apexHomeDir(),
       "Library",
       "Application Support",
-      "IG Agent Apex",
-      "v30-production",
+      "IG Trading Agent",
+      "v31-production",
       "data",
       "logs",
-      "apex_boot_trace.log"
+      "boot_trace.log"
     );
     fs.mkdirSync(path.dirname(tracePath), { recursive: true });
     fs.appendFileSync(tracePath, `[${new Date().toISOString()}] ${message}\n`);
@@ -121,8 +120,8 @@ function resolveUserDataRoot() {
       apexHomeDir(),
       "Library",
       "Application Support",
-      "IG Agent Apex",
-      "v30-production"
+      "IG Trading Agent",
+      "v31-production"
     );
   }
   try {
@@ -161,7 +160,33 @@ const PURGE_SCRIPT = app.isPackaged
 
 const SHADOW_API_PORT = APEX_API_PORT;
 const LIVE_AGENT_PORT = 8080;
+const LIVE_SB_PORT = 8081;
+const TERMINAL_UI_PORT = 3000;
+const TRADING_DESK_URL = `http://localhost:${TERMINAL_UI_PORT}/desk`;
 const SHADOW_COCKPIT_PORT = SHELL.runtime.shadowCockpitPort || 9191;
+
+function resolveWindowBounds() {
+  try {
+    const { workAreaSize } = screen.getPrimaryDisplay();
+    const workW = workAreaSize.width || 1920;
+    const workH = workAreaSize.height || 1080;
+    const minWidth = Math.min(1280, workW);
+    const minHeight = Math.min(720, workH);
+    const width = Math.max(minWidth, Math.min(Math.floor(workW * 0.95), 3840));
+    const height = Math.max(minHeight, Math.min(Math.floor(workH * 0.95), 2160));
+    const shouldMaximize = workW >= 2560 && workH >= 1440 && width >= Math.floor(workW * 0.92);
+    return { width, height, minWidth, minHeight, shouldMaximize };
+  } catch (err) {
+    log.warn("resolveWindowBounds failed — using fallback", err.message);
+    return {
+      width: 1920,
+      height: 1080,
+      minWidth: 1280,
+      minHeight: 720,
+      shouldMaximize: false,
+    };
+  }
+}
 
 /** Desktop GUI wraps the real IG Agent on :8080 — shadow :9090 is not used for demo trading. */
 function isLiveAgentShellMode() {
@@ -287,13 +312,51 @@ function releaseShellImmutable() {
   log.info("releaseShellImmutable: IPC torn down — detached Python daemon preserved");
 }
 
+function probeTerminalDesk200() {
+  try {
+    const curlBin = fs.existsSync("/usr/bin/curl") ? "/usr/bin/curl" : "curl";
+    const result = spawnSync(
+      curlBin,
+      [
+        "-sf",
+        "-o",
+        "/dev/null",
+        "-w",
+        "%{http_code}",
+        "--max-time",
+        "2",
+        TRADING_DESK_URL,
+      ],
+      { encoding: "utf8" }
+    );
+    if (result.error || result.status !== 0) return false;
+    const code = Number.parseInt(String(result.stdout || "").trim(), 10);
+    return code === 200;
+  } catch {
+    return false;
+  }
+}
+
+function dualEnginesBreathing() {
+  return (
+    (isPortListening(LIVE_AGENT_PORT) || probeApiHealth200(LIVE_AGENT_PORT)) &&
+    (isPortListening(LIVE_SB_PORT) || probeApiHealth200(LIVE_SB_PORT))
+  );
+}
+
 function isAllowedApexNavigationUrl(navigationUrl) {
   try {
     const parsed = new URL(navigationUrl);
     const host = parsed.hostname;
     if (host !== "127.0.0.1" && host !== "localhost") return false;
     const port = Number(parsed.port) || (parsed.protocol === "https:" ? 443 : 80);
-    return port === LIVE_AGENT_PORT || port === SHADOW_API_PORT || port === SHADOW_COCKPIT_PORT;
+    return (
+      port === TERMINAL_UI_PORT ||
+      port === LIVE_AGENT_PORT ||
+      port === LIVE_SB_PORT ||
+      port === SHADOW_API_PORT ||
+      port === SHADOW_COCKPIT_PORT
+    );
   } catch {
     return false;
   }
@@ -880,7 +943,7 @@ function waitForInitialApi(callback) {
 }
 
 function inlineBootPageDataUrl() {
-  const html = `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>IG Agent Apex</title><style>
+  const html = `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>IG Trading Agent</title><style>
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%;background:#0a0e14;color:#c8d6e5;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;display:flex;align-items:center;justify-content:center}
 .wrap{text-align:center}
@@ -888,7 +951,7 @@ html,body{height:100%;background:#0a0e14;color:#c8d6e5;font-family:-apple-system
 @keyframes spin{to{transform:rotate(360deg)}}
 h1{font-size:18px;font-weight:500;letter-spacing:.02em}
 p{margin-top:8px;font-size:13px;opacity:.65}
-</style></head><body><div class="wrap"><div class="spinner"></div><h1>IG Agent Apex</h1><p>connecting&hellip;</p></div></body></html>`;
+</style></head><body><div class="wrap"><div class="spinner"></div><h1>IG Trading Agent</h1><p>connecting&hellip;</p></div></body></html>`;
   return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
 }
 
@@ -906,14 +969,15 @@ function loadInitialBootPage() {
 function createMainWindow() {
   const shellCfg = SHELL.shell;
   const preloadCfg = SHELL.preload;
-  bootTrace(`createMainWindow transparency_hud=${APEX_TRANSPARENCY_HUD}`);
+  const bounds = resolveWindowBounds();
+  bootTrace(`createMainWindow transparency_hud=${APEX_TRANSPARENCY_HUD} canvas=${bounds.width}x${bounds.height}`);
   mainWindow = new BrowserWindow({
-    width: shellCfg.width,
-    height: shellCfg.height,
-    minWidth: shellCfg.minWidth,
-    minHeight: shellCfg.minHeight,
+    width: bounds.width,
+    height: bounds.height,
+    minWidth: bounds.minWidth,
+    minHeight: bounds.minHeight,
     backgroundColor: shellCfg.backgroundColor,
-    title: "IG Agent Apex v30.0",
+    title: "IG Trading Desk v34",
     show: true,
     frame: !shellCfg.frameless,
     titleBarStyle: shellCfg.titleBarStyle,
@@ -931,6 +995,9 @@ function createMainWindow() {
   loadInitialBootPage();
 
   mainWindow.once("ready-to-show", () => {
+    if (mainWindow && !mainWindow.isDestroyed() && bounds.shouldMaximize) {
+      mainWindow.maximize();
+    }
     mainWindow.focus();
     flushPendingBootPhases();
   });
@@ -939,10 +1006,18 @@ function createMainWindow() {
 
   const loadDashboard = () => {
     if (!mainWindow) return;
-    if (isLiveAgentShellMode() || probeLiveAgentHealth200()) {
+    if (
+      isLiveAgentShellMode() ||
+      probeTerminalDesk200() ||
+      isPortListening(TERMINAL_UI_PORT)
+    ) {
+      console.log(`[APEX ENGINE] Loading multiplex Trading Desk: ${TRADING_DESK_URL}`);
+      log.info(`[APEX ENGINE] Loading multiplex Trading Desk: ${TRADING_DESK_URL}`);
+      mainWindow.loadURL(TRADING_DESK_URL);
+    } else if (probeLiveAgentHealth200()) {
       const url = `http://127.0.0.1:${LIVE_AGENT_PORT}/`;
-      console.log(`[APEX ENGINE] Loading dashboard from live IG Agent: ${url}`);
-      log.info(`[APEX ENGINE] Loading dashboard from live IG Agent: ${url}`);
+      console.log(`[APEX ENGINE] Terminal down — fallback live API: ${url}`);
+      log.info(`[APEX ENGINE] Terminal down — fallback live API: ${url}`);
       mainWindow.loadURL(url);
     } else if (!isLiveAgentShellMode() && probeShadowApiHealth200()) {
       const url = `http://127.0.0.1:${SHADOW_API_PORT}/`;

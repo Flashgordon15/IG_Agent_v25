@@ -26,7 +26,76 @@ from system.paths import project_root
 
 # POSIX segment name (Python SharedMemory — no leading slash)
 ALPHA_MATRIX_SHM_NAME = "ig_agent_v30_alpha_matrix"
-ALPHA_MATRIX_POSIX_PATH = f"/{ALPHA_MATRIX_SHM_NAME}"
+# macOS SharedMemory names must be <=30 chars (IPC_NAME_MAX); scoped dual names
+# like ig_agent_v30_alpha_matrix_Z6BAH4 exceed the limit and fail with EFNAMETOOLONG.
+_MACOS_SHM_NAME_MAX = 30
+_KNOWN_ACCOUNT_SHM_TAGS = {
+    "Z6BAH4": "h4",
+    "Z6BAH3": "h3",
+}
+
+
+def _engine_scoped_alpha_suffix() -> str | None:
+    """Dual-port twins must not share one alpha-matrix segment or publisher marker."""
+    if os.environ.get("IG_V32_DUAL_PORT", "").strip() != "1":
+        return None
+    account = os.environ.get("IG_ACCOUNT_ID", "").strip().upper()
+    if account:
+        return account
+    port = os.environ.get("IG_API_PORT", os.environ.get("PORT", "")).strip()
+    if port.isdigit():
+        return f"p{port}"
+    origin = os.environ.get("IG_ENGINE_ORIGIN", "").strip().upper()
+    if origin:
+        return origin.lower()
+    return None
+
+
+def _shm_tag_for_scope(scope: str) -> str:
+    """Compact tag for POSIX SHM segment names (filesystem markers may stay verbose)."""
+    upper = scope.strip().upper()
+    if upper in _KNOWN_ACCOUNT_SHM_TAGS:
+        return _KNOWN_ACCOUNT_SHM_TAGS[upper]
+    if upper.startswith("P") and upper[1:].isdigit():
+        return upper[-2:]
+    if len(upper) <= 4:
+        return upper.lower()
+    return upper[-2:].lower()
+
+
+def resolve_alpha_matrix_shm_name() -> str:
+    suffix = _engine_scoped_alpha_suffix()
+    if suffix:
+        tag = _shm_tag_for_scope(suffix)
+        name = f"{ALPHA_MATRIX_SHM_NAME}_{tag}"
+        if len(name) > _MACOS_SHM_NAME_MAX:
+            trim = _MACOS_SHM_NAME_MAX - len(tag) - 1
+            name = f"{ALPHA_MATRIX_SHM_NAME[:trim]}_{tag}"
+        return name
+    return ALPHA_MATRIX_SHM_NAME
+
+
+def resolve_alpha_matrix_posix_path() -> str:
+    return f"/{resolve_alpha_matrix_shm_name()}"
+
+
+ALPHA_MATRIX_POSIX_PATH = resolve_alpha_matrix_posix_path()
+
+
+def alpha_matrix_publisher_marker_path() -> Path:
+    from system.paths import data_dir
+
+    suffix = _engine_scoped_alpha_suffix()
+    if suffix:
+        return data_dir() / "state" / f"alpha_matrix_publisher_{suffix}.pid"
+    return data_dir() / "state" / "alpha_matrix_publisher.pid"
+
+
+def should_publish_alpha_matrix() -> bool:
+    """Dual-port: only the CFD orchestrator twin compiles/publishes alpha SHM."""
+    if os.environ.get("IG_V32_DUAL_PORT", "").strip() != "1":
+        return True
+    return os.environ.get("IG_AGENT_ORCHESTRATOR", "").strip() == "1"
 
 EPIC_SLOTS = 8
 RSI_BINS = 32
@@ -443,34 +512,35 @@ class AlphaMatrixSegment:
 
         if self._shm is not None:
             return
+        shm_name = resolve_alpha_matrix_shm_name()
         try:
             if create:
                 try:
                     existing = shared_memory.SharedMemory(
-                        name=ALPHA_MATRIX_SHM_NAME, create=False
+                        name=shm_name, create=False
                     )
                     existing.close()
                     existing.unlink()
                 except FileNotFoundError:
                     pass
                 self._shm = shared_memory.SharedMemory(
-                    name=ALPHA_MATRIX_SHM_NAME,
+                    name=shm_name,
                     create=True,
                     size=_SHM_TOTAL_BYTES,
                 )
                 log_engine(
-                    f"AlphaMatrixSegment: created shm={ALPHA_MATRIX_SHM_NAME} "
+                    f"AlphaMatrixSegment: created shm={shm_name} "
                     f"bytes={_SHM_TOTAL_BYTES}"
                 )
             else:
                 self._shm = shared_memory.SharedMemory(
-                    name=ALPHA_MATRIX_SHM_NAME, create=False
+                    name=shm_name, create=False
                 )
         except FileNotFoundError:
             if not create:
                 raise
             self._shm = shared_memory.SharedMemory(
-                name=ALPHA_MATRIX_SHM_NAME,
+                name=shm_name,
                 create=True,
                 size=_SHM_TOTAL_BYTES,
             )
@@ -598,7 +668,9 @@ class AlphaMatrixSegment:
         from multiprocessing import shared_memory
 
         try:
-            existing = shared_memory.SharedMemory(name=ALPHA_MATRIX_SHM_NAME, create=False)
+            existing = shared_memory.SharedMemory(
+                name=resolve_alpha_matrix_shm_name(), create=False
+            )
             existing.close()
             existing.unlink()
         except FileNotFoundError:
@@ -627,10 +699,8 @@ def flush_stale_alpha_matrix_shm(*, current_pid: int | None = None) -> bool:
     """Unbind alpha-matrix POSIX segment when publisher PID changes after restart."""
     import os
 
-    from system.paths import data_dir
-
     pid = int(current_pid if current_pid is not None else os.getpid())
-    marker = data_dir() / "state" / "alpha_matrix_publisher.pid"
+    marker = alpha_matrix_publisher_marker_path()
     stale = False
     try:
         if marker.is_file():
@@ -718,6 +788,27 @@ def compile_prebaked_alpha_matrix(
     stride: int = 6,
 ) -> CompileReport:
     """Full in-memory archive compile → shared-memory matrix bind."""
+    if not should_publish_alpha_matrix():
+        try:
+            segment = get_alpha_matrix_segment(create=False)
+            header = segment.read_header()
+            return CompileReport(
+                compile_ms=0.0,
+                memory_bytes=_SHM_TOTAL_BYTES,
+                patterns_scanned=int(header.get("patterns_scanned") or 0),
+                true_wins=int(header.get("true_wins") or 0),
+                true_losses=int(header.get("true_losses") or 0),
+                cells_populated=int(np.sum(segment.matrix[:, COL_SAMPLES] > 0)),
+            )
+        except FileNotFoundError:
+            return CompileReport(
+                compile_ms=0.0,
+                memory_bytes=_SHM_TOTAL_BYTES,
+                patterns_scanned=0,
+                true_wins=0,
+                true_losses=0,
+                cells_populated=0,
+            )
     from intelligence.matrix_backtuner import (
         MAX_FORWARD_TICKS,
         _archive_features_at,
@@ -901,6 +992,8 @@ def _compiler_loop(*, interval_sec: float) -> None:
 
 def fast_bootstrap_alpha_matrix_if_empty(*, stride: int = 48) -> bool:
     """Synchronous fast compile when SHM is empty — unblocks live matrix lookups."""
+    if not should_publish_alpha_matrix():
+        return False
     try:
         with _COMPILE_LOCK:
             if alpha_matrix_mapped():
@@ -986,6 +1079,11 @@ def schedule_inprocess_alpha_compile(
 
 def start_alpha_matrix_compiler_async(*, interval_sec: float = 300.0) -> None:
     """Shadow (:9199) background compiler — non-blocking to the hot path."""
+    if not should_publish_alpha_matrix():
+        log_engine(
+            "AlphaMatrixPrebaker: compiler skipped (dual-port non-publisher twin)"
+        )
+        return
     global _COMPILER_THREAD
     if _COMPILER_THREAD is not None and _COMPILER_THREAD.is_alive():
         return

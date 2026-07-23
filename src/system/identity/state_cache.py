@@ -32,6 +32,13 @@ def _persist_path_for_process() -> Path:
 
     if resolve_parallel_track_key() == "shadow":
         return _DEFAULT_SHADOW_PATH
+    if os.environ.get("IG_V32_DUAL_PORT", "").strip() == "1":
+        account = os.environ.get("IG_ACCOUNT_ID", "").strip().upper()
+        port = os.environ.get("IG_API_PORT", os.environ.get("PORT", "")).strip()
+        if account:
+            return Path(f"/tmp/ig_agent_live_state_{account}.json")
+        if port.isdigit():
+            return Path(f"/tmp/ig_agent_live_state_p{port}.json")
     return _DEFAULT_LIVE_PATH
 
 

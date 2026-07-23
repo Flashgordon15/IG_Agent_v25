@@ -137,13 +137,16 @@ def emergency_close_position(
     size: float,
     reason: str,
 ) -> None:
-    """Market-close a single unprotected position."""
-    close_dir = "SELL" if str(direction).upper() == "BUY" else "BUY"
+    """Market-close a single unprotected position.
+
+    ``direction`` must be the OPEN side; ``close_position`` inverts once.
+    """
+    open_side = str(direction or "BUY").upper()
     try:
         if hasattr(client, "close_position") and deal_id:
             client.close_position(
                 deal_id,
-                direction=close_dir,
+                direction=open_side,
                 size=float(size),
                 epic=epic,
                 verify=True,

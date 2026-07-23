@@ -118,11 +118,15 @@ def os_surface_cleanse(*, api_port: int | None = None) -> dict[str, Any]:
     """
     port = int(api_port) if api_port is not None else _resolve_cleanse_api_port()
     killed = _sigkill_port_listeners(port)
-    shm_removed = _evict_versioned_shm_partitions()
+    dual_port = os.environ.get("IG_V32_DUAL_PORT", "").strip() == "1"
+    shm_removed: list[str] = []
+    if not dual_port:
+        shm_removed = _evict_versioned_shm_partitions()
     summary = {
         "api_port": port,
         "killed_pids": killed,
         "shm_removed": shm_removed,
+        "dual_port_shm_evict_skipped": dual_port,
     }
     if killed or shm_removed:
         try:

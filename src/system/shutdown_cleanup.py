@@ -21,7 +21,7 @@ from typing import Any
 
 from system.engine_log import log_engine
 from system.guard.runtime_guard import log_guarded_exception
-from system.paths import data_dir, find_python_executable, project_root
+from system.paths import data_dir, find_python_executable, legacy_src_data_dir, project_root
 
 # Supervision / post-exit utilities — must stay executable for launchd + verify spawn.
 _SUPERVISION_UTILITY_REL_PATHS: tuple[str, ...] = (
@@ -40,6 +40,7 @@ _SUPERVISION_UTILITY_REL_PATHS: tuple[str, ...] = (
 )
 
 _cleanup_done = False
+# Primary path under active data root (v31-production when APP_MODE applies).
 _MANUAL_STOP_FILE = data_dir() / "state" / "manual_stop.json"
 _MANUAL_STOP_MAX_AGE_SEC = 600.0
 _TRADING_LEDGER_PATH = data_dir() / "state" / "trading_ledger.json"
@@ -50,6 +51,39 @@ _state_sync_event: threading.Event | None = None
 _state_sync_thread: threading.Thread | None = None
 _state_sync_started = False
 _last_position_fingerprint: str | None = None
+
+
+def _manual_stop_paths() -> tuple[Path, ...]:
+    """
+    Dual-path hold markers: data_dir()/state (v31-production) AND legacy
+    src/data/state. Watchdog launchd historically only read the legacy path;
+    writing/reading either closes the auto-relaunch gap during offline.
+    """
+    candidates = (
+        data_dir() / "state" / "manual_stop.json",
+        legacy_src_data_dir() / "state" / "manual_stop.json",
+    )
+    out: list[Path] = []
+    seen: set[str] = set()
+    for path in candidates:
+        key = os.path.normcase(os.path.abspath(str(path)))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(path)
+    return tuple(out)
+
+
+def _manual_stop_file_active(path: Path, *, max_age_sec: float) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        age = time.time() - float(raw.get("ts") or 0)
+        return age >= 0 and age < max_age_sec
+    except Exception:
+        # Unreadable / corrupt flag must still block auto-relaunch.
+        return True
 
 
 def reset_shutdown_verify_state() -> None:
@@ -77,12 +111,21 @@ def mark_manual_stop(*, source: str = "dashboard") -> None:
     """Signal watchdog/launchd not to auto-restart after deliberate Stop Agent."""
     try:
         reset_shutdown_verify_state()
-        _MANUAL_STOP_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _MANUAL_STOP_FILE.write_text(
-            json.dumps({"ts": time.time(), "source": source}),
-            encoding="utf-8",
-        )
-        log_engine(f"manual_stop: flagged (source={source})")
+        payload = json.dumps({"ts": time.time(), "source": source})
+        written = 0
+        for path in _manual_stop_paths():
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(payload, encoding="utf-8")
+                written += 1
+            except Exception as path_exc:
+                log_engine(
+                    f"manual_stop: write failed path={path}: "
+                    f"{type(path_exc).__name__}: {path_exc}"
+                )
+        if written == 0:
+            raise OSError("manual_stop: no path writable")
+        log_engine(f"manual_stop: flagged (source={source}, paths={written})")
         try:
             from system.overnight_supervision import clear_overnight_armed
 
@@ -94,21 +137,19 @@ def mark_manual_stop(*, source: str = "dashboard") -> None:
 
 
 def clear_manual_stop() -> None:
-    try:
-        _MANUAL_STOP_FILE.unlink(missing_ok=True)
-    except OSError:
-        pass
+    for path in _manual_stop_paths():
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def manual_stop_active(*, max_age_sec: float = _MANUAL_STOP_MAX_AGE_SEC) -> bool:
-    if not _MANUAL_STOP_FILE.is_file():
-        return False
-    try:
-        raw = json.loads(_MANUAL_STOP_FILE.read_text(encoding="utf-8"))
-        age = time.time() - float(raw.get("ts") or 0)
-        return age >= 0 and age < max_age_sec
-    except Exception:
-        return True
+    """True if either data_dir or legacy manual_stop.json is within max_age_sec."""
+    return any(
+        _manual_stop_file_active(path, max_age_sec=max_age_sec)
+        for path in _manual_stop_paths()
+    )
 
 
 def _position_state_fingerprint() -> str:
@@ -543,6 +584,31 @@ def _should_skip_pid(pid: int, exclude_pid: int | None) -> bool:
     return False
 
 
+def _dual_port_orphan_kill_skip() -> bool:
+    """True when v32 twin engines run — never SIGTERM the sibling on shutdown."""
+    try:
+        from system.engine_cli import is_v32_dual_port_mode, parse_engine_cli
+
+        if is_v32_dual_port_mode() or parse_engine_cli().dual_port_mode:
+            return True
+    except Exception:
+        if os.environ.get("IG_V32_DUAL_PORT", "").strip() == "1":
+            return True
+    try:
+        from system.paths import shared_state_dir
+
+        marker = shared_state_dir() / "v32_dual_supervision.json"
+        if marker.is_file():
+            import json
+
+            raw = json.loads(marker.read_text(encoding="utf-8"))
+            if isinstance(raw, dict) and raw.get("dual_port"):
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def kill_other_agent_processes(
     *,
     exclude_pid: int | None = None,
@@ -554,6 +620,11 @@ def kill_other_agent_processes(
     if os.environ.get("IG_AGENT_PYTEST") == "1":
         return []
     if os.environ.get("IG_AGENT_SKIP_ORPHAN_KILL", "").strip() in ("1", "true", "yes"):
+        return []
+    if _dual_port_orphan_kill_skip():
+        log_engine(
+            f"{log_label}: orphan kill skipped (v32 dual-port — sibling engine protected)"
+        )
         return []
     if os.environ.get("IG_PARALLEL_TRACK", "").strip() in ("live", "shadow"):
         return []

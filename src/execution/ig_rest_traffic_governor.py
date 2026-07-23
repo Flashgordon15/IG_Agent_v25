@@ -35,12 +35,16 @@ def _effective_max_tx_per_window() -> int:
                 block = get_config().get("demo_throughput_mode") or {}
             except Exception:
                 pass
+            try:
+                demo_max = int(block.get("demo_max_tx_per_60s") or 6)
+            except (TypeError, ValueError):
+                demo_max = 6
+            # bypass_traffic_governor: honor demo_max (0 = unlimited).
+            # When bypass is false, still use demo_max instead of hard 3 so soak
+            # config demo_max_tx_per_60s is not silently ignored.
             if bool(block.get("bypass_traffic_governor", True)):
-                try:
-                    demo_max = int(block.get("demo_max_tx_per_60s") or 6)
-                except (TypeError, ValueError):
-                    demo_max = 6
                 return demo_max if demo_max > 0 else 0
+            return demo_max if demo_max > 0 else MAX_TX_PER_60S
     except Exception:
         pass
     try:

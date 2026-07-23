@@ -14,7 +14,13 @@ import requests
 
 from ig_api.auth import AuthManager, SessionTokens
 from ig_api.endpoints import position_otc, position_otc_list, update_position
-from ig_api.exceptions import IGAPIError, IGAuthError, IGOrderError, RateLimitError
+from ig_api.exceptions import (
+    IGAPIError,
+    IGAuthError,
+    IGOrderError,
+    InstrumentSuspendedException,
+    RateLimitError,
+)
 from system.credentials_loader import Credentials
 from system.demo_execution_trace import trace_execution, update_demo_diagnostics
 from system.demo_rest_log import log_demo_rest, mask_token
@@ -155,6 +161,7 @@ class IGRestClient:
         self._last_stream_activity_at: float = 0.0
         self._token_created_at: float = 0.0
         self._session_refresh_in_progress: bool = False
+        self._token_eviction_in_progress: bool = False
 
     @property
     def session(self) -> SessionTokens | None:
@@ -276,7 +283,7 @@ class IGRestClient:
             self._session.cookies.clear()
         except Exception:
             pass
-        for path in self._token_cache_file_paths():
+        for path in self._token_cache_file_paths(include_legacy_shared=True):
             try:
                 if path.is_file():
                     path.unlink()
@@ -293,57 +300,83 @@ class IGRestClient:
         except Exception:
             pass
 
-    @staticmethod
-    def _token_cache_file_paths() -> list[Any]:
+    def _token_cache_file_paths(self, *, include_legacy_shared: bool = False) -> list[Any]:
+        """
+        Per-account token cache paths — same API key + distinct IG accounts must
+        never share ``ig_session_tokens.json`` (cross-account CST demotion).
+        """
         paths: list[Any] = []
         try:
             from pathlib import Path
 
             from system.paths import data_dir, logs_dir
 
+            aid = str(self.account_id or "").strip().upper()
+            suffix = f"_{aid}" if aid else ""
             for base in (data_dir(), logs_dir()):
-                paths.append(Path(base) / "ig_session_tokens.json")
-                paths.append(Path(base) / "ig_rest_session.json")
+                paths.append(Path(base) / f"ig_session_tokens{suffix}.json")
+                paths.append(Path(base) / f"ig_rest_session{suffix}.json")
+                if include_legacy_shared and suffix:
+                    paths.append(Path(base) / "ig_session_tokens.json")
+                    paths.append(Path(base) / "ig_rest_session.json")
         except Exception:
             pass
         return paths
+
+    def auth_ready_for_hot_path(self) -> bool:
+        """
+        Non-blocking auth readiness for 0ms tick / entry lane.
+
+        True only when CST/XST are valid and no refresh or eviction handshake
+        is in flight. Never triggers login or /session/refresh.
+        """
+        if self._session_refresh_in_progress or self._token_eviction_in_progress:
+            return False
+        tok = self._auth.tokens
+        return bool(tok is not None and tok.is_valid)
 
     def _token_eviction_reauth(self) -> bool:
         """
         Token Eviction Loop — purge cached session, sleep 2s, clean handshake.
         Keeps REST budget silent during re-auth (no refresh recursion).
         """
-        self._evict_session_token_cache()
-        time.sleep(2.0)
-        try:
-            url = f"{self._base}/session"
-            body = self._auth.login_body(self.account_id)
-            headers = self._auth.login_headers()
-            r = self._session.request(
-                "POST",
-                url,
-                json=body,
-                headers=headers,
-                timeout=self.timeout_seconds,
-            )
-            if r.status_code not in (200, 201):
-                self._log_auth_failure_critical()
-                return False
-            resp_body = r.json() if r.text else {}
-            self._auth.apply_login_response(
-                dict(r.headers),
-                resp_body,
-                preferred_account_id=self.account_id,
-            )
-            self._touch_token_created()
-            self.record_rest_success("/session")
-            log_engine("IG REST: token eviction re-auth handshake complete")
-            return bool(self._auth.tokens and self._auth.tokens.is_valid)
-        except Exception as exc:
-            log_engine(
-                f"IG REST: token eviction re-auth failed: {type(exc).__name__}: {exc}"
-            )
+        if self._token_eviction_in_progress:
             return False
+        self._token_eviction_in_progress = True
+        try:
+            self._evict_session_token_cache()
+            time.sleep(2.0)
+            try:
+                url = f"{self._base}/session"
+                body = self._auth.login_body(self.account_id)
+                headers = self._auth.login_headers()
+                r = self._session.request(
+                    "POST",
+                    url,
+                    json=body,
+                    headers=headers,
+                    timeout=self.timeout_seconds,
+                )
+                if r.status_code not in (200, 201):
+                    self._log_auth_failure_critical()
+                    return False
+                resp_body = r.json() if r.text else {}
+                self._auth.apply_login_response(
+                    dict(r.headers),
+                    resp_body,
+                    preferred_account_id=self.account_id,
+                )
+                self._touch_token_created()
+                self.record_rest_success("/session")
+                log_engine("IG REST: token eviction re-auth handshake complete")
+                return bool(self._auth.tokens and self._auth.tokens.is_valid)
+            except Exception as exc:
+                log_engine(
+                    f"IG REST: token eviction re-auth failed: {type(exc).__name__}: {exc}"
+                )
+                return False
+        finally:
+            self._token_eviction_in_progress = False
 
     def _log_auth_state(self, label: str) -> None:
         tok = self._auth.tokens
@@ -614,6 +647,34 @@ class IGRestClient:
                 return tok
         raise IGAuthError("IG session refresh failed")
 
+    def soft_flush_connection_buffers(self) -> dict[str, Any]:
+        """
+        Soft connection reset for orchestrator rate-smoothing — clears cookies and
+        closes urllib3 connection pools without killing the process or wiping auth.
+        """
+        flushed = 0
+        try:
+            self._session.cookies.clear()
+        except Exception:
+            pass
+        try:
+            for adapter in list(getattr(self._session, "adapters", {}).values()):
+                close = getattr(adapter, "close", None)
+                if callable(close):
+                    close()
+                    flushed += 1
+        except Exception:
+            pass
+        # Remount default adapters so subsequent REST calls reopen cleanly.
+        try:
+            from requests.adapters import HTTPAdapter
+
+            self._session.mount("https://", HTTPAdapter())
+            self._session.mount("http://", HTTPAdapter())
+        except Exception:
+            pass
+        return {"adapters_closed": flushed}
+
     def ensure_session(self) -> None:
         get_rate_limit_manager().check_rest_allowed()
         if not self._auth.tokens or not self._auth.tokens.is_valid:
@@ -753,7 +814,24 @@ class IGRestClient:
         """Clamp size/stops/currency to IG dealing rules for the epic."""
         c = self.fetch_market_constraints(epic)
         status = c["market_status"]
-        if status not in ("TRADEABLE", "OPEN"):
+        _skip_status = False
+        try:
+            from system.agent_execution_mode import demo_sandbox_unblock_active
+            _skip_status = demo_sandbox_unblock_active()
+        except Exception:
+            pass
+        if not _skip_status and status not in ("TRADEABLE", "OPEN"):
+            from execution.instrument_suspension import (
+                is_instrument_restriction,
+                raise_instrument_suspended,
+            )
+
+            if is_instrument_restriction("", status=status):
+                raise_instrument_suspended(
+                    epic,
+                    status=str(status or "EDITS_ONLY"),
+                    detail=f"Market {epic} not tradeable (status={status})",
+                )
             raise IGOrderError(
                 f"Market {epic} not tradeable (status={status})",
                 status_code=400,
@@ -1469,17 +1547,55 @@ class IGRestClient:
         _validate_throttle_record_ok(result)
         return result
 
-    def open_positions(self) -> list[dict[str, Any]]:
+    def open_positions(self, *, budget_priority: bool = False) -> list[dict[str, Any]]:
+        """GET open positions — never priority-bypass; coalesce under REST pressure.
+
+        ``budget_priority`` is accepted for API compat but permanently ignored for
+        this read path (order-path bypass is only for confirm/place/close).
+        """
         self.ensure_session()
+        # Permanent: GET /positions must never ride the confirm_deal fast lane.
+        budget_priority = False
+        try:
+            from system.rest_api_budget import positions_poll_deferred
+            from runtime.broker_snapshot import read_snapshot
+
+            if positions_poll_deferred():
+                # Permanent: serve last-good snapshot as IG items — never raise
+                # coalesce pressure to flatten/supervise callers (that stuck the desk).
+                from runtime.broker_snapshot import ig_items_from_snapshot
+
+                items = ig_items_from_snapshot(max_age_sec=None)
+                if items or (read_snapshot(max_age_sec=None) is not None):
+                    return items
+        except Exception:
+            pass
         last_status = 0
         for path in (position_otc_list(), "/positions"):
-            r = self.request("GET", path, headers=self._auth_headers("2"))
+            r = self.request(
+                "GET",
+                path,
+                headers=self._auth_headers("2"),
+                budget_priority=False,
+            )
             if r.status_code == 401:
                 self.login()
-                r = self.request("GET", path, headers=self._auth_headers("2"))
+                r = self.request(
+                    "GET",
+                    path,
+                    headers=self._auth_headers("2"),
+                    budget_priority=False,
+                )
             last_status = int(r.status_code)
             if r.status_code == 200:
-                return r.json().get("positions", [])
+                items = r.json().get("positions", [])
+                try:
+                    from runtime.broker_snapshot import write_snapshot
+
+                    write_snapshot(source="ig_rest_open_positions", items=items)
+                except Exception:
+                    pass
+                return items
         raise IGAPIError(
             f"Positions request failed: HTTP {last_status}",
             status_code=last_status,
@@ -1503,6 +1619,56 @@ class IGRestClient:
                 n += 1
         return n
 
+    def count_open_positions_live(self, epic: str | None = None) -> int:
+        """Hard-cap SoT: force a live GET /positions, never coalesce to stale snapshot.
+
+        ``open_positions()`` may return a deferred last-good snapshot under REST
+        pressure — that undercount is exactly the cascade vector for Z6BAH4.
+        """
+        self.ensure_session()
+        path = "/positions"
+        r = self.request(
+            "GET",
+            path,
+            headers=self._auth_headers("2"),
+            budget_priority=True,
+        )
+        if r.status_code == 401:
+            self.login()
+            r = self.request(
+                "GET",
+                path,
+                headers=self._auth_headers("2"),
+                budget_priority=True,
+            )
+        if r.status_code != 200:
+            # Fail closed for hard-cap callers: unknown book ≡ treat as capped.
+            raise IGOrderError(
+                f"count_open_positions_live failed: HTTP {r.status_code}",
+                status_code=int(r.status_code),
+            )
+        items = r.json().get("positions", []) or []
+        try:
+            from runtime.broker_snapshot import write_snapshot
+
+            write_snapshot(source="ig_rest_open_positions_live", items=items)
+        except Exception:
+            pass
+        n = 0
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            market = item.get("market", {}) or {}
+            position = item.get("position", {}) or {}
+            try:
+                if float(position.get("size", 0) or 0) <= 0:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            if epic is None or market.get("epic") == epic:
+                n += 1
+        return n
+
     def has_open_position(self, epic: str) -> bool:
         return self.count_open_positions(epic) > 0
 
@@ -1515,8 +1681,21 @@ class IGRestClient:
         stop_distance: float,
         limit_distance: float | None = None,
         currency_code: str = "GBP",
+        max_slippage: int | None = None,
+        force_market: bool = False,
     ) -> dict[str, Any]:
+        from execution.maintenance_detachment import is_core_detached, suppress_order_dispatch
         from system.engine_log import log_engine
+
+        if is_core_detached():
+            return suppress_order_dispatch(
+                source="IGRestClient.place_market_order",
+                epic=str(epic),
+                direction=str(direction),
+                action="entry",
+                size=float(size),
+                stopDistance=float(stop_distance),
+            )
 
         try:
             from system.node_profile import is_shadow_node
@@ -1617,21 +1796,42 @@ class IGRestClient:
                 status_code=400,
             ) from exc
 
+        _skip_market_gate = False
         try:
-            market_gate = self.fetch_market_constraints(epic, budget_priority=True)
-            gate_status = str(market_gate.get("market_status") or "").upper()
-            if gate_status not in ("TRADEABLE", "OPEN"):
+            from system.agent_execution_mode import demo_sandbox_unblock_active
+            _skip_market_gate = demo_sandbox_unblock_active()
+        except Exception:
+            pass
+
+        if not _skip_market_gate:
+            try:
+                market_gate = self.fetch_market_constraints(epic, budget_priority=True)
+                gate_status = str(market_gate.get("market_status") or "").upper()
+                if gate_status not in ("TRADEABLE", "OPEN"):
+                    from execution.instrument_suspension import (
+                        is_instrument_restriction,
+                        raise_instrument_suspended,
+                    )
+
+                    if is_instrument_restriction("", status=gate_status):
+                        raise_instrument_suspended(
+                            epic,
+                            status=gate_status or "EDITS_ONLY",
+                            detail=f"Market {epic} not tradeable (status={gate_status})",
+                        )
+                    raise IGOrderError(
+                        f"Market {epic} not tradeable (status={gate_status})",
+                        status_code=400,
+                    )
+            except InstrumentSuspendedException:
+                raise
+            except IGOrderError:
+                raise
+            except Exception as exc:
                 raise IGOrderError(
-                    f"Market {epic} not tradeable (status={gate_status})",
+                    f"Market {epic} status unavailable ({type(exc).__name__})",
                     status_code=400,
-                )
-        except IGOrderError:
-            raise
-        except Exception as exc:
-            raise IGOrderError(
-                f"Market {epic} status unavailable ({type(exc).__name__})",
-                status_code=400,
-            ) from exc
+                ) from exc
 
         micro_lot = False
         try:
@@ -1699,19 +1899,39 @@ class IGRestClient:
         if not allowed:
             raise IGOrderError(governor_reason, status_code=429)
 
+        _use_limit_order = False
+        _limit_level: float = 0.0
+        if not force_market and max_slippage is None:
+            try:
+                from execution.broker_epic_resolver import _WEEKEND_EPIC_MAP
+                if epic in _WEEKEND_EPIC_MAP.values():
+                    constraints = self.fetch_market_constraints(epic, budget_priority=True)
+                    if direction.upper() == "BUY":
+                        _limit_level = float(constraints.get("offer") or 0)
+                    else:
+                        _limit_level = float(constraints.get("bid") or 0)
+                    if _limit_level > 0:
+                        _use_limit_order = True
+            except Exception:
+                pass
+
         payload: dict[str, Any] = {
             "epic": epic,
             "expiry": "-",
             "direction": direction.upper(),
             "size": float(size),
-            "orderType": "MARKET",
+            "orderType": "LIMIT" if _use_limit_order else "MARKET",
             "guaranteedStop": False,
             "forceOpen": True,
             "currencyCode": currency_code,
             "stopDistance": max(INTERNAL_RISK_CEILING_PTS, min_allowed_stop),
         }
+        if _use_limit_order and _limit_level > 0:
+            payload["level"] = _limit_level
         if limit_distance is not None and float(limit_distance) > 0:
             payload["limitDistance"] = float(limit_distance)
+        if max_slippage is not None and int(max_slippage) > 0 and not _use_limit_order:
+            payload["maxSlippage"] = int(max_slippage)
 
         url = f"{self._base}{position_otc()}"
         log_demo_rest(
@@ -1727,13 +1947,75 @@ class IGRestClient:
             params={"url": url, "account_id": self.account_id, "payload": payload},
         )
 
-        r = self.request(
-            "POST",
-            position_otc(),
-            headers=self._auth_headers("2"),
-            json=payload,
-            budget_priority=True,
-        )
+        # Z6BAH4 last-line hard-cap: flock + raw broker count before POST.
+        # ALWAYS check raw opens even when upstream mutex is held (TWAP clip-2+
+        # must not bypass). Naked callers also reserve the ledger here.
+        _ledger_reserved = False
+        _acct_cap = str(getattr(self, "account_id", "") or "").strip().upper()
+        try:
+            from execution.order_in_flight_mutex import (
+                get_order_mutex,
+                pre_submit_hard_cap_gate,
+                release_pre_submit_reservation,
+                resolve_account_hard_open_cap,
+            )
+
+            if resolve_account_hard_open_cap(_acct_cap) is not None:
+                mux_held = bool(get_order_mutex().is_locked(_acct_cap))
+                allowed, cap_reason, _ledger_reserved = pre_submit_hard_cap_gate(
+                    _acct_cap,
+                    rest=self,
+                    source="IGRestClient.place_market_order",
+                    mux_already_held=mux_held,
+                )
+                if not allowed:
+                    return {
+                        "status": "REJECTED",
+                        "rejection_reason": cap_reason,
+                        "account_hard_cap": True,
+                        "dealReference": None,
+                    }
+
+            r = self.request(
+                "POST",
+                position_otc(),
+                headers=self._auth_headers("2"),
+                json=payload,
+                budget_priority=True,
+            )
+        except Exception:
+            if _ledger_reserved:
+                try:
+                    from execution.order_in_flight_mutex import (
+                        release_pre_submit_reservation,
+                    )
+
+                    release_pre_submit_reservation(_acct_cap, filled=False)
+                except Exception:
+                    pass
+            raise
+
+        if _ledger_reserved and r.status_code not in (200, 201):
+            try:
+                from execution.order_in_flight_mutex import (
+                    release_pre_submit_reservation,
+                )
+
+                release_pre_submit_reservation(_acct_cap, filled=False)
+            except Exception:
+                pass
+            _ledger_reserved = False
+        elif _ledger_reserved and r.status_code in (200, 201):
+            try:
+                from execution.order_in_flight_mutex import (
+                    release_pre_submit_reservation,
+                )
+
+                release_pre_submit_reservation(_acct_cap, filled=True)
+            except Exception:
+                pass
+            _ledger_reserved = False
+
         body_preview = (r.text or "")[:500]
         log_demo_rest(
             "POST /v1/positions/otc — response",
@@ -1809,7 +2091,123 @@ class IGRestClient:
         )
         return data
 
-    def place_limit_entry_atomic(
+    def place_otc_market_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """
+        POST `/positions/otc` with a pre-built native IG MARKET body.
+
+        Used by asymmetric hot-path router — expects orderType=MARKET and
+        integer maxSlippage; rejects exchange TIF keys.
+        """
+        from execution.maintenance_detachment import is_core_detached, suppress_order_dispatch
+
+        body = dict(payload or {})
+        if is_core_detached():
+            return suppress_order_dispatch(
+                source="IGRestClient.place_otc_market_payload",
+                epic=str(body.get("epic") or ""),
+                direction=str(body.get("direction") or ""),
+                action="entry",
+                ig_payload=body,
+            )
+        if str(body.get("orderType") or "").upper() != "MARKET":
+            raise IGOrderError(
+                "place_otc_market_payload requires orderType=MARKET",
+                status_code=400,
+            )
+        if "timeInForce" in body or "time_in_force" in body:
+            raise IGOrderError(
+                "place_otc_market_payload rejects timeInForce (use maxSlippage)",
+                status_code=400,
+            )
+        if "maxSlippage" not in body:
+            raise IGOrderError(
+                "place_otc_market_payload requires maxSlippage",
+                status_code=400,
+            )
+
+        self.ensure_session()
+        from execution.ig_rest_traffic_governor import consume_positions_otc_transmit_slot
+
+        epic = str(body.get("epic") or "")
+        allowed, governor_reason = consume_positions_otc_transmit_slot(
+            epic=epic,
+            label="POST /v1/positions/otc — asymmetric MARKET",
+        )
+        if not allowed:
+            raise IGOrderError(governor_reason, status_code=429)
+
+        # Hard-cap last-line gate (same as place_market_order) — asymmetric path
+        # previously bypassed flock/raw-count and allowed TWAP forceOpen stacking.
+        # FAIL-CLOSED: gate errors must reject, never fall through to POST.
+        _ledger_reserved = False
+        _acct_cap = str(getattr(self, "account_id", "") or "").strip().upper()
+        from execution.order_in_flight_mutex import (
+            get_order_mutex,
+            pre_submit_hard_cap_gate,
+            release_pre_submit_reservation,
+            resolve_account_hard_open_cap,
+        )
+
+        if resolve_account_hard_open_cap(_acct_cap) is not None:
+            mux_held = bool(get_order_mutex().is_locked(_acct_cap))
+            try:
+                ok, cap_reason, _ledger_reserved = pre_submit_hard_cap_gate(
+                    _acct_cap,
+                    rest=self,
+                    source="IGRestClient.place_otc_market_payload",
+                    mux_already_held=mux_held,
+                )
+            except Exception as exc:
+                raise IGOrderError(
+                    f"account_hard_cap:{_acct_cap} gate_error={type(exc).__name__}:{exc}",
+                    status_code=409,
+                ) from exc
+            if not ok:
+                raise IGOrderError(cap_reason, status_code=409)
+
+        url = f"{self._base}{position_otc()}"
+        log_demo_rest(
+            "POST /v1/positions/otc — asymmetric MARKET",
+            url=url,
+            account_id=self.account_id,
+            payload=body,
+        )
+        try:
+            r = self.request(
+                "POST",
+                position_otc(),
+                headers=self._auth_headers("2"),
+                json=body,
+                budget_priority=True,
+            )
+        except Exception:
+            if _ledger_reserved:
+                try:
+                    release_pre_submit_reservation(_acct_cap, filled=False)
+                except Exception:
+                    pass
+            raise
+        if _ledger_reserved:
+            try:
+                release_pre_submit_reservation(
+                    _acct_cap, filled=r.status_code in (200, 201)
+                )
+            except Exception:
+                pass
+        body_preview = (r.text or "")[:500]
+        if r.status_code in (401, 403):
+            self._raise_auth_or_api(r, "Asymmetric MARKET placement")
+        if r.status_code not in (200, 201):
+            raise IGOrderError(
+                f"Asymmetric MARKET failed: HTTP {r.status_code} — {body_preview}",
+                status_code=r.status_code,
+                body=body_preview,
+            )
+        data = r.json()
+        self.record_rest_success(position_otc())
+        return data if isinstance(data, dict) else {"raw": data}
+
+    def place_working_order_otc(
         self,
         *,
         epic: str,
@@ -1821,9 +2219,94 @@ class IGRestClient:
         currency_code: str = "GBP",
     ) -> dict[str, Any]:
         """
-        LIMIT entry at touch price with stopDistance + limitDistance in one POST payload.
-        BUY at offer (ask); SELL at bid — marketable limit for immediate fill without slippage.
+        POST `/workingorders/otc` — resting LIMIT at historical touch.
+
+        GOOD_TILL_CANCELLED; used when spread elasticity forbids MARKET.
         """
+        self.ensure_session()
+        size, stop_distance, limit_distance, currency_code = (
+            self.normalize_order_params(
+                epic,
+                size=size,
+                stop_distance=stop_distance,
+                limit_distance=limit_distance,
+                currency_code=currency_code,
+            )
+        )
+        payload: dict[str, Any] = {
+            "epic": epic,
+            "expiry": "-",
+            "direction": str(direction or "BUY").upper(),
+            "size": float(size),
+            "level": float(level),
+            "type": "LIMIT",
+            "currencyCode": currency_code,
+            "timeInForce": "GOOD_TILL_CANCELLED",
+            "guaranteedStop": False,
+            "stopDistance": float(stop_distance),
+            "forceOpen": True,
+        }
+        if limit_distance is not None and float(limit_distance) > 0:
+            payload["limitDistance"] = float(limit_distance)
+
+        path = "/workingorders/otc"
+        log_demo_rest(
+            "POST /workingorders/otc — resting elasticity WO",
+            url=f"{self._base}{path}",
+            account_id=self.account_id,
+            payload=payload,
+        )
+        r = self.request(
+            "POST",
+            path,
+            headers=self._auth_headers("2"),
+            json=payload,
+            budget_priority=True,
+        )
+        body_preview = (r.text or "")[:500]
+        if r.status_code in (401, 403):
+            self._raise_auth_or_api(r, "Working order placement")
+        if r.status_code not in (200, 201):
+            raise IGOrderError(
+                f"Working order failed: HTTP {r.status_code} — {body_preview}",
+                status_code=r.status_code,
+                body=body_preview,
+            )
+        data = r.json()
+        self.record_rest_success(path)
+        return data if isinstance(data, dict) else {"raw": data}
+
+    def place_limit_entry_atomic(
+        self,
+        *,
+        epic: str,
+        direction: str,
+        size: float,
+        level: float,
+        stop_distance: float,
+        limit_distance: float | None = None,
+        currency_code: str = "GBP",
+        time_in_force: str = "FILL_OR_KILL",
+    ) -> dict[str, Any]:
+        """
+        LIMIT entry at touch with stop/limit distances + IOC/FOK TIF.
+
+        BUY at offer (ask); SELL at bid — aggressive marketable limit.
+        timeInForce FILL_OR_KILL / IMMEDIATE_OR_CANCEL prevents hanging queues.
+        GOOD_TILL_CANCELLED is routed to ``place_working_order_otc``.
+        """
+        tif_raw = str(time_in_force or "FILL_OR_KILL").upper().strip()
+        if tif_raw in ("GTC", "GOOD_TILL_CANCELLED", "GOOD_TILL_CANCELED"):
+            return self.place_working_order_otc(
+                epic=epic,
+                direction=direction,
+                size=size,
+                level=level,
+                stop_distance=stop_distance,
+                limit_distance=limit_distance,
+                currency_code=currency_code,
+            )
+
         self.ensure_session()
         size, stop_distance, limit_distance, currency_code = (
             self.normalize_order_params(
@@ -1844,6 +2327,12 @@ class IGRestClient:
         if not allowed:
             raise IGOrderError(governor_reason, status_code=429)
 
+        tif = tif_raw
+        if tif in ("IOC", "IMMEDIATE_OR_CANCEL"):
+            tif = "IMMEDIATE_OR_CANCEL"
+        else:
+            tif = "FILL_OR_KILL"
+
         payload: dict[str, Any] = {
             "epic": epic,
             "expiry": "-",
@@ -1851,6 +2340,7 @@ class IGRestClient:
             "size": float(size),
             "orderType": "LIMIT",
             "level": float(level),
+            "timeInForce": tif,
             "guaranteedStop": False,
             "forceOpen": True,
             "currencyCode": currency_code,
@@ -1858,6 +2348,34 @@ class IGRestClient:
         }
         if limit_distance is not None and float(limit_distance) > 0:
             payload["limitDistance"] = float(limit_distance)
+
+        # Hard-cap gate — limit/FOK entries must not stack on Z6BAH4.
+        # FAIL-CLOSED: gate errors reject (never fall through).
+        _ledger_reserved = False
+        _acct_cap = str(getattr(self, "account_id", "") or "").strip().upper()
+        from execution.order_in_flight_mutex import (
+            get_order_mutex,
+            pre_submit_hard_cap_gate,
+            release_pre_submit_reservation,
+            resolve_account_hard_open_cap,
+        )
+
+        if resolve_account_hard_open_cap(_acct_cap) is not None:
+            mux_held = bool(get_order_mutex().is_locked(_acct_cap))
+            try:
+                ok, cap_reason, _ledger_reserved = pre_submit_hard_cap_gate(
+                    _acct_cap,
+                    rest=self,
+                    source="IGRestClient.place_limit_entry_atomic",
+                    mux_already_held=mux_held,
+                )
+            except Exception as exc:
+                raise IGOrderError(
+                    f"account_hard_cap:{_acct_cap} gate_error={type(exc).__name__}:{exc}",
+                    status_code=409,
+                ) from exc
+            if not ok:
+                raise IGOrderError(cap_reason, status_code=409)
 
         url = f"{self._base}{position_otc()}"
         log_demo_rest(
@@ -1873,12 +2391,27 @@ class IGRestClient:
             params={"url": url, "payload": payload},
         )
 
-        r = self.request(
-            "POST",
-            position_otc(),
-            headers=self._auth_headers("2"),
-            json=payload,
-        )
+        try:
+            r = self.request(
+                "POST",
+                position_otc(),
+                headers=self._auth_headers("2"),
+                json=payload,
+            )
+        except Exception:
+            if _ledger_reserved:
+                try:
+                    release_pre_submit_reservation(_acct_cap, filled=False)
+                except Exception:
+                    pass
+            raise
+        if _ledger_reserved:
+            try:
+                release_pre_submit_reservation(
+                    _acct_cap, filled=r.status_code in (200, 201)
+                )
+            except Exception:
+                pass
         body_preview = (r.text or "")[:500]
         log_demo_rest(
             "POST /positions/otc — atomic limit response",
@@ -1972,11 +2505,11 @@ class IGRestClient:
             epic = str(market.get("epic") or "")
             if not did or size <= 0:
                 continue
-            close_dir = "SELL" if side == "BUY" else "BUY"
+            # close_position expects OPEN side and inverts once — never pass close_dir.
             try:
                 self.close_position(
                     did,
-                    direction=close_dir,
+                    direction=side,
                     size=size,
                     epic=epic or None,
                     currency_code=ccy,
@@ -2154,10 +2687,10 @@ class IGRestClient:
             if not targets:
                 break
             for did, side, size in targets:
-                close_dir = "SELL" if side == "BUY" else "BUY"
+                # close_position expects OPEN side and inverts once — never pass close_dir.
                 self.close_position(
                     did,
-                    direction=close_dir,
+                    direction=side,
                     size=size,
                     epic=epic,
                     currency_code=ccy,
@@ -2176,13 +2709,36 @@ class IGRestClient:
         epic: str | None = None,
         currency_code: str | None = None,
         verify: bool = True,
+        budget_priority: bool = False,
+        skip_lookup: bool = False,
+        skip_confirm: bool = False,
     ) -> dict[str, Any]:
         """
         Close an open OTC position.
 
-        Uses DELETE /positions/otc with MARKET (IG rejects LIMIT+level on many CFDs).
-        On failure, nets via MARKET with forceOpen=false, then verifies the deal closed.
+        Uses dealId close as POST + ``_method: DELETE`` (IG drops real DELETE
+        bodies → ``validation.null-not-allowed``). On failure, nets via MARKET
+        with forceOpen=false + confirm ``FULLY_CLOSED`` — never treat confirm
+        ``OPENED`` as a successful close (that spawns a new deal).
+
+        ``direction`` is the OPEN side (BUY/SELL of the live position). This method
+        always inverts once for the DELETE/net-close payload. With
+        ``skip_lookup=True``, callers must pass OPEN side — never a pre-inverted
+        close_dir (double invert leaves the deal open and spams REST).
         """
+        from execution.maintenance_detachment import is_core_detached, suppress_order_dispatch
+
+        if is_core_detached():
+            return suppress_order_dispatch(
+                source="IGRestClient.close_position",
+                epic=str(epic or ""),
+                direction=str(direction or ""),
+                action="close",
+                dealId=str(deal_id),
+                verified_closed=True,
+                skipped=False,
+            )
+
         from execution.exit_inflight import (
             clear_exit,
             set_exit_deal_reference,
@@ -2210,6 +2766,9 @@ class IGRestClient:
                 epic=epic,
                 currency_code=currency_code,
                 verify=verify,
+                budget_priority=budget_priority,
+                skip_lookup=skip_lookup,
+                skip_confirm=skip_confirm,
                 set_deal_reference=(set_exit_deal_reference if guarded else None),
                 guarded_epic=epic_key if guarded else "",
             )
@@ -2238,19 +2797,23 @@ class IGRestClient:
         epic: str | None = None,
         currency_code: str | None = None,
         verify: bool = True,
+        budget_priority: bool = False,
+        skip_lookup: bool = False,
+        skip_confirm: bool = False,
         set_deal_reference: Any = None,
         guarded_epic: str = "",
+        skip_net_close: bool = False,
     ) -> dict[str, Any]:
         self.ensure_session()
         deal_id = str(deal_id).strip()
-        ig_row = self.find_open_position(deal_id)
+        ig_row = None if skip_lookup else self.find_open_position(deal_id)
         if ig_row:
             pos = ig_row.get("position") or {}
             direction = str(pos.get("direction") or direction).upper()
             size = float(pos.get("size") or size)
             close_dir = "SELL" if direction == "BUY" else "BUY"
         else:
-            close_dir = direction.upper()
+            close_dir = "SELL" if str(direction or "").upper() == "BUY" else "BUY"
         size_f = float(size)
         epic_use = epic or ""
 
@@ -2259,8 +2822,9 @@ class IGRestClient:
             "direction": close_dir,
             "size": size_f,
             "orderType": "MARKET",
-            "timeInForce": "FILL_OR_KILL",
         }
+        # dealId XOR epic/expiry (IG mutual-exclusive). Prefer dealId-only close.
+        # Do NOT send timeInForce (IG defaults FOK); explicit nulls also 400.
 
         log_demo_rest("DELETE /positions/otc — close", deal_id=deal_id, payload=payload)
         r = self.request(
@@ -2268,6 +2832,7 @@ class IGRestClient:
             position_otc(),
             headers=self._auth_headers("1"),
             json=payload,
+            budget_priority=budget_priority,
         )
         body_preview = (r.text or "")[:500]
         log_demo_rest(
@@ -2281,9 +2846,32 @@ class IGRestClient:
             if ref:
                 if set_deal_reference is not None and guarded_epic:
                     set_deal_reference(guarded_epic, ref)
-                data["confirm"] = self.confirm_deal(ref)
-            time.sleep(0.8)
-            if not verify or not self.is_position_open(deal_id):
+                if not skip_confirm:
+                    data["confirm"] = self.confirm_deal(ref)
+            data = self._annotate_close_confirm(data)
+            if data.get("close_spawned"):
+                data["verified_closed"] = False
+                return data
+            # Trust terminal close confirm even when coalesce snapshot lags.
+            conf = data.get("confirm") if isinstance(data.get("confirm"), dict) else {}
+            raw_c = conf.get("raw") if isinstance(conf.get("raw"), dict) else {}
+            conf_status = str(
+                conf.get("dealStatus") or conf.get("status") or (raw_c or {}).get("dealStatus") or ""
+            ).upper()
+            affected = conf.get("affectedDeals") or (raw_c or {}).get("affectedDeals") or []
+            fully_closed = conf_status in ("FULLY_CLOSED", "CLOSED", "DELETED")
+            for ad in affected if isinstance(affected, list) else []:
+                if not isinstance(ad, dict):
+                    continue
+                st = str(ad.get("status") or "").upper()
+                did = str(ad.get("dealId") or "").strip()
+                if st in ("FULLY_CLOSED", "CLOSED", "DELETED") and (
+                    not did or did == str(deal_id)
+                ):
+                    fully_closed = True
+                    break
+            time.sleep(0.15 if skip_confirm else 0.8)
+            if fully_closed or (not verify) or (not self.is_position_open(deal_id)):
                 data["verified_closed"] = True
                 return data
             log_demo_rest(
@@ -2291,11 +2879,98 @@ class IGRestClient:
                 deal_id=deal_id,
             )
 
+        # Hard-cap accounts: never fall through to forceOpen=false net-close after a
+        # failed/ambiguous DELETE — that path is the wrong-way cascade vector.
+        if not skip_net_close:
+            try:
+                from execution.order_in_flight_mutex import resolve_account_hard_open_cap
+
+                _acct = str(getattr(self, "account_id", "") or "").strip().upper()
+                if resolve_account_hard_open_cap(_acct) is not None:
+                    skip_net_close = True
+            except Exception:
+                pass
+        if skip_net_close:
+            raise IGOrderError(
+                f"DELETE close failed and net-close disabled deal={deal_id} "
+                f"http={r.status_code} body={body_preview[:200]}",
+                status_code=int(r.status_code or 400),
+                body=body_preview,
+            )
+
         if epic_use:
+            # EDITS_ONLY: fail-closed before net-close retry congestion
+            try:
+                from execution.instrument_suspension import (
+                    is_instrument_restriction,
+                    raise_instrument_suspended,
+                )
+
+                body_u = str(body_preview or "").upper()
+                if is_instrument_restriction(body_u) or is_instrument_restriction(
+                    f"status_code={r.status_code} {body_u}"
+                ):
+                    raise_instrument_suspended(
+                        epic_use,
+                        status="EDITS_ONLY",
+                        detail=(
+                            f"Close blocked epic={epic_use} deal={deal_id} "
+                            f"http={r.status_code} body={body_preview[:160]}"
+                        ),
+                        deal_id=deal_id,
+                        body=body_preview,
+                    )
+                gate = self.fetch_market_constraints(epic_use, budget_priority=True)
+                gate_status = str((gate or {}).get("market_status") or "").upper()
+                if gate_status and gate_status not in ("TRADEABLE", "OPEN"):
+                    if is_instrument_restriction("", status=gate_status):
+                        raise_instrument_suspended(
+                            epic_use,
+                            status=gate_status,
+                            detail=(
+                                f"Close blocked epic={epic_use} deal={deal_id} "
+                                f"status={gate_status}"
+                            ),
+                            deal_id=deal_id,
+                        )
+            except InstrumentSuspendedException:
+                raise
+            except Exception:
+                pass
+
             from system.config_loader import get_config
 
             cfg = get_config()
-            ccy = currency_code or cfg.currency_code
+            # Prefer USD OPEN-side net-close (desk index CFDs). DELETE often fails
+            # with validation.null-not-allowed; USD POST net-close is the working path.
+            ccy = str(currency_code or getattr(cfg, "currency_code", None) or "USD").upper()
+            if ccy not in ("USD", "GBP", "EUR", "AUD", "CAD", "CHF", "JPY"):
+                ccy = "USD"
+            epic_u = str(epic_use or "").upper()
+            # USDJPY CFDs often open in JPY — wrong currencyCode yields REJECTED/UNKNOWN.
+            if "USDJPY" in epic_u and ccy != "JPY":
+                ccy = "JPY"
+            elif any(tok in epic_u for tok in (".FTSE.", ".DAX.")) and ccy not in (
+                "GBP",
+                "EUR",
+            ):
+                ccy = "GBP" if ".FTSE." in epic_u else "EUR"
+            fx_hint = any(
+                tok in epic_u
+                for tok in (
+                    ".EURUSD.",
+                    ".GBPUSD.",
+                    ".USDJPY.",
+                    ".AUDUSD.",
+                    ".USDCAD.",
+                    ".USDCHF.",
+                    "FOREX",
+                )
+            )
+            if not fx_hint and "USDJPY" not in epic_u and ".FTSE." not in epic_u and ".DAX." not in epic_u:
+                # Index/commodity CFDs: force USD even if callers pass GBP account ccy.
+                # Exception: FTSE/DAX handled above; Gold may need GBP at session open.
+                ccy = "USD"
             size_n, _, _, ccy_n = self.normalize_order_params(
                 epic_use,
                 size=size_f,
@@ -2303,6 +2978,82 @@ class IGRestClient:
                 limit_distance=float(cfg.limit_distance_points),
                 currency_code=ccy,
             )
+            ccy_n = str(ccy_n or ccy or "USD").upper() or "USD"
+            # Hard-cap (Z6BAH4): forceOpen=false net-close can OPEN a new deal when no
+            # opposite-side exposure exists (IG quirk) — that is the cascade vector.
+            # Refuse the POST unless an open-side position is present to net against.
+            # CRITICAL: ig_row presence is NOT enough — wrong close_dir with a known
+            # dealId still spawns (DELETE 400 → POST same dir → OPENED).
+            try:
+                from execution.order_in_flight_mutex import (
+                    resolve_account_hard_open_cap,
+                )
+
+                _acct = str(getattr(self, "account_id", "") or "").strip().upper()
+                if resolve_account_hard_open_cap(_acct) is not None:
+                    open_side = "BUY" if str(close_dir).upper() == "SELL" else "SELL"
+                    opposite_n = 0
+                    row_dir = None
+                    if isinstance(ig_row, dict):
+                        row_dir = str(
+                            (ig_row.get("position") or {}).get("direction")
+                            or ig_row.get("direction")
+                            or ""
+                        ).upper() or None
+                    try:
+                        rows = (
+                            self.fetch_open_positions(epic_use)
+                            if epic_use
+                            else self.open_positions()
+                        )
+                    except Exception:
+                        rows = []
+                    for item in rows or []:
+                        if not isinstance(item, dict):
+                            continue
+                        pos = item.get("position") or {}
+                        try:
+                            if float(pos.get("size") or 0) <= 0:
+                                continue
+                        except (TypeError, ValueError):
+                            continue
+                        if str(pos.get("direction") or "").upper() == open_side:
+                            opposite_n += 1
+                    refuse = False
+                    refuse_why = ""
+                    if opposite_n <= 0:
+                        refuse = True
+                        refuse_why = f"no_{open_side}_open_to_net"
+                    elif row_dir and row_dir != open_side:
+                        # Caller inverted wrong: closing a BUY with close_dir=BUY.
+                        refuse = True
+                        refuse_why = (
+                            f"direction_mismatch row={row_dir} need={open_side} "
+                            f"close_dir={close_dir}"
+                        )
+                    if refuse:
+                        from system.engine_log import log_engine
+
+                        reason = (
+                            f"account_hard_cap:{_acct} net_close_refused "
+                            f"{refuse_why} epic={epic_use} "
+                            f"close_dir={close_dir} (would spawn OPENED)"
+                        )
+                        log_engine(reason)
+                        raise IGOrderError(reason, status_code=409)
+            except IGOrderError:
+                raise
+            except Exception as exc:
+                from execution.order_in_flight_mutex import resolve_account_hard_open_cap
+
+                _acct = str(getattr(self, "account_id", "") or "").strip().upper()
+                if resolve_account_hard_open_cap(_acct) is not None:
+                    raise IGOrderError(
+                        f"account_hard_cap:{_acct} net_close_gate_error="
+                        f"{type(exc).__name__}:{exc}",
+                        status_code=409,
+                    ) from exc
+
             net_payload: dict[str, Any] = {
                 "epic": epic_use,
                 "expiry": "-",
@@ -2318,11 +3069,23 @@ class IGRestClient:
                 deal_id=deal_id,
                 payload=net_payload,
             )
+            # Snapshot live count before POST so we can detect spawn.
+            _opens_before: int | None = None
+            try:
+                from execution.order_in_flight_mutex import resolve_account_hard_open_cap
+
+                if resolve_account_hard_open_cap(
+                    str(getattr(self, "account_id", "") or "")
+                ) is not None:
+                    _opens_before = int(self.count_open_positions_live() or 0)
+            except Exception:
+                _opens_before = None
             r2 = self.request(
                 "POST",
                 position_otc(),
                 headers=self._auth_headers("2"),
                 json=net_payload,
+                budget_priority=budget_priority,
             )
             log_demo_rest(
                 "POST /positions/otc — net close response",
@@ -2335,8 +3098,87 @@ class IGRestClient:
                 if ref:
                     if set_deal_reference is not None and guarded_epic:
                         set_deal_reference(guarded_epic, ref)
-                    data["confirm"] = self.confirm_deal(ref)
-                time.sleep(1.0)
+                    if not skip_confirm:
+                        data["confirm"] = self.confirm_deal(ref)
+                data = self._annotate_close_confirm(data)
+                if data.get("close_spawned"):
+                    # Ghost path: original deal may be gone while confirm OPENED a new one.
+                    data["verified_closed"] = False
+                    # Hard-cap: immediately attempt to flatten the spawn.
+                    try:
+                        from execution.order_in_flight_mutex import (
+                            resolve_account_hard_open_cap,
+                        )
+
+                        if resolve_account_hard_open_cap(
+                            str(getattr(self, "account_id", "") or "")
+                        ) is not None:
+                            spawn_id = None
+                            conf = data.get("confirm") if isinstance(data.get("confirm"), dict) else {}
+                            raw_c = conf.get("raw") if isinstance(conf.get("raw"), dict) else {}
+                            spawn_id = (
+                                conf.get("dealId")
+                                or (raw_c or {}).get("dealId")
+                                or data.get("dealId")
+                            )
+                            affected = (
+                                conf.get("affectedDeals")
+                                or (raw_c or {}).get("affectedDeals")
+                                or []
+                            )
+                            for ad in affected if isinstance(affected, list) else []:
+                                if isinstance(ad, dict) and str(ad.get("status") or "").upper() in (
+                                    "OPENED",
+                                    "PARTIALLY_OPENED",
+                                ):
+                                    spawn_id = ad.get("dealId") or spawn_id
+                                    break
+                            if spawn_id and str(spawn_id) != str(deal_id):
+                                from system.engine_log import log_engine
+
+                                log_engine(
+                                    f"account_hard_cap: flattening net-close spawn "
+                                    f"deal={spawn_id} (orig={deal_id}) skip_net_close"
+                                )
+                                try:
+                                    self._do_close_position(
+                                        str(spawn_id),
+                                        direction=str(close_dir),
+                                        size=float(size_n),
+                                        epic=epic_use,
+                                        currency_code=ccy_n,
+                                        verify=True,
+                                        budget_priority=True,
+                                        skip_lookup=False,
+                                        skip_confirm=False,
+                                        skip_net_close=True,
+                                    )
+                                except Exception as spawn_exc:
+                                    log_engine(
+                                        f"account_hard_cap: spawn flatten failed "
+                                        f"{type(spawn_exc).__name__}:{spawn_exc}"
+                                    )
+                    except Exception:
+                        pass
+                    return data
+                # Hard-cap: if open count rose, treat as spawn even without flag.
+                if _opens_before is not None:
+                    try:
+                        after = int(self.count_open_positions_live() or 0)
+                        if after > int(_opens_before):
+                            data["close_spawned"] = True
+                            data["verified_closed"] = False
+                            data["error"] = "close_confirm_opened_spawn"
+                            from system.engine_log import log_engine
+
+                            log_engine(
+                                f"account_hard_cap: net-close increased opens "
+                                f"{_opens_before}->{after} — abort"
+                            )
+                            return data
+                    except Exception:
+                        pass
+                time.sleep(0.15 if skip_confirm else 1.0)
                 still_open = self.is_position_open(deal_id)
                 data["verified_closed"] = not still_open if verify else True
                 if verify and still_open:
@@ -2344,7 +3186,7 @@ class IGRestClient:
                         "Net close returned OK but deal still open",
                         deal_id=deal_id,
                     )
-                if verify and epic_use:
+                if verify and epic_use and not data.get("close_spawned"):
                     extras = self.count_open_positions(epic_use)
                     if extras > 0:
                         log_demo_rest(
@@ -2365,6 +3207,37 @@ class IGRestClient:
             self._raise_auth_or_api(r, "Close position")
         return r.json()
 
+    @staticmethod
+    def _annotate_close_confirm(data: dict[str, Any]) -> dict[str, Any]:
+        """Mark close payloads that confirmed OPENED (spawn) — never verified_closed."""
+        if not isinstance(data, dict):
+            return data
+        confirm = data.get("confirm")
+        if not isinstance(confirm, dict):
+            return data
+        raw = confirm.get("raw") if isinstance(confirm.get("raw"), dict) else {}
+        status = str(
+            confirm.get("dealStatus")
+            or confirm.get("status")
+            or (raw or {}).get("dealStatus")
+            or (raw or {}).get("status")
+            or ""
+        ).upper()
+        if status == "OPENED" or confirm.get("opened") is True:
+            data["close_spawned"] = True
+            data["verified_closed"] = False
+            confirm = dict(confirm)
+            confirm["opened"] = True
+            confirm["status"] = status or "OPENED"
+            confirm["dealStatus"] = status or "OPENED"
+            data["confirm"] = confirm
+            log_demo_rest(
+                "Close confirm OPENED — treating as spawn, not closed",
+                deal_reference=confirm.get("deal_reference") or data.get("dealReference"),
+                deal_id=confirm.get("deal_id") or confirm.get("dealId"),
+            )
+        return data
+
     def confirm_deal(
         self,
         deal_reference: str,
@@ -2374,6 +3247,16 @@ class IGRestClient:
     ) -> dict[str, Any]:
         self.ensure_session()
         deadline = time.time() + max_wait_seconds
+        # OPENED = entry/spawn terminal; FULLY_CLOSED/CLOSED = close terminal.
+        _terminal = (
+            "ACCEPTED",
+            "REJECTED",
+            "OPENED",
+            "FULLY_CLOSED",
+            "CLOSED",
+            "DELETED",
+            "PARTIALLY_CLOSED",
+        )
         while time.time() < deadline:
             try:
                 r = self.request(
@@ -2403,7 +3286,7 @@ class IGRestClient:
                 continue
             body = r.json()
             status = str(body.get("dealStatus", body.get("status", ""))).upper()
-            if status in ("ACCEPTED", "REJECTED"):
+            if status in _terminal:
                 affected = body.get("affectedDeals") or []
                 affected_reason = ""
                 if affected and isinstance(affected[0], dict):
@@ -2419,14 +3302,26 @@ class IGRestClient:
                     or body.get("errorMessage")
                     or ""
                 )
+                # Entry path: OPENED/ACCEPTED count as accepted. Close path must
+                # still reject OPENED via ExitGate / _annotate_close_confirm.
+                accepted = status in (
+                    "ACCEPTED",
+                    "OPENED",
+                    "FULLY_CLOSED",
+                    "CLOSED",
+                    "DELETED",
+                    "PARTIALLY_CLOSED",
+                )
                 result = {
                     "terminal": True,
-                    "accepted": status == "ACCEPTED",
+                    "accepted": accepted and status != "REJECTED",
                     "rejected": status == "REJECTED",
+                    "opened": status == "OPENED",
                     "deal_id": body.get("dealId"),
                     "deal_reference": deal_reference,
                     "reason": str(reason),
                     "status": status,
+                    "dealStatus": status,
                     "raw": body,
                 }
                 log_demo_rest(
@@ -2448,6 +3343,7 @@ class IGRestClient:
             "terminal": False,
             "accepted": False,
             "rejected": False,
+            "opened": False,
             "deal_id": None,
             "reason": "confirm timeout",
             "status": "TIMEOUT",
@@ -2577,24 +3473,53 @@ class IGRestClient:
         except Exception:
             pass
 
-        # budget_priority=True bypasses the min-interval wait and hard cap for
-        # critical order-confirmation calls — must be popped before passing to
-        # requests.Session.request() which does not accept this kwarg.
-        budget_priority: bool = kwargs.pop("budget_priority", False)
+        # budget_priority=True may bypass spacing ONLY for real order-path calls.
+        # GET /positions polls are permanently demoted — false priority was the
+        # Mini desk's IG traffic-governor breach (9+/min under "confirm_deal").
+        budget_priority: bool = bool(kwargs.pop("budget_priority", False))
+        label = f"{method} {path}"
+        try:
+            from system.rest_api_budget import priority_bypass_allowed
+
+            if not priority_bypass_allowed(label, priority=budget_priority):
+                budget_priority = False
+        except Exception:
+            if str(method).upper() == "GET" and "position" in str(path).lower():
+                budget_priority = False
 
         mgr = get_rate_limit_manager()
         if auth_required:
+            # v33 per-account wire pacing (40/s CFD · 10/s SB) — ADDITIONAL layer;
+            # RestApiBudget 3/min non-essential hard cap remains authoritative below.
+            try:
+                from system.account_token_bucket import acquire_account_token
+
+                if not acquire_account_token(
+                    max_wait_sec=2.0,
+                    priority=budget_priority,
+                ):
+                    raise IGAPIError(
+                        f"AccountTokenBucket: rate exceeded for {method} {path}"
+                    )
+            except IGAPIError:
+                raise
+            except Exception:
+                pass
             try:
                 from system.chaos_guardian import acquire_outbound_token
                 from system.rest_api_budget import categorize_rest_label
 
-                cat = categorize_rest_label(f"{method} {path}")
+                cat = categorize_rest_label(label)
+                # Order-path priority ≠ fast-pass voucher. budget_priority means
+                # force the ig_orders lane for the wire call; vouchers are optional.
+                token_priority = "order_priority" if budget_priority else ""
                 if not acquire_outbound_token(
                     "ig",
                     method=method,
                     path=path,
                     category=cat,
                     max_wait_sec=30.0,
+                    priority=token_priority,
                 ):
                     raise IGAPIError(
                         f"ChaosGuardian: token bucket exhausted for {method} {path}"
@@ -2605,7 +3530,7 @@ class IGRestClient:
                 pass
             try:
                 get_rest_api_budget().acquire(
-                    label=f"{method} {path}", priority=budget_priority
+                    label=label, priority=budget_priority
                 )
             except RestBudgetPausedError as exc:
                 raise IGAPIError(f"REST deferred ({exc})") from exc
@@ -2613,7 +3538,14 @@ class IGRestClient:
                 from system.data_execution_policy import audit_ig_rest_call
                 from system.rest_api_budget import categorize_rest_label
 
-                audit_ig_rest_call(f"{method} {path}", categorize_rest_label(f"{method} {path}"))
+                audit_ig_rest_call(label, categorize_rest_label(label))
+                if categorize_rest_label(label) == "positions":
+                    try:
+                        from system import shared_rest_budget
+
+                        shared_rest_budget.record("ig_positions")
+                    except Exception:
+                        pass
             except Exception:
                 pass
         else:
@@ -2631,6 +3563,22 @@ class IGRestClient:
 
         if auth_required and not self._session_path_protected(path):
             self.proactive_refresh_if_needed()
+
+        # IG silently drops JSON bodies on real HTTP DELETE → validation.null-not-allowed.
+        # Official trading-ig workaround: POST with _method: DELETE when a body is present.
+        method_u = str(method or "").upper()
+        has_body = kwargs.get("json") is not None or kwargs.get("data") is not None
+        if method_u == "DELETE" and has_body:
+            hdrs = kwargs.get("headers")
+            if not isinstance(hdrs, dict):
+                hdrs = {}
+            else:
+                hdrs = dict(hdrs)
+            hdrs["_method"] = "DELETE"
+            kwargs["headers"] = hdrs
+            method = "POST"
+            # Keep forensic/budget labels as DELETE intent; wire method is POST.
+            label = f"DELETE(via POST _method) {path}"
 
         relogin_done = False
         for attempt in range(1, self.max_retries + 1):
@@ -2661,6 +3609,32 @@ class IGRestClient:
                     continue
                 if 200 <= r.status_code < 300:
                     self.record_rest_success(path)
+                try:
+                    from system.forensic_network_log import (
+                        is_order_dispatch_path,
+                        log_forensic_network,
+                    )
+
+                    if is_order_dispatch_path(method, path):
+                        req_headers = kwargs.get("headers")
+                        if isinstance(req_headers, dict):
+                            hdrs = dict(req_headers)
+                        else:
+                            hdrs = {}
+                        req_json = kwargs.get("json")
+                        log_forensic_network(
+                            account_id=str(self.account_id or ""),
+                            method=method,
+                            path=path,
+                            headers=hdrs,
+                            request_json=req_json if isinstance(req_json, dict) else None,
+                            status_code=r.status_code,
+                            response_body=r.text or "",
+                            source="rest_client.request",
+                            phase="response",
+                        )
+                except Exception:
+                    pass
                 return r
             except RateLimitError:
                 raise

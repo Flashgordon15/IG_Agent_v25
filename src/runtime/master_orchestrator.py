@@ -86,6 +86,65 @@ _ACCEPTABLE_STAGE_TOKENS = frozenset(
     {_TOKEN_SUCCESS, _TOKEN_WARMING, _TOKEN_WARMING_HEALTHY}
 )
 
+_BOOT_FORENSIC_STAGES: frozenset[str] = frozenset(
+    {
+        STAGE_4_TUNER_PRIME,
+        STAGE_5_LAUNCH_CORE,
+        STAGE_6_REST_AUTH,
+    }
+)
+
+
+def _boot_forensic_log(stage: str, event: str, detail: str = "") -> None:
+    """Durable one-line boot forensics for STAGE_4–6 (dual soak death zone)."""
+    from datetime import datetime, timezone
+
+    from system.paths import state_dir
+
+    msg = (detail or "").replace("\n", " | ").strip()
+    line = (
+        f"{datetime.now(timezone.utc).isoformat()} pid={os.getpid()} "
+        f"{stage} {event} {msg}\n"
+    )
+    log_engine(f"BOOT_FORENSIC: {stage} {event} {msg}")
+    try:
+        log_path = state_dir() / "boot_stage_forensic.log"
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(line)
+            fh.flush()
+            os.fsync(fh.fileno())
+    except Exception:
+        pass
+    if event in ("ENTRY", "EXIT_OK", "EXIT_FAIL", "EXCEPTION"):
+        try:
+            import json
+
+            hb = state_dir() / "boot_stage_heartbeat.json"
+            hb.write_text(
+                json.dumps(
+                    {
+                        "ts": time.time(),
+                        "pid": os.getpid(),
+                        "stage": stage,
+                        "event": event,
+                        "detail": msg[:500],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+
+def _boot_forensic_traceback(stage: str, exc: BaseException) -> None:
+    import traceback
+
+    tb = traceback.format_exc()
+    _boot_forensic_log(stage, "EXCEPTION", f"{type(exc).__name__}: {exc}")
+    _boot_forensic_log(stage, "TRACEBACK", tb)
+
+
 _TELEMETRY_ROUTE_PINGS: tuple[tuple[str, str, str], ...] = (
     ("guardian", "system.chaos_guardian", "get_guardian_status_snapshot"),
     ("tuner", "runtime.parameter_tuner", "get_tuner_state_snapshot"),
@@ -556,8 +615,13 @@ async def _run_stage_with_retries(
             }
 
     last_log: dict[str, Any] = {"stage": stage_key, "ok": False, "detail": "not_run"}
+    forensic = stage_key in _BOOT_FORENSIC_STAGES
+    if forensic:
+        _boot_forensic_log(stage_key, "ENTRY", f"attempt_window={_WARMUP_MAX_ATTEMPTS}")
     for attempt in range(1, _WARMUP_MAX_ATTEMPTS + 1):
         try:
+            if forensic:
+                _boot_forensic_log(stage_key, "RUN", f"attempt={attempt}")
             if epics is not None:
                 ok, log = await runner(epics)
             else:
@@ -579,8 +643,20 @@ async def _run_stage_with_retries(
                     publish_iron_ledger_snapshot()
                 except Exception:
                     pass
+                if forensic:
+                    _boot_forensic_log(
+                        stage_key,
+                        "EXIT_OK",
+                        str(last_log.get("detail") or "ok"),
+                    )
                 return True, log
-        except Exception as exc:
+        except BaseException as exc:
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                if forensic:
+                    _boot_forensic_log(stage_key, "EXIT_ABORT", type(exc).__name__)
+                raise
+            if forensic:
+                _boot_forensic_traceback(stage_key, exc)
             last_log = _log_stage(
                 stage_key,
                 False,
@@ -597,6 +673,8 @@ async def _run_stage_with_retries(
     _commit_stage_token(stage_key, _TOKEN_FAILED, error=err_detail)
     last_log["token"] = _TOKEN_FAILED
     last_log["status"] = "FAILED"
+    if forensic:
+        _boot_forensic_log(stage_key, "EXIT_FAIL", err_detail)
     return False, last_log
 
 
@@ -2051,3 +2129,21 @@ def reset_master_orchestrator_for_tests() -> None:
     except Exception:
         pass
     _scoreboard.reset()
+
+
+def check_forensics_dry_run() -> tuple[bool, list[str]]:
+    from runtime.forensics_preflight import check_forensics_dry_run as _check
+
+    return _check()
+
+
+def _cli_main(argv: list[str] | None = None) -> int:
+    from runtime.forensics_preflight import run_forensics_cli
+
+    return run_forensics_cli(argv)
+
+
+if __name__ == "__main__":
+    import sys
+
+    raise SystemExit(_cli_main())

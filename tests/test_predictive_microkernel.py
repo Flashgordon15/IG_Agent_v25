@@ -191,6 +191,7 @@ def test_predictive_micro_scalp_blocked_when_obi_not_aligned():
             "promote_tier": "high",
             "direction": "BUY",
             "order_flow_aligned": False,
+            "obi_ratio": -0.22,
             "forecast_confidence": 0.40,
         }
         trigger = dce.evaluate_predictive_micro_scalp_trigger(
@@ -200,6 +201,29 @@ def test_predictive_micro_scalp_blocked_when_obi_not_aligned():
         )
     assert trigger["armed"] is False
     assert trigger["reason"] == "obi_not_aligned"
+
+
+def test_predictive_micro_scalp_allows_depthless_neutral_obi():
+    """Yahoo/rest_poll OBI≈0 must not freeze the instant lane forever."""
+    with patch(
+        "runtime.master_orchestrator.validate_regime_entropy_arbitration",
+        return_value=(True, ""),
+    ), patch("apex.microkernel.get_microkernel") as mock_mk:
+        mock_mk.return_value.micro_trend_for.return_value = {
+            "score_pct": 48.0,
+            "promote_tier": "high",
+            "direction": "BUY",
+            "order_flow_aligned": False,
+            "obi_ratio": 0.0,
+            "forecast_confidence": 0.62,
+        }
+        trigger = dce.evaluate_predictive_micro_scalp_trigger(
+            epic="IX.D.DOW.IFM.IP",
+            bid=52000.0,
+            offer=52003.0,
+        )
+    assert trigger["armed"] is True
+    assert trigger["direction"] == "BUY"
 
 
 def test_micro_scalper_tick_lane_registers_hub_listener():

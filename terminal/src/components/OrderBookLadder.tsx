@@ -18,22 +18,32 @@ function LadderSide({
 }) {
   const isAsk = side === "ask";
   return (
-    <div className="flex flex-1 flex-col gap-0.5 overflow-auto py-1">
+    <div className="flex flex-1 flex-col justify-center gap-1 overflow-auto px-2 py-2">
       {levels.map((lvl) => (
-        <div key={`${side}-${lvl.label}`} className="relative px-1">
+        <div
+          key={`${side}-${lvl.label}`}
+          className="relative overflow-hidden rounded-md px-2 py-1.5"
+        >
           <div
             className={`absolute inset-y-0 ${isAsk ? "right-0" : "left-0"} ${
-              isAsk ? "bg-[#ff0055]/10" : "bg-[#00f5d4]/10"
+              isAsk
+                ? "bg-[rgba(255,77,109,0.14)]"
+                : "bg-[rgba(61,220,151,0.14)]"
             }`}
-            style={{ width: `${lvl.pct}%` }}
+            style={{
+              width: `${Math.max(8, lvl.pct)}%`,
+              transition: "width 160ms ease",
+            }}
           />
-          <div className="relative flex items-center justify-between gap-1 py-0.5">
-            <span className="cq-mono truncate text-[9px] text-[#71717a]">
+          <div className="relative flex items-center justify-between gap-2">
+            <span className="cq-mono truncate text-[length:var(--desk-type-xs)] text-[var(--color-desk-mute)]">
               {lvl.label}
             </span>
             <span
-              className={`cq-mono text-[10px] font-semibold ${
-                isAsk ? "text-[#ff0055]" : "text-[#00f5d4]"
+              className={`cq-mono text-[length:var(--desk-type-sm)] font-semibold ${
+                isAsk
+                  ? "text-[var(--color-desk-bad)]"
+                  : "text-[var(--color-desk-good)]"
               }`}
             >
               {lvl.weight.toFixed(0)}
@@ -47,18 +57,26 @@ function LadderSide({
 
 export function OrderBookLadder({ epic, asks, bids }: Props) {
   return (
-    <div className="cq-panel flex h-full w-44 shrink-0 flex-col overflow-hidden">
-      <div className="border-b border-[#1f1f24] px-2 py-1">
-        <span className="cq-label">Depth — {EPIC_LABELS[epic] ?? "—"}</span>
+    <div className="cq-panel flex h-full w-[clamp(10.5rem,12vw,13.5rem)] shrink-0 flex-col overflow-hidden">
+      <div
+        className="border-b border-[var(--color-desk-line)]"
+        style={{ padding: "0.7rem 0.85rem" }}
+      >
+        <div className="cq-label">Depth</div>
+        <div className="mt-1 text-[length:var(--desk-type-sm)] font-semibold">
+          {EPIC_LABELS[epic] ?? "—"}
+        </div>
       </div>
-      <div className="cq-label border-b border-[#1f1f24] px-2 py-0.5 text-center text-[#ff0055]">
+      <div className="cq-label px-3 py-1 text-center text-[var(--color-desk-bad)]">
         ASK
       </div>
       <LadderSide levels={asks} side="ask" />
-      <div className="border-y border-[#1f1f24] bg-[#141418] px-2 py-1 text-center">
-        <span className="cq-mono text-[10px] text-[#e8ecf4]">MID</span>
+      <div className="border-y border-[var(--color-desk-line)] bg-[var(--color-desk-elevated)] px-3 py-2 text-center">
+        <span className="cq-mono text-[length:var(--desk-type-xs)] text-[var(--color-desk-mute)]">
+          MID
+        </span>
       </div>
-      <div className="cq-label border-b border-[#1f1f24] px-2 py-0.5 text-center text-[#00f5d4]">
+      <div className="cq-label px-3 py-1 text-center text-[var(--color-desk-good)]">
         BID
       </div>
       <LadderSide levels={bids} side="bid" />

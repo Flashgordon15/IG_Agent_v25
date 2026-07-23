@@ -13,8 +13,7 @@ type Props = {
 
 const KINETIC_DELTA_PCT = 0.05;
 const KINETIC_WINDOW_MS = 20;
-const KINETIC_GLOW_MS = 120;
-const KINETIC_GLOW_CLASS = "shadow-[0_0_12px_#00f5d4]";
+const KINETIC_GLOW_MS = 140;
 
 function useKineticGlow(rows: WatchlistRow[]): Set<string> {
   const trailRef = useRef<Map<string, { price: number; ts: number }>>(
@@ -29,63 +28,45 @@ function useKineticGlow(rows: WatchlistRow[]): Set<string> {
       const prev = trailRef.current.get(row.epic);
       if (prev && now - prev.ts <= KINETIC_WINDOW_MS && prev.price > 0) {
         const deltaPct = Math.abs((row.price - prev.price) / prev.price) * 100;
-        if (deltaPct >= KINETIC_DELTA_PCT) {
-          next.add(row.epic);
-        }
+        if (deltaPct >= KINETIC_DELTA_PCT) next.add(row.epic);
       }
       trailRef.current.set(row.epic, { price: row.price, ts: now });
     }
-    if (next.size === 0) {
-      return;
-    }
+    if (next.size === 0) return;
     setGlowEpics(next);
-    const timer = window.setTimeout(
-      () => setGlowEpics(new Set()),
-      KINETIC_GLOW_MS,
-    );
+    const timer = window.setTimeout(() => setGlowEpics(new Set()), KINETIC_GLOW_MS);
     return () => window.clearTimeout(timer);
   }, [rows]);
 
   return glowEpics;
 }
 
-function Sparkline({
-  values,
-  up,
-  kinetic,
-}: {
-  values: number[];
-  up: boolean;
-  kinetic: boolean;
-}) {
-  const w = 72;
-  const h = 22;
-  if (values.length < 2) {
-    return <svg width={w} height={h} />;
-  }
+function Sparkline({ values, up }: { values: number[]; up: boolean }) {
+  const w = 88;
+  const h = 28;
+  if (values.length < 2) return <svg width={w} height={h} />;
   const min = Math.min(...values);
   const max = Math.max(...values);
   const range = max - min || 1;
-  const pts = values
-    .map((v, i) => {
-      const x = (i / (values.length - 1)) * w;
-      const y = h - ((v - min) / range) * (h - 4) - 2;
-      return `${x},${y}`;
-    })
-    .join(" ");
-  const glow = kinetic
-    ? "drop-shadow(0 0 12px rgba(0,245,212,0.95))"
-    : up
-      ? "drop-shadow(0 0 8px rgba(0,245,212,0.3))"
-      : "drop-shadow(0 0 8px rgba(255,0,85,0.3))";
-  const stroke = kinetic ? "#00f5d4" : up ? "#00f5d4" : "#ff0055";
+  const pts = values.map((v, i) => {
+    const x = (i / (values.length - 1)) * w;
+    const y = h - ((v - min) / range) * (h - 6) - 3;
+    return `${x},${y}`;
+  });
+  const line = pts.join(" ");
+  const area = `${line} L ${w},${h} L 0,${h} Z`;
+  const stroke = up ? "#3ddc97" : "#ff4d6d";
+  const fill = up ? "rgba(61,220,151,0.16)" : "rgba(255,77,109,0.14)";
   return (
-    <svg width={w} height={h} className="shrink-0" style={{ filter: glow }}>
+    <svg width={w} height={h} className="shrink-0" aria-hidden>
+      <path d={area} fill={fill} />
       <polyline
         fill="none"
         stroke={stroke}
-        strokeWidth={kinetic ? "2" : "1.5"}
-        points={pts}
+        strokeWidth="1.75"
+        strokeLinejoin="round"
+        strokeLinecap="round"
+        points={line}
       />
     </svg>
   );
@@ -106,73 +87,67 @@ export function WatchlistMatrix({
   const kineticEpics = useKineticGlow(rows);
 
   return (
-    <div className="relative cq-panel flex h-full flex-col overflow-hidden">
+    <div className="cq-panel relative flex h-full flex-col overflow-hidden">
       <SysStreamPending active={fault} />
-      <div className="border-b border-[#1f1f24] px-2 py-1.5">
-        <span className="cq-label">Watchlist Matrix</span>
+      <div
+        className="border-b border-[var(--color-desk-line)]"
+        style={{ padding: "0.75rem 1rem" }}
+      >
+        <div className="cq-label">Watchlist</div>
+        <div className="mt-1 text-[length:clamp(0.95rem,0.85rem+0.2vw,1.1rem)] font-semibold">
+          Markets
+        </div>
       </div>
       <div className="flex-1 overflow-auto">
-        <table className="w-full text-left">
-          <thead className="sticky top-0 bg-[#0f0f12]">
-            <tr className="cq-label border-b border-[#1f1f24]">
-              <th className="px-2 py-1 font-medium">Ticker</th>
-              <th className="px-1 py-1 font-medium">Price</th>
-              <th className="px-1 py-1 font-medium">24h</th>
-              <th className="px-1 py-1 font-medium" />
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row) => {
-              const up = row.direction === "UP";
-              const down = row.direction === "DOWN";
-              const selected = row.epic === selectedEpic;
-              const kinetic = kineticEpics.has(row.epic);
-              return (
-                <tr
-                  key={row.epic}
-                  onClick={() => onSelect(row.epic)}
-                  className={`cursor-pointer border-b border-[#1f1f24]/60 hover:bg-[#141418] ${
-                    selected ? "bg-[#141418]" : ""
-                  } ${kinetic ? KINETIC_GLOW_CLASS : ""}`}
-                >
-                  <td className="cq-mono px-2 py-1.5 text-[11px] font-semibold text-[#e8ecf4]">
+        <div className="flex flex-col p-1.5">
+          {rows.map((row) => {
+            const up = row.direction === "UP";
+            const down = row.direction === "DOWN";
+            const selected = row.epic === selectedEpic;
+            const kinetic = kineticEpics.has(row.epic);
+            return (
+              <button
+                key={row.epic}
+                type="button"
+                onClick={() => onSelect(row.epic)}
+                className={`cq-row flex w-full items-center gap-2 rounded-[calc(var(--desk-radius)-4px)] px-2.5 py-2.5 text-left ${
+                  selected ? "cq-row-selected" : ""
+                }`}
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="cq-mono text-[length:var(--desk-type-sm)] font-semibold">
                     {row.ticker}
-                  </td>
-                  <td
-                    className={`cq-mono px-1 py-1.5 text-[11px] transition-shadow duration-75 ${
+                  </div>
+                  <div
+                    className={`cq-mono text-[length:clamp(0.85rem,0.75rem+0.2vw,1.05rem)] font-semibold ${
                       kinetic
-                        ? `${KINETIC_GLOW_CLASS} text-[#00f5d4]`
-                        : ""
+                        ? "text-[var(--color-desk-good)]"
+                        : "text-[var(--color-desk-text)]"
                     }`}
                   >
                     {fmtPrice(row.epic, row.price)}
-                  </td>
-                  <td
-                    className={`cq-mono px-1 py-1.5 text-[10px] font-semibold ${
+                  </div>
+                </div>
+                <div className="flex flex-col items-end gap-1">
+                  <span
+                    className={`cq-mono text-[length:var(--desk-type-xs)] font-semibold ${
                       up
-                        ? "text-[#00f5d4]"
+                        ? "text-[var(--color-desk-good)]"
                         : down
-                          ? "text-[#ff0055]"
-                          : "text-[#71717a]"
+                          ? "text-[var(--color-desk-bad)]"
+                          : "text-[var(--color-desk-mute)]"
                     }`}
                   >
                     {row.deltaPct >= 0 ? "+" : ""}
                     {row.deltaPct.toFixed(2)}%
-                  </td>
-                  <td className="px-1 py-1">
-                    <Sparkline
-                      values={row.history}
-                      up={up || !down}
-                      kinetic={kinetic}
-                    />
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+                  </span>
+                  <Sparkline values={row.history} up={up || !down} />
+                </div>
+              </button>
+            );
+          })}
+        </div>
       </div>
     </div>
   );
 }
-

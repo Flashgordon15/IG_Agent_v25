@@ -215,24 +215,11 @@ def materialize_post_g5_execution_plane(context: BootContext) -> None:
         log_engine(
             f"post-ready: broker reject guard reset skipped: {type(e).__name__}: {e}"
         )
-    if rest is not None and cfg is not None:
-        try:
-            from data.learning_store import LearningStore
-            from runtime.active_lifecycle_trades import boot_reconcile_active_trades
 
-            store = LearningStore(str(cfg.learning_db))
-            counts = boot_reconcile_active_trades(rest, store)
-            log_engine(
-                "post-ready: active lifecycle boot reconcile "
-                f"adopted={counts.get('adopted', 0)} "
-                f"closed_registry={counts.get('closed_registry', 0)} "
-                f"synced={counts.get('synced', 0)}"
-            )
-        except Exception as e:
-            log_engine(
-                f"post-ready: active lifecycle boot reconcile skipped: "
-                f"{type(e).__name__}: {e}"
-            )
+    # Arm open-book supervision BEFORE any REST-heavy reconcile. trade_support
+    # (and other launchd helpers) can saturate the shared REST budget during
+    # Gate-2 hydrate; a blocking reconcile here previously stalled the plane
+    # forever so OpenPositionManager never started.
     try:
         from runtime.strategy_kill_switch import clear_strategy_kill_switch
 
@@ -278,6 +265,153 @@ def materialize_post_g5_execution_plane(context: BootContext) -> None:
         log_engine(f"post-ready: dynamic limit engine skipped: {type(e).__name__}: {e}")
 
     try:
+        from runtime.micro_gbp_exit import start_micro_gbp_exit_engine
+
+        start_micro_gbp_exit_engine(rest)
+        log_engine("post-ready: MicroGbpExit engine started (hydrate deferred)")
+    except Exception as e:
+        log_engine(f"post-ready: micro gbp exit skipped: {type(e).__name__}: {e}")
+
+    try:
+        from runtime.open_position_manager import start_open_position_manager
+
+        start_open_position_manager(rest, cfg=cfg)
+        log_engine("post-ready: OpenPositionManager supervisor armed")
+    except Exception as e:
+        log_engine(f"post-ready: open position manager skipped: {type(e).__name__}: {e}")
+
+    try:
+        from runtime.feed_health_watchdog import start_feed_health_watchdog
+
+        start_feed_health_watchdog()
+        log_engine("post-ready: FeedHealthWatchdog armed (5s stale → block+flatten)")
+    except Exception as e:
+        log_engine(f"post-ready: feed health watchdog skipped: {type(e).__name__}: {e}")
+
+    def _background_broker_hydrate() -> None:
+        """REST reconcile/hydrate off the post-ready critical path."""
+        if rest is None or cfg is None:
+            return
+        try:
+            from data.learning_store import LearningStore
+            from runtime.active_lifecycle_trades import boot_reconcile_active_trades
+
+            store = LearningStore(str(cfg.learning_db))
+            counts = boot_reconcile_active_trades(rest, store)
+            log_engine(
+                "post-ready: active lifecycle boot reconcile "
+                f"adopted={counts.get('adopted', 0)} "
+                f"closed_registry={counts.get('closed_registry', 0)} "
+                f"synced={counts.get('synced', 0)}"
+            )
+        except Exception as e:
+            log_engine(
+                f"post-ready: active lifecycle boot reconcile skipped: "
+                f"{type(e).__name__}: {e}"
+            )
+        try:
+            from runtime.micro_gbp_exit import hydrate_open_positions_from_broker
+
+            hydrate_open_positions_from_broker(rest, cfg=cfg)
+            log_engine("post-ready: MicroGbpExit broker hydrate complete")
+        except Exception as e:
+            log_engine(
+                f"post-ready: MicroGbpExit hydrate skipped: {type(e).__name__}: {e}"
+            )
+        # Adopt every broker open into the software risk stack + RAM matrix so a
+        # mid-session bytecode recycle never leaves inflight trades unmonitored.
+        try:
+            from execution.position_risk_stack import (
+                ensure_risk_stack_coverage,
+                reconcile_open_positions_risk_stack,
+            )
+            from system.memory_context import get_memory_context
+
+            ensure_risk_stack_coverage(rest, cfg=cfg, force=True)
+            stack = reconcile_open_positions_risk_stack(rest, cfg=cfg, force=True)
+            items = list(rest.open_positions(budget_priority=True) or [])
+            rows = []
+            for it in items:
+                pos = it.get("position") or {}
+                mkt = it.get("market") or {}
+                rows.append(
+                    {
+                        "deal_id": str(pos.get("dealId") or ""),
+                        "epic": str(mkt.get("epic") or ""),
+                        "direction": str(pos.get("direction") or "BUY"),
+                        "size": float(pos.get("size") or 0),
+                        "entry": float(pos.get("level") or 0),
+                        "pnl_gbp": pos.get("upl") or pos.get("unrealised") or 0.0,
+                        "source": "boot_inflight_adopt",
+                    }
+                )
+            verified = get_memory_context().sync_open_rows(rows)
+            log_engine(
+                "post-ready: inflight adopt "
+                f"broker={len(items)} memory={len(verified)} "
+                f"stack_armed={stack.get('armed', 0)} gbp={stack.get('gbp', 0)}"
+            )
+        except Exception as e:
+            log_engine(
+                f"post-ready: inflight adopt skipped: {type(e).__name__}: {e}"
+            )
+
+    threading.Thread(
+        target=_background_broker_hydrate,
+        name="post-ready-broker-hydrate",
+        daemon=True,
+    ).start()
+    log_engine("post-ready: broker lifecycle reconcile scheduled (background)")
+
+    try:
+        from runtime.deploy_hold import warn_if_deploy_window_closed
+
+        warn_if_deploy_window_closed(rest, cfg=cfg)
+    except Exception as e:
+        log_engine(f"post-ready: deploy_hold check skipped: {type(e).__name__}: {e}")
+
+    try:
+        from runtime.trading_desk_liveness import start_trading_desk_liveness_monitor
+
+        start_trading_desk_liveness_monitor()
+        log_engine("post-ready: TradingDeskLiveness monitor armed")
+    except Exception as e:
+        log_engine(f"post-ready: trading desk liveness skipped: {type(e).__name__}: {e}")
+
+    try:
+        if not _harness_mode():
+            from runtime.boot_sot_fallback import arm_boot_fallback_circuit
+            from runtime.desk_stability_harness import (
+                note_boot_started,
+                start_desk_stability_harness,
+            )
+
+            note_boot_started()
+            arm_boot_fallback_circuit(reason="post_ready")
+            start_desk_stability_harness(cfg)
+            log_engine("post-ready: DeskStability harness armed (PERF/background)")
+        else:
+            log_engine("post-ready: DeskStability harness skipped (IG_TEST_HARNESS)")
+    except Exception as e:
+        log_engine(f"post-ready: DeskStability harness skipped: {type(e).__name__}: {e}")
+
+    try:
+        from runtime.strategy_improvement_tracker import load_persisted_state
+
+        load_persisted_state()
+        log_engine("post-ready: strategy improvement tracker loaded")
+    except Exception as e:
+        log_engine(f"post-ready: strategy improvement skipped: {type(e).__name__}: {e}")
+
+    try:
+        from runtime.intraday_slot_tracker import load_persisted_state as load_intraday_slots
+
+        load_intraday_slots()
+        log_engine("post-ready: intraday slot tracker loaded")
+    except Exception as e:
+        log_engine(f"post-ready: intraday slot tracker skipped: {type(e).__name__}: {e}")
+
+    try:
         from system.unified_runtime_state import init_unified_runtime_state, update_stops_limits
 
         init_unified_runtime_state()
@@ -300,6 +434,35 @@ def materialize_post_g5_execution_plane(context: BootContext) -> None:
     except Exception as e:
         log_engine(
             f"post-ready: ledger hydration bootstrap skipped: {type(e).__name__}: {e}"
+        )
+
+    try:
+        from runtime.trade_manager import start_dual_core_coordinator
+
+        start_dual_core_coordinator(rest, config=cfg)
+        log_engine("post-ready: DualCoreCoordinator ENGINE_B_MICRO_SCALPER armed")
+        try:
+            from runtime.dual_core_execution import start_micro_scalper_tick_lane
+
+            if start_micro_scalper_tick_lane():
+                log_engine("post-ready: MicroScalper instant tick lane armed")
+        except Exception as e:
+            log_engine(
+                f"post-ready: micro scalper tick lane skipped: {type(e).__name__}: {e}"
+            )
+        try:
+            from runtime.session_trade_unlimited import inject_session_unlimited_trades
+
+            inject_session_unlimited_trades()
+            log_engine("post-ready: session trade caps and order cadence unlimited")
+        except Exception as e:
+            log_engine(
+                f"post-ready: session unlimited trades inject skipped: "
+                f"{type(e).__name__}: {e}"
+            )
+    except Exception as e:
+        log_engine(
+            f"post-ready: dual-core coordinator skipped: {type(e).__name__}: {e}"
         )
 
 
@@ -457,6 +620,22 @@ def start_post_ready_services(context: BootContext) -> None:
         start_trading_health_monitor()
     except Exception as e:
         log_engine(f"post-ready: trading health monitor skipped: {type(e).__name__}: {e}")
+
+    try:
+        from alpha.geopolitical_monitor import start_geopolitical_monitor
+
+        start_geopolitical_monitor()
+        log_engine("post-ready: geopolitical oil/VIX monitor started")
+    except Exception as e:
+        log_engine(f"post-ready: geopolitical monitor skipped: {type(e).__name__}: {e}")
+
+    try:
+        from diagnostics.performance_journal import start_performance_journal
+
+        start_performance_journal()
+        log_engine("post-ready: performance journal armed")
+    except Exception as e:
+        log_engine(f"post-ready: performance journal skipped: {type(e).__name__}: {e}")
 
     try:
         from intelligence.matrix_prebaker import (
@@ -675,6 +854,37 @@ def start_post_ready_services(context: BootContext) -> None:
             f"post-ready: backup_manager skipped: {type(e).__name__}: {e}"
         )
 
+    # PERF / background plane — never on the 0.0ms tick lane
+    try:
+        from runtime.log_rotator_daemon import start_log_rotator_daemon
+
+        start_log_rotator_daemon()
+        log_engine("post-ready: PERF log_rotator_daemon started")
+    except Exception as e:
+        log_engine(
+            f"post-ready: log_rotator_daemon skipped: {type(e).__name__}: {e}"
+        )
+
+    try:
+        from analytics.eod_settlement_reporter import start_eod_settlement_reporter
+
+        start_eod_settlement_reporter()
+        log_engine("post-ready: PERF eod_settlement_reporter started")
+    except Exception as e:
+        log_engine(
+            f"post-ready: eod_settlement_reporter skipped: {type(e).__name__}: {e}"
+        )
+
+    try:
+        from analytics.weekly_performance_ledger import start_weekly_performance_ledger
+
+        start_weekly_performance_ledger()
+        log_engine("post-ready: PERF weekly_performance_ledger started")
+    except Exception as e:
+        log_engine(
+            f"post-ready: weekly_performance_ledger skipped: {type(e).__name__}: {e}"
+        )
+
     if rest is not None:
         try:
             from runtime.trade_manager import start_dual_core_coordinator
@@ -707,6 +917,17 @@ def start_post_ready_services(context: BootContext) -> None:
 
     _sync_loops_accepting_ticks_from_plane()
     _schedule_accepting_ticks_sync_retries()
+
+    try:
+        from system.agent_orchestration import maybe_start_agent_orchestrator
+
+        if maybe_start_agent_orchestrator():
+            log_engine("post-ready: v33 agent orchestrator self-heal daemon armed")
+    except Exception as e:
+        log_engine(
+            f"post-ready: agent orchestrator skipped: {type(e).__name__}: {e}"
+        )
+
     try:
         from system.boot.iron_gauge import GaugePhase, PhaseStatus, iron_gauge_mark
 

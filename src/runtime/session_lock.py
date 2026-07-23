@@ -56,8 +56,25 @@ def lock_path_for_scope(account_scope: str, data_root: Path | str) -> Path:
     return Path(data_root) / f"{_LOCK_NAME_PREFIX}{safe}.lock"
 
 
-def resolve_account_scope(app_mode: AppMode | None = None) -> str:
-    """Return account scope string for the active APP_MODE."""
+def resolve_account_scope(
+    app_mode: AppMode | None = None,
+    *,
+    account_id: str | None = None,
+) -> str:
+    """Return account scope string for the active APP_MODE.
+
+    Priority: explicit ``account_id`` → ``IG_ACCOUNT_SCOPE`` → ``IG_ACCOUNT_ID``
+    (CLI / v32 dual-port) → credentials fallback. Never uses a shared lock string
+    without ``ig:{accountId}`` prefix for DEMO/LIVE.
+    """
+    if account_id:
+        aid = str(account_id).strip().upper()
+        if aid:
+            scope = f"ig:{aid}"
+            os.environ["IG_ACCOUNT_ID"] = aid
+            os.environ["IG_ACCOUNT_SCOPE"] = scope
+            return scope
+
     env_scope = os.environ.get("IG_ACCOUNT_SCOPE", "").strip()
     if env_scope:
         return env_scope
@@ -71,23 +88,24 @@ def resolve_account_scope(app_mode: AppMode | None = None) -> str:
     prepare_boot_env()
     load_dotenv()
 
-    account_id = os.environ.get("IG_ACCOUNT_ID", "").strip()
+    account_id = os.environ.get("IG_ACCOUNT_ID", "").strip().upper()
     if not account_id:
         try:
             from system.credentials_loader import try_load_credentials
 
             status = try_load_credentials()
             if status.ok and status.credentials is not None:
-                account_id = status.credentials.ig_account_id.strip()
+                account_id = status.credentials.ig_account_id.strip().upper()
         except Exception:
             account_id = ""
 
     if not account_id:
         raise RuntimeError(
-            "cannot resolve account_scope — set IG_ACCOUNT_ID or credentials for DEMO/LIVE"
+            "cannot resolve account_scope — set IG_ACCOUNT_ID, --account-id, or credentials for DEMO/LIVE"
         )
 
     scope = f"ig:{account_id}"
+    os.environ["IG_ACCOUNT_ID"] = account_id
     os.environ["IG_ACCOUNT_SCOPE"] = scope
     return scope
 
@@ -121,6 +139,41 @@ def pid_alive(pid: int) -> bool:
         return False
 
 
+def pid_is_zombie(pid: int) -> bool:
+    """True when ``pid`` is a defunct (zombie) process awaiting reaping.
+
+    ``os.kill(pid, 0)`` succeeds for zombies because they linger in the process
+    table until their parent reaps them — so ``pid_alive`` alone reports a dead
+    boot as alive. A boot's ``main.py`` that crashed under a stuck ``session_ready``
+    parent stays a zombie holding a ``status: HEALTHY`` session lock; without this
+    check ``session_is_healthy`` treats that lock as live and every restart
+    collides on it (the 76-minute restart-fail loop). Treat zombies as not alive.
+    """
+    if pid <= 0:
+        return False
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            ["/bin/ps", "-o", "state=", "-p", str(int(pid))],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        if result.returncode != 0:
+            return False
+        state = (result.stdout or "").strip()
+        return state[:1] == "Z" if state else False
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def pid_alive_and_functional(pid: int) -> bool:
+    """``pid_alive`` that additionally rejects zombie/defunct processes."""
+    return pid_alive(pid) and not pid_is_zombie(pid)
+
+
 def health_endpoint_ok(port: int, *, timeout_sec: float = 3.0) -> bool:
     url = f"http://127.0.0.1:{int(port)}/api/health"
     try:
@@ -139,6 +192,11 @@ def session_is_healthy(record: dict[str, Any] | None) -> bool:
         return False
     pid = int(record.get("pid") or 0)
     if not pid_alive(pid):
+        return False
+    # A defunct (zombie) holder is a dead boot, not a live agent — even when the
+    # lock still reads status=HEALTHY. Reject it so clear_stale_lock reaps the
+    # lock and the next boot can proceed cleanly.
+    if pid != os.getpid() and pid_is_zombie(pid):
         return False
     # Never HTTP-probe our own health endpoint: when called from inside the
     # /api/health handler this recursed into the same (busy) event loop and
@@ -356,6 +414,7 @@ def preflight_startup(
     app_mode: AppMode,
     port: int,
     account_scope: str | None = None,
+    account_id: str | None = None,
     data_root: str | Path | None = None,
 ) -> tuple[int, str]:
     """
@@ -373,7 +432,7 @@ def preflight_startup(
             return 2, str(exc)
 
     try:
-        scope = account_scope or resolve_account_scope(app_mode)
+        scope = account_scope or resolve_account_scope(app_mode, account_id=account_id)
     except RuntimeError as exc:
         return 2, str(exc)
 
@@ -425,6 +484,12 @@ def acquire_session_lock() -> tuple[bool, str]:
     active_path, active = find_active_session(scope, root)
     if active_path is not None and active is not None:
         holder = int(active.get("pid") or 0)
+        lock_scope = str(active.get("account_scope") or "").strip()
+        if lock_scope and lock_scope != scope:
+            return (
+                False,
+                f"lock scope mismatch expected={scope} found={lock_scope} ({active_path.name})",
+            )
         if holder != my_pid:
             return (
                 False,
@@ -475,6 +540,7 @@ def _cli_main(argv: list[str] | None = None) -> int:
     pre = sub.add_parser("preflight", help="Preflight before supervisor launch")
     pre.add_argument("--mode", required=True, choices=sorted(_VALID_APP_MODES))
     pre.add_argument("--port", type=int, default=None)
+    pre.add_argument("--account-id", "--account_id", dest="account_id", default="")
     pre.add_argument("--config", default="")
     pre.add_argument("--data-root", default="")
 
@@ -491,7 +557,13 @@ def _cli_main(argv: list[str] | None = None) -> int:
         if args.config:
             os.environ["IG_AGENT_CONFIG"] = args.config
         data_root = args.data_root or None
-        code, msg = preflight_startup(app_mode=mode, port=port, data_root=data_root)
+        account_id = args.account_id.strip() or None
+        code, msg = preflight_startup(
+            app_mode=mode,
+            port=port,
+            data_root=data_root,
+            account_id=account_id,
+        )
         if code != 0:
             print(msg, file=sys.stderr)
         else:

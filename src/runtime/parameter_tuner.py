@@ -244,6 +244,20 @@ def get_trailing_sensitivity_for_regime(regime_state: int) -> float | None:
     return float(val) if val is not None else None
 
 
+def get_profit_target_multiplier(regime_state: int | None = None) -> float:
+    """Regime-tuned target scale for GBP exits (from overlay or defaults)."""
+    state_key = str(int(regime_state) if regime_state is not None else 0)
+    overlay = _read_overlay()
+    block = overlay.get("regime_matrix")
+    row: dict[str, Any] = dict(_DEFAULT_REGIME_MATRIX.get(state_key) or {})
+    if isinstance(block, dict) and isinstance(block.get(state_key), dict):
+        row.update(block[state_key])
+    val = row.get("profit_target_multiplier")
+    if val is None:
+        val = row.get("limit_factor", 1.0)
+    return max(0.5, min(2.0, float(val)))
+
+
 def record_trade_regime(*, ticket: str, regime_state: int) -> None:
     """Tag closed trade with Markov state for harvest attribution."""
     if not ticket:

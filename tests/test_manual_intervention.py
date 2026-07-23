@@ -93,6 +93,8 @@ class ManualInterventionTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["closed_deal_ids"], ["DEAL1"])
         rest._do_close_position.assert_called_once()
+        kwargs = rest._do_close_position.call_args.kwargs
+        self.assertEqual(kwargs.get("direction"), "BUY")  # OPEN side, not SELL
 
     def test_force_breakeven_updates_local_stop_and_syncs(self) -> None:
         mgr = MagicMock()

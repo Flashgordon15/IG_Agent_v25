@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from system.paths import data_dir
+from system.paths import data_dir, legacy_src_data_dir
 
 _EPIC_CACHE_FILES: dict[str, str] = {
     "IX.D.NIKKEI.IFM.IP": "nikkei_5m.jsonl",
@@ -18,17 +18,33 @@ _EPIC_CACHE_FILES: dict[str, str] = {
 }
 
 
-def ohlc_cache_path(epic: str, market: str = "") -> Path:
-    """Resolve append-only 5m cache file for an IG epic."""
+def _filename_for_epic(epic: str, market: str = "") -> str:
     key = str(epic or "").strip()
     filename = _EPIC_CACHE_FILES.get(key)
-    if not filename:
-        slug = (
-            str(market or key)
-            .lower()
-            .replace("/", "")
-            .replace(" ", "_")
-            .replace(".", "_")
-        )
-        filename = f"{slug or 'market'}_5m.jsonl"
-    return data_dir() / "ohlc_cache" / filename
+    if filename:
+        return filename
+    slug = (
+        str(market or key)
+        .lower()
+        .replace("/", "")
+        .replace(" ", "_")
+        .replace(".", "_")
+    )
+    return f"{slug or 'market'}_5m.jsonl"
+
+
+def ohlc_cache_path(epic: str, market: str = "") -> Path:
+    """Resolve append-only 5m cache file for an IG epic.
+
+    Prefer the unified data root. When that file is missing (common after
+    v31 data-root unification left an empty ``ohlc_cache/``), fall back to
+    the legacy ``src/data/ohlc_cache`` tree so regime bars can warm.
+    """
+    filename = _filename_for_epic(epic, market)
+    primary = data_dir() / "ohlc_cache" / filename
+    if primary.is_file() and primary.stat().st_size > 0:
+        return primary
+    legacy = legacy_src_data_dir() / "ohlc_cache" / filename
+    if legacy.is_file() and legacy.stat().st_size > 0:
+        return legacy
+    return primary

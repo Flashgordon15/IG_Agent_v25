@@ -43,10 +43,28 @@ def resolve_parallel_track_key() -> str:
     return "live"
 
 
+def _engine_scoped_shm_suffix() -> str | None:
+    """Dual-port twins must not share ``ig_agent_v30_live_state``."""
+    if os.environ.get("IG_V32_DUAL_PORT", "").strip() != "1":
+        return None
+    account = os.environ.get("IG_ACCOUNT_ID", "").strip().upper()
+    if account:
+        return account
+    port = os.environ.get("IG_API_PORT", os.environ.get("PORT", "")).strip()
+    if port.isdigit():
+        return f"p{port}"
+    origin = os.environ.get("IG_ENGINE_ORIGIN", "").strip().upper()
+    if origin:
+        return origin.lower()
+    return None
+
+
 def shm_name_for_track(track_key: str) -> str:
-    if track_key == "shadow":
-        return _SHM_NAME_SHADOW
-    return _SHM_NAME_LIVE
+    base = _SHM_NAME_SHADOW if track_key == "shadow" else _SHM_NAME_LIVE
+    suffix = _engine_scoped_shm_suffix()
+    if suffix:
+        return f"{base}_{suffix}"
+    return base
 
 
 def track_label_for_key(track_key: str) -> str:

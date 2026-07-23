@@ -175,6 +175,12 @@ class LearningStore:
             )
         if "original_size" not in cols:
             c.execute("ALTER TABLE trades ADD COLUMN original_size REAL")
+        if "account_id" not in cols:
+            c.execute("ALTER TABLE trades ADD COLUMN account_id TEXT")
+        if "product_type" not in cols:
+            c.execute("ALTER TABLE trades ADD COLUMN product_type TEXT")
+        if "engine_origin" not in cols:
+            c.execute("ALTER TABLE trades ADD COLUMN engine_origin TEXT")
         c.execute(
             """
             UPDATE trades SET original_size = size
@@ -294,6 +300,9 @@ class LearningStore:
         *,
         ig_pnl_currency: float | None = None,
         ig_close_deal_id: str | None = None,
+        profit_and_loss: float | None = None,
+        point_value: float = 1.0,
+        closed_at: str | None = None,
     ) -> None:
         row = self.conn.execute(
             "SELECT * FROM trades WHERE id=?", (trade_id,)
@@ -301,6 +310,88 @@ class LearningStore:
         if not row or row["closed_at"]:
             return
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(trades)").fetchall()}
+        row_keys = row.keys() if hasattr(row, "keys") else []
+        # Single true close stamp for learning DB + journal (never batch-sync now).
+        closed_at_str = str(closed_at or "").strip() or datetime.now().strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        size_v = (
+            float(row["size"])
+            if "size" in row_keys and row["size"] is not None
+            else 0.0
+        )
+        # Prefer IG settlement profitAndLoss packet → true GBP; never points-as-GBP.
+        # Authentic broker cash only — never synthesize ig_pnl_currency=0.0 from a
+        # phantom entry==exit close (that blocks later IG transaction sync).
+        authentic_ig_cash = profit_and_loss is not None or ig_pnl_currency is not None
+        entry_v = (
+            float(row["entry"])
+            if "entry" in row_keys and row["entry"] is not None
+            else None
+        )
+        try:
+            exit_f = float(exit_price) if exit_price is not None else None
+        except (TypeError, ValueError):
+            exit_f = None
+        flat_exit = (
+            entry_v is not None
+            and exit_f is not None
+            and abs(entry_v - exit_f) < 1e-9
+            and abs(float(pnl_points or 0.0)) < 1e-9
+        )
+        try:
+            from system.pnl_math import (
+                classify_result_gbp,
+                settle_gbp_from_ig,
+            )
+
+            if authentic_ig_cash:
+                settled_gbp = settle_gbp_from_ig(
+                    profit_and_loss=profit_and_loss,
+                    ig_pnl_currency=ig_pnl_currency,
+                    pnl_points=None,  # do not mix points into authentic packet
+                    contract_size=size_v,
+                    point_value=point_value,
+                )
+            elif flat_exit:
+                # Phantom / unconfirmed close — leave cash NULL for txn sync.
+                settled_gbp = None
+            else:
+                settled_gbp = settle_gbp_from_ig(
+                    profit_and_loss=None,
+                    ig_pnl_currency=None,
+                    pnl_points=pnl_points,
+                    contract_size=size_v,
+                    point_value=point_value,
+                )
+        except Exception:
+            settled_gbp = ig_pnl_currency if authentic_ig_cash else None
+            if settled_gbp is None and size_v > 0 and not flat_exit:
+                settled_gbp = float(pnl_points or 0.0) * size_v
+
+        result_u = str(result or "").upper()
+        # Force WIN/LOSS from cash when we have a true differential — kill CANCELLED leak.
+        # Do NOT reclassify CANCELLED/UNKNOWN → BREAKEVEN from a synthetic £0.
+        if settled_gbp is not None and result_u in (
+            "",
+            "CANCELLED",
+            "REJECTED",
+            "PENDING",
+            "UNKNOWN",
+        ):
+            try:
+                from system.pnl_math import classify_result_gbp
+
+                result = classify_result_gbp(float(settled_gbp))
+                result_u = result
+            except Exception:
+                result = "WIN" if float(settled_gbp) > 0 else "LOSS"
+                result_u = result
+        if settled_gbp is not None:
+            ig_pnl_currency = float(settled_gbp)
+        elif not authentic_ig_cash:
+            ig_pnl_currency = None
+
         close_sets = [
             "closed_at=?",
             "exit=?",
@@ -308,7 +399,7 @@ class LearningStore:
             "result=?",
         ]
         close_params: list[Any] = [
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            closed_at_str,
             exit_price,
             pnl_points,
             result,
@@ -340,7 +431,7 @@ class LearningStore:
                 WHERE id=?
                 """,
                 (
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    closed_at_str,
                     exit_price,
                     pnl_points,
                     result,
@@ -349,6 +440,88 @@ class LearningStore:
                 ),
             )
         self.conn.commit()
+        self._emit_ml_training_close(
+            row,
+            exit_price=exit_price,
+            pnl_points=pnl_points,
+            result=result,
+            ig_pnl_currency=ig_pnl_currency,
+            notes=notes,
+        )
+        try:
+            from diagnostics.performance_journal import record_trade_close
+
+            result_u = str(result or "").upper()
+            # Skip pure cancels and £0 entry==exit stubs — they poison the cash plane.
+            stub_zero = (
+                ig_pnl_currency is None
+                or abs(float(ig_pnl_currency)) < 1e-9
+            ) and flat_exit
+            if (
+                result_u not in ("CANCELLED", "REJECTED", "UNKNOWN")
+                or (ig_pnl_currency is not None and abs(float(ig_pnl_currency)) > 1e-9)
+            ) and not stub_zero:
+                direction = ""
+                if "side" in row_keys and row["side"]:
+                    direction = str(row["side"])
+                elif "direction" in row_keys and row["direction"]:
+                    direction = str(row["direction"])
+                if ig_pnl_currency is not None:
+                    pnl_gbp = float(ig_pnl_currency)
+                else:
+                    pnl_gbp = float(pnl_points or 0.0) * float(size_v or 0.0)
+                # Never append CANCELLED label — force WIN/LOSS/BREAKEVEN text in notes via result
+                if result_u in ("CANCELLED", "REJECTED") and ig_pnl_currency is not None:
+                    from system.pnl_math import classify_result_gbp
+
+                    result_u = classify_result_gbp(float(ig_pnl_currency))
+                closed_ts: float | None = None
+                try:
+                    from system.ig_transactions import _raw_has_clock_time
+
+                    raw_c = closed_at_str.replace("T", " ").replace("Z", "")
+                    if _raw_has_clock_time(raw_c):
+                        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+                            try:
+                                closed_ts = datetime.strptime(
+                                    raw_c[:19], fmt
+                                ).timestamp()
+                                break
+                            except ValueError:
+                                continue
+                except Exception:
+                    closed_ts = None
+                record_trade_close(
+                    deal_id=str(
+                        row["ig_deal_id"] if "ig_deal_id" in row_keys else trade_id
+                    ),
+                    direction=direction,
+                    entry_price=(
+                        float(row["entry"])
+                        if "entry" in row_keys and row["entry"] is not None
+                        else None
+                    ),
+                    exit_price=float(exit_price) if exit_price is not None else None,
+                    realized_pnl_gbp=pnl_gbp,
+                    closed_at_ts=closed_ts,
+                    account_id=(
+                        str(row["account_id"])
+                        if "account_id" in row_keys and row["account_id"]
+                        else None
+                    ),
+                    product_type=(
+                        str(row["product_type"])
+                        if "product_type" in row_keys and row["product_type"]
+                        else None
+                    ),
+                    engine_origin=(
+                        str(row["engine_origin"])
+                        if "engine_origin" in row_keys and row["engine_origin"]
+                        else None
+                    ),
+                )
+        except Exception:
+            pass
         try:
             from system.shutdown_cleanup import notify_position_state_change
 
@@ -356,6 +529,13 @@ class LearningStore:
         except Exception:
             pass
         self._rebuild_stats_for(row["setup_key"])
+        if str(result) in ("WIN", "LOSS"):
+            try:
+                from system.setup_registry_refresh import maybe_refresh_setup_registry
+
+                maybe_refresh_setup_registry(self)
+            except Exception:
+                pass
         try:
             from feeder.event_bus import emit_fill_close
 
@@ -478,6 +658,69 @@ class LearningStore:
             """,
             (ref, ref, suffix, f"%{suffix}"),
         ).fetchone()
+
+        # Open deal ids (DIAAAA…) ≠ IG transaction refs — match £0 stubs by
+        # openLevel/side/size/day so broker cash lands on the agent row.
+        if existing is None:
+            try:
+                stub_entry = float(row.get("entry") or 0)
+                stub_size = float(row.get("size") or 0)
+            except (TypeError, ValueError):
+                stub_entry, stub_size = 0.0, 0.0
+            stub_side = str(row.get("side") or "").upper()
+            stub_day = str(row.get("closed_at") or "")[:10]
+            market = str(row.get("market") or "")
+            if stub_entry > 0 and stub_day:
+                candidates = self.conn.execute(
+                    """
+                    SELECT id, closed_at, entry, exit, size, side, epic, market,
+                           ig_pnl_currency
+                    FROM trades
+                    WHERE closed_at IS NOT NULL
+                      AND closed_at LIKE ?
+                      AND ABS(COALESCE(entry, 0) - ?) < 0.051
+                      AND (
+                        ig_pnl_currency IS NULL
+                        OR (
+                          ABS(COALESCE(ig_pnl_currency, 0)) < 1e-9
+                          AND ABS(COALESCE(entry, 0) - COALESCE(exit, 0)) < 1e-9
+                        )
+                      )
+                    ORDER BY id DESC
+                    LIMIT 8
+                    """,
+                    (f"{stub_day}%", stub_entry),
+                ).fetchall()
+                for cand in candidates:
+                    try:
+                        c_size = float(cand["size"] or 0)
+                    except (TypeError, ValueError):
+                        c_size = 0.0
+                    c_side = str(cand["side"] or "").upper()
+                    if stub_size > 0 and c_size > 0 and abs(stub_size - c_size) > 1e-6:
+                        continue
+                    if stub_side and c_side and stub_side != c_side:
+                        continue
+                    # Prefer same market family when both present
+                    c_blob = f"{cand['epic'] or ''} {cand['market'] or ''}".lower()
+                    m_blob = market.lower()
+                    if m_blob and c_blob:
+                        same = (
+                            ("wall" in m_blob or "dow" in m_blob)
+                            and ("wall" in c_blob or "dow" in c_blob or "dow" in c_blob)
+                        ) or (
+                            ("japan" in m_blob or "nikkei" in m_blob)
+                            and ("japan" in c_blob or "nikkei" in c_blob)
+                        ) or ("gold" in m_blob and "gold" in c_blob)
+                        if not same and ("wall" in m_blob or "japan" in m_blob or "gold" in m_blob):
+                            # different named market — skip
+                            if any(
+                                tok in c_blob
+                                for tok in ("dow", "wall", "nikkei", "japan", "gold")
+                            ):
+                                continue
+                    existing = cand
+                    break
 
         if existing:
             existing_ts = str(existing["closed_at"] or "")
@@ -674,6 +917,11 @@ class LearningStore:
         result: str,
         *,
         ig_close_deal_id: str | None = None,
+        exit_price: float | None = None,
+        entry_price: float | None = None,
+        pnl_points: float | None = None,
+        closed_at: str | None = None,
+        emit_hooks: bool = True,
     ) -> bool:
         """Update closed trade P&L from IG transaction history."""
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(trades)").fetchall()}
@@ -698,17 +946,73 @@ class LearningStore:
             return False
         already_confirmed = False
         pre = self.conn.execute(
-            "SELECT ig_pnl_currency FROM trades WHERE id=?",
+            "SELECT ig_pnl_currency, entry, exit, side, size, closed_at FROM trades WHERE id=?",
             (row["id"],),
         ).fetchone()
         if pre is not None and pre["ig_pnl_currency"] is not None:
-            already_confirmed = True
+            try:
+                prior = float(pre["ig_pnl_currency"])
+            except (TypeError, ValueError):
+                prior = 0.0
+            # £0 entry==exit stubs are NOT confirmed — allow overwrite.
+            try:
+                ent = float(pre["entry"] or 0)
+                ex = float(pre["exit"] or 0)
+            except (TypeError, ValueError):
+                ent, ex = 0.0, -1.0
+            if abs(prior) > 1e-9 or abs(ent - ex) >= 1e-9:
+                already_confirmed = True
         sets = ["ig_pnl_currency=?", "result=?"]
         params: list[Any] = [ig_pnl, result]
         close_id = str(ig_close_deal_id or deal_id or deal_reference or "").strip()
         if "ig_close_deal_id" in cols and close_id:
             sets.append("ig_close_deal_id=?")
             params.append(close_id)
+        if exit_price is not None and float(exit_price) > 0:
+            sets.append("exit=?")
+            params.append(float(exit_price))
+        if entry_price is not None and float(entry_price) > 0:
+            sets.append("entry=?")
+            params.append(float(entry_price))
+        if pnl_points is not None:
+            sets.append("pnl_points=?")
+            params.append(float(pnl_points))
+        elif (
+            exit_price is not None
+            and pre is not None
+            and pre["entry"] is not None
+            and pre["side"]
+        ):
+            try:
+                from system.pnl_math import realised_pnl_points
+
+                pts = realised_pnl_points(
+                    str(pre["side"]),
+                    float(entry_price if entry_price is not None else pre["entry"]),
+                    float(exit_price),
+                )
+                sets.append("pnl_points=?")
+                params.append(float(pts))
+            except Exception:
+                pass
+        # Prefer clock-bearing IG/local close time over batch-sync wall clock.
+        if closed_at:
+            try:
+                from system.ig_transactions import _raw_has_clock_time
+
+                ig_ts = str(closed_at).strip()
+                existing_ts = str((pre["closed_at"] if pre is not None else "") or "")
+                if _raw_has_clock_time(ig_ts) and not _raw_has_clock_time(existing_ts):
+                    sets.append("closed_at=?")
+                    params.append(ig_ts)
+                elif _raw_has_clock_time(ig_ts) and _raw_has_clock_time(existing_ts):
+                    # Keep existing local clock (agent close) — more accurate than IG midnight-ish.
+                    pass
+                elif not existing_ts and ig_ts:
+                    sets.append("closed_at=?")
+                    params.append(ig_ts)
+            except Exception:
+                pass
         params.append(row["id"])
         self.conn.execute(
             f"""
@@ -720,6 +1024,52 @@ class LearningStore:
         self.conn.commit()
         ok = self.conn.total_changes > 0
         if ok:
+            try:
+                from diagnostics.performance_journal import upsert_journal_cash_close
+
+                detail = self.conn.execute(
+                    """
+                    SELECT ig_deal_id, side, entry, exit, closed_at,
+                           account_id, product_type, engine_origin
+                    FROM trades WHERE id=?
+                    """,
+                    (row["id"],),
+                ).fetchone()
+                if detail is not None:
+                    upsert_journal_cash_close(
+                        deal_id=str(detail["ig_deal_id"] or deal_id or deal_reference),
+                        direction=str(detail["side"] or ""),
+                        entry_price=(
+                            float(detail["entry"])
+                            if detail["entry"] is not None
+                            else None
+                        ),
+                        exit_price=(
+                            float(detail["exit"])
+                            if detail["exit"] is not None
+                            else None
+                        ),
+                        realized_pnl_gbp=float(ig_pnl),
+                        closed_at=str(detail["closed_at"] or "") or None,
+                        account_id=(
+                            str(detail["account_id"])
+                            if detail["account_id"]
+                            else None
+                        ),
+                        product_type=(
+                            str(detail["product_type"])
+                            if detail["product_type"]
+                            else None
+                        ),
+                        engine_origin=(
+                            str(detail["engine_origin"])
+                            if detail["engine_origin"]
+                            else None
+                        ),
+                    )
+            except Exception:
+                pass
+        if ok and emit_hooks:
             if not already_confirmed and not self.is_partial_close_done(row["id"]):
                 try:
                     detail = self.conn.execute(
@@ -815,6 +1165,54 @@ class LearningStore:
                     f"portfolio_envelope exit hook failed: {type(e).__name__}: {e}"
                 )
         return ok
+
+    def _emit_ml_training_close(
+        self,
+        row: Any,
+        *,
+        exit_price: float,
+        pnl_points: float,
+        result: str,
+        ig_pnl_currency: float | None,
+        notes: str = "",
+        exit_reason: str = "learning_store_close",
+    ) -> None:
+        """Write ML training memory on every agent close — not only IG txn backfill."""
+        try:
+            from execution.ml_training_hooks import record_ml_exit_for_deal
+            from system.closed_trades_display import is_excluded_display_row
+
+            row_dict = dict(row)
+            if is_excluded_display_row(row_dict):
+                return
+            keys = row.keys() if hasattr(row, "keys") else row_dict
+            deal_id = str(
+                row_dict.get("ig_deal_id")
+                or row_dict.get("deal_reference")
+                or ""
+            ).strip()
+            if not deal_id:
+                return
+            size = float(row_dict.get("size") or 1.0) or 1.0
+            if ig_pnl_currency is not None:
+                gbp = float(ig_pnl_currency)
+            else:
+                gbp = float(pnl_points or 0.0) * size
+            record_ml_exit_for_deal(
+                deal_id,
+                ig_pnl=gbp,
+                result=str(result or ""),
+                exit_price=float(exit_price or 0.0),
+                pts_pnl=float(pnl_points or 0.0),
+                exit_reason=exit_reason,
+            )
+        except Exception as exc:
+            from system.engine_log import log_engine
+
+            log_engine(
+                f"ml_training_store close_trade hook failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
 
     def _rebuild_stats_for(self, setup_key: str) -> None:
         if is_ig_import_setup_key(setup_key):
@@ -935,6 +1333,34 @@ class LearningStore:
             (deal_id, trade_id),
         )
         self.conn.commit()
+
+    @_locked
+    def update_open_entry(
+        self,
+        deal_id: str,
+        entry: float,
+        *,
+        currency: str = "",
+    ) -> bool:
+        """Patch entry (and optional currency) on an open trade by ig_deal_id."""
+        row = self.find_open_by_deal_id(str(deal_id or "").strip())
+        if row is None:
+            return False
+        tid = int(row["id"])
+        self.conn.execute(
+            "UPDATE trades SET entry=? WHERE id=?",
+            (float(entry), tid),
+        )
+        cols = {
+            r[1] for r in self.conn.execute("PRAGMA table_info(trades)").fetchall()
+        }
+        if currency and "ig_pnl_currency" in cols:
+            self.conn.execute(
+                "UPDATE trades SET ig_pnl_currency=? WHERE id=?",
+                (str(currency).upper(), tid),
+            )
+        self.conn.commit()
+        return True
 
     @_locked
     @_locked
@@ -1954,7 +2380,11 @@ class LearningStore:
 
     @_locked
     def count_unconfirmed_closed_trades(self) -> int:
-        """Count closed strategy trades that still lack IG-confirmed P&L."""
+        """Count closed trades that still lack IG-confirmed P&L.
+
+        Includes £0 entry==exit stubs (phantom reconcile) — those must keep
+        transaction sync alive until broker cash lands.
+        """
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(trades)").fetchall()}
         if "ig_pnl_currency" not in cols:
             return 0
@@ -1962,9 +2392,14 @@ class LearningStore:
             """
             SELECT COUNT(*) AS n FROM trades
             WHERE closed_at IS NOT NULL
-              AND ig_pnl_currency IS NULL
               AND dry_run = 0
-              AND (source IS NULL OR source = 'strategy')
+              AND (
+                ig_pnl_currency IS NULL
+                OR (
+                  ABS(COALESCE(ig_pnl_currency, 0)) < 1e-9
+                  AND ABS(COALESCE(entry, 0) - COALESCE(exit, 0)) < 1e-9
+                )
+              )
             """
         ).fetchone()
         return int(row["n"]) if row else 0

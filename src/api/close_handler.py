@@ -82,17 +82,21 @@ def _default_ig_close(deal_id: str) -> dict[str, Any]:
         raise LookupError(f"open position not found for deal_id={deal_id}")
 
     _, side, size, epic = targets[0]
-    close_dir = "SELL" if side == "BUY" else "BUY"
+    # close_position(skip_lookup=True) inverts OPEN once — pass OPEN side.
+    open_side = str(side or "BUY").upper()
     last_error: Exception | None = None
     for attempt in (1, 2):
         try:
             result = rest.close_position(
                 deal_id,
-                direction=close_dir,
+                direction=open_side,
                 size=size,
                 epic=epic or None,
                 currency_code=ccy,
-                verify=True,
+                verify=False,
+                budget_priority=True,
+                skip_lookup=True,
+                skip_confirm=True,
             )
             verified = bool(result.get("verified_closed"))
             if not verified:

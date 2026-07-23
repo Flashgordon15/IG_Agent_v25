@@ -9,11 +9,11 @@ from typing import Any
 from system.learning_trade_policy import agent_trades_sql_clause
 from system.setup_registry import write_registry_from_stats
 
-# Demo-friendly ban thresholds (stricter than v26 feeder MIN_TRADES_BAN=20).
-MIN_TRADES_BAN = 5
-BAN_WR_BELOW = 0.35
+# Demo-friendly ban thresholds — align with 70% profit success target.
+MIN_TRADES_BAN = 4
+BAN_WR_BELOW = 0.45
 MIN_TRADES_PROBE = 8
-ACTIVE_WR_MIN = 0.52
+ACTIVE_WR_MIN = 0.65
 
 
 @dataclass
@@ -149,3 +149,22 @@ def refresh_setup_registry_from_store(
             for s in stats
         ],
     }
+
+
+_REGISTRY_REFRESH_AT: float = 0.0
+_REGISTRY_REFRESH_MIN_SEC = 300.0
+
+
+def maybe_refresh_setup_registry(store: Any) -> None:
+    """Throttled registry rebuild after labeled closes — bans drifting setups."""
+    import time
+
+    global _REGISTRY_REFRESH_AT
+    now = time.time()
+    if now - _REGISTRY_REFRESH_AT < _REGISTRY_REFRESH_MIN_SEC:
+        return
+    _REGISTRY_REFRESH_AT = now
+    try:
+        refresh_setup_registry_from_store(store, enabled=True)
+    except Exception:
+        pass

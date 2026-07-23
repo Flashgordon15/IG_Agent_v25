@@ -1,7 +1,7 @@
 {
-  "name": "ig-agent-apex-monolith",
-  "version": "30.0.0",
-  "description": "IG Agent v30.0 Project Apex — native Electron shell with Python sidecar",
+  "name": "ig-trading-agent",
+  "version": "31.1.0",
+  "description": "IG Trading Agent v31.1 — Python trading engine with React dashboard",
   "private": true,
   "main": "main.js",
   "author": "IG Agent",
@@ -16,7 +16,7 @@
     "apex:dashboard:build": "cd dashboard && npm run build",
     "apex:build-power": "bash scripts/apex-build-power-assertion.sh",
     "apex:dev": "npm run apex:build-power && electron .",
-    "start": "env -u ELECTRON_RUN_AS_NODE IG_APEX_LIVE_ONLY=1 IG_AGENT_DESKTOP_LAUNCH=1 electron .",
+    "start": "bash scripts/trading_desk_silent.sh",
     "apex:start": "npm run apex:build-lock && npm run apex:build-power && npm run apex:dashboard:build && npm run apex:dev",
     "apex:pack": "bash scripts/apex-pack.sh dir",
     "apex:dist": "bash scripts/apex-pack.sh full",
@@ -26,7 +26,7 @@
     "electron-log": "^5.2.0"
   },
   "devDependencies": {
-    "electron": "^33.2.1",
+    "electron": "^33.4.11",
     "electron-builder": "25.1.8",
     "rimraf": "^6.1.3"
   },
@@ -133,6 +133,6 @@
     }
   },
   "allowScripts": {
-    "electron@33.2.1": true
+    "electron@33.4.11": true
   }
 }

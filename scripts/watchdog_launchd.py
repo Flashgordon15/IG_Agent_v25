@@ -31,18 +31,21 @@ def main() -> int:
     env = os.environ.copy()
     env["IG_AGENT_ROOT"] = str(root)
     env.setdefault("PYTHONPATH", str(root / "src"))
+    env.setdefault("APP_MODE", "DEMO")
+    env.setdefault("IG_AGENT_CONFIG", "config/config_v31_demo_throughput.json")
 
+    # Execute the script by path — never `bash -s` with the body on stdin.
+    # Piping the script made heredocs inside functions steal the remaining
+    # script bytes, so later top-level calls (clear_stale_agent_lock) failed
+    # with "command not found" and the watchdog could not heal the agent.
     try:
-        proc = subprocess.Popen(
-            ["/bin/bash", "-s"],
-            stdin=subprocess.PIPE,
-            cwd=str(root),
-            env=env,
+        return int(
+            subprocess.call(
+                ["/bin/bash", str(script)],
+                cwd=str(root),
+                env=env,
+            )
         )
-        assert proc.stdin is not None
-        proc.stdin.write(script.read_bytes())
-        proc.stdin.close()
-        return int(proc.wait())
     except Exception as exc:
         print(f"watchdog_launchd: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1

@@ -31,8 +31,14 @@ class YahooQuotePollerTests(unittest.TestCase):
 
     def test_yahoo_quote_from_mid_fx(self) -> None:
         sample = yahoo_quote_from_mid("CS.D.EURUSD.CFD.IP", 1.0850, "EURUSD=X")
+        self.assertIsNotNone(sample)
+        assert sample is not None
         self.assertAlmostEqual(sample.mid, 1.0850)
         self.assertLess(sample.bid, sample.offer)
+
+    def test_yahoo_quote_from_mid_rejects_dxy_scale_fx(self) -> None:
+        sample = yahoo_quote_from_mid("CS.D.EURUSD.CFD.IP", 100.09, "EURUSD=X")
+        self.assertIsNone(sample)
 
     @patch("feeder.yahoo_quote_poller.fetch_yahoo_mid", return_value=42000.0)
     def test_fetch_yahoo_quote(self, _mid: MagicMock) -> None:

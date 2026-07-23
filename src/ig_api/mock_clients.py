@@ -196,7 +196,11 @@ class MockIGRest:
         stop_distance: float,
         limit_distance: float,
         currency_code: str = "GBP",
+        max_slippage: int | None = None,
+        force_market: bool = False,
+        **_kwargs: Any,
     ) -> dict[str, Any]:
+        _ = (max_slippage, force_market, currency_code)
         if self.mock.reject_order:
             raise IGOrderError("Mock order rejected", status_code=400)
         if not epic or not str(epic).strip():
@@ -225,7 +229,20 @@ class MockIGRest:
         self._last_deal_reference = ref
         return {"dealReference": ref}
 
-    def place_limit_entry_atomic(
+    def place_otc_market_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        body = dict(payload or {})
+        return self.place_market_order(
+            epic=str(body.get("epic") or ""),
+            direction=str(body.get("direction") or "BUY"),
+            size=float(body.get("size") or 0),
+            stop_distance=float(body.get("stopDistance") or 0),
+            limit_distance=float(body.get("limitDistance") or 0),
+            currency_code=str(body.get("currencyCode") or "GBP"),
+            max_slippage=int(body.get("maxSlippage") or 0) or None,
+            force_market=True,
+        )
+
+    def place_working_order_otc(
         self,
         *,
         epic: str,
@@ -236,6 +253,28 @@ class MockIGRest:
         limit_distance: float | None = None,
         currency_code: str = "GBP",
     ) -> dict[str, Any]:
+        _ = (level, currency_code)
+        return self.place_market_order(
+            epic=epic,
+            direction=direction,
+            size=size,
+            stop_distance=stop_distance,
+            limit_distance=float(limit_distance or 0),
+        )
+
+    def place_limit_entry_atomic(
+        self,
+        *,
+        epic: str,
+        direction: str,
+        size: float,
+        level: float,
+        stop_distance: float,
+        limit_distance: float | None = None,
+        currency_code: str = "GBP",
+        time_in_force: str = "FILL_OR_KILL",
+    ) -> dict[str, Any]:
+        _ = (level, time_in_force)
         return self.place_market_order(
             epic=epic,
             direction=direction,
@@ -243,6 +282,7 @@ class MockIGRest:
             stop_distance=stop_distance,
             limit_distance=float(limit_distance or 0),
             currency_code=currency_code,
+            force_market=True,
         )
 
     def find_open_position(self, deal_id: str) -> dict[str, Any] | None:

@@ -9,6 +9,8 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AGENT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck source=lib/detach_exec.sh
+source "${SCRIPT_DIR}/lib/detach_exec.sh"
 
 V31_DATA="${IG_DATA_ROOT:-${AGENT_ROOT}/src/data/v31-production}"
 LOG_DIR="${V31_DATA}/logs"
@@ -329,15 +331,15 @@ start_agent_inner() {
   # Tell in-process recovery layers (WatchdogSelfHealer) that this supervisor
   # owns restarts — prevents them spawning duplicate main.py agents.
   export IG_APEX_DAEMON=1
-  if [[ "${LAUNCHER_DESKTOP:-}" == "1" ]]; then
+  if [[ "${LAUNCHER_DESKTOP:-}" == "1" ]] && [[ "${IG_TRADING_DESK_NATIVE:-}" != "1" ]]; then
     export IG_APEX_DESKTOP=1
     export IG_AGENT_DESKTOP_LAUNCH=1
   fi
 
   log "launch: starting v31.1.0 core (APP_MODE=${APP_MODE} config=${IG_AGENT_CONFIG} :${API_PORT} scope=${IG_ACCOUNT_SCOPE:-masked})"
   cd "${AGENT_ROOT}"
-  nohup "${PY}" -u src/main.py >> "${LOG_DIR}/agent_stdout.log" 2>&1 &
-  local agent_pid=$!
+  detach_exec --log "${LOG_DIR}/agent_stdout.log" -- "${PY}" -u src/main.py
+  local agent_pid="${DETACH_PID}"
   echo "${agent_pid}" > "${AGENT_PID_FILE}"
   AGENT_START_EPOCH=$(date +%s)
   log "launch: agent detached pid=${agent_pid}"

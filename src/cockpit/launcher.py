@@ -94,9 +94,21 @@ def _apex_desktop_mode() -> bool:
         return False
 
 
+def _trading_desk_native_mode() -> bool:
+    return os.environ.get("IG_TRADING_DESK_NATIVE", "").strip().lower() in ("1", "true", "yes")
+
+
 def launch_flight_deck_after_gate4(cfg: Any | None) -> None:
     """Start telemetry bridge + local web cockpit after Gate 4."""
     global _bridge_started, _web_started
+
+    if _trading_desk_native_mode():
+        log_engine(
+            "Trading Desk native mode — :8787 Flight Deck web cockpit suppressed; "
+            "multiplex desk served from :3000/desk"
+        )
+        _ipc_ready.set()
+        return
 
     if not _cockpit_enabled(cfg):
         return

@@ -56,6 +56,14 @@ def _check_once() -> None:
                 run_supervision_monitor_tick(repair=True)
             except Exception:
                 pass
+            try:
+                from runtime.trading_desk_liveness import evaluate_liveness, run_recovery_tick
+
+                liv = evaluate_liveness()
+                if not liv.get("ok") and liv.get("has_open_risk"):
+                    run_recovery_tick()
+            except Exception:
+                pass
             return
 
         _UNHEALTHY_STREAK += 1
@@ -73,6 +81,12 @@ def _check_once() -> None:
         from system.telegram_notifier import send_critical_alert
 
         send_critical_alert(f"⚠️ Agent unhealthy x{_UNHEALTHY_STREAK} — {detail}")
+        try:
+            from runtime.trading_desk_liveness import run_recovery_tick
+
+            run_recovery_tick(force=True)
+        except Exception:
+            pass
         try:
             from system.supervision_monitor import run_supervision_monitor_tick
 

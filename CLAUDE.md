@@ -1,89 +1,91 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with this repository.
 
 ## Project
 
-**IG Agent v29.1** — automated CFD trading agent for IG (DEMO deployment). Python backend (FastAPI + `MarketOrchestrator` trading loops) on `localhost:8080`, React/Vite dashboard in `dashboard/`.
+**IG Agent v31.1** — DEMO Trading Desk for IG spreadbet. Python backend (FastAPI + trading loops) on `localhost:8080`, canonical desktop UI = **Quantum Terminal** (`terminal/` on `:3000`) via `Trading_Desk.app` → `scripts/trading_desk_silent.sh`.
 
 | Doc | Role |
 |-----|------|
-| **`IG_Agent_v29.1_COMPLETE_SPEC.md`** | **Current shipped spec** — gates, learning, P&L, Flight Deck, capital harvesting |
-| **`docs/V29.1_ARCHITECTURE.md`** | Module map, snapshot flow, learning plane |
-| **`docs/STRATEGIC_ENHANCEMENTS_ROADMAP.md`** | Platform roadmap — shipped vs planned |
-| **`docs/MAINTENANCE_LOG.md`** | Stress gates S1–S3, lockdown, re-deployment |
-| `IG_Agent_v25_COMPLETE_SPEC_v8.md` | Historical v25.5 detail |
-| `IG_Agent_v26_FRAMEWORK.md` | Future multi-strategy / £50k vision (not separate agent yet) |
+| **`docs/DESK_DEPLOY_RUNBOOK.md`** | **Ops spine** — audit / deploy / sync-wrappers / anti-zombie |
+| **`.cursor/rules/2026-07-07-trading-desk-session.mdc`** | Live desk session profile (DOW hot path, sizes, supervision) |
+| `docs/V31_RUNTIME_MODE_MAP.md` | Runtime mode map (verify version labels) |
+| `IG_Agent_v29.1_COMPLETE_SPEC.md` | Historical v29.1 behaviour reference |
+| `docs/V29.1_ARCHITECTURE.md` | Historical module map |
 | `docs/LIVE_PROMOTION_CHECKLIST.md` | Live funds gate |
 
-Version source of truth: `src/system/app_identity.py` (`APP_VERSION = 29.1.0`).
+Version source of truth: `src/system/identity/app_identity.py` (`APP_VERSION = 31.1.0`).
 
 ## Commands
 
 **All Python commands require `PYTHONPATH=src`.**
 
 ```bash
+# Preferred config
+export IG_AGENT_CONFIG=config/config_v31_demo_throughput.json
+
 # Run the agent
 PYTHONPATH=src python3 src/main.py
 
-# Run all tests (~794)
+# Run tests
 PYTHONPATH=src python3 -m pytest tests/ -q
 
-# Run a single test file
-PYTHONPATH=src python3 -m pytest tests/test_trading_loop.py -x -v
+# Desk deploy (flat sessions only)
+./scripts/desk_deploy.sh audit
+./scripts/desk_deploy.sh deploy
 
-# Learning health report
-PYTHONPATH=src python3 scripts/learning_health_report.py
-
-# Pre-flight check before a live session
-PYTHONPATH=src python3 scripts/pre_flight_check.py --live
-
-# Full E2E platform validation
-PYTHONPATH=src python3 scripts/e2e_platform_validation.py
+# Unify data root (legacy src/data → IG_DATA_ROOT)
+PYTHONPATH=src python3 scripts/unify_data_root.py --check
+PYTHONPATH=src python3 scripts/unify_data_root.py --apply
 ```
 
-**Dashboard:**
+**Desktop:** `Trading_Desk.app` or `Launch_Trading_Desk.command` → Quantum Terminal `:3000` (pywebview).  
+**Legacy Vite dashboard** is still served from `dashboard/dist` on `:8080/` — not the product Desk UI.
 
 ```bash
-cd dashboard && npm run build   # rebuild after any dashboard/ change (served from dist/)
-cd dashboard && npm run dev     # dev server :5173, proxies /api → :8080
+cd dashboard && npm run build   # after dashboard/ JSX changes
+cd terminal && npm run build    # after terminal/ changes (or start_ui_background.sh)
 ```
 
 ## Configuration
 
-- **Primary overlay:** `config/config_v29.json` (extends v25)
-- **Instrument base:** `config/config_v25.json`
-- Loader: `ConfigLoader` merges v29 → v25 → v24
-- IG credentials loaded at startup (memory only)
+- **Primary overlay:** `config/config_v31_demo_throughput.json`
+- Merge chain: v31_demo → v31 → v30 → v29 → v25
+- Hot path (authoritative): **DOW only** until Nikkei JPY PnL certified (`dual_core.exclude_from_hot_path`)
+- Broker stop at entry: `micro_risk.omit_broker_limit_at_entry: false` (requires flat deploy to load)
 
-## State files & gotchas
+## Data plane (unified)
 
-- **Instance lock:** `src/data/.ig_agent_v29.lock` — remove if stale: `rm -f src/data/.ig_agent_v29.lock`
-- **SQLite WAL:** `src/data/learning_db.sqlite3` — do not delete `-wal`/`-shm` while running
-- **Rate limit state:** `src/data/logs/rate_limit_state.json`
-- **Runtime state:** `src/data/state/` — inspect only; don't edit while agent runs
-- **Quote freshness:** Hub snapshot only for trading quotes; 45s max tick age typical
-- **Order in-flight timeout:** 30s (`live_executor.py`)
+When `APP_MODE` applies, `IG_DATA_ROOT` and `IG_AGENT_DATA_DIR` both point at:
 
-## Architecture (v29.1 highlights)
+`src/data/v31-production/`
 
-- `MarketOrchestrator` → one `TradingLoop` thread per epic
-- **Protective learning:** floors at 62% conf / 55 fitness when enabled (`protective_learning`)
-- **Clean learning:** IG-import setups excluded (`learning_trade_policy`)
-- **Open P&L:** hub quote refresh + FX pip scaling + quote-trust guard (`open_position_view.py`)
-- **Daily P&L:** `realized_daily_pnl_gbp` + open unrealized; v29.1 baseline reset on startup
-- **ML:** blend at ≥500 records; `meta.json` filter overrides at signal time
-- **Shadow log:** appended on all `SignalEngine.evaluate()` return paths
-- `RestApiBudget`: 3 REST calls/min hard cap
+`system.paths.data_dir()` follows that tree and bridges critical files from legacy `src/data/` (learning DB symlink, trade_support status, broker_snapshot).
 
-## Supervision lifecycle
+**Do not** treat empty stubs under `v31-production` as truth without checking the bridge / legacy tree.
 
-**Safe to Leave** = launchd watchdog + caffeinate. Install: `./scripts/install_launchd.sh`
+## Open-position truth ranking
 
-| Action | Behaviour |
-|--------|-----------|
-| Dashboard Stop | Clean exit; `manual_stop.json` blocks auto-restart ~10 min |
-| Watchdog | Restarts unless manual stop |
-| Overnight | `./scripts/ensure_overnight_ready.sh` + `supervision_check.py --repair` |
+1. `GET /api/trade_support/status` — broker REST supervisor
+2. `GET /api/positions/live` — check `verdict`, `critical`, `broker_open_sot`, not just `count`
+3. `GET /api/trading_desk/liveness`
+4. `GET /api/position_manager/status`
+5. `GET /api/health` — process readiness only
 
-While running, `trading_health_monitor` runs supervision tick every 60s. `/api/health` exposes drift warnings.
+## Supervision
+
+| Process | Role |
+|---------|------|
+| `src/main.py` | Agent + API + in-process OpenPositionManager |
+| `runtime.trade_support_wrapper` | Broker-authoritative open-trade supervisor |
+| `runtime.desk_support_wrapper` | Out-of-process health / recovery |
+
+Never `kill -9` main.py — use anti-zombie protocol in `.cursorrules` / `desk_deploy.sh`.
+
+## Architecture (v31.1 desk)
+
+- Dual-core rotation + gated `TradingLoop` (also matrix/scalp lanes — prefer gated path)
+- Post-fill risk stack: GBP exit + virtual stop + dynamic trail
+- Night matrix 24/7; sole scheduled block = rollover **21:58–22:05 BST**
+- `RestApiBudget`: 3 non-essential REST calls/min hard cap

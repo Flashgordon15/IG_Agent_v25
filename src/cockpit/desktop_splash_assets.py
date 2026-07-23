@@ -16,7 +16,7 @@ LAUNCHER_STAGES: tuple[dict[str, str], ...] = (
     {"id": "post_ready", "label": "06", "title": "Execution Plane", "detail": "Trade-ready routing & armed loops"},
     {"id": "warmup", "label": "07", "title": "Warm-up", "detail": "Unified execution route priming"},
     {"id": "verify", "label": "08", "title": "Verification", "detail": "Health + GUI status field audit"},
-    {"id": "gui", "label": "09", "title": "Flight Deck", "detail": "Iron Cage cockpit embed"},
+    {"id": "gui", "label": "09", "title": "Trading Desk", "detail": "Multiplex desk :3000/desk"},
 )
 
 ORCHESTRATOR_STAGES: tuple[dict[str, str], ...] = (
@@ -62,7 +62,34 @@ def orchestrator_segment_states(stage_tokens: dict[str, Any] | None) -> list[str
     return out
 
 
-def build_splash_html() -> str:
+def build_splash_html(*, trading_desk: bool = False) -> str:
+    stages = LAUNCHER_STAGES
+    if trading_desk:
+        stages = tuple(
+            {
+                **row,
+                "title": "Trading Desk",
+                "detail": "Multiplex desk :3000/desk",
+            }
+            if row["id"] == "gui"
+            else row
+            for row in LAUNCHER_STAGES
+        )
+    title = (
+        "IG Trading Agent — Trading Desk"
+        if trading_desk
+        else "Iron Cage — Flight Deck Control Center"
+    )
+    subtitle = (
+        "NATIVE DESKTOP · MULTIPLEX DESK :3000/desk"
+        if trading_desk
+        else "NATIVE DESKTOP · IRON CAGE COCKPIT"
+    )
+    exit_title = (
+        "Gracefully close IG Trading Desk"
+        if trading_desk
+        else "Gracefully close IG Trading Desk"
+    )
     stage_rows = "\n".join(
         f'''<li class="stage-item" data-stage="{row["id"]}" data-index="{i}">
           <span class="stage-tick" aria-hidden="true"></span>
@@ -72,7 +99,7 @@ def build_splash_html() -> str:
             <span class="stage-detail">{row["detail"]}</span>
           </span>
         </li>'''
-        for i, row in enumerate(LAUNCHER_STAGES)
+        for i, row in enumerate(stages)
     )
     orch_segments = "\n".join(
         f'<div class="orch-seg" data-orch="{i}"><span class="orch-label">{row["title"]}</span></div>'
@@ -82,8 +109,8 @@ def build_splash_html() -> str:
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=1440, height=900" />
-<title>Iron Cage — Flight Deck Control Center</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>{title}</title>
 <style>
 :root {{
   --bg: #0D0E12;
@@ -101,7 +128,7 @@ html, body {{
 }}
 .shell {{
   display: flex; flex-direction: column; height: 100vh;
-  padding: 28px 32px 18px;
+  padding: 20px 24px 14px;
   background: radial-gradient(ellipse 80% 50% at 50% -10%, rgba(16,185,129,0.08), transparent),
               var(--bg);
 }}
@@ -250,11 +277,11 @@ html, body {{
 <div class="shell">
   <header class="shell-header">
     <div class="brand">
-      <h1>Iron Cage — Flight Deck Control Center</h1>
-      <p>CRYPTOGRAPHIC INITIALIZATION · 9-STAGE VERIFICATION</p>
+      <h1>{title}</h1>
+      <p>{subtitle}</p>
     </div>
     <div class="shell-header-actions">
-      <button type="button" class="shell-exit-btn" id="shell-exit-btn" title="Gracefully close Iron Cage Flight Deck">Exit</button>
+      <button type="button" class="shell-exit-btn" id="shell-exit-btn" title="{exit_title}">Exit</button>
       <div id="tier-pill" class="tier-pill">WARMING</div>
     </div>
   </header>

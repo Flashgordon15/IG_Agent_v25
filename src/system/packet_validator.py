@@ -24,6 +24,7 @@ REASON_SPREAD_TOO_WIDE = 5
 REASON_OUT_OF_ORDER = 6
 REASON_MALFORMED_JSON = 7
 REASON_CIRCUIT_BREAKER = 8
+REASON_IMPLAUSIBLE_LEVEL = 9
 
 _REASON_TEXT = (
     "ok",
@@ -35,6 +36,7 @@ _REASON_TEXT = (
     "out_of_order",
     "malformed_json",
     "feed_circuit_breaker",
+    "implausible_level",
 )
 
 _MALFORMED_RATE_THRESHOLD = 0.05
@@ -164,6 +166,13 @@ def validate_quote_packet_fast(*, epic: str, bid: float, offer: float) -> int:
     mid = (bid + offer) * 0.5
     if mid > 0.0 and spread / mid > 0.10:
         return REASON_SPREAD_TOO_WIDE
+    try:
+        from system.quote_sanity import plausible_mid_for_epic
+
+        if not plausible_mid_for_epic(epic, mid):
+            return REASON_IMPLAUSIBLE_LEVEL
+    except Exception:
+        pass
     oo = _check_out_of_order(epic, bid, offer)
     if oo != REASON_OK:
         return oo
@@ -197,7 +206,9 @@ def reject_packet_code(code: int) -> None:
     # Circuit-breaker drops are a consequence of the breaker, not evidence of
     # malformed traffic — counting them kept the 60s window at 100% bad and
     # re-tripped the breaker the instant it expired, forever.
-    if int(code) != REASON_CIRCUIT_BREAKER:
+    # Implausible epic bands (e.g. Yahoo ~100 on EURUSD) are intentional
+    # sanity rejects — do not inflate the malformed-rate circuit breaker.
+    if int(code) not in (REASON_CIRCUIT_BREAKER, REASON_IMPLAUSIBLE_LEVEL):
         _record_traffic(accepted=False)
 
 
@@ -249,6 +260,35 @@ def get_packet_sanitizer_health() -> dict[str, Any]:
             else "",
             "cb_triggered_at": _cb_triggered_at,
         }
+
+
+def reanchor_epic_mid(epic: str) -> None:
+    """Clear jump-guard anchor for an epic — used by desk Yahoo→hub heal."""
+    key = str(epic or "").strip()
+    if not key:
+        return
+    with _lock:
+        _last_mid_by_epic.pop(key, None)
+        _oo_reject_streak.pop(key, None)
+
+
+def clear_feed_circuit_breaker_for_heal(*, reason: str = "desk_heal") -> bool:
+    """Lift a stuck feed circuit breaker so Yahoo hub bridge can publish."""
+    global _cb_until, _cb_triggered_at
+    was_active = feed_circuit_breaker_active()
+    with _lock:
+        _cb_until = 0.0
+        _cb_triggered_at = 0.0
+        # Drain reject window so heal publishes don't immediately re-trip.
+        _traffic_window.clear()
+    if was_active:
+        try:
+            from system.engine_log import log_engine
+
+            log_engine(f"PacketValidator: circuit breaker cleared ({reason})")
+        except Exception:
+            pass
+    return was_active
 
 
 def reset_packet_validator_for_tests() -> None:

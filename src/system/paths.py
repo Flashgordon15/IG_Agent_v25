@@ -3,20 +3,56 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 from pathlib import Path
 
 _APEX_V30_SUPPORT = Path("Library") / "Application Support" / "IG Agent Apex" / "v30-production"
+_BRIDGED_MARK = ".data_root_bridged"
+_BRIDGE_REL_PATHS = (
+    "trade_support_status.json",
+    "edits_only_close_queue.json",
+    "runtime_state.json",
+    "state/broker_snapshot.json",
+    "learning_db.sqlite3",
+    "ml_training_store.jsonl",
+    "ml_model",
+    "ohlc_cache",
+)
 
 
 def is_v30_monolith() -> bool:
-    """True when the active runtime is the v30 Apex monolith (not legacy v25/v29 data plane)."""
+    """True when the active runtime is the v30 Apex monolith (isolated App Support store)."""
     try:
         from system.app_identity import APP_VERSION
 
         return str(APP_VERSION).startswith("30.")
     except Exception:
         return False
+
+
+def is_v31_desk() -> bool:
+    """True for Trading Desk v31.x — uses src/data/v31-production by default."""
+    try:
+        from system.app_identity import APP_VERSION
+
+        return str(APP_VERSION).startswith("31.")
+    except Exception:
+        return False
+
+
+def legacy_src_data_dir() -> Path:
+    """Pre-unification writable tree (src/data) — bridge source only."""
+    d = project_root() / "src" / "data"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def v31_production_data_dir() -> Path:
+    d = project_root() / "src" / "data" / "v31-production"
+    d.mkdir(parents=True, exist_ok=True)
+    _ensure_data_subdirs(d)
+    return d
 
 
 def apex_isolated_root() -> Path:
@@ -120,20 +156,155 @@ def config_dir() -> Path:
     return project_root() / "config"
 
 
+def _ensure_data_subdirs(root: Path) -> None:
+    for sub in ("logs", "state", "state_cfd", "state_sb", "historical", "ohlc_cache"):
+        (root / sub).mkdir(parents=True, exist_ok=True)
+
+
+def bridge_legacy_data_into(target: Path, *, legacy: Path | None = None) -> list[str]:
+    """
+    One-shot bridge: copy/symlink critical artifacts from legacy src/data into
+    the unified data root when missing or empty stubs.
+
+    Safe while the agent holds the legacy learning DB open — we only replace
+    empty stubs in the target tree and never truncate a non-empty target DB.
+    """
+    legacy = legacy or legacy_src_data_dir()
+    try:
+        if target.resolve() == legacy.resolve():
+            return []
+    except OSError:
+        return []
+
+    actions: list[str] = []
+    _ensure_data_subdirs(target)
+    mark = target / _BRIDGED_MARK
+
+    for rel in _BRIDGE_REL_PATHS:
+        src = legacy / rel
+        dst = target / rel
+        if not src.exists():
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if dst.exists() or dst.is_symlink():
+                # Replace empty learning_db stub with a link to the real DB.
+                if (
+                    rel.endswith("learning_db.sqlite3")
+                    and dst.is_file()
+                    and not dst.is_symlink()
+                    and dst.stat().st_size == 0
+                    and src.is_file()
+                    and src.stat().st_size > 0
+                ):
+                    dst.unlink()
+                    os.symlink(src.resolve(), dst)
+                    actions.append(f"symlink_empty_stub:{rel}")
+                # Empty ohlc_cache/ dir created by _ensure_data_subdirs blocks
+                # the directory symlink — populate missing bar files from legacy.
+                elif (
+                    rel == "ohlc_cache"
+                    and dst.is_dir()
+                    and not dst.is_symlink()
+                    and src.is_dir()
+                ):
+                    try:
+                        empty = not any(dst.iterdir())
+                    except OSError:
+                        empty = False
+                    if empty:
+                        try:
+                            dst.rmdir()
+                            os.symlink(src.resolve(), dst)
+                            actions.append(f"symlink_empty_dir:{rel}")
+                        except OSError:
+                            for child in src.iterdir():
+                                target_child = dst / child.name
+                                if target_child.exists() or target_child.is_symlink():
+                                    continue
+                                try:
+                                    os.symlink(child.resolve(), target_child)
+                                    actions.append(f"symlink:{rel}/{child.name}")
+                                except OSError:
+                                    continue
+                    else:
+                        for child in src.iterdir():
+                            target_child = dst / child.name
+                            if target_child.exists() or target_child.is_symlink():
+                                continue
+                            try:
+                                os.symlink(child.resolve(), target_child)
+                                actions.append(f"symlink:{rel}/{child.name}")
+                            except OSError:
+                                continue
+                continue
+            if src.is_dir():
+                os.symlink(src.resolve(), dst)
+                actions.append(f"symlink_dir:{rel}")
+            elif rel.endswith(".sqlite3"):
+                os.symlink(src.resolve(), dst)
+                actions.append(f"symlink:{rel}")
+            else:
+                # Prefer symlink for large training stores; copy small JSON status.
+                if rel.endswith(".jsonl") or rel.endswith("model.pkl"):
+                    os.symlink(src.resolve(), dst)
+                    actions.append(f"symlink:{rel}")
+                else:
+                    shutil.copy2(src, dst)
+                    actions.append(f"copy:{rel}")
+        except OSError:
+            continue
+
+    if actions and not mark.exists():
+        try:
+            mark.write_text(
+                "bridged_from=" + str(legacy.resolve()) + "\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+    return actions
+
+
 def data_dir() -> Path:
-    """Writable runtime state — v30 isolated namespace when Apex monolith is active."""
+    """
+    Writable runtime state — must match session ``IG_DATA_ROOT`` when set.
+
+    Priority:
+      1. ``IG_AGENT_DATA_DIR`` (explicit override)
+      2. ``IG_DATA_ROOT`` (session identity / health data_root)
+      3. Apex isolated store (shadow/v30 desktop profiles)
+      4. Legacy ``src/data``
+    """
     env = os.environ.get("IG_AGENT_DATA_DIR", "").strip()
     if env:
         d = Path(env).resolve()
         d.mkdir(parents=True, exist_ok=True)
+        _ensure_data_subdirs(d)
+        bridge_legacy_data_into(d)
         return d
+
+    ig_root = os.environ.get("IG_DATA_ROOT", "").strip()
+    if ig_root:
+        d = Path(ig_root).resolve()
+        d.mkdir(parents=True, exist_ok=True)
+        _ensure_data_subdirs(d)
+        bridge_legacy_data_into(d)
+        return d
+
+    # v31 Trading Desk default — never divert to Apex Application Support.
+    if is_v31_desk():
+        d = v31_production_data_dir()
+        bridge_legacy_data_into(d)
+        return d
+
     if _use_apex_isolated_store():
         d = apex_isolated_root() / "data"
-        for sub in ("logs", "state", "historical", "ohlc_cache"):
-            (d / sub).mkdir(parents=True, exist_ok=True)
+        _ensure_data_subdirs(d)
         return d
-    d = project_root() / "src" / "data"
-    d.mkdir(parents=True, exist_ok=True)
+
+    d = legacy_src_data_dir()
+    _ensure_data_subdirs(d)
     return d
 
 
@@ -168,8 +339,46 @@ def triage_db_path() -> Path:
     return analytics_dir() / "triage_v30.db"
 
 
-def state_dir() -> Path:
+def engine_state_subdir() -> str | None:
+    """Per-engine state namespace when ``IG_ENGINE_ORIGIN`` / CLI is active."""
+    explicit = os.environ.get("IG_STATE_DIR", "").strip()
+    if explicit:
+        return None
+    sub = os.environ.get("IG_ENGINE_STATE_SUBDIR", "").strip()
+    if sub:
+        return sub
+    origin = os.environ.get("IG_ENGINE_ORIGIN", "").strip().upper()
+    if origin == "QUANT_SNIPER":
+        return "state_cfd"
+    if origin == "MACRO_SENTINEL":
+        return "state_sb"
+    return None
+
+
+def shared_state_dir() -> Path:
+    """Cross-engine operator state (deploy hold, REST budget, manual stop)."""
     d = data_dir() / "state"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def state_dir() -> Path:
+    """
+    Process-local runtime state.
+
+    v32 dual-port: ``QUANT_SNIPER`` → ``state_cfd/``, ``MACRO_SENTINEL`` → ``state_sb/``.
+    Single-process default remains ``state/``.
+    """
+    explicit = os.environ.get("IG_STATE_DIR", "").strip()
+    if explicit:
+        d = Path(explicit).resolve()
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+    sub = engine_state_subdir()
+    if sub:
+        d = data_dir() / sub
+    else:
+        d = data_dir() / "state"
     d.mkdir(parents=True, exist_ok=True)
     return d
 

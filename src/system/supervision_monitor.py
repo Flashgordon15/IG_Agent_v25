@@ -72,8 +72,11 @@ def evaluate_supervision_drift(*, port: int = 8080) -> dict[str, Any]:
             warnings.append("launchd_watchdog_job_loaded_but_process_not_detected")
 
         duplicate = _duplicate_main_pids()
-        if len(duplicate) > 1:
+        v32_dual = _v32_dual_supervision_expected()
+        if len(duplicate) > 1 and not v32_dual:
             issues.append(f"duplicate_main_py_processes:{len(duplicate)}")
+        elif len(duplicate) > 1 and v32_dual and not _both_v32_ports_listening():
+            warnings.append(f"v32_dual_processes_unhealthy:{len(duplicate)}")
 
         try:
             from system.shutdown_cleanup import supervision_utility_permission_issues
@@ -117,6 +120,50 @@ def _duplicate_main_pids() -> list[int]:
     except Exception:
         pass
     return pids
+
+
+def _port_health_ok(port: int, *, timeout_sec: float = 2.0) -> bool:
+    import urllib.error
+    import urllib.request
+
+    url = f"http://127.0.0.1:{int(port)}/api/health"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "IG-Agent-Supervision/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+            return 200 <= resp.status < 300
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+
+def _both_v32_ports_listening() -> bool:
+    """True when intentional v32 twin (:8080 + :8081) both respond to /api/health."""
+    import os
+
+    marker = os.environ.get("IG_V32_DUAL_PORT", "").strip() == "1"
+    cfd_ok = _port_health_ok(8080)
+    sb_ok = _port_health_ok(8081)
+    if marker and cfd_ok and sb_ok:
+        return True
+    return cfd_ok and sb_ok
+
+
+def _v32_dual_supervision_expected() -> bool:
+    import os
+    from pathlib import Path
+
+    if os.environ.get("IG_V32_DUAL_PORT", "").strip() == "1":
+        return True
+    try:
+        from system.paths import data_dir
+
+        root = Path(data_dir())
+        if (root / "state" / "v32_dual_supervision.json").is_file():
+            return True
+        if (root / "state" / "v32_legacy_watchdog_paused.json").is_file():
+            return True
+    except Exception:
+        pass
+    return _both_v32_ports_listening()
 
 
 def attempt_supervision_repair() -> tuple[bool, str]:

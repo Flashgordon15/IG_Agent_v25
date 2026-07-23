@@ -355,6 +355,20 @@ def _check_hub_quote_staleness() -> None:
                 return
         except Exception:
             pass
+        # Direct Yahoo→hub bridge — heals Gate 3 without waiting for poller thread.
+        try:
+            from runtime.desk_self_assess import bridge_stale_hub_from_yahoo
+
+            bridged = bridge_stale_hub_from_yahoo(force=False)
+            n = len(bridged.get("bridged") or [])
+            if n:
+                _record_mitigation(
+                    "hub_quote_staleness_yahoo_bridge",
+                    detail=f"bridged={n} max_age={max_age:.1f}s",
+                )
+                return
+        except Exception:
+            pass
         if not _failover_engaged and max_age >= 20.0:
             _engage_failover_recovery(f"hub_quote_staleness max_age={max_age:.1f}s")
     except Exception as exc:

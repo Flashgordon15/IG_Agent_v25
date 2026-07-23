@@ -36,6 +36,8 @@ _BUCKET_SPECS: dict[str, tuple[float, float]] = {
     # GET /confirms/{dealRef} polls — isolated from POST /positions/otc lane.
     "ig_confirms": (24.0, 24.0 / 60.0),
     "ig_ledger": (2.0, 2.0 / 60.0),
+    # Open-book supervision — isolated from ledger/account traffic.
+    "ig_positions": (10.0, 10.0 / 60.0),
     # Night-matrix poller: 7 epics / ~3s ≈ 2.3 req/s — old 8/min starved feeds.
     "yahoo": (14.0, 7.0 / 3.0),
 }
@@ -477,7 +479,7 @@ def _is_order_transmit_path(method: str, path: str) -> bool:
 
 
 def _demo_chaos_guardian_order_bypass() -> bool:
-    """Demo throughput — skip ig_orders token bucket when traffic governor is bypassed."""
+    """Demo throughput — elevated order lanes when traffic governor is bypassed."""
     try:
         from system.demo_execution_plane import demo_throughput_active
 
@@ -493,6 +495,22 @@ def _demo_chaos_guardian_order_bypass() -> bool:
 
 _demo_buckets_applied = False
 _CONFIRM_POLL_TOKEN_COST = 0.25
+
+
+def _force_order_lane_token(*, bucket_name: str, cost: float = 1.0) -> bool:
+    """Guarantee one transmit token for a real POST/PUT/DELETE order path."""
+    bucket = _buckets.get(bucket_name)
+    if bucket is None:
+        return True
+    with bucket._lock:
+        bucket._refill_unlocked()
+        need = float(cost)
+        if bucket.tokens < need:
+            bucket.tokens = need
+        bucket.tokens -= need
+        if bucket.queued_waits > 0:
+            bucket.queued_waits = max(0, bucket.queued_waits - 1)
+    return True
 
 
 def _apply_demo_throughput_bucket_rates() -> None:
@@ -514,6 +532,10 @@ def _apply_demo_throughput_bucket_rates() -> None:
             bucket.capacity = cap
             bucket.refill_rate = rate
             bucket.tokens = min(bucket.tokens, cap)
+    log_engine(
+        "ChaosGuardian: demo throughput order-lane rates armed "
+        "ig_orders=8/min ig_confirms=48/min ig_ledger=4/min"
+    )
 
 
 def _bucket_for_ig_path(method: str, path: str) -> str:
@@ -521,6 +543,8 @@ def _bucket_for_ig_path(method: str, path: str) -> str:
         return "ig_confirms"
     p = str(path or "").upper()
     m = str(method or "").upper()
+    if m == "GET" and "POSITION" in p:
+        return "ig_positions"
     if m in ("POST", "PUT", "DELETE") and any(
         k in p for k in ("POSITION", "WORKINGORDER", "DEAL", "CONFIRM", "ORDER")
     ):
@@ -561,23 +585,86 @@ def acquire_outbound_token(
         elif category in ("orders", "order"):
             bucket_name = "ig_orders"
         elif category in ("ledger", "account", "positions"):
-            if _is_order_transmit_path(method, path):
+            if (
+                str(method or "").upper() == "GET"
+                and "POSITION" in str(path or "").upper()
+            ):
+                bucket_name = "ig_positions"
+            elif _is_order_transmit_path(method, path):
                 bucket_name = "ig_orders"
             else:
                 bucket_name = "ig_ledger"
         else:
             bucket_name = _bucket_for_ig_path(method, path)
 
-    if str(priority or "").lower() in ("fast_pass", "micro_scalp"):
+    pri = str(priority or "").lower()
+    if pri in ("fast_pass", "micro_scalp"):
         if _try_grant_fast_pass(bucket_name=bucket_name, epic=epic, cost=token_cost):
+            try:
+                from system import shared_rest_budget
+
+                if shared_rest_budget.is_coordinated(bucket_name):
+                    shared_rest_budget.record(bucket_name)
+            except Exception:
+                pass
             return True
 
     _apply_demo_throughput_bucket_rates()
+
+    # Wire-order priority from rest_client (budget_priority=True): force one
+    # ig_orders token so MARKET POST is not soft-deadlocked by empty fast-pass
+    # queue / refill theft. Does not apply to bare acquire() callers/tests.
+    if (
+        pri == "order_priority"
+        and bucket_name == "ig_orders"
+        and _is_order_transmit_path(method, path)
+    ):
+        ok = _force_order_lane_token(bucket_name=bucket_name, cost=token_cost)
+        if ok:
+            try:
+                from system import shared_rest_budget
+
+                if shared_rest_budget.is_coordinated(bucket_name):
+                    shared_rest_budget.record(bucket_name)
+            except Exception:
+                pass
+            log_engine(
+                f"ChaosGuardian: order-priority token forced bucket={bucket_name} "
+                f"path={method} {str(path or '')[:48]}"
+            )
+            return True
+
+    # Cross-process budget coordination — keep the COMBINED outbound rate of all
+    # processes (agent + support wrappers) under IG's real limit. Advisory and
+    # fail-open: only coordinated read lanes, only a brief throttle when the
+    # global rate is well over cap, never orders/confirms/fast-pass.
+    try:
+        from system import shared_rest_budget
+
+        if shared_rest_budget.is_coordinated(bucket_name):
+            spec = _BUCKET_SPECS.get(bucket_name)
+            limit_pm = float(spec[1]) * 60.0 if spec else 0.0
+            if limit_pm > 0:
+                deadline = time.monotonic() + min(float(max_wait_sec), 3.0)
+                while shared_rest_budget.recent_count(
+                    bucket_name
+                ) >= 2.0 * limit_pm and time.monotonic() < deadline:
+                    time.sleep(0.25)
+    except Exception:
+        pass
 
     bucket = _buckets.get(bucket_name)
     if bucket is None:
         return True
     ok = bucket.acquire(token_cost, max_wait_sec=max_wait_sec)
+    if ok:
+        try:
+            from system import shared_rest_budget
+
+            if shared_rest_budget.is_coordinated(bucket_name):
+                shared_rest_budget.record(bucket_name)
+        except Exception:
+            pass
     if not ok:
         log_engine(
             f"ChaosGuardian: token bucket exhausted bucket={bucket_name} "
@@ -871,14 +958,14 @@ def _emergency_flatten_drift(*, rest: Any, reason: str) -> dict[str, Any]:
         size = float(pos.get("size") or 0)
         if not deal_id or size <= 0:
             continue
-        close_dir = "SELL" if side == "BUY" else "BUY"
+        # close_position expects OPEN side and inverts once — never pass close_dir.
         try:
             if not acquire_outbound_token("ig", category="orders", max_wait_sec=10.0):
                 result["errors"].append(f"token_exhausted:{deal_id}")
                 continue
             rest.close_position(
                 deal_id,
-                direction=close_dir,
+                direction=side,
                 size=size,
                 epic=epic or None,
                 currency_code=currency,

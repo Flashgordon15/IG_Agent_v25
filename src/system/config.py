@@ -7,6 +7,7 @@ Modules must use ``Config`` properties only; no inline numeric defaults.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -420,6 +421,12 @@ class Config:
         return bool(self._data.get("volatility_bracket_enabled", False))
 
     @property
+    def sandbox_mode_enabled(self) -> bool:
+        if os.environ.get("IG_SANDBOX", "").strip().lower() in ("1", "true", "yes"):
+            return True
+        return bool(self._data.get("sandbox_mode_enabled", False))
+
+    @property
     def adaptive_trailing_trigger_points(self) -> float:
         return float(self._data["adaptive_trailing_trigger_points"])
 
@@ -529,10 +536,41 @@ class Config:
         return bool(self._data.get("one_position_per_epic", True))
 
     @property
-    def max_open_positions(self) -> int:
+    def max_open_positions(self) -> int | None:
         if "max_open_positions" in self._data:
-            return max(1, min(18, int(self._data["max_open_positions"])))
+            raw = self._data["max_open_positions"]
+            if raw is None:
+                return None
+            try:
+                n = int(raw)
+            except (TypeError, ValueError):
+                return self.max_positions_per_epic
+            if n <= 0:
+                return None
+            return max(1, min(18, n))
         return self.max_positions_per_epic
+
+    @property
+    def engine_position_caps(self) -> dict[str, int | None]:
+        raw = self._data.get("engine_position_caps")
+        if not isinstance(raw, dict):
+            return {}
+        out: dict[str, int | None] = {}
+        for key, val in raw.items():
+            if val is None:
+                out[str(key)] = None
+            else:
+                try:
+                    n = int(val)
+                    out[str(key)] = None if n <= 0 else max(1, n)
+                except (TypeError, ValueError):
+                    out[str(key)] = None
+        return out
+
+    @property
+    def engine_lanes(self) -> dict[str, Any]:
+        raw = self._data.get("engine_lanes")
+        return dict(raw) if isinstance(raw, dict) else {}
 
     @property
     def max_positions_per_epic(self) -> int:

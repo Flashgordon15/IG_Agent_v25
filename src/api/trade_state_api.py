@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 
 def get_trade_state_response() -> dict[str, Any]:
     from runtime.dynamic_limit_engine import snapshot as dynamic_snapshot
+    from runtime.micro_gbp_exit import snapshot as gbp_exit_snapshot
     from runtime.trade_lifecycle import snapshot as lifecycle_snapshot
     from runtime.virtual_stop_loss import virtual_stop_snapshot
     from system.unified_runtime_state import snapshot as unified_snapshot
@@ -20,6 +21,7 @@ def get_trade_state_response() -> dict[str, Any]:
         "lifecycle": lc,
         "stops": virtual_stop_snapshot(),
         "dynamic_limits": dynamic_snapshot(),
+        "gbp_exits": gbp_exit_snapshot(),
         "sizing": unified.get("sizing") or {},
         "execution": unified.get("execution") or {},
         "startup_diagnostics": unified.get("startup_diagnostics") or {},

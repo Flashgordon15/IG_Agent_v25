@@ -177,6 +177,850 @@ def api_trade_state() -> JSONResponse:
     return api_trade_state_json()
 
 
+@router.get("/api/position_risk_monitor")
+def api_position_risk_monitor() -> dict[str, Any]:
+    """Audit open positions vs armed GBP/virtual/dynamic risk tracks."""
+    from api.position_risk_monitor import build_position_risk_report
+
+    return build_position_risk_report()
+
+
+@router.get("/api/positions/live")
+async def api_positions_live() -> dict[str, Any]:
+    """Fast IG-sync open book for terminal UI — cache-only, 2s hard cap."""
+    import asyncio
+
+    from api.positions_live import (
+        build_live_positions_payload,
+        last_good_live_positions_payload,
+    )
+
+    try:
+        return await _run_dashboard_sync(build_live_positions_payload, timeout=2.0)
+    except asyncio.TimeoutError:
+        # Never invent an empty flat book on timeout when last-good had opens.
+        return last_good_live_positions_payload(error="timeout")
+
+
+@router.get("/api/desk/why_idle")
+def api_desk_why_idle(heal: bool = False) -> dict[str, Any]:
+    """Self-assessment — why entries are idle + optional Yahoo hub bridge heal."""
+    from runtime.desk_self_assess import run_self_assess_tick
+
+    return run_self_assess_tick(heal=bool(heal))
+
+
+@router.get("/api/desk/simplified_accounting")
+def api_desk_simplified_accounting() -> dict[str, Any]:
+    """Sovereign accounting board — today net / last 10 / daily history + health."""
+    try:
+        from diagnostics.performance_journal import simplified_accounting_payload
+
+        return simplified_accounting_payload()
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": f"{type(exc).__name__}:{exc}",
+            "today_net_realized_pnl_gbp": 0.0,
+            "last_10_closed_trades": [],
+            "daily_history": [],
+            "empty_day": True,
+            "system_state": {"is_healthy": False, "operational_badge": False},
+        }
+
+
+@router.get("/api/desk/weekly_metrics")
+def api_desk_weekly_metrics() -> dict[str, Any]:
+    """Rolling 7-day desk ledger — Sharpe, asymmetric PF, per-account assets."""
+    try:
+        from analytics.weekly_performance_ledger import WeeklyPerformanceLedger
+
+        return WeeklyPerformanceLedger.compile_weekly_metrics()
+    except Exception as exc:
+        empty = {
+            "weekly_sharpe": None,
+            "asymmetric_profit_factor": 0.0,
+            "win_rate": 0.0,
+            "wins": 0,
+            "losses": 0,
+            "gross_wins_gbp": 0.0,
+            "gross_losses_gbp": 0.0,
+            "net_pnl_gbp": 0.0,
+            "sample_n": 0,
+            "trading_days": 0,
+            "asset_breakdown": [],
+        }
+        return {
+            "ok": False,
+            "error": f"{type(exc).__name__}:{exc}",
+            "week_start": "",
+            "week_end": "",
+            "merged": dict(empty),
+            "accounts": {},
+            "asset_breakdown": [],
+        }
+
+
+@router.get("/api/kernel/shm_snapshot")
+def api_kernel_shm_snapshot() -> dict[str, Any]:
+    """v33 SHM ring buffer snapshot — UI multiplex / desk polling (no disk)."""
+    try:
+        from kernel.shm_facade import snapshot_payload
+
+        return snapshot_payload()
+    except Exception as exc:
+        return {
+            "ok": False,
+            "attached": False,
+            "error": f"{type(exc).__name__}:{exc}",
+            "positions": [],
+            "stats": {},
+        }
+
+
+@router.get("/api/desk/rest_budget")
+def api_desk_rest_budget() -> dict[str, Any]:
+    """Cross-process + in-process REST budget snapshot for desk operators."""
+    out: dict[str, Any] = {"ok": True}
+    try:
+        from system.rest_api_budget import get_rest_api_budget
+
+        metrics = get_rest_api_budget().metrics()
+        out["rest_api_budget"] = metrics
+        out["pressure_level"] = str(metrics.get("pressure_level") or "IDLE")
+        # Align with ops_strip / entries_blocked_by_rest_pressure — ELEVATED
+        # already pauses NEW entries (budget reserved for closes).
+        out["rest_pressure"] = out["pressure_level"] in (
+            "ELEVATED",
+            "HIGH",
+            "CRITICAL",
+        )
+    except Exception as exc:
+        out["rest_api_budget_error"] = f"{type(exc).__name__}"
+        out["pressure_level"] = "UNKNOWN"
+        out["rest_pressure"] = False
+    try:
+        from system import shared_rest_budget
+
+        out["shared"] = shared_rest_budget.snapshot()
+    except Exception as exc:
+        out["shared_error"] = f"{type(exc).__name__}"
+    try:
+        from system import chaos_guardian
+
+        snap = getattr(chaos_guardian, "snapshot", None)
+        if callable(snap):
+            out["token_buckets"] = (snap() or {}).get("token_buckets") or {}
+        else:
+            out["token_buckets"] = (getattr(chaos_guardian, "_snapshot", {}) or {}).get(
+                "token_buckets"
+            ) or {}
+    except Exception:
+        out["token_buckets"] = {}
+    return out
+
+
+def _desk_idle_reason_for_ops() -> dict[str, Any] | None:
+    """One clear desk-level idle reason (slot / bars / gate) — not four UI copies."""
+    import time as _time
+
+    try:
+        from runtime.intraday_slot_tracker import (
+            intraday_slots_enabled,
+            slot_id_for_timestamp,
+        )
+
+        cfg = None
+        try:
+            from system.config_loader import get_config
+
+            cfg = get_config()
+        except Exception:
+            cfg = None
+        if intraday_slots_enabled(cfg):
+            sid = slot_id_for_timestamp(_time.time(), cfg) or ""
+            if sid == "us_close":
+                try:
+                    from system.strategy_quality_gate import evaluate_entry_slot_gate
+
+                    slot_ok, _slot_detail = evaluate_entry_slot_gate(cfg)
+                    if not slot_ok:
+                        return {
+                            "code": "us_close",
+                            "label": "US Close session window — desk idle is expected, not a crash",
+                        }
+                except Exception:
+                    return {
+                        "code": "us_close",
+                        "label": "US Close session window — desk idle is expected, not a crash",
+                    }
+            # Surface strategy_quality slot blocks as a clear desk idle reason
+            try:
+                from system.strategy_quality_gate import evaluate_entry_slot_gate
+
+                ok_slot, slot_detail = evaluate_entry_slot_gate(cfg)
+                if not ok_slot:
+                    return {
+                        "code": "slot_blocked",
+                        "label": str(slot_detail or f"slot {sid} blocked"),
+                    }
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        from system.regime_state import get_regime_state_snapshot
+
+        snap = get_regime_state_snapshot() or {}
+        for m in snap.get("markets") or []:
+            if not isinstance(m, dict):
+                continue
+            if str(m.get("epic") or "") != "IX.D.DOW.IFM.IP":
+                continue
+            reason = str(m.get("reason") or "")
+            gate = m.get("strategy_gate") if isinstance(m.get("strategy_gate"), dict) else {}
+            if "insufficient" in reason.lower():
+                return {
+                    "code": "insufficient_bars",
+                    "label": "DOW warming — insufficient bars for regime / strategy gate",
+                }
+            if gate.get("allow_entries") is False:
+                mode = str(gate.get("mode") or reason or "gated")
+                return {
+                    "code": "entries_gated",
+                    "label": f"DOW entries gated ({mode})",
+                }
+            break
+    except Exception:
+        pass
+    try:
+        from system.strategy_quality_gate import evaluate_desk_halt_gate
+
+        # Live gate — never trust a stale desk_self_assess WR halt string.
+        ok_halt, halt_detail, _halt_val = evaluate_desk_halt_gate()
+        if not ok_halt:
+            return {
+                "code": "strategy_quality",
+                "label": str(halt_detail or "strategy quality desk halt"),
+            }
+    except Exception:
+        pass
+    try:
+        from runtime.desk_self_assess import last_assessment
+
+        assess = last_assessment() or {}
+        primary = assess.get("primary_blocker") if assess.get("idle") else None
+        if isinstance(primary, dict) and primary.get("id"):
+            # Skip stale strategy_quality when live gate is clear.
+            if str(primary.get("id")) == "strategy_quality":
+                return None
+            return {
+                "code": str(primary.get("id")),
+                "label": str(primary.get("detail") or primary.get("id")),
+            }
+    except Exception:
+        pass
+    return None
+
+
+@router.get("/api/desk/ops_strip")
+def api_desk_ops_strip() -> dict[str, Any]:
+    """Read-only Trading Desk status strip — milestone + ATR R:R + macro bias.
+
+    Non-blocking disk/config peek for the Quantum Terminal UI. Never touches
+    the Lightstreamer hot path or REST budget.
+    """
+    out: dict[str, Any] = {
+        "ok": True,
+        "core_detached": False,
+        "maintenance_detached_badge": None,
+        "daily_realized_pnl_gbp": 0.0,
+        "daily_milestone_gbp": 1000.0,
+        "progress_pct": 0.0,
+        "atr_reward_risk": 3.5,
+        "grok_macro_bias": "NEUTRAL",
+        "desk_idle_reason": None,
+        "trading_path_live": False,
+        "trading_path_blockers": [],
+        "trading_path_badge": "DESK TRADING DOWN — readiness unknown",
+    }
+    try:
+        from diagnostics.performance_journal import milestone_progress_payload
+
+        mile = milestone_progress_payload()
+        out.update(
+            {
+                "daily_realized_pnl_gbp": mile.get("daily_realized_pnl_gbp", 0.0),
+                "daily_milestone_gbp": mile.get("daily_milestone_gbp", 1000.0),
+                "progress_pct": mile.get("progress_pct", 0.0),
+                "journal": mile.get("journal"),
+                "benchmark": mile.get("benchmark"),
+            }
+        )
+    except Exception as exc:
+        out["milestone_error"] = f"{type(exc).__name__}"
+    try:
+        from execution.grok_macro_bias import resolve_grok_macro_bias
+
+        out["grok_macro_bias"] = resolve_grok_macro_bias()
+    except Exception:
+        pass
+    try:
+        from diagnostics.param_tuner import load_overlay_cached
+
+        overlay = load_overlay_cached() or {}
+        vb = overlay.get("volatility_bracket") or {}
+        rr = vb.get("elevated_vol_reward_risk")
+        if rr is not None:
+            out["atr_reward_risk"] = float(rr)
+    except Exception:
+        pass
+    try:
+        from alpha.micro_sniper_ml import latest_sniper_ml_snapshot
+
+        # Ops strip badge must reflect hot-path (DOW) sniper only — never show
+        # a stale Nikkei/Gold/FX cache hit as the desk arm signal.
+        hot_epic = "IX.D.DOW.IFM.IP"
+        try:
+            from system.config_loader import get_config
+
+            cfg = get_config()
+            dual = cfg.get("dual_core") if hasattr(cfg, "get") else {}
+            excluded = {
+                str(e).strip()
+                for e in ((dual or {}).get("exclude_from_hot_path") or [])
+            }
+            raw_hot = (dual or {}).get("hot_path_epics") or []
+            candidates = [str(e).strip() for e in raw_hot if str(e).strip()]
+            if not candidates:
+                candidates = [hot_epic]
+            hot_candidates = [e for e in candidates if e not in excluded] or [
+                e for e in [hot_epic] if e not in excluded
+            ]
+        except Exception:
+            hot_candidates = [hot_epic]
+
+        snap = None
+        for epic in hot_candidates:
+            row = latest_sniper_ml_snapshot(epic=epic)
+            if row.get("p_success") is not None and str(row.get("epic") or "") == epic:
+                snap = row
+                break
+        if snap is None:
+            # Fall back to global only when it already matches a hot-path epic.
+            global_snap = latest_sniper_ml_snapshot()
+            g_epic = str(global_snap.get("epic") or "")
+            if global_snap.get("p_success") is not None and g_epic in set(
+                hot_candidates
+            ):
+                snap = global_snap
+        if snap is not None and snap.get("p_success") is not None:
+            out["sniper_ml"] = {
+                "p_success": snap.get("p_success"),
+                "approved": snap.get("approved"),
+                "threshold": snap.get("threshold"),
+                "epic": snap.get("epic"),
+                "ts": snap.get("ts"),
+            }
+    except Exception:
+        pass
+    try:
+        out["desk_idle_reason"] = _desk_idle_reason_for_ops()
+    except Exception:
+        out["desk_idle_reason"] = None
+    try:
+        from execution.maintenance_detachment import is_core_detached
+
+        detached = is_core_detached()
+        out["core_detached"] = detached
+        if detached:
+            out["maintenance_detached_badge"] = (
+                "[🛠️ MAINTENANCE DEVELOPMENT MODE - TRADING DETACHED]"
+            )
+    except Exception:
+        out["core_detached"] = False
+    try:
+        from runtime.trading_path_readiness import compute_trading_path_readiness
+
+        path = compute_trading_path_readiness(desk_idle=out.get("desk_idle_reason"))
+        out["trading_path_live"] = bool(path.get("trading_path_live"))
+        out["trading_path_blockers"] = list(path.get("blockers") or [])
+        out["trading_path_badge"] = str(path.get("badge") or "")
+        out["trading_path_primary"] = path.get("primary_blocker")
+        out["trading_path"] = path
+    except Exception as exc:
+        out["trading_path_error"] = f"{type(exc).__name__}"
+    # REST pressure — never show false OK when the governor is hot.
+    # Include ELEVATED (entries paused) and CAP BREACH from snapshot SoT.
+    try:
+        from system.rest_api_budget import get_rest_api_budget
+
+        metrics = get_rest_api_budget().metrics()
+        level = str(metrics.get("pressure_level") or "IDLE")
+        out["rest_pressure_level"] = level
+        out["rest_pressure"] = level in ("ELEVATED", "HIGH", "CRITICAL")
+        out["rest_calls_last_minute"] = int(metrics.get("calls_last_minute") or 0)
+        if out["rest_pressure"]:
+            out["rest_pressure_warning"] = (
+                f"REST PRESSURE {level} — {metrics.get('status_label')} "
+                f"(entries paused; closes reserved)"
+            )
+    except Exception:
+        out["rest_pressure"] = False
+        out["rest_pressure_level"] = "UNKNOWN"
+
+    # Cap breach badge from snapshot (authoritative under coalesce).
+    try:
+        from runtime.broker_snapshot import open_count_from_snapshot
+        from runtime.desk_stability_harness import boot_grace_active
+        from system.config_loader import get_config
+
+        cfg = get_config()
+        max_open = max(1, int(getattr(cfg, "max_open_positions", 6) or 6))
+        snap_n = open_count_from_snapshot(max_age_sec=300.0)
+        out["broker_open_snapshot"] = snap_n
+        out["max_open_positions"] = max_open
+        live_open = 0
+        try:
+            live_open = int(out.get("broker_open") or 0)
+        except (TypeError, ValueError):
+            live_open = 0
+        stale_cap_skip = boot_grace_active() and live_open <= 0
+        if snap_n is not None and snap_n > max_open and not stale_cap_skip:
+            out["cap_breach"] = True
+            out["cap_breach_warning"] = (
+                f"CAP BREACH broker_open={snap_n}>{max_open} — flatten before entries"
+            )
+        else:
+            out["cap_breach"] = False
+    except Exception:
+        out["cap_breach"] = False
+
+    # Compose badge — CAP BREACH / REST PRESSURE win over green path.
+    badge_bits: list[str] = []
+    if out.get("cap_breach"):
+        badge_bits.append(str(out.get("cap_breach_warning") or "CAP BREACH"))
+    if out.get("rest_pressure"):
+        badge_bits.append(str(out.get("rest_pressure_warning") or "REST PRESSURE"))
+    if badge_bits:
+        if out.get("trading_path_live"):
+            out["trading_path_badge"] = " | ".join(
+                ["PATH LIVE"] + badge_bits
+            )
+        else:
+            base = str(out.get("trading_path_badge") or "DESK TRADING DOWN")
+            out["trading_path_badge"] = f"{base} — " + " | ".join(badge_bits)
+
+    # Composite desk R/A/G — single traffic light for Terminal header / ops_strip.
+    # Never treat health.ok alone as green — path / SoT / liveness are separate.
+    try:
+        from runtime.desk_dev_controls import entries_paused
+
+        paused = bool(entries_paused())
+    except Exception:
+        paused = False
+    out["entries_paused"] = paused
+    level = str(out.get("rest_pressure_level") or "IDLE").upper()
+    path_live = bool(out.get("trading_path_live"))
+    if out.get("cap_breach") or level == "CRITICAL":
+        rag, rag_label = "R", "RED — cap/REST critical"
+    elif paused or out.get("rest_pressure") or level in ("HIGH", "ELEVATED"):
+        rag, rag_label = "A", "AMBER — entries paused or REST pressure"
+    elif path_live:
+        rag, rag_label = "G", "GREEN — path live"
+    else:
+        rag, rag_label = "A", "AMBER — path not live"
+    out["desk_rag"] = rag
+    out["desk_rag_label"] = rag_label
+
+    # Broker SoT + desk liveness — surfaced separately so UI never greenwashes.
+    sot: dict[str, Any] = {
+        "count": out.get("broker_open_snapshot"),
+        "source": "broker_snapshot",
+        "ok": True,
+    }
+    try:
+        from runtime.broker_snapshot import open_count_from_snapshot
+        from runtime.desk_stability_harness import trade_support_stale_budget_sec
+
+        snap_n = open_count_from_snapshot(max_age_sec=300.0)
+        ts_path = None
+        sot_budget = trade_support_stale_budget_sec()
+        try:
+            from system.paths import data_dir
+
+            ts_file = data_dir() / "trade_support_status.json"
+            if ts_file.is_file():
+                import json as _json
+                import time as _time
+
+                raw = _json.loads(ts_file.read_text(encoding="utf-8"))
+                age = _time.time() - float(raw.get("ts") or 0)
+                sot = {
+                    "count": int(raw.get("broker_open") or 0),
+                    "source": "trade_support",
+                    "status_age_sec": round(age, 1),
+                    "ok": age < sot_budget,
+                    "stale_budget_sec": sot_budget,
+                    "snapshot_count": snap_n,
+                }
+                ts_path = True
+        except Exception:
+            ts_path = False
+        if not ts_path:
+            sot = {
+                "count": snap_n,
+                "source": "broker_snapshot",
+                "ok": snap_n is not None,
+            }
+    except Exception:
+        pass
+    out["broker_open_sot"] = sot
+
+    liveness: dict[str, Any] = {"ok": None, "has_open_risk": None}
+    try:
+        from runtime.trading_desk_liveness import evaluate_liveness
+
+        liv = evaluate_liveness()
+        if isinstance(liv, dict):
+            liveness = {
+                "ok": bool(liv.get("ok")),
+                "has_open_risk": bool(liv.get("has_open_risk")),
+                "open_count": liv.get("open_count"),
+                "issues": list(liv.get("issues") or [])[:6],
+            }
+    except Exception:
+        liveness = {"ok": None, "has_open_risk": None, "source": "unavailable"}
+    out["desk_liveness"] = liveness
+
+    try:
+        from runtime.feed_transport_summary import build_feed_transport_summary
+
+        out["feed_transport_summary"] = build_feed_transport_summary()
+    except Exception as exc:
+        out["feed_transport_summary"] = {
+            "label": "FEED — unavailable",
+            "error": f"{type(exc).__name__}",
+        }
+
+    # Application Stability Harness — observe-only on ops_strip (no side effects).
+    desk_stability: dict[str, Any] = {}
+    try:
+        from runtime.desk_stability_harness import (
+            evaluate_stability,
+            latest_stability,
+        )
+
+        cached = latest_stability()
+        if cached.get("desk_stability"):
+            desk_stability = dict(cached["desk_stability"])
+        else:
+            # Lightweight: reuse already-collected strip fields when possible
+            snap = evaluate_stability(act=False, in_process=True)
+            desk_stability = dict(snap.get("desk_stability") or {})
+    except Exception as exc:
+        desk_stability = {
+            "grade": "A",
+            "reasons": [f"harness_unavailable:{type(exc).__name__}"],
+            "label": "A — harness unavailable",
+        }
+    out["desk_stability"] = desk_stability
+    # Surface boot latency buffer for Terminal ops badge (30s hydration grace).
+    try:
+        boot_gate = desk_stability.get("boot_gate") if isinstance(desk_stability, dict) else None
+        if isinstance(boot_gate, dict):
+            out["boot_gate"] = {
+                "boot_started_at": boot_gate.get("boot_started_at"),
+                "boot_latency_buffer_sec": boot_gate.get("boot_latency_buffer_sec"),
+                "boot_latency_buffer_active": boot_gate.get("boot_latency_buffer_active"),
+                "false_engine_blockage_suppressed": boot_gate.get(
+                    "false_engine_blockage_suppressed"
+                ),
+                "boot_grace_active": boot_gate.get("boot_grace_active"),
+                "sot_stale_budget_sec": boot_gate.get("sot_stale_budget_sec"),
+            }
+    except Exception:
+        pass
+
+    try:
+        from system.agent_orchestration import get_orchestrator_status
+
+        orch = get_orchestrator_status()
+        out["orchestrator"] = orch
+        out["healing_active"] = bool(orch.get("healing_active"))
+        out["dual_engine_operational"] = bool(orch.get("dual_engine_operational"))
+        out["order_mutex"] = orch.get("order_mutex") or {}
+        out["mutex_reconcile"] = orch.get("mutex_reconcile")
+    except Exception as exc:
+        out["orchestrator"] = {"ok": False, "error": f"{type(exc).__name__}"}
+        out["healing_active"] = False
+        try:
+            from execution.order_in_flight_mutex import get_order_mutex
+
+            out["order_mutex"] = get_order_mutex().status()
+        except Exception:
+            out["order_mutex"] = {}
+
+    out["composite_status"] = {
+        "rag": rag,
+        "label": rag_label,
+        "path_live": path_live,
+        "rest": level,
+        "entries_paused": paused,
+        "cap_breach": bool(out.get("cap_breach")),
+        "opens": out.get("broker_open_snapshot"),
+        "sot_count": sot.get("count"),
+        "sot_ok": sot.get("ok"),
+        "liveness_ok": liveness.get("ok"),
+        "stability_grade": desk_stability.get("grade"),
+        # Explicit: health.ok must never be inferred from this strip alone.
+        "health_ok_is_not_desk_green": True,
+    }
+    return out
+
+
+@router.get("/api/desk/orchestrator")
+def api_desk_orchestrator() -> dict[str, Any]:
+    """v33 self-healing orchestrator status — healing_active for Terminal badge."""
+    try:
+        from system.agent_orchestration import get_orchestrator_status
+
+        return get_orchestrator_status()
+    except Exception as exc:
+        return {
+            "ok": False,
+            "healing_active": False,
+            "dual_engine_operational": False,
+            "error": f"{type(exc).__name__}:{exc}",
+        }
+
+
+@router.get("/api/desk/stability")
+def api_desk_stability(act: bool = False) -> dict[str, Any]:
+    """Application Stability Harness — composite grade + component SoT.
+
+    Default observe-only. Pass ``?act=1`` to allow rate-limited safe heals
+    (UI restart / trade_support heal / pause on REST CRITICAL) — never flatten,
+    never kill main.
+    """
+    try:
+        from runtime.desk_stability_harness import evaluate_stability
+
+        return evaluate_stability(act=bool(act), in_process=True)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": f"{type(exc).__name__}:{exc}",
+            "desk_stability": {
+                "grade": "R",
+                "reasons": [f"evaluate_failed:{type(exc).__name__}"],
+                "actions_taken": [],
+                "components": {},
+            },
+        }
+
+
+@router.get("/api/desk/sniper_ml")
+def api_desk_sniper_ml() -> dict[str, Any]:
+    """Live QuantumSniperMLCore P(Success) per epic for AIMarketScanner."""
+    try:
+        from alpha.micro_sniper_ml import sniper_ml_desk_payload
+
+        return sniper_ml_desk_payload()
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": f"{type(exc).__name__}:{exc}",
+            "threshold": 0.68,
+            "by_epic": {},
+            "latest": {},
+        }
+
+
+@router.get("/api/position_manager/status")
+def api_position_manager_status() -> dict[str, Any]:
+    """In-process open-position supervisor — last tick, actions, coverage."""
+    from runtime.open_position_manager import snapshot as mgr_snap
+
+    snap = mgr_snap()
+    try:
+        from runtime.micro_gbp_exit import snapshot as gbp_snap
+        from runtime.virtual_stop_loss import virtual_stop_snapshot
+        from runtime.dynamic_limit_engine import snapshot as dyn_snap
+
+        snap["gbp_tracks"] = len((gbp_snap().get("tracks") or {}))
+        snap["virtual_stops"] = len((virtual_stop_snapshot().get("positions") or []))
+        snap["dynamic_limits"] = len((dyn_snap().get("tracks") or {}))
+    except Exception:
+        pass
+    try:
+        from runtime.agent_bootstrap import get_ig_position_sync
+
+        sync = get_ig_position_sync()
+        if sync is not None:
+            s = sync.snapshot()
+            snap["sync_open"] = int(getattr(s, "total_open", 0) or 0)
+            snap["sync_status"] = str(getattr(s, "sync_status", "") or "")
+    except Exception:
+        pass
+    return {"ok": True, **snap}
+
+
+@router.get("/api/trade_support/status")
+def api_trade_support_status() -> dict[str, Any]:
+    """Always-on open-trade supervisor — last cycle, broker book, managed actions.
+
+    Reads the status file written by ``runtime.trade_support_wrapper`` (an
+    independent process using IG REST as source of truth), so it stays accurate
+    even when the in-process manager cache is stale or dead.
+    """
+    import json as _json
+    import time as _time
+
+    from system.paths import data_dir, legacy_src_data_dir
+
+    candidates = [
+        data_dir() / "trade_support_status.json",
+        legacy_src_data_dir() / "trade_support_status.json",
+    ]
+    best: dict[str, Any] | None = None
+    best_ts = -1.0
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            status = _json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        ts = float(status.get("ts") or 0)
+        if ts >= best_ts:
+            best_ts = ts
+            best = status
+    if best is None:
+        return {"ok": False, "running": False, "error": "no_status_file"}
+    age = _time.time() - best_ts
+    best["status_age_sec"] = round(age, 1)
+    best["running"] = age < 60.0
+    best["ok"] = True
+    # SoT honesty: never report broker_open=0 when last-good snapshot has opens.
+    try:
+        from runtime import broker_snapshot
+
+        snap = broker_snapshot.read_snapshot(max_age_sec=None) or {}
+        snap_n = int(snap.get("count") or len(snap.get("positions") or []))
+        status_n = int(best.get("broker_open") or 0)
+        best["snapshot_open"] = snap_n
+        if status_n == 0 and snap_n > 0:
+            best["broker_open"] = snap_n
+            best["sot_overlay"] = True
+            best["source"] = f"{best.get('source') or 'status'}|sot_overlay_snapshot"
+        # Stale status with opens → nudge heal via desk_support contract field.
+        if age > 90.0 and snap_n > 0:
+            best["heal_recommended"] = True
+            best["running"] = False
+    except Exception:
+        pass
+    return best
+
+
+def _position_manager_tick_sync() -> dict[str, Any]:
+    from runtime.open_position_manager import run_management_tick
+    from system.config_loader import get_config
+    from system.credentials_loader import try_load_credentials
+    from system.ig_rest_session import get_shared_rest_client
+
+    cfg = get_config()
+    rest = None
+    cred = try_load_credentials()
+    if cred.ok and cred.credentials:
+        rest = get_shared_rest_client(cred.credentials)
+    return run_management_tick(rest, cfg, execute=True)
+
+
+@router.post("/api/position_manager/tick")
+async def api_position_manager_tick() -> dict[str, Any]:
+    """Force one in-process assess + manage cycle (Trading Desk supervision)."""
+    import asyncio
+
+    try:
+        return await _run_dashboard_sync(_position_manager_tick_sync, timeout=12.0)
+    except asyncio.TimeoutError:
+        return {"ok": False, "error": "tick_timeout"}
+
+
+@router.get("/api/trading_desk/liveness")
+async def api_trading_desk_liveness() -> dict[str, Any]:
+    """Trading Desk AI connection health — non-blocking."""
+    from runtime.trading_desk_liveness import evaluate_liveness
+
+    return await _run_dashboard_sync(evaluate_liveness, timeout=2.0)
+
+
+@router.post("/api/trading_desk/recover")
+async def api_trading_desk_recover() -> dict[str, Any]:
+    """Trigger failsafe recovery (sync nudge, manager tick, risk stack)."""
+    from runtime.trading_desk_liveness import run_recovery_tick
+
+    return await _run_dashboard_sync(lambda: run_recovery_tick(force=True), timeout=15.0)
+
+
+@router.get("/api/strategy/improvement")
+async def api_strategy_improvement() -> dict[str, Any]:
+    """Rolling WR/PnL and epoch deltas as strategy shifts."""
+    from runtime.strategy_improvement_tracker import snapshot
+
+    return await _run_dashboard_sync(snapshot, timeout=2.0)
+
+
+@router.get("/api/strategy/intraday_slots")
+async def api_strategy_intraday_slots() -> dict[str, Any]:
+    """BST intraday slot WR/PnL with per-slot improvement vs prior epoch/day."""
+    from runtime.intraday_slot_tracker import snapshot
+
+    return await _run_dashboard_sync(snapshot, timeout=2.0)
+
+
+@router.get("/api/strategy/profit_tiers")
+async def api_strategy_profit_tiers() -> dict[str, Any]:
+    """% profit tier assessment by market — WR/PnL per tier bucket for ML review."""
+    from execution.profit_pct_tiers import assess_profit_tier_strategy, build_pct_tiers
+    from runtime.strategy_improvement_tracker import list_managed_closes
+    from system.config_loader import get_config
+
+    def _body() -> dict[str, Any]:
+        cfg = get_config()
+        closes = list_managed_closes(limit=200)
+        assessment = assess_profit_tier_strategy(closes, cfg=cfg)
+        ladders: dict[str, Any] = {}
+        for epic in ("IX.D.DOW.IFM.IP", "IX.D.NIKKEI.IFM.IP"):
+            try:
+                from execution.micro_risk_profile import resolve_micro_tp_sl_for_epic
+
+                _, _, prof = resolve_micro_tp_sl_for_epic(epic, 0.5, cfg)
+                target = float(prof.risk_per_trade_gbp) * float(prof.target_r_multiple)
+                tiers = build_pct_tiers(epic=epic, target_gbp=target, cfg=cfg)
+                ladders[epic] = [
+                    {
+                        "pct": t.pct,
+                        "peak_min_gbp": t.peak_min_gbp,
+                        "bank_floor_gbp": t.bank_floor_gbp,
+                        "label": t.label,
+                    }
+                    for t in tiers
+                ]
+            except Exception:
+                ladders[epic] = []
+        return {
+            "ok": True,
+            "close_count": len(closes),
+            "profit_tier_assessment": assessment,
+            "tier_ladders_gbp": ladders,
+            "closes": closes,
+        }
+
+    return await _run_dashboard_sync(_body, timeout=3.0)
+
+
 @router.get("/api/trade_events")
 def api_trade_events(limit: int = 50) -> JSONResponse:
     """Typed trade/lifecycle events for trading path panel."""
@@ -497,6 +1341,24 @@ def api_emergency_stop() -> dict[str, Any]:
     return JSONResponse(result, status_code=200 if result.get("ok") else 500)
 
 
+@router.post("/api/v1/emergency/kill")
+def api_emergency_kill_v1() -> JSONResponse:
+    """Instant kill — stop loops, cancel working orders, flatten all broker opens.
+
+    Bypasses normal trading-loop cadence; uses exit_execution_gate for closes.
+    """
+    from api.emergency_kill import run_emergency_kill
+
+    result = run_emergency_kill(source="api_v1")
+    return JSONResponse(result, status_code=200 if result.get("ok") else 500)
+
+
+@router.post("/api/emergency/kill")
+def api_emergency_kill_alias() -> JSONResponse:
+    """Alias for /api/v1/emergency/kill."""
+    return api_emergency_kill_v1()
+
+
 @router.get("/api/trades")
 def api_trades(limit: int = 10) -> dict[str, Any]:
     trades = get_closed_trades(limit=min(100, max(1, limit)))
@@ -557,6 +1419,128 @@ def api_admin_unlimited_trading() -> JSONResponse:
         f"buy={snap.get('buy')} sell={snap.get('sell')}"
     )
     return JSONResponse({"ok": True, "unlimited": True, "correlation_guard": snap})
+
+
+@router.post("/api/sim/tick")
+async def api_sim_tick(request: Request) -> JSONResponse:
+    """Sandbox simulation — publish a synthetic tick into the live market data hub.
+
+    Gated behind ``sandbox_mode_enabled`` in config; rejected outright in production.
+    """
+    import time
+
+    from system.config_loader import get_config
+    from system.market_data_hub import get_market_data_hub
+
+    cfg = get_config()
+    if not getattr(cfg, "sandbox_mode_enabled", False):
+        return JSONResponse(
+            {"ok": False, "error": "sandbox_mode_enabled is false — endpoint disabled"},
+            status_code=403,
+        )
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "invalid JSON"}, status_code=400)
+
+    epic = str(body.get("epic") or "").strip()
+    bid = float(body.get("bid") or 0)
+    offer = float(body.get("offer") or 0)
+    if not epic or bid <= 0 or offer <= 0:
+        return JSONResponse(
+            {"ok": False, "error": "epic, bid, offer required (positive floats)"},
+            status_code=400,
+        )
+
+    hub = get_market_data_hub()
+    snap = hub.publish(epic, bid, offer, source="sandbox", quote_time=time.time())
+    return JSONResponse({
+        "ok": True,
+        "epic": epic,
+        "bid": bid,
+        "offer": offer,
+        "accepted": snap is not None,
+    })
+
+
+@router.post("/api/signal/inject")
+async def api_signal_inject(request: Request) -> JSONResponse:
+    """Inject a synthetic operator signal into the gate stack for one tick."""
+    from execution.signal_injection import enqueue_injection, pending_injections
+    from runtime.market_orchestrator import MarketOrchestrator
+    from system.engine_log import log_engine
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "invalid JSON"}, status_code=400)
+
+    epic = str(body.get("epic") or "").strip()
+    direction = str(body.get("direction") or "").strip().upper()
+
+    if not epic:
+        return JSONResponse({"ok": False, "error": "epic is required"}, status_code=400)
+    if direction not in ("BUY", "SELL"):
+        return JSONResponse(
+            {"ok": False, "error": "direction must be BUY or SELL"}, status_code=400
+        )
+
+    active = MarketOrchestrator.get_global_active_epics()
+    if active and epic not in active:
+        return JSONResponse(
+            {"ok": False, "error": f"epic '{epic}' not in active rotation", "active": active},
+            status_code=400,
+        )
+
+    pending = pending_injections()
+    if epic in pending:
+        return JSONResponse(
+            {"ok": False, "error": f"injection already queued for {epic}", "pending": pending[epic]},
+            status_code=409,
+        )
+
+    entry = enqueue_injection(epic, direction)
+    log_engine(f"signal_inject: operator queued {direction} for {epic}")
+    return JSONResponse({"ok": True, "status": "queued", **entry})
+
+
+@router.get("/api/signal/inject/pending")
+def api_signal_inject_pending() -> JSONResponse:
+    """Current pending signal injections."""
+    from execution.signal_injection import pending_injections
+
+    return JSONResponse({"ok": True, "pending": pending_injections()})
+
+
+@router.post("/api/admin/force_snapshot_sync")
+async def api_admin_force_snapshot_sync() -> JSONResponse:
+    """Invalidate stale GUI book: mirror broker_snapshot + re-arm in-memory GBP tracks.
+
+    Use after offline reconcile repaired disk/DB but the agent PID still serves
+    ``gbp_track_fallback`` with ``entry=0``. No process restart required once this
+    route is loaded in the running API process.
+    """
+    from system.engine_log import log_engine
+
+    try:
+        from runtime.broker_snapshot import force_snapshot_sync
+
+        result = await _run_dashboard_sync(force_snapshot_sync, timeout=5.0)
+        log_engine(
+            "admin/force_snapshot_sync: "
+            f"ok={result.get('ok')} rearmed={result.get('rearmed')} "
+            f"actions={result.get('actions')}"
+        )
+        return JSONResponse(result)
+    except asyncio.TimeoutError:
+        return JSONResponse(
+            {"ok": False, "error": "force_snapshot_sync_timeout"},
+            status_code=504,
+        )
+    except Exception as exc:
+        log_engine(f"admin/force_snapshot_sync failed: {type(exc).__name__}: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.post("/api/admin/force-close")
@@ -1305,14 +2289,18 @@ def api_flatten_all() -> JSONResponse:
             size = float(pos.get("size") or 0)
             if not deal_id or size <= 0:
                 continue
-            close_dir = "SELL" if side == "BUY" else "BUY"
+            # close_position(skip_lookup=True) inverts OPEN once — pass OPEN side.
             try:
                 rest.close_position(
                     deal_id,
-                    direction=close_dir,
+                    direction=side,
                     size=size,
                     epic=epic or None,
                     currency_code=cfg.currency_code,
+                    verify=False,
+                    budget_priority=True,
+                    skip_lookup=True,
+                    skip_confirm=True,
                 )
                 closed.append(deal_id)
                 log_engine(f"flatten_all: closed {epic} deal={deal_id}")
@@ -1384,13 +2372,17 @@ def api_flatten_epic(epic: str) -> JSONResponse:
             size = float(pos.get("size") or 0)
             if not deal_id or size <= 0:
                 continue
-            close_dir = "SELL" if side == "BUY" else "BUY"
+            # close_position(skip_lookup=True) inverts OPEN once — pass OPEN side.
             rest.close_position(
                 deal_id,
-                direction=close_dir,
+                direction=side,
                 size=size,
                 epic=epic,
                 currency_code=cfg.currency_code,
+                verify=False,
+                budget_priority=True,
+                skip_lookup=True,
+                skip_confirm=True,
             )
             closed.append(deal_id)
             log_engine(f"flatten_epic: closed {epic} deal={deal_id}")

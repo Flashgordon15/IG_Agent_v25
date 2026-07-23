@@ -96,6 +96,41 @@ def classify_result(pnl_points: float) -> str:
     return "WIN" if pnl_points > 0 else "LOSS"
 
 
+def classify_result_gbp(pnl_gbp: float, *, epsilon_gbp: float = 0.01) -> str:
+    """Force WIN/LOSS/BREAKEVEN from true cash differential (never CANCELLED)."""
+    if abs(float(pnl_gbp)) < float(epsilon_gbp):
+        return "BREAKEVEN"
+    return "WIN" if float(pnl_gbp) > 0 else "LOSS"
+
+
+def settle_gbp_from_ig(
+    *,
+    profit_and_loss: float | None = None,
+    ig_pnl_currency: float | None = None,
+    pnl_points: float | None = None,
+    contract_size: float | None = None,
+    point_value: float = 1.0,
+) -> float | None:
+    """Resolve true gross GBP from IG settlement packet or points×size×point_value."""
+    if profit_and_loss is not None:
+        try:
+            return float(profit_and_loss)
+        except (TypeError, ValueError):
+            pass
+    if ig_pnl_currency is not None:
+        try:
+            return float(ig_pnl_currency)
+        except (TypeError, ValueError):
+            pass
+    if pnl_points is None:
+        return None
+    size = float(contract_size or 0.0)
+    pv = float(point_value or 1.0)
+    if size <= 0:
+        return None
+    return float(pnl_points) * size * pv
+
+
 def exit_price_from_ig_close(
     side: str,
     entry: float,

@@ -110,9 +110,8 @@ class MLScorer:
             raise FileNotFoundError(path)
         try:
             import pandas as pd
-            from xgboost import XGBClassifier
         except ImportError as e:
-            raise RuntimeError("xgboost and pandas required for MLScorer.train") from e
+            raise RuntimeError("pandas required for MLScorer.train") from e
 
         df = pd.read_csv(path)
 
@@ -163,23 +162,79 @@ class MLScorer:
             df["atr_ratio"] = df["atr"]
             df["spread_ratio"] = df["spread"] if "spread" in df.columns else 0.0
 
-        # Only keep numeric features that are also available at inference time.
-        # spread_ratio and fired are excluded: spread_ratio has near-zero variance
-        # in training data (constant spread/stop) and fired=1 for all trained rows,
-        # so both are uninformative and cause out-of-distribution issues at inference.
-        inference_features = [
+        # Core features always used when present; optional tier/slot only if
+        # enough labelled rows carry them (keeps legacy 2-feature models safe).
+        core_features = [
             "adjusted_score",
             "raw_score",
             "rsi",
             "atr_ratio",
         ]
-        keep = [c for c in inference_features if c in df.columns]
+        optional_features = ["profit_tier_pct", "session_slot_idx"]
+        keep = [c for c in core_features if c in df.columns]
+        n_rows = max(1, len(df))
+        for col in optional_features:
+            if col not in df.columns:
+                continue
+            filled = df[col].notna().sum()
+            if filled / n_rows >= 0.10:
+                keep.append(col)
         X = df[keep].copy()
-        # fired is bool — coerce to int
         if "fired" in X.columns:
             X["fired"] = X["fired"].astype(int)
 
         self._feature_names = list(X.columns)
+        holdout_auc: float | None = None
+        holdout_logloss: float | None = None
+        backend = "xgboost"
+        cut = int(len(X) * (1.0 - _HOLDOUT_FRACTION))
+
+        model = self._fit_classifier(X, y, cut=cut)
+        if model is None:
+            backend = "sklearn"
+            model = self._fit_sklearn_classifier(X, y, cut=cut)
+
+        if model is None:
+            raise RuntimeError("no ML backend available (install xgboost or scikit-learn)")
+
+        if 0 < cut < len(X):
+            y_hold = y.iloc[cut:]
+            if y_hold.nunique() > 1 and len(y_hold) > 0:
+                try:
+                    probs = model.predict_proba(X.iloc[cut:])[:, 1]
+                    holdout_auc, holdout_logloss = _holdout_metrics(y_hold, probs)
+                except Exception as e:
+                    log_engine(
+                        f"ml_scorer holdout evaluation failed: {type(e).__name__}: {e}"
+                    )
+
+        _MODEL_DIR.mkdir(parents=True, exist_ok=True)
+        with open(_MODEL_FILE, "wb") as f:
+            pickle.dump(model, f)
+        _META_FILE.write_text(
+            json.dumps(
+                {"features": self._feature_names, "backend": backend},
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        self._model = model
+        log_engine(
+            f"ml_scorer trained ({backend}) on {len(df)} rows ({int(y.sum())} wins), "
+            f"{len(self._feature_names)} features | "
+            f"holdout_auc={holdout_auc if holdout_auc is None else round(holdout_auc, 4)} "
+            f"holdout_logloss={holdout_logloss if holdout_logloss is None else round(holdout_logloss, 4)}"
+        )
+
+    def _fit_classifier(self, X: Any, y: Any, *, cut: int) -> Any | None:
+        try:
+            from xgboost import XGBClassifier
+        except Exception as exc:
+            log_engine(
+                f"ml_scorer: xgboost unavailable ({type(exc).__name__}) — "
+                f"trying sklearn fallback"
+            )
+            return None
         params = dict(
             n_estimators=100,
             max_depth=4,
@@ -187,41 +242,43 @@ class MLScorer:
             eval_metric="logloss",
             scale_pos_weight=1,
         )
+        try:
+            model = XGBClassifier(**params)
+            model.fit(X, y)
+            return model
+        except Exception as exc:
+            log_engine(
+                f"ml_scorer xgboost train failed: {type(exc).__name__}: {exc}"
+            )
+            return None
 
-        # Chronological 80/20 holdout: validate out-of-time, then refit on 100%
-        holdout_auc: float | None = None
-        holdout_logloss: float | None = None
-        cut = int(len(X) * (1.0 - _HOLDOUT_FRACTION))
-        if 0 < cut < len(X):
-            y_fit = y.iloc[:cut]
-            y_hold = y.iloc[cut:]
-            if y_fit.nunique() > 1 and len(y_hold) > 0:
-                try:
-                    fold = XGBClassifier(**params)
-                    fold.fit(X.iloc[:cut], y_fit)
-                    probs = fold.predict_proba(X.iloc[cut:])[:, 1]
-                    holdout_auc, holdout_logloss = _holdout_metrics(y_hold, probs)
-                except Exception as e:
-                    log_engine(
-                        f"ml_scorer holdout evaluation failed: {type(e).__name__}: {e}"
-                    )
-
-        model = XGBClassifier(**params)
-        model.fit(X, y)
-        _MODEL_DIR.mkdir(parents=True, exist_ok=True)
-        with open(_MODEL_FILE, "wb") as f:
-            pickle.dump(model, f)
-        _META_FILE.write_text(
-            json.dumps({"features": self._feature_names}, indent=2),
-            encoding="utf-8",
-        )
-        self._model = model
-        log_engine(
-            f"ml_scorer trained on {len(df)} rows ({int(y.sum())} wins), "
-            f"{len(self._feature_names)} features | "
-            f"holdout_auc={holdout_auc if holdout_auc is None else round(holdout_auc, 4)} "
-            f"holdout_logloss={holdout_logloss if holdout_logloss is None else round(holdout_logloss, 4)}"
-        )
+    def _fit_sklearn_classifier(self, X: Any, y: Any, *, cut: int) -> Any | None:
+        try:
+            from sklearn.linear_model import LogisticRegression
+            from sklearn.preprocessing import StandardScaler
+            from sklearn.pipeline import Pipeline
+        except ImportError:
+            return None
+        try:
+            pipe = Pipeline(
+                [
+                    ("scale", StandardScaler()),
+                    (
+                        "clf",
+                        LogisticRegression(
+                            max_iter=500,
+                            class_weight="balanced",
+                        ),
+                    ),
+                ]
+            )
+            pipe.fit(X, y)
+            return pipe
+        except Exception as exc:
+            log_engine(
+                f"ml_scorer sklearn train failed: {type(exc).__name__}: {exc}"
+            )
+            return None
 
     def predict(self, features: dict[str, float]) -> float:
         if self._model is None:
@@ -302,4 +359,12 @@ def get_ml_scorer() -> MLScorer:
     global _scorer
     if _scorer is None:
         _scorer = MLScorer()
+    return _scorer
+
+
+def reload_ml_scorer() -> MLScorer:
+    """Reload model.pkl from disk after background auto-train."""
+    global _scorer
+    _scorer = MLScorer()
+    _scorer.load()
     return _scorer

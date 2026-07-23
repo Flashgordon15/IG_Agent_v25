@@ -229,6 +229,38 @@ _BOOT_SPLASH_HTML = """<!DOCTYPE html>
 </html>"""
 
 
+_TRADING_DESK_LANDING_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>IG Trading Desk</title>
+  <style>
+    body{font-family:ui-sans-serif,system-ui,sans-serif;background:#070b14;color:#e8eef7;
+         display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
+    .wrap{max-width:28rem;padding:2rem;text-align:center}
+    h1{font-size:1.6rem;letter-spacing:.04em;margin:0 0 .5rem;font-weight:700}
+    p{margin:.4rem 0;color:#9fb0cc;line-height:1.45}
+    a.btn{display:inline-block;margin:.85rem .35rem 0;padding:.65rem 1.1rem;
+          background:#1d4ed8;color:#fff;text-decoration:none;border-radius:8px;font-weight:600}
+    a.sec{color:#93c5fd;font-size:.9rem}
+  </style>
+  <meta http-equiv="refresh" content="2;url=http://127.0.0.1:3000/"/>
+</head>
+<body>
+  <div class="wrap">
+    <h1>IG Trading Desk</h1>
+    <p>Operator UI is Quantum Terminal on port 3000.</p>
+    <p>Redirecting in 2s…</p>
+    <p>
+      <a class="btn" href="http://127.0.0.1:3000/">Open Trading Desk</a>
+    </p>
+    <p><a class="sec" href="/app/">Legacy Vite dashboard</a> · <a class="sec" href="/api/health">API health</a></p>
+  </div>
+</body>
+</html>"""
+
+
 def _ensure_ig_agent_root_env() -> None:
     """Ensure dashboard path resolution works before first request."""
     if os.environ.get("IG_AGENT_ROOT", "").strip():
@@ -318,28 +350,15 @@ def resolve_dashboard_dist() -> Path | None:
 
 
 def _mount_dashboard_static(app: FastAPI) -> None:
-    """Register ``/``, ``/assets/*``, and favicon at factory time (fast path)."""
+    """Register ``/``, ``/assets/*``, and favicon at factory time (fast path).
+
+    Priority: Vite-built ``dashboard/dist/`` (has assets/) > unified fulfillment
+    template (single-file fallback for headless deploys).
+    """
     if getattr(app.state, "dashboard_static_mounted", False):
         return
 
     _ensure_ig_agent_root_env()
-
-    if _unified_engine_active():
-        unified_tpl = resolve_unified_fulfillment_template()
-        if unified_tpl is not None:
-            @app.get("/", include_in_schema=False)
-            async def unified_fulfillment_root() -> FileResponse:
-                return FileResponse(unified_tpl, headers=_DASHBOARD_NO_CACHE)
-
-            app.state.dashboard_dist = None
-            try:
-                from system.engine_log import log_engine
-
-                log_engine(f"API: unified fulfillment template mounted from {unified_tpl}")
-            except Exception:
-                pass
-            app.state.dashboard_static_mounted = True
-            return
 
     dist = resolve_dashboard_dist()
     index: Path | None = None
@@ -358,7 +377,13 @@ def _mount_dashboard_static(app: FastAPI) -> None:
         favicon = dist / "favicon.svg"
 
         @app.get("/", include_in_schema=False)
-        async def dashboard_root() -> FileResponse:
+        async def dashboard_root() -> HTMLResponse:
+            """Trading Desk product root — Quantum Terminal is the operator UI."""
+            return HTMLResponse(_TRADING_DESK_LANDING_HTML, headers=_DASHBOARD_NO_CACHE)
+
+        @app.get("/app", include_in_schema=False)
+        @app.get("/app/", include_in_schema=False)
+        async def dashboard_legacy_app() -> FileResponse:
             return FileResponse(index, headers=_DASHBOARD_NO_CACHE)
 
         if favicon.is_file():
@@ -371,10 +396,30 @@ def _mount_dashboard_static(app: FastAPI) -> None:
         try:
             from system.engine_log import log_engine
 
-            log_engine(f"API: dashboard static shell mounted from {dist}")
+            log_engine(
+                f"API: Trading Desk landing at /; legacy Vite shell at /app from {dist}"
+            )
         except Exception:
             pass
-    else:
+    elif _unified_engine_active():
+        unified_tpl = resolve_unified_fulfillment_template()
+        if unified_tpl is not None:
+            @app.get("/", include_in_schema=False)
+            async def unified_fulfillment_root() -> FileResponse:
+                return FileResponse(unified_tpl, headers=_DASHBOARD_NO_CACHE)
+
+            app.state.dashboard_dist = None
+            try:
+                from system.engine_log import log_engine
+
+                log_engine(f"API: unified fulfillment template mounted from {unified_tpl}")
+            except Exception:
+                pass
+            app.state.dashboard_static_mounted = True
+            return
+        # unified template also missing — fall through to boot splash
+
+    if not getattr(app.state, "dashboard_static_mounted", False) and dist is None:
         searched = [
             str((Path(os.environ.get("IG_AGENT_ROOT", "")).resolve() / "dashboard" / "dist"))
             if os.environ.get("IG_AGENT_ROOT")
@@ -1215,18 +1260,27 @@ def main() -> None:
     import uvicorn
 
     from system.boot.preflight_helpers import resolve_api_port
+    from system.socket_bind import build_uvicorn_config
 
     parser = argparse.ArgumentParser(description="IG Agent v25 FastAPI server")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=resolve_api_port())
     args = parser.parse_args()
-    uvicorn.run(
-        "api.server:create_app",
-        factory=True,
+    app = create_app()
+    config, hold_sock = build_uvicorn_config(
+        app,
         host=args.host,
         port=args.port,
         reload=False,
     )
+    try:
+        uvicorn.Server(config).run()
+    finally:
+        if hold_sock is not None:
+            try:
+                hold_sock.close()
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":
