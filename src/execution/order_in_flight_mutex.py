@@ -39,6 +39,8 @@ _ledger_lock = threading.Lock()
 _open_ledger: dict[str, int] = {}
 # Slot reserved at signal-accept / mutex acquire (counts toward hard cap).
 _reserved_slots: dict[str, int] = {}
+# Alt-1 entry quarantine: after any hard-cap fill, block new entries until raw flat.
+_entry_quarantine: dict[str, float] = {}
 
 
 def _norm_account(account_id: str | None) -> str:
@@ -142,8 +144,30 @@ def note_account_flat(account_id: str | None = None) -> None:
     with _ledger_lock:
         _open_ledger[acct] = 0
         _reserved_slots[acct] = 0
+        _entry_quarantine.pop(acct, None)
         if resolve_account_hard_open_cap(acct) is not None:
             _write_disk_ledger(acct, open_n=0, reserved_n=0)
+
+
+def arm_entry_quarantine(account_id: str | None = None) -> None:
+    """After a hard-cap fill: refuse new entries until raw broker proves flat."""
+    acct = _norm_account(account_id) or "DEFAULT"
+    if resolve_account_hard_open_cap(acct) is None:
+        return
+    with _ledger_lock:
+        _entry_quarantine[acct] = time.time()
+
+
+def entry_quarantine_active(account_id: str | None = None) -> bool:
+    acct = _norm_account(account_id) or "DEFAULT"
+    with _ledger_lock:
+        return acct in _entry_quarantine
+
+
+def clear_entry_quarantine(account_id: str | None = None) -> None:
+    acct = _norm_account(account_id) or "DEFAULT"
+    with _ledger_lock:
+        _entry_quarantine.pop(acct, None)
 
 
 def memory_open_count(account_id: str | None = None) -> int:
@@ -260,6 +284,7 @@ def sync_hard_cap_ledger_with_broker(
     account_id: str | None = None,
     *,
     rest: Any | None = None,
+    force_broker_n: int | None = None,
 ) -> int | None:
     """Align memory/disk ledger to live broker opens for hard-capped accounts.
 
@@ -272,7 +297,7 @@ def sync_hard_cap_ledger_with_broker(
     acct = _norm_account(account_id)
     if resolve_account_hard_open_cap(acct) is None:
         return None
-    raw = raw_broker_open_count(rest)
+    raw = int(force_broker_n) if force_broker_n is not None else raw_broker_open_count(rest)
     if raw is None:
         # Unknown book — keep existing pressure; do not undercount-clear.
         return None
@@ -287,6 +312,8 @@ def sync_hard_cap_ledger_with_broker(
     mem = memory_open_count(acct)
     if int(raw) > mem:
         note_account_open(acct, delta=int(raw) - mem)
+    # Live open still present — keep quarantine armed.
+    arm_entry_quarantine(acct)
     return int(raw)
 
 
@@ -377,6 +404,9 @@ def pre_submit_hard_cap_gate(
     Returns (allowed, reason, ledger_reserved).
     Always queries raw broker opens under flock when rest is provided — even if
     the in-process mutex is already held (TWAP clip-2+ must not bypass).
+
+    When live raw==0 and mutex is free, stale mem/disk ledgers are cleared
+    inside the flock (sync-alone can miss when an earlier live GET failed).
     """
     acct = _norm_account(account_id)
     cap = resolve_account_hard_open_cap(acct)
@@ -400,9 +430,20 @@ def pre_submit_hard_cap_gate(
             return False, reason, False
 
         raw_n = raw_broker_open_count(rest)
+
+        # Trust a successful live flat: clear stale mem/disk that blocked soak
+        # after ambiguous-timeout releases left ledger=1 while broker_raw=0.
+        if (
+            raw_n is not None
+            and int(raw_n) <= 0
+            and not get_order_mutex().is_locked(acct)
+        ):
+            note_account_flat(acct)
+
         mem_n = memory_open_count(acct)
         res_n = reserved_slot_count(acct)
         disk_n = disk_open_count(acct)
+        quarantined = entry_quarantine_active(acct)
 
         if mux_already_held:
             # Caller already reserved via try_acquire — do not self-block on
@@ -430,6 +471,26 @@ def pre_submit_hard_cap_gate(
                 meta["entry_posted"] = True
                 mux._meta[acct] = meta
             return True, "", False
+
+        # Fail-closed when live count unavailable AND pressure/quarantine present.
+        if raw_n is None and (mem_n > 0 or res_n > 0 or disk_n > 0 or quarantined):
+            reason = (
+                f"account_hard_cap:{acct} live_count_unavailable "
+                f"(mem={mem_n} reserved={res_n} disk={disk_n} "
+                f"quarantine={int(quarantined)}) "
+                f"({source or 'pre_submit'} gate; fail-closed)"
+            )
+            log_engine(f"{HARD_CAP_REJECT_LOG} {reason}")
+            return False, reason, False
+
+        if quarantined and (raw_n is None or int(raw_n) > 0):
+            reason = (
+                f"account_hard_cap:{acct} entry_quarantine_until_flat "
+                f"broker_raw={raw_n if raw_n is not None else -1} "
+                f"({source or 'pre_submit'} gate)"
+            )
+            log_engine(f"{HARD_CAP_REJECT_LOG} {reason}")
+            return False, reason, False
 
         effective = max(
             mem_n,
@@ -488,6 +549,7 @@ def release_pre_submit_reservation(
             open_n=max(1, int(disk.get("open") or 0)),
             reserved_n=max(0, int(disk.get("reserved") or 0) - 1),
         )
+        arm_entry_quarantine(acct)
     else:
         _write_disk_ledger(
             acct,
@@ -620,6 +682,7 @@ class AccountOrderMutex:
                     open_n=max(1, int(disk.get("open") or 0)),
                     reserved_n=max(0, int(disk.get("reserved") or 0) - 1),
                 )
+                arm_entry_quarantine(acct)
         if existed:
             log_engine(
                 f"OrderMutex: released account={acct} reason={reason}"
@@ -675,6 +738,7 @@ class AccountOrderMutex:
         with _ledger_lock:
             _open_ledger.clear()
             _reserved_slots.clear()
+            _entry_quarantine.clear()
         for acct in list(HARD_OPEN_CAP_BY_ACCOUNT.keys()):
             try:
                 _write_disk_ledger(acct, open_n=0, reserved_n=0)

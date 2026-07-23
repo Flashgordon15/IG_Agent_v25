@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import os
 import threading
 import time
 from collections import deque
@@ -3001,7 +3002,19 @@ def is_force_channel_z(z: float) -> bool:
 
 
 def is_core_b_satellite_uncoupled() -> bool:
-    """True when Core B micro-scalper runs outside the 15m macro trend satellite."""
+    """True when Core B micro-scalper runs outside the 15m macro trend satellite.
+
+    Hard-capped CFD (Z6BAH4) NEVER uncouples — mean-revert against the 15m trend
+    was the wrong-way loss pattern (BUY dips in a BEARISH tape), not a BUY/SELL invert.
+    """
+    try:
+        from execution.order_in_flight_mutex import resolve_account_hard_open_cap
+
+        acct = str(os.environ.get("IG_ACCOUNT_ID") or "").strip().upper()
+        if resolve_account_hard_open_cap(acct) is not None:
+            return False
+    except Exception:
+        pass
     return bool(DEMO_BYPASS_15M_MACRO_TREND_LOCK and CORE_B_SATELLITE_UNCOUPLED)
 
 

@@ -970,6 +970,11 @@ def _fetch_raw_broker_opens(account_id: str) -> int | None:
         cred = try_load_credentials()
         if cred is not None and acct:
             client = get_session_registry().get_client_for_account(acct, cred)
+            if client is not None and hasattr(client, "count_open_positions_live"):
+                try:
+                    return int(client.count_open_positions_live())
+                except Exception:
+                    pass
             if client is not None and hasattr(client, "count_open_positions"):
                 return int(client.count_open_positions())
             if client is not None and hasattr(client, "fetch_open_positions"):
@@ -1017,19 +1022,45 @@ def maybe_reconcile_ambiguous_order_mutex(
 
     accounts_out: list[dict[str, Any]] = []
     for acct in aged:
-        cleared = mux.force_clear(acct, reason="orchestrator_ambiguous_timeout")
         opens = _fetch_raw_broker_opens(acct)
+        # Reconcile ledger BEFORE releasing mutex so release(filled=…) is accurate.
+        filled: bool | None
+        if opens is None:
+            filled = None
+        elif int(opens) <= 0:
+            filled = False
+        else:
+            filled = True
+        cleared = mux.release(
+            acct, reason="orchestrator_ambiguous_timeout", filled=filled
+        )
+        try:
+            from execution.order_in_flight_mutex import (
+                sync_hard_cap_ledger_with_broker,
+            )
+
+            # Force ledger to broker SoT (clears stuck open=1 when flat).
+            if opens is not None:
+                sync_hard_cap_ledger_with_broker(
+                    acct, force_broker_n=int(opens)
+                )
+        except Exception as exc:
+            log_engine(
+                f"orchestrator: ledger sync after ambiguous clear failed "
+                f"account={acct} {type(exc).__name__}: {exc}"
+            )
         row = {
             "account_id": acct,
             "mutex_cleared": bool(cleared),
             "broker_opens": opens,
             "timeout_sec": float(timeout_sec),
+            "ledger_filled": filled,
         }
         accounts_out.append(row)
         log_engine(
             f"orchestrator: ambiguous order mutex cleared account={acct} "
             f"broker_opens={opens if opens is not None else 'n/a'} "
-            f"after>{timeout_sec:.1f}s"
+            f"filled={filled} after>{timeout_sec:.1f}s"
         )
 
     payload = {
@@ -1596,6 +1627,26 @@ def _tick_once() -> None:
     except Exception as exc:
         log_engine(
             f"orchestrator: mutex reconcile skipped {type(exc).__name__}: {exc}"
+        )
+    # Periodic hard-cap ledger sync (clears stuck open=1 when broker flat).
+    try:
+        from execution.order_in_flight_mutex import (
+            HARD_OPEN_CAP_BY_ACCOUNT,
+            get_order_mutex,
+            sync_hard_cap_ledger_with_broker,
+        )
+
+        for _acct in list(HARD_OPEN_CAP_BY_ACCOUNT.keys()):
+            if get_order_mutex().is_locked(_acct):
+                continue
+            opens = _fetch_raw_broker_opens(_acct)
+            if opens is not None:
+                sync_hard_cap_ledger_with_broker(
+                    _acct, force_broker_n=int(opens)
+                )
+    except Exception as exc:
+        log_engine(
+            f"orchestrator: hard_cap ledger sync skipped {type(exc).__name__}: {exc}"
         )
     # Rate-smoothing / token purge — runs every tick (independent of dual-port health).
     try:

@@ -85,9 +85,9 @@
     "enabled": true,
     "min_abs_ratio": 0.22,
     "require_align": true,
-    "fail_closed_on_neutral": false,
+    "fail_closed_on_neutral": true,
     "min_tpm_confirm": 8,
-    "_note": "Depthless Mini: 0.15 OBI over-triggers on low-volume noise. Require |OBI|>=0.22 and TPM>=8 when using quote_proxy."
+    "_note": "Depthless Mini: require |OBI|>=0.22 align + TPM>=8. fail_closed_on_neutral=true stops wrong-way entries on flat book pressure."
   },
   "event_driven_tick": {
     "enabled": true,
@@ -515,21 +515,21 @@
   "ml_veto": {
     "enabled": true,
     "mode": "veto",
-    "min_probability": 0.52,
-    "min_probability_high_conf": 0.5,
+    "min_probability": 0.55,
+    "min_probability_high_conf": 0.52,
     "min_labelled_rows": 30,
     "use_s4_models": false,
     "per_epic": {
       "IX.D.DOW.IFM.IP": {
         "enabled": true,
-        "min_probability": 0.52
+        "min_probability": 0.55
       },
       "IX.D.NIKKEI.IFM.IP": {
         "enabled": true,
-        "min_probability": 0.52
+        "min_probability": 0.55
       }
     },
-    "_note": "Gate 11 uses blend_ml_confidence prob \u2014 blocks low-conviction entries"
+    "_note": "Gate 11 blend_ml — raised to 0.55 after wrong-way mean-revert soak losses (not BUY/SELL invert)"
   },
   "session_validation": {
     "clear_circuit_breaker_on_boot": true

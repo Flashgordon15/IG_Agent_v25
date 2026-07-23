@@ -189,6 +189,17 @@ def test_hard_cap_blocks_when_open_ge_1_allows_when_flat() -> None:
     assert count_cap_for_engine(ENGINE_SB_SENTINEL, cfg) == 10
 
 
+def test_hard_cap_account_forces_15m_trend_lock(monkeypatch) -> None:
+    """Z6BAH4 must not mean-revert against 15m trend (wrong-way pattern, not invert)."""
+    import runtime.dual_core_execution as dce
+
+    monkeypatch.setenv("IG_ACCOUNT_ID", ACCT_CFD)
+    assert dce.is_core_b_satellite_uncoupled() is False
+    monkeypatch.setenv("IG_ACCOUNT_ID", ACCT_SB)
+    # SB not hard-capped — may remain uncoupled when flags True.
+    assert dce.is_core_b_satellite_uncoupled() is True
+
+
 def test_ambiguous_over_5s_orchestrator_clears_mutex_and_reconciles(
     monkeypatch,
 ) -> None:
@@ -204,6 +215,7 @@ def test_ambiguous_over_5s_orchestrator_clears_mutex_and_reconciles(
 
     mock_client = MagicMock()
     mock_client.count_open_positions.return_value = 1
+    mock_client.count_open_positions_live.return_value = 1
     mock_registry = MagicMock()
     mock_registry.get_client_for_account.return_value = mock_client
     monkeypatch.setattr(
@@ -228,7 +240,7 @@ def test_ambiguous_over_5s_orchestrator_clears_mutex_and_reconciles(
     assert accounts[0]["mutex_cleared"] is True
     assert accounts[0]["broker_opens"] == 1
     assert status["order_mutex"]["order_in_flight"] is False
-    mock_client.count_open_positions.assert_called()
+    mock_client.count_open_positions_live.assert_called()
 
 
 def test_stale_snapshot_undercount_cannot_allow_second_submit(monkeypatch) -> None:
@@ -242,6 +254,53 @@ def test_stale_snapshot_undercount_cannot_allow_second_submit(monkeypatch) -> No
     )
     blocked, reason = hard_cap_blocks_entry(ACCT_CFD, open_count=None)
     assert blocked is True
+    assert "account_hard_cap" in reason
+    note_account_flat(ACCT_CFD)
+
+
+def test_pre_submit_clears_stale_ledger_when_raw_broker_flat() -> None:
+    """Soak stall vector: mem/disk=1 while broker_raw=0 must re-arm (not permanent block)."""
+    note_account_flat(ACCT_CFD)
+    note_account_open(ACCT_CFD, delta=1)
+    from execution.order_in_flight_mutex import (
+        arm_entry_quarantine,
+        disk_open_count,
+        memory_open_count,
+    )
+
+    arm_entry_quarantine(ACCT_CFD)
+    assert memory_open_count(ACCT_CFD) >= 1
+    assert disk_open_count(ACCT_CFD) >= 1
+
+    rest = MagicMock()
+    rest.count_open_positions_live.return_value = 0
+    rest.count_open_positions.return_value = 0
+    ok, reason, reserved = pre_submit_hard_cap_gate(
+        ACCT_CFD, rest=rest, source="stale_ledger_clear", mux_already_held=False
+    )
+    assert ok is True, reason
+    assert reserved is True
+    assert memory_open_count(ACCT_CFD) >= 1  # reserved for this submit
+    # Rollback reservation for clean teardown.
+    from execution.order_in_flight_mutex import release_pre_submit_reservation
+
+    release_pre_submit_reservation(ACCT_CFD, filled=False)
+    note_account_flat(ACCT_CFD)
+
+
+def test_pre_submit_blocks_when_snapshot_zero_but_raw_one() -> None:
+    """Integration: stale snapshot undercount=0 while raw=1 → second submit blocked."""
+    note_account_flat(ACCT_CFD)
+    rest = MagicMock()
+    # Live SoT shows an open; snapshot helpers would say 0.
+    rest.count_open_positions_live.return_value = 1
+    rest.count_open_positions.return_value = 0
+
+    ok, reason, reserved = pre_submit_hard_cap_gate(
+        ACCT_CFD, rest=rest, source="raw_over_snapshot", mux_already_held=False
+    )
+    assert ok is False
+    assert reserved is False
     assert "account_hard_cap" in reason
     note_account_flat(ACCT_CFD)
 

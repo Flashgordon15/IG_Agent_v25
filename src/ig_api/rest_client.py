@@ -2249,6 +2249,22 @@ class IGRestClient:
         if limit_distance is not None and float(limit_distance) > 0:
             payload["limitDistance"] = float(limit_distance)
 
+        # Hard-capped accounts: async WO fills bypass in-process mutex/ledger.
+        _acct_cap = str(getattr(self, "account_id", "") or "").strip().upper()
+        try:
+            from execution.order_in_flight_mutex import resolve_account_hard_open_cap
+
+            if resolve_account_hard_open_cap(_acct_cap) is not None:
+                raise IGOrderError(
+                    f"account_hard_cap:{_acct_cap} resting_working_order_blocked "
+                    f"(async fills bypass mutex/ledger)",
+                    status_code=409,
+                )
+        except IGOrderError:
+            raise
+        except Exception:
+            pass
+
         path = "/workingorders/otc"
         log_demo_rest(
             "POST /workingorders/otc — resting elasticity WO",
