@@ -284,11 +284,21 @@ def _dow_overnight_allowlisted(epic: str, label: str, block: dict[str, Any]) -> 
     if label not in ("NEUTRAL", "LOW_VOL", "MEAN_REVERSION"):
         return False
     # us_close / London chop window — keep blocked even with allowlist
+    # Soak escape: allow MEAN_REVERSION through us_close when soak flag/config set
+    # (rollover lock 21:55–22:10 BST still hard-blocked).
+    soak_bypass_us_close = bool(block.get("soak_bypass_us_close_chop", False))
+    if not soak_bypass_us_close:
+        try:
+            from system.paths import data_dir
+
+            soak_bypass_us_close = (data_dir() / "state" / "soak5_no_auto_pause.json").is_file()
+        except Exception:
+            soak_bypass_us_close = False
     try:
         now = datetime.now(ZoneInfo("Europe/London"))
         hm = now.hour * 60 + now.minute
         # US cash close / early post-close chop ~20:00–21:30 BST
-        if 20 * 60 <= hm < 21 * 60 + 30:
+        if 20 * 60 <= hm < 21 * 60 + 30 and not soak_bypass_us_close:
             return False
         # Rollover lock vicinity already handled elsewhere; block 21:55–22:10
         if 21 * 60 + 55 <= hm <= 22 * 60 + 10:

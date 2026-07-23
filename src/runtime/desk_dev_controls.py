@@ -68,19 +68,23 @@ def _write_flag(name: str, *, active: bool, reason: str) -> dict[str, Any]:
         "reason": str(reason or ""),
         "ts": time.time(),
     }
-    text = json.dumps(payload, indent=2)
     primary = _state_path(name)
     if _under_pytest_or_harness() and _is_production_state_path(primary):
         # Never let unit tests stamp pause/hold into the live desk tree.
         return payload
-    # Write shared state + lane mirrors so resume clears CFD/SB holds too.
+    # Clear = DELETE (existence of active:false files still confuses operators/tools).
+    # Arm = write active:true across shared + CFD/SB lane mirrors.
     for root in _lane_state_roots():
         try:
             path = root / name
             if _under_pytest_or_harness() and _is_production_state_path(path):
                 continue
+            if not active:
+                if path.is_file():
+                    path.unlink()
+                continue
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text, encoding="utf-8")
+            path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         except OSError:
             continue
     return payload
@@ -103,6 +107,24 @@ def pause_entries(*, reason: str = "desk_dev_pause") -> dict[str, Any]:
     Writes ``entry_halt.json`` + ``trading_paused.json`` and arms deploy_hold.
     Does **not** flatten, does **not** stop trade_support / OPM.
     """
+    reason_l = str(reason or "").lower()
+    # Soak proof: refuse REST/cap soft pauses that re-starve the dual desk.
+    # True cascade (opens>1) is handled by soak5 monitor flatten — not this path.
+    if "rest_critical" in reason_l or "cap_breach" in reason_l:
+        try:
+            from system.paths import data_dir
+
+            flag = data_dir() / "state" / "soak5_no_auto_pause.json"
+            if flag.is_file():
+                return {
+                    "ok": True,
+                    "mode": "pause_entries",
+                    "reason": reason,
+                    "skipped": True,
+                    "skip_reason": "soak5_no_auto_pause",
+                }
+        except Exception:
+            pass
     out: dict[str, Any] = {"ok": True, "mode": "pause_entries", "reason": reason}
     out["entry_halt"] = _write_flag("entry_halt.json", active=True, reason=reason)
     out["trading_paused"] = _write_flag(

@@ -99,7 +99,7 @@
   "micro_scalp_instant": {
     "enabled": true,
     "min_entry_interval_sec": 60.0,
-    "_note": "Gated Instant (cadence+flip cooldown+forecast/OBI) — not a full scalp disable. Legitimate Core B scalp + long_trade_runner still fire."
+    "_note": "Gated Instant (cadence+flip cooldown+forecast/OBI) \u2014 not a full scalp disable. Legitimate Core B scalp + long_trade_runner still fire."
   },
   "asymmetric_ioc_routing": {
     "enabled": true,
@@ -111,12 +111,12 @@
     "enabled": true,
     "max_spread_pct": 0.0002,
     "max_spread_pts": 3.0,
-    "_note": "Hard block on toxic spread + OBI; multi-market entries only in TREND/BREAKOUT/HV_TREND \u2014 RANGE_BOUND/NEUTRAL/CHOP/STAGNANT_DZ excluded. DOW overnight may pass NEUTRAL/LOW_VOL/MEAN_REVERSION via dow_overnight_allowlist except us_close/rollover. CFD (Z6BAH4) still blocked in MEAN_REVERSION via streak_protection.cfd_block_mean_reversion.",
+    "_note": "Hard block on toxic spread + OBI; multi-market entries only in TREND/BREAKOUT/HV_TREND \u2014 RANGE_BOUND/NEUTRAL/CHOP/STAGNANT_DZ excluded. DOW overnight may pass NEUTRAL/LOW_VOL/MEAN_REVERSION via dow_overnight_allowlist (soak_bypass_us_close_chop). Soak5: CFD MEAN_REVERSION chop block OFF.",
     "require_trending_regime": false,
     "dow_overnight_allowlist": true,
     "soak_bypass_us_close_chop": true,
-    "cfd_block_mean_reversion": true,
-    "_soak_note": "2026-07-23 soak5: SB may pass MEAN_REVERSION DOW via allowlist; CFD sniper hard-blocked in chop by streak_protection. Rollover 21:55-22:10 still blocked."
+    "cfd_block_mean_reversion": false,
+    "_soak_note": "2026-07-23 soak5: BOTH lanes may pass MEAN_REVERSION DOW (allowlist + streak CFD chop off). Rollover 21:55-22:10 still blocked."
   },
   "spread_elasticity": {
     "enabled": true,
@@ -218,15 +218,15 @@
     "broker_account_product": "SPREADBET",
     "active_stack_slots": 2,
     "multi_source_auto_rotation": true,
-    "cfd_block_mean_reversion": true,
-    "cfd_require_15m_trend_ml_obi": true,
+    "cfd_block_mean_reversion": false,
+    "cfd_require_15m_trend_ml_obi": false,
     "exclude_from_hot_path": [
       "CS.D.GBPUSD.CFD.IP",
       "IX.D.DAX.IFM.IP",
       "CS.D.CRUDE.CFD.IP",
       "IX.D.NIKKEI.IFM.IP"
     ],
-    "_note": "v32 multi-market hot path: DOW + Gold + FTSE + EURUSD armed via engine_hot_path + multi_market_promote. Nikkei excluded until JPY PnL certified. DAX/Crude/GBPUSD remain rotation-only. CFD Z6BAH4: block MEAN_REVERSION + require 15m/ML/OBI align."
+    "_note": "v32 multi-market hot path: DOW + Gold + FTSE + EURUSD armed via engine_hot_path + multi_market_promote. Nikkei excluded until JPY PnL certified. DAX/Crude/GBPUSD remain rotation-only. Soak5: CFD MEAN_REVERSION + 15m/ML/OBI sniper gates OFF so dual proof can fire."
   },
   "ig_deal_size_floors": {
     "_note": "Authoritative min \u00a3/pt \u2014 mirrored in execution/size_floors.py SPREADBET_MIN_DEAL_BY_EPIC",
@@ -241,12 +241,13 @@
     "min_profit_target_pts": 6.0,
     "max_loss_cap_pts": 12.0,
     "streak_protection": {
-      "enabled": true,
+      "enabled": false,
       "post_win_cooldown_sec": 600,
       "post_loss_lock_sec": 900,
-      "cfd_block_mean_reversion": true,
-      "cfd_require_15m_trend_ml_obi": true,
-      "_note": "Mirrors entry_protection streak timers; dedicated state under state_cfd/state_sb."
+      "cfd_block_mean_reversion": false,
+      "cfd_require_15m_trend_ml_obi": false,
+      "_note": "Mirrors entry_protection streak timers; dedicated state under state_cfd/state_sb.",
+      "_soak_note": "2026-07-23 soak5: disabled so post-loss tilt + CFD MEAN_REVERSION block cannot starve dual proof. Re-enable after soak."
     },
     "virtual_stop_ceiling_pts": 12.0,
     "trail_profit_lock_ratio": 0.78,
@@ -279,7 +280,7 @@
     "omit_broker_limit_at_entry": false,
     "omit_broker_trail_updates": true,
     "_note": "Ceiling 12pt (~10.2 armed) for scalp AND long holds (max-loss, not profit exit). Targets/trail >=6pt fix scalp R:R; long_trade_runner extends to 4R after 3m once peak>=trail_trigger_gbp. Soft GBP risk*0.55. omit_broker_trail_updates=true.",
-    "_soak_note": "Effective virtual ceiling = 12*0.85≈10.2 even when IG min stop is ~4pt. Tiered banks only below trail_trigger; trail/long_runner own exits above."
+    "_soak_note": "Effective virtual ceiling = 12*0.85\u224810.2 even when IG min stop is ~4pt. Tiered banks only below trail_trigger; trail/long_runner own exits above."
   },
   "profit_pct_tiers": {
     "enabled": true,
@@ -412,7 +413,7 @@
     "outside_prime_min_confidence": 0.68,
     "strong_signal_bypass_confidence": 0.75,
     "size_cut_factor": 0.5,
-    "_note": "DOW liquidity filter (BST/Europe/London): prime allowlist for productive hours; soft-block late-evening chop 18-19; overnight allowed with higher ML bar when confidence known. CFD+SB. No night blackout — night matrix stays."
+    "_note": "DOW liquidity filter (BST/Europe/London): prime allowlist for productive hours; soft-block late-evening chop 18-19; overnight allowed with higher ML bar when confidence known. CFD+SB. No night blackout \u2014 night matrix stays."
   },
   "entry_rate_limit": {
     "enabled": true,

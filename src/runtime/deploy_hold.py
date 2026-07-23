@@ -148,6 +148,24 @@ def set_deploy_hold(
     if _refuse_prod_write_under_test(path):
         # Harness isolation — never pollute the live desk state tree from pytest.
         return path
+    # Clear = delete file (existence alone is operator risk during soak).
+    if not active:
+        try:
+            if path.is_file():
+                path.unlink()
+        except OSError:
+            pass
+        # Also clear lane mirrors used by v32 dual-port.
+        try:
+            from system.paths import data_dir
+
+            for lane in ("state_cfd", "state_sb", "state"):
+                p = Path(data_dir()) / lane / "deploy_hold.json"
+                if p.is_file():
+                    p.unlink()
+        except Exception:
+            pass
+        return path
     path.parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, Any] = {
         "active": bool(active),

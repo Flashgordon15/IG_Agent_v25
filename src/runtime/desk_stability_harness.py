@@ -663,6 +663,23 @@ def _heal_trade_support(conf: dict[str, Any]) -> dict[str, Any]:
 
 def _pause_entries_safe(reason: str, conf: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {"action": "pause_entries", "ok": False, "reason": reason}
+    # Soak proof: never re-arm entry_halt for REST pressure / soft harness grades.
+    # Cascade (opens>1) is enforced by scripts/soak5_profitable_monitor.py instead.
+    reason_l = str(reason or "").lower()
+    if "rest_critical" in reason_l or "cap_breach" in reason_l:
+        try:
+            soak_flag = data_dir() / "state" / "soak5_no_auto_pause.json"
+            if soak_flag.is_file() or not conf.get("auto_pause_on_rest_critical", True):
+                out["skipped"] = True
+                out["reason"] = "soak5_no_auto_pause"
+                out["ok"] = True
+                return out
+        except Exception:
+            if not conf.get("auto_pause_on_rest_critical", True):
+                out["skipped"] = True
+                out["reason"] = "auto_pause_disabled"
+                out["ok"] = True
+                return out
     if not _cooldown_ready("pause_entries", float(conf.get("heal_cooldown_sec", 120.0))):
         out["skipped"] = True
         out["reason"] = "cooldown"
