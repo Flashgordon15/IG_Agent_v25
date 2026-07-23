@@ -2611,6 +2611,23 @@ def _dispatch_piercing_zone_order(epic: str, z_score: float, cfg: Any | None) ->
             return
     except Exception:
         pass
+    try:
+        from execution.streak_protection import check_streak_entry_allowed
+
+        streak_ok, streak_reason = check_streak_entry_allowed(
+            None,
+            epic=str(epic),
+            cfg=cfg,
+            skip_cfd_chop=True,
+        )
+        if not streak_ok:
+            set_last_gate_suppression_reason(streak_reason)
+            log_engine(
+                f"ParallelStrategySweep: streak blocked epic={epic} reason={streak_reason}"
+            )
+            return
+    except Exception:
+        pass
     with _sweep_dispatch_lock:
         if is_api_trading_paused():
             set_last_gate_suppression_reason("api_trading_paused")
@@ -3654,6 +3671,29 @@ def try_instant_predictive_micro_scalp(
             return {"dispatched": False, "trigger": trigger, "reason": dir_reason}
     except Exception as exc:
         reason = f"regime_veto_fail_closed:{type(exc).__name__}"
+        set_last_gate_suppression_reason(reason)
+        return {"dispatched": False, "trigger": trigger, "reason": reason}
+
+    try:
+        from execution.streak_protection import check_streak_entry_allowed
+
+        streak_ok, streak_reason = check_streak_entry_allowed(
+            None,
+            epic=key,
+            direction=direction,
+            cfg=cfg,
+            bid=float(bid),
+            offer=float(offer),
+        )
+        if not streak_ok:
+            set_last_gate_suppression_reason(streak_reason)
+            return {
+                "dispatched": False,
+                "trigger": trigger,
+                "reason": streak_reason,
+            }
+    except Exception as streak_exc:
+        reason = f"streak_protection_fail_closed:{type(streak_exc).__name__}"
         set_last_gate_suppression_reason(reason)
         return {"dispatched": False, "trigger": trigger, "reason": reason}
 

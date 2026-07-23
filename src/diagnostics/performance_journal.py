@@ -346,6 +346,18 @@ def record_trade_close(
         note_closed_trade_outcome(float(realized_pnl_gbp or 0.0))
     except Exception:
         pass
+    # Per-account streak timers (post-win cooldown / post-loss tilt lock).
+    # Dedicated state — does NOT arm entry_halt / deploy_hold.
+    try:
+        from execution.streak_protection import arm_streak_protection_on_close
+
+        arm_streak_protection_on_close(
+            account_id=meta.get("account_id") or account_id,
+            realized_pnl_gbp=realized_pnl_gbp,
+            deal_id=str(deal_id or ""),
+        )
+    except Exception:
+        pass
 
 
 def journal_has_deal(deal_id: str, *, path: Path | None = None) -> bool:

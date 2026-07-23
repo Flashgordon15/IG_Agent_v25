@@ -654,6 +654,22 @@ def dispatch_asymmetric_ioc_limit(
         getattr(rest, "account_id", "") or ""
     ).strip().upper()
 
+    try:
+        from execution.streak_protection import check_streak_entry_allowed
+
+        streak_ok, streak_reason = check_streak_entry_allowed(
+            account_id,
+            epic=str(epic),
+            direction=dir_u,
+            cfg=cfg,
+            bid=float(bid),
+            offer=float(offer),
+        )
+        if not streak_ok:
+            return _veto(streak_reason or "streak_protection")
+    except Exception as streak_exc:
+        return _veto(f"streak_protection_fail_closed:{type(streak_exc).__name__}")
+
     cap_blocked, cap_reason = hard_cap_blocks_entry(account_id, rest=rest)
     if cap_blocked:
         return _veto(cap_reason or "account_hard_cap")

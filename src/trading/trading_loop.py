@@ -3830,6 +3830,27 @@ class TradingLoop:
 
             meta = resolve_journal_metadata(cfg=self.config)
             acct = str(meta.get("account_id") or DEFAULT_ACCOUNT_CFD)
+            try:
+                from execution.streak_protection import check_streak_entry_allowed
+
+                streak_ok, streak_reason = check_streak_entry_allowed(
+                    acct,
+                    epic=str(getattr(self, "epic", "") or ""),
+                    cfg=self.config,
+                    product_type=meta.get("product_type"),
+                    engine_origin=meta.get("engine_origin"),
+                    skip_cfd_chop=True,
+                )
+                if not streak_ok:
+                    return self._hard_block_all_gates(
+                        streak_reason or "streak_protection",
+                        primary_gate="broker_feed",
+                    )
+            except Exception as streak_exc:
+                return self._hard_block_all_gates(
+                    f"streak_protection_fail_closed:{type(streak_exc).__name__}",
+                    primary_gate="broker_feed",
+                )
             cap_blocked, cap_reason = hard_cap_blocks_entry(acct)
             if cap_blocked:
                 return self._hard_block_all_gates(

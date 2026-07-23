@@ -111,9 +111,12 @@
     "enabled": true,
     "max_spread_pct": 0.0002,
     "max_spread_pts": 3.0,
-    "_note": "Hard block on toxic spread + OBI; multi-market entries only in TREND/BREAKOUT/HV_TREND \u2014 RANGE_BOUND/NEUTRAL/CHOP/STAGNANT_DZ excluded. DOW overnight may pass NEUTRAL/LOW_VOL/MEAN_REVERSION via dow_overnight_allowlist except us_close/rollover.",
-    "require_trending_regime": true,
-    "dow_overnight_allowlist": true
+    "_note": "Hard block on toxic spread + OBI; multi-market entries only in TREND/BREAKOUT/HV_TREND \u2014 RANGE_BOUND/NEUTRAL/CHOP/STAGNANT_DZ excluded. DOW overnight may pass NEUTRAL/LOW_VOL/MEAN_REVERSION via dow_overnight_allowlist except us_close/rollover. CFD (Z6BAH4) still blocked in MEAN_REVERSION via streak_protection.cfd_block_mean_reversion.",
+    "require_trending_regime": false,
+    "dow_overnight_allowlist": true,
+    "soak_bypass_us_close_chop": true,
+    "cfd_block_mean_reversion": true,
+    "_soak_note": "2026-07-23 soak5: SB may pass MEAN_REVERSION DOW via allowlist; CFD sniper hard-blocked in chop by streak_protection. Rollover 21:55-22:10 still blocked."
   },
   "spread_elasticity": {
     "enabled": true,
@@ -187,7 +190,12 @@
   "entry_protection": {
     "cooldown_minutes_after_close": 5,
     "max_trades_per_epic_per_session": 12,
-    "_note": "Demo soak: allow DOW re-entry through the session; 5m post-close cooldown. Cap 1 was starving fills after first morning trade despite path_live."
+    "streak_protection_enabled": true,
+    "post_win_cooldown_sec": 600,
+    "post_loss_lock_sec": 900,
+    "post_loss_mode": "lock",
+    "post_loss_ml_boost": 0.08,
+    "_note": "Demo soak: allow DOW re-entry through the session; 5m post-close cooldown. Cap 1 was starving fills after first morning trade despite path_live. Streak: 10m post-win / 15m post-loss per-account entry pause (not entry_halt)."
   },
   "demo_soak_mode": {
     "enabled": true,
@@ -210,13 +218,15 @@
     "broker_account_product": "SPREADBET",
     "active_stack_slots": 2,
     "multi_source_auto_rotation": true,
+    "cfd_block_mean_reversion": true,
+    "cfd_require_15m_trend_ml_obi": true,
     "exclude_from_hot_path": [
       "CS.D.GBPUSD.CFD.IP",
       "IX.D.DAX.IFM.IP",
       "CS.D.CRUDE.CFD.IP",
       "IX.D.NIKKEI.IFM.IP"
     ],
-    "_note": "v32 multi-market hot path: DOW + Gold + FTSE + EURUSD armed via engine_hot_path + multi_market_promote. Nikkei excluded until JPY PnL certified. DAX/Crude/GBPUSD remain rotation-only."
+    "_note": "v32 multi-market hot path: DOW + Gold + FTSE + EURUSD armed via engine_hot_path + multi_market_promote. Nikkei excluded until JPY PnL certified. DAX/Crude/GBPUSD remain rotation-only. CFD Z6BAH4: block MEAN_REVERSION + require 15m/ML/OBI align."
   },
   "ig_deal_size_floors": {
     "_note": "Authoritative min \u00a3/pt \u2014 mirrored in execution/size_floors.py SPREADBET_MIN_DEAL_BY_EPIC",
@@ -230,6 +240,14 @@
     "target_r_multiple": 2.5,
     "min_profit_target_pts": 6.0,
     "max_loss_cap_pts": 12.0,
+    "streak_protection": {
+      "enabled": true,
+      "post_win_cooldown_sec": 600,
+      "post_loss_lock_sec": 900,
+      "cfd_block_mean_reversion": true,
+      "cfd_require_15m_trend_ml_obi": true,
+      "_note": "Mirrors entry_protection streak timers; dedicated state under state_cfd/state_sb."
+    },
     "virtual_stop_ceiling_pts": 12.0,
     "trail_profit_lock_ratio": 0.78,
     "trail_trigger_pts": 6.0,
@@ -556,9 +574,10 @@
     "auto_heal_enabled": true,
     "auto_heal_ui": true,
     "auto_heal_trade_support": true,
-    "auto_pause_on_rest_critical": true,
-    "auto_pause_on_cap_breach": true,
-    "_note": "In-process AI Application Stability Harness \u2014 composite G/A/R SoT; 30s boot latency buffer suppresses false ENGINE BLOCKAGE/GATE HOLD during candle/token hydration; never flatten or kill -9 main"
+    "auto_pause_on_rest_critical": false,
+    "auto_pause_on_cap_breach": false,
+    "_note": "In-process AI Application Stability Harness \u2014 composite G/A/R SoT; 30s boot latency buffer suppresses false ENGINE BLOCKAGE/GATE HOLD during candle/token hydration; never flatten or kill -9 main",
+    "_soak_note": "2026-07-23 soak5: auto_pause_on_rest_critical/cap_breach DISABLED so REST CRITICAL cannot re-arm entry_halt/trading_paused/deploy_hold. Cascade opens>1 handled by soak5 monitor only."
   },
   "desk_support_wrapper": {
     "enabled": true,

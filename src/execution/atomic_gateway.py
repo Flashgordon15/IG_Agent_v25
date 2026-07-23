@@ -269,6 +269,26 @@ def dispatch_atomic_market_order(
         return {"status": "REJECTED", "rejection_reason": hold, "shadow": False}
 
     account_id = str(getattr(client, "account_id", "") or "").strip().upper()
+    try:
+        from execution.streak_protection import check_streak_entry_allowed
+
+        streak_ok, streak_reason = check_streak_entry_allowed(
+            account_id,
+            epic=str(epic),
+            direction=str(direction or ""),
+        )
+        if not streak_ok:
+            log_engine(f"AtomicGateway: {streak_reason}")
+            return {
+                "status": "REJECTED",
+                "rejection_reason": streak_reason or "streak_protection",
+                "shadow": False,
+            }
+    except Exception as streak_exc:
+        reason = f"streak_protection_fail_closed:{type(streak_exc).__name__}"
+        log_engine(f"AtomicGateway: {reason}")
+        return {"status": "REJECTED", "rejection_reason": reason, "shadow": False}
+
     cap_blocked, cap_reason = hard_cap_blocks_entry(account_id, rest=client)
     if cap_blocked:
         log_engine(cap_reason)
