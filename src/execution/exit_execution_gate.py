@@ -436,6 +436,50 @@ def request_flatten(
             )
         except Exception:
             pass
+        # Hot-path micro flattens bypass learning_store — still arm the cash journal
+        # so soak / milestone trackers see real DIAAAA DealIDs.
+        try:
+            from diagnostics.performance_journal import record_trade_close
+
+            conf = confirm if isinstance(confirm, dict) else {}
+            raw = conf.get("raw") if isinstance(conf.get("raw"), dict) else conf
+            profit = None
+            for key in ("profit", "pnl", "realized_pnl"):
+                if raw.get(key) is not None:
+                    try:
+                        profit = float(raw.get(key))
+                        break
+                    except (TypeError, ValueError):
+                        pass
+            if profit is None and pnl_gbp is not None:
+                try:
+                    profit = float(pnl_gbp)
+                except (TypeError, ValueError):
+                    profit = None
+            exit_lvl = None
+            for key in ("level", "exit", "exit_price", "price"):
+                if raw.get(key) is not None:
+                    try:
+                        exit_lvl = float(raw.get(key))
+                        break
+                    except (TypeError, ValueError):
+                        pass
+            if profit is not None:
+                record_trade_close(
+                    deal_id=did,
+                    direction=direction_u,
+                    entry_price=None,
+                    exit_price=exit_lvl,
+                    realized_pnl_gbp=float(profit),
+                    account_id=str(getattr(rest, "account_id", "") or ""),
+                    product_type="",
+                    engine_origin=str(source or "exit_gate"),
+                )
+        except Exception as journal_exc:
+            log_engine(
+                f"ExitGate: journal record skipped deal={did[:12]} "
+                f"{type(journal_exc).__name__}: {journal_exc}"
+            )
         return result
     except Exception as exc:
         err = f"{type(exc).__name__}: {exc}"

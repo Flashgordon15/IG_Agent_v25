@@ -85,9 +85,9 @@
     "enabled": true,
     "min_abs_ratio": 0.22,
     "require_align": true,
-    "fail_closed_on_neutral": true,
+    "fail_closed_on_neutral": false,
     "min_tpm_confirm": 8,
-    "_note": "Depthless Mini: require |OBI|>=0.22 align + TPM>=8. fail_closed_on_neutral=true stops wrong-way entries on flat book pressure."
+    "_note": "Depthless Mini (rest_poll): quote_proxy OBI often ~0 with no mid history. fail_closed_on_neutral=true permanently starved entries (ratio=0.000). Crash/meltup guards + informative require_align remain; Sniper ML gate owns probabilistic side quality. Wrong-way cascade was DELETE-body spawn, not OBI invert."
   },
   "event_driven_tick": {
     "enabled": true,
@@ -354,7 +354,6 @@
       "IX.D.DOW.IFM.IP"
     ],
     "avoid_hours": [
-      16,
       18
     ],
     "prefer_hours": [
@@ -364,7 +363,8 @@
     "mode": "soft_block",
     "strong_signal_bypass_confidence": 0.72,
     "size_cut_factor": 0.5,
-    "_note": "Soft-block DOW at historically weak London hours 16:00/18:00. Prefer 13:00/17:00. No night blackout \u2014 night matrix stays."
+    "_note": "Soft-block DOW at historically weak London hours 16:00/18:00. Prefer 13:00/17:00. No night blackout \u2014 night matrix stays.",
+    "_soak_note": "Temporarily dropped hour-16 soft_block for DELETE-fix soak; hour-18 remains. Revisit after 5-success milestone."
   },
   "entry_rate_limit": {
     "enabled": true,
@@ -529,7 +529,7 @@
         "min_probability": 0.55
       }
     },
-    "_note": "Gate 11 blend_ml — raised to 0.55 after wrong-way mean-revert soak losses (not BUY/SELL invert)"
+    "_note": "Gate 11 blend_ml \u2014 raised to 0.55 after wrong-way mean-revert soak losses (not BUY/SELL invert)"
   },
   "session_validation": {
     "clear_circuit_breaker_on_boot": true
