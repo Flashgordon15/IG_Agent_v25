@@ -377,6 +377,14 @@ class IgTransactionSync:
                 if not close_ref:
                     continue
                 open_deal = self._resolve_open_deal_id_for_journal(r) or close_ref
+                # Short IG close refs (e.g. 6AVMLHA7) must journal as DIAAAAX…
+                # so soak / DealID milestones can count them.
+                if (
+                    open_deal
+                    and not str(open_deal).upper().startswith("DIAAAA")
+                    and len(str(open_deal).strip()) >= 6
+                ):
+                    open_deal = f"DIAAAAX{str(open_deal).strip().upper()}"
                 pnl = r.get("ig_pnl_currency")
                 if pnl is None:
                     pnl = r.get("pnl_points")

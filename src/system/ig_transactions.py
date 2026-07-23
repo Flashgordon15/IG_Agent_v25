@@ -133,9 +133,15 @@ def ig_deal_key_variants(key: str) -> set[str]:
         return set()
     out = {k}
     if k.startswith("DIAAAA") and len(k) > 7:
-        out.add(k[7:])
+        # DIAAAAX6AVMLHA7 → X6AVMLHA7 and 6AVMLHA7
+        out.add(k[6:])  # after DIAAAA
+        out.add(k[7:])  # after DIAAAAX / DIAAAA?
+        if k.startswith("DIAAAAX") and len(k) > 8:
+            out.add(k[8:])
     elif len(k) >= 6 and not k.startswith("SIM"):
-        # Short position suffix from /history/transactions
+        # Short position suffix from /history/transactions.
+        # Live demo dealIds are DIAAAAX… (with X); also keep legacy DIAAAA… form.
+        out.add(f"DIAAAAX{k}")
         out.add(f"DIAAAA{k}")
     return out
 

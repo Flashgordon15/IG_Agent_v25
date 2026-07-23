@@ -100,9 +100,10 @@
     "enabled": true,
     "min_entry_interval_sec": 60.0,
     "side_persistence_sec": 8.0,
-    "require_15m_trend_ml_obi": true,
-    "min_ml_p_success": 0.68,
-    "_note": "Gated Instant: cadence+flip+side persistence + 15m/ML/OBI agree \u2014 rejects naked score=100. Core B / long_trade_runner remain."
+    "require_15m_trend_ml_obi": false,
+    "min_ml_p_success": 0.55,
+    "_note": "Gated Instant: cadence+flip+side persistence + 15m/ML/OBI agree \u2014 rejects naked score=100. Core B / long_trade_runner remain.",
+    "_soak_note": "soak5: Instant 15m/ML/OBI hard-require OFF so entries can fire overnight"
   },
   "asymmetric_ioc_routing": {
     "enabled": true,
@@ -127,7 +128,7 @@
     "_note": "If spread > 1.5\u00d7 1h MA \u2192 resting WO at historical inside touch (no MARKET)"
   },
   "leader_follower": {
-    "enabled": true,
+    "enabled": false,
     "lookback_ticks": 8,
     "momentum_eps": 5e-05,
     "shadow_proxy": true,
@@ -137,7 +138,8 @@
     "leader_map": {
       "IX.D.DOW.IFM.IP": "PROXY.US30"
     },
-    "_note": "Veto BUY only on meaningful negative micro-momentum (~2.5 DOW pts over lookback). eps 1e-9 was vetoing noise and starving ACCEPTED fills."
+    "_note": "Veto BUY only on meaningful negative micro-momentum (~2.5 DOW pts over lookback). eps 1e-9 was vetoing noise and starving ACCEPTED fills.",
+    "_soak_note": "soak5: disabled \u2014 micro-momentum veto was starving DOW fills overnight"
   },
   "volatility_bracket": {
     "enabled": true,

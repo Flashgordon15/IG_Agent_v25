@@ -505,10 +505,16 @@ def ensure_broker_attached_exit_journaled(
     this hook those DIAAAA* deals can settle on the broker and never appear in
     ``daily_journal.csv``. Returns True when a new row was written.
     """
-    deal = str(deal_id or "").strip()
+    deal = str(deal_id or "").strip().upper()
     if not deal:
         return False
+    # Expand short IG close refs so soak milestones see DIAAAA* DealIDs.
+    if not deal.startswith("DIAAAA") and len(deal) >= 6 and deal.isalnum():
+        deal = f"DIAAAAX{deal}"
     if journal_has_deal(deal, path=path):
+        return False
+    # Also skip if the short-form row already exists (avoid double-count).
+    if deal.startswith("DIAAAAX") and journal_has_deal(deal[8:], path=path):
         return False
     if realized_pnl_gbp is None:
         # Still journal £0 so soak / DealID round-trip is not silent.

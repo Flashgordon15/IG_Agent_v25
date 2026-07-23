@@ -106,7 +106,10 @@ def journal_profits(start_epoch: float):
         ts = parse_ts(row.get("Timestamp") or "")
         if ts is None or ts < start_epoch - 2:
             continue
-        deal = str(row.get("DealID") or "").strip()
+        deal = str(row.get("DealID") or "").strip().upper()
+        # Expand short IG close refs (6AVMLHA7 → DIAAAAX6AVMLHA7).
+        if deal and not deal.startswith("DIAAAA") and len(deal) >= 6 and deal.isalnum():
+            deal = f"DIAAAAX{deal}"
         if not deal.startswith("DIAAAA"):
             continue
         if deal in seen:
