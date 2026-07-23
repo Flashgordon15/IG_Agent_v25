@@ -8,6 +8,7 @@ overnight desk monitor can scrape.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from collections import defaultdict
@@ -24,6 +25,23 @@ def outcomes_path() -> Path:
     from system.paths import data_dir
 
     return Path(data_dir()) / "metrics" / "ml_trade_outcomes.jsonl"
+
+
+def _refuse_prod_write_under_test(path: Path) -> bool:
+    if not (
+        os.environ.get("IG_TEST_HARNESS", "").strip() == "1"
+        or os.environ.get("IG_AGENT_PYTEST", "").strip() == "1"
+        or bool(os.environ.get("PYTEST_CURRENT_TEST"))
+    ):
+        return False
+    try:
+        from system.paths import project_root
+
+        resolved = path.resolve()
+        prod = (project_root() / "src" / "data" / "v31-production").resolve()
+        return str(resolved).startswith(str(prod) + os.sep) or resolved == prod
+    except OSError:
+        return False
 
 
 def reset_ml_trade_outcomes_for_tests() -> None:
@@ -110,6 +128,8 @@ def record_ml_trade_outcome(
         "engine_origin": str(engine_origin or ""),
     }
     out = path or outcomes_path()
+    if _refuse_prod_write_under_test(out):
+        return False
     try:
         out.parent.mkdir(parents=True, exist_ok=True)
         with _LOCK:

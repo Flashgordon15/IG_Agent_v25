@@ -205,6 +205,25 @@ def _load_state(account_id: str) -> dict[str, Any]:
         return dict(st)
 
 
+def _under_pytest_or_harness() -> bool:
+    return (
+        os.environ.get("IG_TEST_HARNESS", "").strip() == "1"
+        or os.environ.get("IG_AGENT_PYTEST", "").strip() == "1"
+        or bool(os.environ.get("PYTEST_CURRENT_TEST"))
+    )
+
+
+def _is_production_data_path(path: Path) -> bool:
+    try:
+        from system.paths import project_root
+
+        resolved = path.resolve()
+        prod = (project_root() / "src" / "data" / "v31-production").resolve()
+        return str(resolved).startswith(str(prod) + os.sep) or resolved == prod
+    except OSError:
+        return False
+
+
 def _save_state(account_id: str, state: dict[str, Any]) -> None:
     st = dict(state)
     st["account_id"] = account_id
@@ -212,6 +231,9 @@ def _save_state(account_id: str, state: dict[str, Any]) -> None:
     with _LOCK:
         _MEMORY[account_id] = dict(st)
         path = _state_path(account_id)
+        # Never let unit tests arm live desk streak cooldowns.
+        if _under_pytest_or_harness() and _is_production_data_path(path):
+            return
         try:
             tmp = path.with_suffix(".json.tmp")
             tmp.write_text(json.dumps(st, indent=2, sort_keys=True) + "\n", encoding="utf-8")
