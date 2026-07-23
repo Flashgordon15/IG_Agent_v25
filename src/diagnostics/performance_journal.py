@@ -37,7 +37,51 @@ _HEADER = [
     "EngineOrigin",
     "ExitReason",
     "HoldSec",
+    "Style",
 ]
+
+# Hold ≥ 3m (long_trade_runner arm window) tags SB/CFD closes as long.
+_LONG_HOLD_SEC = 180.0
+
+
+def infer_trade_style(
+    *,
+    engine_origin: str = "",
+    exit_reason: str = "",
+    hold_sec: float | None = None,
+    style: str | None = None,
+) -> str:
+    """Resolve ``scalp|long|macro|supervised_exit|unknown`` for journal / ML."""
+    explicit = str(style or "").strip().lower()
+    if explicit in ("scalp", "long", "macro", "supervised_exit"):
+        return explicit
+    origin = str(engine_origin or "").upper()
+    reason = str(exit_reason or "").lower()
+    if (
+        "LONG" in origin
+        or "long_runner" in reason
+        or "long_trade" in reason
+        or "runner_extended" in reason
+    ):
+        return "long"
+    if hold_sec is not None:
+        try:
+            if float(hold_sec) >= _LONG_HOLD_SEC:
+                return "long"
+            if float(hold_sec) >= 0:
+                # Short supervised holds default scalp unless macro origin.
+                if "SENTINEL" in origin or "MACRO" in origin:
+                    return "macro"
+                return "scalp"
+        except (TypeError, ValueError):
+            pass
+    if "MICRO" in origin or "SCALP" in origin or "SNIPER" in origin:
+        return "scalp"
+    if "SENTINEL" in origin or "MACRO" in origin:
+        return "macro"
+    if "dynamic_limit" in reason or "open_position" in reason or "broker_attached" in reason:
+        return "supervised_exit"
+    return "unknown"
 _QUEUE_MAX = 2048
 
 _lock = threading.RLock()
@@ -63,6 +107,10 @@ class _JournalEvent:
     engine_origin: str = ""
     exit_reason: str = ""
     hold_sec: float | None = None
+    style: str = ""
+    epic: str = ""
+    ml_score: float | None = None
+    regime: str = ""
 
 
 def reset_performance_journal_for_tests() -> None:
@@ -117,6 +165,7 @@ def ensure_benchmark_offset(*, path: Path | None = None) -> Path:
                 "",
                 "",
                 "0.0",
+                "",
                 "",
                 "",
                 "",
@@ -240,6 +289,14 @@ def _append_row(ev: _JournalEvent) -> None:
         meta["engine_origin"],
         str(ev.exit_reason or ""),
         _fmt(None if ev.hold_sec is None else round(float(ev.hold_sec), 1)),
+        str(
+            ev.style
+            or infer_trade_style(
+                engine_origin=meta["engine_origin"],
+                exit_reason=ev.exit_reason,
+                hold_sec=ev.hold_sec,
+            )
+        ),
     ]
     with _lock:
         with path.open("a", encoding="utf-8", newline="") as fh:
@@ -328,6 +385,10 @@ def record_trade_close(
     engine_id: str | None = None,
     exit_reason: str | None = None,
     hold_sec: float | None = None,
+    style: str | None = None,
+    epic: str | None = None,
+    ml_score: float | None = None,
+    regime: str | None = None,
 ) -> None:
     """Hot-path safe — enqueue one journal line for a closed deal."""
     meta = _resolve_event_metadata(
@@ -335,6 +396,12 @@ def record_trade_close(
         product_type=product_type,
         engine_origin=engine_origin,
         engine_id=engine_id,
+    )
+    style_tag = infer_trade_style(
+        engine_origin=meta["engine_origin"],
+        exit_reason=str(exit_reason or ""),
+        hold_sec=float(hold_sec) if hold_sec is not None else None,
+        style=style,
     )
     _enqueue(
         _JournalEvent(
@@ -350,12 +417,35 @@ def record_trade_close(
             engine_origin=meta["engine_origin"],
             exit_reason=str(exit_reason or ""),
             hold_sec=float(hold_sec) if hold_sec is not None else None,
+            style=style_tag,
+            epic=str(epic or ""),
+            ml_score=float(ml_score) if ml_score is not None else None,
+            regime=str(regime or ""),
         )
     )
     try:
         from execution.asymmetric_ioc_router import note_closed_trade_outcome
 
         note_closed_trade_outcome(float(realized_pnl_gbp or 0.0))
+    except Exception:
+        pass
+    # Lightweight ML feedback — overnight monitor scrapes the summary log line.
+    try:
+        from diagnostics.ml_trade_outcomes import record_ml_trade_outcome
+
+        record_ml_trade_outcome(
+            account_id=meta["account_id"],
+            epic=str(epic or ""),
+            side=str(direction or "").upper(),
+            ml_score=float(ml_score) if ml_score is not None else None,
+            regime=str(regime or ""),
+            style=style_tag,
+            pnl=float(realized_pnl_gbp) if realized_pnl_gbp is not None else None,
+            deal_id=str(deal_id or "").strip(),
+            exit_reason=str(exit_reason or ""),
+            hold_sec=float(hold_sec) if hold_sec is not None else None,
+            engine_origin=meta["engine_origin"],
+        )
     except Exception:
         pass
     # Per-account streak timers (post-win cooldown / post-loss tilt lock).
@@ -403,6 +493,10 @@ def ensure_broker_attached_exit_journaled(
     account_id: str | None = None,
     product_type: str | None = None,
     engine_origin: str | None = None,
+    exit_reason: str | None = None,
+    hold_sec: float | None = None,
+    style: str | None = None,
+    epic: str | None = None,
     path: Path | None = None,
 ) -> bool:
     """Idempotently journal a broker-attached / ExitGate-bypass close.
@@ -444,6 +538,7 @@ def ensure_broker_attached_exit_journaled(
                 continue
 
     origin = str(engine_origin or "").strip() or "broker_attached"
+    reason = str(exit_reason or "").strip() or "broker_attached"
     record_trade_close(
         deal_id=deal,
         direction=direction,
@@ -454,11 +549,15 @@ def ensure_broker_attached_exit_journaled(
         account_id=account_id,
         product_type=product_type,
         engine_origin=origin,
+        exit_reason=reason,
+        hold_sec=hold_sec,
+        style=style,
+        epic=epic,
     )
     try:
         log_engine(
             f"PerformanceJournal: broker-attached exit journaled deal={deal[:16]} "
-            f"pnl={pnl:.2f} origin={origin}"
+            f"pnl={pnl:.2f} origin={origin} reason={reason[:40]}"
         )
     except Exception:
         pass

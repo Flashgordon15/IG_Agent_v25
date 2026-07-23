@@ -463,19 +463,27 @@ def _evaluate_track(track: GbpExitTrack, pnl_gbp: float) -> None:
     if _stagnant_flatten(track, pnl_gbp, cfg):
         return
 
-    # 3) Track peak and ratchet trail floor.
+    # 3) Track peak and ratchet trail floor — reject fantasy GBP jumps (SB too).
     if pnl_gbp > track.peak_profit_gbp:
-        with _lock:
-            live = _tracks.get(track.deal_id)
-            if live is None:
-                return
-            live.peak_profit_gbp = pnl_gbp
-            if pnl_gbp >= live.trail_trigger_gbp:
-                live.trail_floor_gbp = max(
-                    live.trail_floor_gbp,
-                    _update_trail_floor(live, pnl_gbp, cfg=cfg),
-                )
-            track = live
+        jump = float(pnl_gbp) - float(track.peak_profit_gbp or 0.0)
+        # Index SB: >£25 one-tick peak is hub/Yahoo noise (mirrors DynamicLimit 25pt).
+        if jump > 25.0:
+            log_engine(
+                f"MicroGbpExit: fantasy peak rejected deal={track.deal_id[:10]} "
+                f"jump={jump:.2f} pnl={pnl_gbp:.2f} prev={track.peak_profit_gbp:.2f}"
+            )
+        else:
+            with _lock:
+                live = _tracks.get(track.deal_id)
+                if live is None:
+                    return
+                live.peak_profit_gbp = pnl_gbp
+                if pnl_gbp >= live.trail_trigger_gbp:
+                    live.trail_floor_gbp = max(
+                        live.trail_floor_gbp,
+                        _update_trail_floor(live, pnl_gbp, cfg=cfg),
+                    )
+                track = live
 
     from execution.tiered_profit_banks import tiered_bank_reason
     from runtime.long_trade_runner import is_long_runner_active, sb_prefer_long_hold
@@ -490,8 +498,19 @@ def _evaluate_track(track: GbpExitTrack, pnl_gbp: float) -> None:
     sb_long = sb_prefer_long_hold(cfg)
     defer_scalp_banks = bool(long_runner or sb_long)
 
+    # Min-hold before trail / micro banks (hard loss_cap / virtual-stop still fire).
+    min_hold = 150.0
+    try:
+        mr = (cfg.get("micro_risk") or {}) if cfg is not None and hasattr(cfg, "get") else {}
+        if isinstance(mr, dict) and mr.get("min_hold_before_trail_sec") is not None:
+            min_hold = max(0.0, float(mr.get("min_hold_before_trail_sec")))
+    except Exception:
+        pass
+    hold_age = max(0.0, time.time() - float(track.armed_at or 0.0))
+    trail_hold_ok = hold_age >= min_hold
+
     # 4) Trailing profit exit — controlled giveback from peak.
-    if track.peak_profit_gbp >= track.trail_trigger_gbp:
+    if trail_hold_ok and track.peak_profit_gbp >= track.trail_trigger_gbp:
         floor = max(
             track.trail_floor_gbp,
             _update_trail_floor(track, track.peak_profit_gbp, cfg=cfg),
@@ -508,6 +527,19 @@ def _evaluate_track(track: GbpExitTrack, pnl_gbp: float) -> None:
                 exit_meta={"runner_extended": bool(long_runner)},
             )
             return
+
+    if not trail_hold_ok:
+        # Still allow hard target after min-hold only; soft banks wait.
+        target = _effective_target(track, cfg)
+        if pnl_gbp >= target and hold_age >= min_hold:
+            tag = "long_runner_target_profit" if long_runner else "target_profit"
+            _flatten(
+                track,
+                reason=f"{tag} pnl={pnl_gbp:.2f} tgt={target:.2f}",
+                pnl_gbp=pnl_gbp,
+                exit_meta={"runner_extended": bool(long_runner)},
+            )
+        return
 
     pct_decision = None
     try:
@@ -688,6 +720,18 @@ def _load_broker_pnls_gbp() -> dict[str, float]:
         return out
 
 
+def hold_sec_for_deal(deal_id: str) -> float | None:
+    """Best-effort hold age for journal Style tagging (pre-remove)."""
+    key = str(deal_id or "").strip()
+    if not key:
+        return None
+    with _lock:
+        track = _tracks.get(key)
+    if track is None or not track.armed_at:
+        return None
+    return max(0.0, time.time() - float(track.armed_at))
+
+
 def _flatten(
     track: GbpExitTrack,
     *,
@@ -702,6 +746,11 @@ def _flatten(
         if is_executing(track.deal_id):
             return
         rest = _resolve_rest_client()
+        hold = hold_sec_for_deal(track.deal_id)
+        meta = dict(exit_meta or {})
+        style = "long" if meta.get("runner_extended") or "long_runner" in reason else None
+        if style is None and hold is not None and hold >= 180.0:
+            style = "long"
         request_flatten(
             rest=rest,
             deal_id=track.deal_id,
@@ -711,6 +760,8 @@ def _flatten(
             reason=reason,
             pnl_gbp=pnl_gbp,
             source="micro_gbp_exit",
+            hold_sec=hold,
+            style=style,
         )
         return
     except Exception as exc:

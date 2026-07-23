@@ -3881,19 +3881,16 @@ class TradingLoop:
             log_guarded_exception("trading_loop", exc)
 
         try:
-            from pathlib import Path
-            import json as _json
+            from runtime.halt_sot import active_halt_flags
 
-            from system.paths import state_dir
-
-            halt = Path(state_dir()) / "entry_halt.json"
-            if halt.is_file():
-                raw = _json.loads(halt.read_text(encoding="utf-8"))
-                if bool(raw.get("active")):
-                    return self._hard_block_all_gates(
-                        str(raw.get("reason") or "entry_halt"),
-                        primary_gate="broker_feed",
-                    )
+            for row in active_halt_flags(include_deploy_hold=False):
+                name = str(row.get("name") or "")
+                if name not in ("entry_halt.json", "trading_paused.json"):
+                    continue
+                return self._hard_block_all_gates(
+                    str(row.get("reason") or name.replace(".json", "")),
+                    primary_gate="broker_feed",
+                )
         except Exception as exc:
             log_guarded_exception("trading_loop", exc)
 

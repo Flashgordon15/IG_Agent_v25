@@ -91,10 +91,14 @@ MICRO_SCALP_TARGET_MAX_PTS = 12.0
 MICRO_SCALP_INSTANT_CADENCE_SEC = 60.0
 MICRO_SCALP_FLIP_COOLDOWN_SEC = 45.0
 MICRO_SCALP_MIN_FORECAST = 0.55
+MICRO_SCALP_SIDE_PERSISTENCE_SEC = 8.0
+MICRO_SCALP_MIN_ML_P_SUCCESS = 0.68
 _micro_scalper_lane_registered = False
 _micro_scalper_lane_unsub: Callable[[], None] | None = None
 _last_instant_scalp_at: dict[str, float] = {}
 _last_instant_scalp_dir: dict[str, str] = {}
+# epic -> (direction, first_seen_ts) for Instant side persistence
+_instant_side_persist: dict[str, tuple[str, float]] = {}
 _micro_scalper_lane_lock = threading.Lock()
 
 
@@ -264,6 +268,33 @@ def refresh_active_stack_tradeability(*, cfg: Any | None = None, rest: Any | Non
     return _rotate_active_stack_to(new_stack, reason="tradeability_refresh", cfg=cfg, rest=rest)
 
 
+def _sb_hot_path_allowlist(cfg: Any | None = None) -> set[str] | None:
+    """SB-only allowlist (DOW until Gold/EURUSD/Nikkei certified). None = no SB filter."""
+    try:
+        if cfg is None:
+            from system.config_loader import get_config
+
+            cfg = get_config()
+        if cfg is not None and hasattr(cfg, "get"):
+            dual = cfg.get("dual_core") or {}
+            if isinstance(dual, dict):
+                allow = dual.get("sb_hot_path_allowlist")
+                if isinstance(allow, list) and allow:
+                    return {str(e).strip() for e in allow if str(e).strip()}
+    except Exception:
+        pass
+    return None
+
+
+def _is_sb_lane_process() -> bool:
+    acct = str(os.environ.get("IG_ACCOUNT_ID") or "").strip().upper()
+    origin = str(os.environ.get("IG_ENGINE_ORIGIN") or "").strip().upper()
+    if acct == "Z6BAH3" or origin == "MACRO_SENTINEL":
+        return True
+    product = str(os.environ.get("IG_PRODUCT_TYPE") or "").strip().upper()
+    return product in ("SPREADBET", "SPREAD_BET")
+
+
 def epic_allowed_on_hot_path(epic: str, cfg: Any | None = None) -> bool:
     """Reject dispatch on epics outside active stack or on exclude list.
 
@@ -273,11 +304,19 @@ def epic_allowed_on_hot_path(epic: str, cfg: Any | None = None) -> bool:
     Misleading ``hot_path_epic_excluded`` logs for DOW starve fills while
     ``trading_path_live`` stays green.
 
+    SB lane: ``sb_hot_path_allowlist`` (default DOW-only) blocks Gold/EURUSD noise.
+
     Forex-rotation lock remains a hard override (indices off).
     """
     key = str(epic or "").strip()
     if not key:
         return False
+
+    # SB DOW-only until non-DOW epics are PnL-certified.
+    if _is_sb_lane_process():
+        allow = _sb_hot_path_allowlist(cfg)
+        if allow is not None and key not in allow:
+            return False
 
     excluded: set[str] = set()
     try:
@@ -1943,21 +1982,13 @@ def lite_valve_block_status() -> str:
     except Exception:
         pass
     try:
-        from pathlib import Path
-        import json as _json
+        from runtime.halt_sot import active_halt_flags
 
-        from system.paths import state_dir
-
-        for flag_name, default_reason in (
-            ("entry_halt.json", "entry_halt"),
-            ("trading_paused.json", "trading_paused"),
-        ):
-            halt = Path(state_dir()) / flag_name
-            if not halt.is_file():
+        for row in active_halt_flags(include_deploy_hold=False):
+            name = str(row.get("name") or "")
+            if name not in ("entry_halt.json", "trading_paused.json"):
                 continue
-            raw = _json.loads(halt.read_text(encoding="utf-8"))
-            if bool(raw.get("active")):
-                reasons.append(str(raw.get("reason") or default_reason))
+            reasons.append(str(row.get("reason") or name.replace(".json", "")))
     except Exception:
         pass
     try:
@@ -3542,6 +3573,90 @@ def evaluate_predictive_micro_scalp_trigger(
         )
         return empty
 
+    # Instant selectivity: reject naked score=100 without 15m + ML + OBI agree.
+    require_triple = True
+    min_ml = float(MICRO_SCALP_MIN_ML_P_SUCCESS)
+    try:
+        from system.config_loader import get_config
+
+        cfg_sel = get_config()
+        block = (cfg_sel.get("micro_scalp_instant") or {}) if hasattr(cfg_sel, "get") else {}
+        if isinstance(block, dict):
+            if "require_15m_trend_ml_obi" in block:
+                require_triple = bool(block.get("require_15m_trend_ml_obi"))
+            if block.get("min_ml_p_success") is not None:
+                min_ml = float(block.get("min_ml_p_success"))
+    except Exception:
+        pass
+    if require_triple:
+        # Enforce live 15m trend (do NOT honor Core-B uncoupled bypass for Instant).
+        try:
+            trend = resolve_live_15min_macro_trend(key)
+            dir_u = str(direction).upper()
+            trend_ok = (
+                (trend == "BULLISH" and dir_u == "BUY")
+                or (trend == "BEARISH" and dir_u == "SELL")
+            )
+            if not trend_ok:
+                empty.update(
+                    {
+                        "score_pct": score,
+                        "promote_tier": tier,
+                        "order_flow_aligned": flow_aligned,
+                        "forecast_confidence": forecast_conf,
+                        "reason": f"instant_15m_trend_disagree trend={trend}",
+                    }
+                )
+                return empty
+        except Exception as exc:
+            empty["reason"] = f"instant_15m_fail_closed:{type(exc).__name__}"
+            return empty
+
+        # ML sniper must approve — naked microkernel score=100 is not enough.
+        try:
+            from types import SimpleNamespace
+
+            from execution.entry_gate_hardening import evaluate_sniper_ml_gate
+
+            quote = SimpleNamespace(
+                bid=float(bid),
+                offer=float(offer),
+                mid=(float(bid) + float(offer)) / 2.0,
+            )
+            ml_ok, ml_detail, p = evaluate_sniper_ml_gate(
+                key, direction, cfg=None, quote=quote
+            )
+            if (not ml_ok) or float(p) < min_ml:
+                empty.update(
+                    {
+                        "score_pct": score,
+                        "promote_tier": tier,
+                        "order_flow_aligned": flow_aligned,
+                        "forecast_confidence": forecast_conf,
+                        "reason": (
+                            f"instant_ml_reject p={float(p):.3f}<{min_ml:.3f} "
+                            f"{ml_detail}"
+                        ),
+                    }
+                )
+                return empty
+        except Exception as exc:
+            empty["reason"] = f"instant_ml_fail_closed:{type(exc).__name__}"
+            return empty
+
+        # OBI must affirmatively align (not merely non-informative).
+        if not flow_aligned:
+            empty.update(
+                {
+                    "score_pct": score,
+                    "promote_tier": tier,
+                    "order_flow_aligned": False,
+                    "forecast_confidence": forecast_conf,
+                    "reason": "instant_obi_not_aligned",
+                }
+            )
+            return empty
+
     # Resolve R:R-compatible targets from micro_risk when available.
     t_min, t_max = float(MICRO_SCALP_TARGET_MIN_PTS), float(MICRO_SCALP_TARGET_MAX_PTS)
     try:
@@ -3720,6 +3835,15 @@ def try_instant_predictive_micro_scalp(
         return {"dispatched": False, "trigger": trigger, "reason": reason}
 
     now = time.time()
+    persist_sec = float(MICRO_SCALP_SIDE_PERSISTENCE_SEC)
+    try:
+        if cfg is not None and hasattr(cfg, "get"):
+            block = cfg.get("micro_scalp_instant") or {}
+            if isinstance(block, dict) and block.get("side_persistence_sec") is not None:
+                persist_sec = max(0.0, float(block.get("side_persistence_sec")))
+    except Exception:
+        pass
+
     with _micro_scalper_lane_lock:
         last = _last_instant_scalp_at.get(key, 0.0)
         last_dir = str(_last_instant_scalp_dir.get(key) or "")
@@ -3736,10 +3860,27 @@ def try_instant_predictive_micro_scalp(
             and last_dir != direction
             and (now - last) < float(MICRO_SCALP_FLIP_COOLDOWN_SEC)
         ):
+            _instant_side_persist.pop(key, None)
             return {
                 "dispatched": False,
                 "trigger": trigger,
                 "reason": "instant_scalp_flip_chop",
+            }
+        # Side persistence: same direction must hold ≥ N seconds before fire.
+        prev = _instant_side_persist.get(key)
+        if prev is None or str(prev[0]) != direction:
+            _instant_side_persist[key] = (direction, now)
+            if persist_sec > 0:
+                return {
+                    "dispatched": False,
+                    "trigger": trigger,
+                    "reason": "instant_side_persistence",
+                }
+        elif persist_sec > 0 and (now - float(prev[1])) < persist_sec:
+            return {
+                "dispatched": False,
+                "trigger": trigger,
+                "reason": "instant_side_persistence",
             }
         _last_instant_scalp_at[key] = now
         _last_instant_scalp_dir[key] = direction
@@ -3879,6 +4020,7 @@ def reset_micro_scalper_tick_lane_for_tests() -> None:
     with _micro_scalper_lane_lock:
         _last_instant_scalp_at.clear()
         _last_instant_scalp_dir.clear()
+        _instant_side_persist.clear()
 
 
 def evaluate_micro_scalp_signal(

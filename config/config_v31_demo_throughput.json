@@ -99,7 +99,10 @@
   "micro_scalp_instant": {
     "enabled": true,
     "min_entry_interval_sec": 60.0,
-    "_note": "Gated Instant (cadence+flip cooldown+forecast/OBI) \u2014 not a full scalp disable. Legitimate Core B scalp + long_trade_runner still fire."
+    "side_persistence_sec": 8.0,
+    "require_15m_trend_ml_obi": true,
+    "min_ml_p_success": 0.68,
+    "_note": "Gated Instant: cadence+flip+side persistence + 15m/ML/OBI agree \u2014 rejects naked score=100. Core B / long_trade_runner remain."
   },
   "asymmetric_ioc_routing": {
     "enabled": true,
@@ -159,7 +162,7 @@
     "_note": "Hold soft losers up to 45s on fresh feed (\u226410s quote age) when regime favours reversion; cut on shift or stale feed. Hard cap always enforced."
   },
   "max_daily_trades": 12,
-  "_max_open_positions_note": "v32 dual-engine: null = no global cap; per-engine limits in engine_position_caps. Z6BAH4/QUANT_SNIPER hard-capped at 1 open in runtime (order_in_flight_mutex) even if config raised.",
+  "_max_open_positions_note": "v32 dual-engine: null = no global cap; per-engine limits in engine_position_caps. Z6BAH4 AND Z6BAH3 hard-capped at 1 open in runtime (order_in_flight_mutex) — forbids same-second opposite opens.",
   "max_open_positions": null,
   "max_positions_per_epic": 1,
   "max_position_age_minutes": 0,
@@ -219,14 +222,17 @@
     "active_stack_slots": 2,
     "multi_source_auto_rotation": true,
     "cfd_block_mean_reversion": false,
-    "cfd_require_15m_trend_ml_obi": false,
+    "cfd_require_15m_trend_ml_obi": true,
+    "sb_hot_path_allowlist": [
+      "IX.D.DOW.IFM.IP"
+    ],
     "exclude_from_hot_path": [
       "CS.D.GBPUSD.CFD.IP",
       "IX.D.DAX.IFM.IP",
       "CS.D.CRUDE.CFD.IP",
       "IX.D.NIKKEI.IFM.IP"
     ],
-    "_note": "v32 multi-market hot path: DOW + Gold + FTSE + EURUSD armed via engine_hot_path + multi_market_promote. Nikkei excluded until JPY PnL certified. DAX/Crude/GBPUSD remain rotation-only. Soak5: CFD MEAN_REVERSION + 15m/ML/OBI sniper gates OFF so dual proof can fire."
+    "_note": "Hot path: CFD may rotate multi-market; SB allowlist DOW-only until Gold/EURUSD/Nikkei certified. Instant/micro require 15m+ML+OBI. Nikkei excluded until JPY PnL certified."
   },
   "ig_deal_size_floors": {
     "_note": "Authoritative min \u00a3/pt \u2014 mirrored in execution/size_floors.py SPREADBET_MIN_DEAL_BY_EPIC",
@@ -241,15 +247,17 @@
     "min_profit_target_pts": 6.0,
     "max_loss_cap_pts": 12.0,
     "streak_protection": {
-      "enabled": false,
+      "enabled": true,
       "post_win_cooldown_sec": 600,
       "post_loss_lock_sec": 900,
       "cfd_block_mean_reversion": false,
-      "cfd_require_15m_trend_ml_obi": false,
+      "cfd_require_15m_trend_ml_obi": true,
       "_note": "Mirrors entry_protection streak timers; dedicated state under state_cfd/state_sb.",
-      "_soak_note": "2026-07-23 soak5: disabled so post-loss tilt + CFD MEAN_REVERSION block cannot starve dual proof. Re-enable after soak."
+      "_soak_note": "2026-07-23 eve: streak ON; Instant/micro require 15m+ML+OBI (reject naked score=100). MEAN_REVERSION chop block stays OFF."
     },
     "virtual_stop_ceiling_pts": 12.0,
+    "dow_broker_stop_floor_pts": 12.0,
+    "min_hold_before_trail_sec": 150,
     "trail_profit_lock_ratio": 0.78,
     "trail_trigger_pts": 6.0,
     "trail_trigger_gbp": 2.5,
@@ -279,8 +287,8 @@
     ],
     "omit_broker_limit_at_entry": false,
     "omit_broker_trail_updates": true,
-    "_note": "Ceiling 12pt (~10.2 armed) for scalp AND long holds (max-loss, not profit exit). Targets/trail >=6pt fix scalp R:R; long_trade_runner extends to 4R after 3m once peak>=trail_trigger_gbp. Soft GBP risk*0.55. omit_broker_trail_updates=true.",
-    "_soak_note": "Effective virtual ceiling = 12*0.85\u224810.2 even when IG min stop is ~4pt. Tiered banks only below trail_trigger; trail/long_runner own exits above."
+    "_note": "Ceiling 12pt (~10.2 armed) for scalp AND long holds. DOW broker stop floor=12 (never 6/4). min_hold_before_trail_sec=150. Soft GBP risk*0.55. omit_broker_trail_updates=true.",
+    "_soak_note": "Effective virtual ceiling = 12*0.85\u224810.2. Broker stopDistance on DOW submit = 12. Tiered banks only after min-hold; trail/long_runner own exits above."
   },
   "profit_pct_tiers": {
     "enabled": true,
@@ -365,13 +373,14 @@
     "skip_max_age_on_profit": true,
     "sb_prefer_long_hold": true,
     "skip_scalp_banks_for_sb": true,
+    "skip_dynamic_limit_until_armed": true,
     "sb_accounts": [
       "Z6BAH3"
     ],
     "sb_engine_origins": [
       "MACRO_SENTINEL"
     ],
-    "_note": "After 3m with peak>=trail_trigger_gbp (2.5): target 4R, 40% giveback, 65% lock. SB/MACRO_SENTINEL skips scalp tier/quick_win banks so positions can age into long-runner; CFD sniper keeps scalp banks. Hard-cap still per-account."
+    "_note": "After 3m with peak>=trail_trigger_gbp (2.5): target 4R, 40% giveback, 65% lock. SB skips scalp banks AND DynamicLimit trail until long-runner armed; CFD sniper keeps scalp banks. Hard-cap=1 per-account (CFD+SB)."
   },
   "broker_upl_hard_floor": {
     "enabled": true,

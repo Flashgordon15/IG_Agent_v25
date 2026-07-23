@@ -35,14 +35,23 @@ ACCT_SB = "Z6BAH3"
 
 
 @pytest.fixture(autouse=True)
-def _reset_mutex_state() -> None:
+def _reset_mutex_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    from execution.streak_protection import reset_streak_protection_for_tests
+
     reset_order_mutex_for_tests()
     reset_asymmetric_router_state_for_tests()
+    reset_streak_protection_for_tests()
     ao.reset_orchestrator_for_tests()
     reset_target_engine_for_tests()
+    # Race tests must not inherit live desk streak tilt locks from v31-production.
+    monkeypatch.setattr(
+        "execution.streak_protection.check_streak_entry_allowed",
+        lambda *_a, **_k: (True, "ok"),
+    )
     yield
     reset_order_mutex_for_tests()
     reset_asymmetric_router_state_for_tests()
+    reset_streak_protection_for_tests()
     ao.reset_orchestrator_for_tests()
     reset_target_engine_for_tests()
 

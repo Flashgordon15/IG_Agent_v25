@@ -199,11 +199,17 @@ def mark_offline_for_dev(*, reason: str = "desk_dev_offline") -> dict[str, Any]:
 
 
 def entries_paused() -> bool:
-    for name in ("entry_halt.json", "trading_paused.json"):
-        raw = _read_flag(name)
-        if bool(raw.get("active")):
-            return True
-    return False
+    """True only when an active:true halt exists (shared or CFD/SB lanes)."""
+    try:
+        from runtime.halt_sot import any_entry_halt_active
+
+        return bool(any_entry_halt_active())
+    except Exception:
+        for name in ("entry_halt.json", "trading_paused.json"):
+            raw = _read_flag(name)
+            if bool(raw.get("active")):
+                return True
+        return False
 
 
 def status_snapshot() -> dict[str, Any]:
@@ -217,7 +223,15 @@ def status_snapshot() -> dict[str, Any]:
             "manual_stop.json",
         )
     }
+    halt_snap: dict[str, Any] = {}
+    try:
+        from runtime.halt_sot import halt_status_snapshot
+
+        halt_snap = halt_status_snapshot()
+    except Exception:
+        pass
     return {
         "entries_paused": entries_paused(),
         "flags": flags,
+        "halt_sot": halt_snap,
     }

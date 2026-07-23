@@ -761,6 +761,54 @@ def api_desk_ops_strip() -> dict[str, Any]:
         except Exception:
             out["order_mutex"] = {}
 
+    # Ops enrichment — streak cooldown, hour gate, last ML score, halt SoT flags.
+    try:
+        from execution.streak_protection import streak_protection_status
+        from system.engine_lane import resolve_journal_metadata
+
+        meta = resolve_journal_metadata()
+        acct = str(meta.get("account_id") or "")
+        streak = streak_protection_status(acct) if acct else {"active": False}
+        out["streak_protection"] = streak
+        out["streak_cooldown_remaining_sec"] = max(
+            float(streak.get("post_win_remaining_sec") or 0),
+            float(streak.get("post_loss_remaining_sec") or 0),
+        )
+    except Exception:
+        out["streak_protection"] = {"active": False}
+        out["streak_cooldown_remaining_sec"] = 0.0
+    try:
+        from system.config_loader import get_config
+        from system.strategy_quality_gate import evaluate_entry_hour_gate
+
+        cfg = get_config()
+        hour_ok, hour_reason, hour_meta = evaluate_entry_hour_gate(
+            "IX.D.DOW.IFM.IP", cfg=cfg
+        )
+        out["hour_gate"] = {
+            "ok": bool(hour_ok),
+            "reason": str(hour_reason or ""),
+            "meta": hour_meta if isinstance(hour_meta, dict) else {},
+        }
+    except Exception as exc:
+        out["hour_gate"] = {"ok": True, "reason": f"unavailable:{type(exc).__name__}"}
+    try:
+        sniper = out.get("sniper_ml") if isinstance(out.get("sniper_ml"), dict) else {}
+        out["last_ml_score"] = sniper.get("p_success")
+    except Exception:
+        out["last_ml_score"] = None
+    try:
+        from runtime.halt_sot import halt_status_snapshot
+
+        halt = halt_status_snapshot()
+        out["halt_sot"] = halt
+        out["halt_active"] = bool(halt.get("entries_halted") or halt.get("deploy_hold_active"))
+        out["halt_flags"] = halt.get("flags") or {}
+    except Exception:
+        out["halt_sot"] = {}
+        out["halt_active"] = bool(paused)
+        out["halt_flags"] = {}
+
     out["composite_status"] = {
         "rag": rag,
         "label": rag_label,
@@ -773,6 +821,10 @@ def api_desk_ops_strip() -> dict[str, Any]:
         "sot_ok": sot.get("ok"),
         "liveness_ok": liveness.get("ok"),
         "stability_grade": desk_stability.get("grade"),
+        "halt_active": bool(out.get("halt_active")),
+        "streak_cooldown_remaining_sec": out.get("streak_cooldown_remaining_sec"),
+        "hour_gate_ok": (out.get("hour_gate") or {}).get("ok"),
+        "last_ml_score": out.get("last_ml_score"),
         # Explicit: health.ok must never be inferred from this strip alone.
         "health_ok_is_not_desk_green": True,
     }

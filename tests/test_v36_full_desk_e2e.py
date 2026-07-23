@@ -187,9 +187,16 @@ class TestEntryPathGates:
         cfg = _load_cfg()
         dc = cfg.get("dual_core") or {}
         sp = (cfg.get("micro_risk") or {}).get("streak_protection") or {}
-        assert dc.get("cfd_block_mean_reversion") is True
-        assert dc.get("cfd_require_15m_trend_ml_obi") is True
-        assert sp.get("cfd_block_mean_reversion") is True
+        # Soak throughput (2026-07-23): CFD chop + 15m trend/ML/OBI gates OFF so
+        # MEAN_REVERSION DOW can fill both lanes. Hard keep-list is mutex / hard-cap /
+        # streak timers / hour filter / SB long_runner — covered in sibling tests.
+        assert dc.get("cfd_block_mean_reversion") is False
+        assert dc.get("cfd_require_15m_trend_ml_obi") is False
+        assert sp.get("cfd_block_mean_reversion") is False
+        assert sp.get("cfd_require_15m_trend_ml_obi") is False
+        assert sp.get("enabled", True) is True
+        assert (cfg.get("entry_hour_gate") or {}).get("enabled") is True
+        assert (cfg.get("long_trade_runner") or {}).get("enabled") is True
 
 
 # ---------------------------------------------------------------------------
@@ -313,8 +320,11 @@ class TestHardCapMutexRace:
             reset_order_mutex_for_tests,
         )
 
+        from execution.streak_protection import reset_streak_protection_for_tests
+
         reset_order_mutex_for_tests()
         reset_asymmetric_router_state_for_tests()
+        reset_streak_protection_for_tests()
 
         hold = threading.Event()
         release = threading.Event()
@@ -344,6 +354,10 @@ class TestHardCapMutexRace:
         monkeypatch.setattr(
             "execution.asymmetric_ioc_router.auth_lane_ready",
             lambda _r: (True, ""),
+        )
+        monkeypatch.setattr(
+            "execution.streak_protection.check_streak_entry_allowed",
+            lambda *_a, **_k: (True, "ok"),
         )
         monkeypatch.setattr(
             "execution.order_in_flight_mutex.hard_cap_blocks_entry",

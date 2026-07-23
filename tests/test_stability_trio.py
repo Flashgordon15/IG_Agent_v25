@@ -129,12 +129,13 @@ def test_resume_entries_clears_shared_and_lane_halts(
     assert out["ok"] is True
 
     for sub in ("state", "state_cfd", "state_sb"):
-        halt = json.loads((tmp_path / sub / "entry_halt.json").read_text(encoding="utf-8"))
-        paused = json.loads(
-            (tmp_path / sub / "trading_paused.json").read_text(encoding="utf-8")
-        )
-        assert halt.get("active") is False, sub
-        assert paused.get("active") is False, sub
+        for name in ("entry_halt.json", "trading_paused.json"):
+            path = tmp_path / sub / name
+            # Clear deletes OR writes active:false — either clears the block.
+            if not path.is_file():
+                continue
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            assert raw.get("active") is not True, f"{sub}/{name}"
 
 
 def test_capital_preservation_no_false_halt_on_inflated_journal() -> None:

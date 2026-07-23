@@ -29,31 +29,42 @@ def compute_trading_path_readiness(
     except Exception:
         pass
     try:
-        from pathlib import Path
-        import json
-
+        from runtime.halt_sot import active_halt_flags, flag_file_active
         from system.paths import state_dir
 
-        for name, code, label in (
-            ("trading_paused.json", "trading_paused", "Trading paused"),
-            ("entry_halt.json", "entry_halt", "Entry halt active"),
-            ("manual_stop.json", "manual_stop", "Manual stop / watchdog hold"),
-            ("offline_for_dev.json", "offline_for_dev", "Offline for development"),
-        ):
-            p = state_dir() / name
-            if not p.is_file():
+        label_map = {
+            "trading_paused.json": ("trading_paused", "Trading paused"),
+            "entry_halt.json": ("entry_halt", "Entry halt active"),
+            "offline_for_dev.json": ("offline_for_dev", "Offline for development"),
+        }
+        seen_codes: set[str] = set()
+        for row in active_halt_flags(include_deploy_hold=False):
+            name = str(row.get("name") or "")
+            mapped = label_map.get(name)
+            if not mapped:
                 continue
-            try:
-                raw = json.loads(p.read_text(encoding="utf-8"))
-            except Exception:
-                raw = {}
-            if bool(raw.get("active")):
-                blockers.append(
-                    {
-                        "code": code,
-                        "label": f"{label}: {raw.get('reason') or code}",
-                    }
-                )
+            code, label = mapped
+            if code in seen_codes:
+                continue
+            seen_codes.add(code)
+            blockers.append(
+                {
+                    "code": code,
+                    "label": f"{label}: {row.get('reason') or code}",
+                }
+            )
+        # manual_stop stays on shared state_dir only (watchdog hold).
+        manual = state_dir() / "manual_stop.json"
+        if flag_file_active(manual):
+            from runtime.halt_sot import read_flag_payload
+
+            raw = read_flag_payload(manual)
+            blockers.append(
+                {
+                    "code": "manual_stop",
+                    "label": f"Manual stop / watchdog hold: {raw.get('reason') or 'manual_stop'}",
+                }
+            )
     except Exception:
         pass
 

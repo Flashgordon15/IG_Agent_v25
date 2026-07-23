@@ -226,12 +226,16 @@ def request_flatten(
     pnl_gbp: float | None = None,
     cfg: Any | None = None,
     source: str = "exit_gate",
+    hold_sec: float | None = None,
+    style: str | None = None,
 ) -> dict[str, Any]:
     """Atomic flatten — pause trackers, close, reconcile. One in-flight per deal."""
     global _last_result
     did = str(deal_id or "").strip()
     if not did:
         return {"ok": False, "error": "missing_deal_id", "source": source}
+    _hold_sec_hint = hold_sec
+    _style_hint = style
 
     if flatten_circuit_open(did):
         return {
@@ -492,6 +496,23 @@ def request_flatten(
             # Leave engine_origin empty so lane/env resolves MACRO_SENTINEL /
             # QUANT_SNIPER — do not overwrite with close-source tags like
             # "dynamic_limit" (breaks soak style/lane inference).
+            reason_s = (
+                f"{source}:{reason}"[:160] if reason else str(source or "")
+            )
+            style_hint = _style_hint
+            reason_l = reason_s.lower()
+            if style_hint is None and (
+                "long_runner" in reason_l or "long_trade" in reason_l
+            ):
+                style_hint = "long"
+            hold_hint = _hold_sec_hint
+            if hold_hint is None:
+                try:
+                    from runtime.micro_gbp_exit import hold_sec_for_deal
+
+                    hold_hint = hold_sec_for_deal(did)
+                except Exception:
+                    hold_hint = None
             record_trade_close(
                 deal_id=did,
                 direction=direction_u,
@@ -501,7 +522,10 @@ def request_flatten(
                 account_id=str(getattr(rest, "account_id", "") or ""),
                 product_type="",
                 engine_origin="",
-                exit_reason=f"{source}:{reason}"[:160] if reason else str(source or ""),
+                exit_reason=reason_s,
+                hold_sec=hold_hint,
+                style=style_hint,
+                epic=epic_s,
             )
             log_engine(
                 f"ExitGate: journal recorded deal={did[:12]} pnl={float(profit):.2f}"

@@ -375,11 +375,26 @@ def mark_orchestrator_fault(reason: str) -> None:
 
 
 def note_api_error(exc: BaseException | str, *, flatten: bool = True) -> None:
-    """Call from unhandled API paths — marks unhealthy and may flatten."""
+    """Call from unhandled API paths — marks unhealthy and may flatten.
+
+    HTTP 429 / rate-limit noise must never force a book flatten — back off and
+    reconnect only. Primary rest_poll path stays authoritative.
+    """
+    detail = str(exc)
     reason = f"api_error:{type(exc).__name__ if isinstance(exc, BaseException) else exc}"
+    detail_l = detail.lower()
+    is_429 = (
+        "429" in detail_l
+        or "rate limit" in detail_l
+        or "too many requests" in detail_l
+        or getattr(exc, "status_code", None) == 429
+        or getattr(exc, "code", None) == 429
+    )
     age = _resolve_quote_age_sec()
     _mark_unhealthy(age, reason)
-    if flatten:
+    # Never flatten solely for secondary-feed / REST 429 storms.
+    do_flatten = bool(flatten) and not is_429
+    if do_flatten:
         try:
             from system.credentials_loader import try_load_credentials
             from system.ig_rest_session import ensure_shared_authenticated
@@ -392,6 +407,10 @@ def note_api_error(exc: BaseException | str, *, flatten: bool = True) -> None:
                     _catastrophic_flatten(reason)
         except Exception:
             pass
+    if is_429:
+        log_engine(
+            "FeedHealthWatchdog: 429 noted — backoff/reconnect only (no flatten)"
+        )
     _hard_reset_streams(reason)
 
 

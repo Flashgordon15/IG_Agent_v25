@@ -57,16 +57,23 @@ def _read_hold_file() -> dict[str, Any]:
 
 
 def deploy_hold_file_active() -> bool:
-    """Operator file override — touch ``src/data/state/deploy_hold.json``."""
+    """Operator file override — require ``active: true`` (existence alone ≠ hold)."""
+    # Scan shared + CFD/SB lane mirrors so a leftover lane file cannot soft-block.
+    try:
+        from runtime.halt_sot import any_deploy_hold_file_active
+
+        if not any_deploy_hold_file_active():
+            return False
+    except Exception:
+        raw = _read_hold_file()
+        if not raw or not bool(raw.get("active")):
+            return False
     raw = _read_hold_file()
-    if not raw:
-        return False
-    if raw.get("active") is False:
-        return False
-    until = float(raw.get("until") or 0)
+    until = float(raw.get("until") or 0) if raw else 0.0
     if until > 0 and time.time() > until:
         return False
-    return bool(raw.get("active", True))
+    # Lane-mirror active with empty primary still counts as held.
+    return True
 
 
 def deploy_hold_config_active(cfg: Any | None = None) -> bool:
