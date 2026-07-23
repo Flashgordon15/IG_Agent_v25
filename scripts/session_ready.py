@@ -306,11 +306,12 @@ def _verify_config(cfg: Any) -> list[str]:
     if not runner.get("enabled"):
         issues.append("long_trade_runner.enabled false")
     excluded = set(dual.get("exclude_from_hot_path") or [])
-    # DOW must remain on hot path; Nikkei may be excluded until JPY PnL fix is certified live.
+    # DOW must remain on hot path; Nikkei excluded until JPY PnL certified.
+    # Gold/FTSE/EURUSD may be on hot path (v32 multi-market) — do not require Gold exclusion.
     if "IX.D.DOW.IFM.IP" in excluded:
         issues.append("hot epic excluded: IX.D.DOW.IFM.IP")
-    if "CS.D.CFPGOLD.CFP.IP" not in excluded:
-        issues.append("Gold should stay excluded from hot path")
+    if "IX.D.NIKKEI.IFM.IP" not in excluded:
+        issues.append("Nikkei should stay excluded from hot path until JPY PnL certified")
     floors = cfg.get("ig_deal_size_floors") or {}
     for epic, want in EXPECTED_SIZES.items():
         got = floors.get(epic)
