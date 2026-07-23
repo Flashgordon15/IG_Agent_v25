@@ -159,6 +159,49 @@ def test_capital_preservation_no_false_halt_on_inflated_journal() -> None:
     assert engine.capital_preservation is False
 
 
+def test_txn_sync_resolves_open_diaaaa_for_journal() -> None:
+    """Short IG close refs must journal under open DIAAAA* when learning store matches."""
+    from runtime.ig_transaction_sync import IgTransactionSync
+
+    class _Store:
+        def __init__(self) -> None:
+            import sqlite3
+
+            self.conn = sqlite3.connect(":memory:")
+            self.conn.row_factory = sqlite3.Row
+            self.conn.execute(
+                """
+                CREATE TABLE trades(
+                    id INTEGER PRIMARY KEY,
+                    ig_deal_id TEXT,
+                    side TEXT,
+                    entry REAL,
+                    closed_at TEXT
+                )
+                """
+            )
+            self.conn.execute(
+                """
+                INSERT INTO trades(ig_deal_id, side, entry, closed_at)
+                VALUES('DIAAAAX58MS5ZAP', 'SELL', 51714.6, '2026-07-23 17:20:00')
+                """
+            )
+            self.conn.commit()
+
+    sync = IgTransactionSync.__new__(IgTransactionSync)
+    sync._store = _Store()
+    open_id = sync._resolve_open_deal_id_for_journal(
+        {
+            "ig_deal_id": "58LCVRAR",
+            "deal_reference": "58LCVRAR",
+            "side": "SELL",
+            "entry": 51714.6,
+            "closed_at": "2026-07-23 00:00:00",
+        }
+    )
+    assert open_id == "DIAAAAX58MS5ZAP"
+
+
 def test_capital_preservation_trips_on_broker_confirmed_target() -> None:
     """Real broker session delta at/above target must still engage preservation."""
     engine = TargetSeekingEngine(target_daily_gbp=1000.0, enabled=True)

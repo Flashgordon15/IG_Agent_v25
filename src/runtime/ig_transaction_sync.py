@@ -364,20 +364,24 @@ class IgTransactionSync:
 
         # Forensic settle: broker-attached SL/TP closes skip ExitGate — ensure
         # every IG closed deal lands in daily_journal.csv (idempotent).
+        # Prefer open DIAAAA* deal ids (learning store) over short IG close refs.
         try:
             from diagnostics.performance_journal import (
                 ensure_broker_attached_exit_journaled,
             )
 
             for r in rows:
-                deal = str(r.get("ig_deal_id") or r.get("deal_reference") or "").strip()
-                if not deal:
+                close_ref = str(
+                    r.get("ig_deal_id") or r.get("deal_reference") or ""
+                ).strip()
+                if not close_ref:
                     continue
+                open_deal = self._resolve_open_deal_id_for_journal(r) or close_ref
                 pnl = r.get("ig_pnl_currency")
                 if pnl is None:
                     pnl = r.get("pnl_points")
                 ensure_broker_attached_exit_journaled(
-                    deal_id=deal,
+                    deal_id=open_deal,
                     direction=str(r.get("side") or ""),
                     entry_price=(
                         float(r["entry"]) if r.get("entry") is not None else None
@@ -480,6 +484,54 @@ class IgTransactionSync:
             return None
         v = row.get("ig_pnl_currency")
         return float(v) if v is not None else None
+
+    def _resolve_open_deal_id_for_journal(self, ig_row: dict[str, Any]) -> str:
+        """Map IG close-ref rows to local open DIAAAA* deal ids when possible."""
+        close_ref = str(
+            ig_row.get("ig_deal_id") or ig_row.get("deal_reference") or ""
+        ).strip()
+        if close_ref.startswith("DIAAAA"):
+            return close_ref
+        store = self._store
+        if store is None or not hasattr(store, "conn"):
+            return ""
+        try:
+            entry = float(ig_row.get("entry") or 0)
+        except (TypeError, ValueError):
+            entry = 0.0
+        side = str(ig_row.get("side") or "").upper()
+        day = str(ig_row.get("closed_at") or "")[:10]
+        if entry <= 0 or not day:
+            return ""
+        try:
+            rows = store.conn.execute(
+                """
+                SELECT ig_deal_id, side, entry, closed_at
+                FROM trades
+                WHERE ig_deal_id IS NOT NULL
+                  AND ig_deal_id LIKE 'DIAAAA%'
+                  AND closed_at IS NOT NULL
+                  AND closed_at LIKE ?
+                  AND ABS(COALESCE(entry, 0) - ?) < 0.051
+                ORDER BY id DESC
+                LIMIT 12
+                """,
+                (f"{day}%", entry),
+            ).fetchall()
+        except Exception:
+            return ""
+        for row in rows:
+            try:
+                keys = row.keys()
+            except Exception:
+                keys = []
+            deal = str(row["ig_deal_id"] if "ig_deal_id" in keys else row[0] or "").strip()
+            rside = str(row["side"] if "side" in keys else "").upper()
+            if side and rside and side != rside:
+                continue
+            if deal.startswith("DIAAAA"):
+                return deal
+        return ""
 
     def _reconcile_open_close_deals(self, ig_rows: list[dict[str, Any]]) -> int:
         """

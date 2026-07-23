@@ -59,7 +59,7 @@ def parse_ts(s):
 
 def journal_profits(start_epoch: float):
     if not JOURNAL.is_file():
-        return [], 0
+        return [], [], 0
     rows = list(
         csv.DictReader(JOURNAL.open(newline="", encoding="utf-8", errors="replace"))
     )
@@ -179,55 +179,57 @@ def main() -> int:
     cascades = 0
 
     while time.time() - start < MAX_SEC:
-        pos = get("http://127.0.0.1:8080/api/positions/live")
-        opens = cfd_open_count(pos if isinstance(pos, dict) else {})
-        cfd_max = max(cfd_max, opens)
-        if opens > 1:
-            cascades += 1
-            log(f"CASCADE opens={opens} — STOP+flatten")
-            flatten_all(f"cascade_opens={opens}")
-            RESULT.write_text(
-                json.dumps(
-                    {
-                        "status": "BLOCKED",
-                        "reason": "cascade",
-                        "opens": opens,
-                        "cfd_max_opens": cfd_max,
-                        "cascades": cascades,
-                    },
-                    indent=2,
-                ),
-                encoding="utf-8",
+        try:
+            pos = get("http://127.0.0.1:8080/api/positions/live")
+            opens = cfd_open_count(pos if isinstance(pos, dict) else {})
+            cfd_max = max(cfd_max, opens)
+            if opens > 1:
+                cascades += 1
+                log(f"CASCADE opens={opens} — STOP+flatten")
+                flatten_all(f"cascade_opens={opens}")
+                RESULT.write_text(
+                    json.dumps(
+                        {
+                            "status": "BLOCKED",
+                            "reason": "cascade",
+                            "opens": opens,
+                            "cfd_max_opens": cfd_max,
+                            "cascades": cascades,
+                        },
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+                return 2
+
+            profits, settled, streak = journal_profits(start)
+            log(
+                f"progress profits={len(profits)}/{GOAL} streak={streak} "
+                f"settled={len(settled)} opens={opens} cfd_max={cfd_max} cascades={cascades}"
             )
-            return 2
+            if profits:
+                log(f"  profits={json.dumps(profits)}")
 
-        profits, settled, streak = journal_profits(start)
-        log(
-            f"progress profits={len(profits)}/{GOAL} streak={streak} "
-            f"settled={len(settled)} opens={opens} cfd_max={cfd_max} cascades={cascades}"
-        )
-        if profits:
-            log(f"  profits={json.dumps(profits)}")
-
-        if len(profits) >= GOAL and cascades == 0 and cfd_max <= 1:
-            payload = {
-                "status": "SUCCESS",
-                "milestone": f"{GOAL} profitable real live closes",
-                "ended": datetime.now(tz=timezone.utc).isoformat(),
-                "streak": streak,
-                "profits": profits[:GOAL] if streak < GOAL else profits[-GOAL:],
-                "all_profits": profits,
-                "cfd_max_opens": cfd_max,
-                "cascades": cascades,
-                "note": (
-                    f"{GOAL} profitable DIAAAA closes; "
-                    f"trailing_streak={streak}; cfd_max={cfd_max}"
-                ),
-            }
-            RESULT.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-            log(f"SUCCESS {json.dumps(payload['profits'], indent=2)}")
-            return 0
-
+            if len(profits) >= GOAL and cascades == 0 and cfd_max <= 1:
+                payload = {
+                    "status": "SUCCESS",
+                    "milestone": f"{GOAL} profitable real live closes",
+                    "ended": datetime.now(tz=timezone.utc).isoformat(),
+                    "streak": streak,
+                    "profits": profits[:GOAL] if streak < GOAL else profits[-GOAL:],
+                    "all_profits": profits,
+                    "cfd_max_opens": cfd_max,
+                    "cascades": cascades,
+                    "note": (
+                        f"{GOAL} profitable DIAAAA closes; "
+                        f"trailing_streak={streak}; cfd_max={cfd_max}"
+                    ),
+                }
+                RESULT.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                log(f"SUCCESS {json.dumps(payload['profits'], indent=2)}")
+                return 0
+        except Exception as exc:
+            log(f"monitor loop error: {type(exc).__name__}: {exc}")
         time.sleep(POLL)
 
     profits, settled, streak = journal_profits(start)
