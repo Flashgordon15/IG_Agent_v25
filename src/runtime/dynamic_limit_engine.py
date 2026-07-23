@@ -56,11 +56,69 @@ class DynamicLimitTrack:
     trail_trigger_ig_pts: float = 1.5
     trail_lock_ratio: float = 0.70
     updated_at: float = 0.0
+    armed_at: float = 0.0
     last_broker_trail_at: float = 0.0
     broker_trail_iterations: int = 0
     broker_put_disabled: bool = False
     broker_put_fail_count: int = 0
     last_broker_put_fail_at: float = 0.0
+
+
+_FANTASY_PEAK_JUMP_PTS = 25.0
+_FANTASY_INDEX_PEAK_CAP_PTS = 80.0
+
+
+def _min_hold_before_trail_sec(cfg: Any | None = None) -> float:
+    try:
+        if cfg is None:
+            from system.config_loader import get_config
+
+            cfg = get_config()
+        if cfg is not None and hasattr(cfg, "get"):
+            mr = cfg.get("micro_risk") or {}
+            if isinstance(mr, dict) and mr.get("min_hold_before_trail_sec") is not None:
+                return max(0.0, float(mr.get("min_hold_before_trail_sec")))
+    except Exception:
+        pass
+    return 150.0
+
+
+def _sb_skip_dynamic_trail(track: "DynamicLimitTrack", cfg: Any | None = None) -> bool:
+    """SB long-runner lane: no DynamicLimit trail flatten until runner armed."""
+    try:
+        from runtime.long_trade_runner import (
+            is_long_runner_active,
+            sb_prefer_long_hold,
+            skip_dynamic_limit_until_armed,
+        )
+
+        if not skip_dynamic_limit_until_armed(cfg):
+            return False
+        if not sb_prefer_long_hold(cfg):
+            return False
+        peak_gbp = float(track.peak_profit_ig_pts) * max(0.01, float(track.size))
+        # Approximate GBP peak from pts×size; trail_trigger from micro_risk.
+        trail_trig = 2.5
+        try:
+            if cfg is None:
+                from system.config_loader import get_config
+
+                cfg = get_config()
+            mr = (cfg.get("micro_risk") or {}) if cfg is not None and hasattr(cfg, "get") else {}
+            if isinstance(mr, dict) and mr.get("trail_trigger_gbp") is not None:
+                trail_trig = float(mr.get("trail_trigger_gbp"))
+        except Exception:
+            pass
+        if is_long_runner_active(
+            armed_at=float(track.armed_at or 0.0),
+            peak_profit_gbp=peak_gbp,
+            trail_trigger_gbp=trail_trig,
+            cfg=cfg,
+        ):
+            return False
+        return True
+    except Exception:
+        return False
 
 
 def start_dynamic_limit_engine() -> None:
@@ -225,6 +283,7 @@ def register_dynamic_limit(
             trail_trigger_ig_pts=trigger,
             trail_lock_ratio=max(0.4, min(0.95, lock)),
             updated_at=time.time(),
+            armed_at=time.time(),
         )
     _publish(key)
     try:
@@ -252,12 +311,26 @@ def update_from_mid(epic: str, mid: float) -> None:
             )
             if profit_ig <= track.peak_profit_ig_pts:
                 continue
-            # Reject one-tick fantasy peaks (Yahoo/hub scale noise). Index scalp
-            # trails are single-digit→low-tens pts; 50+ pt jumps are not real.
+            # Reject fantasy peaks (Yahoo/hub scale noise) — CFD and SB alike.
+            # • First print from flat >12pt on index = bogus (forensic 19.5pt peak)
+            # • Any single jump >25pt rejected
+            # • Absolute peak >80pt on index rejected
             jump = profit_ig - float(track.peak_profit_ig_pts or 0.0)
-            if jump > 25.0 and float(track.peak_profit_ig_pts or 0.0) < 1.0:
+            prev_peak = float(track.peak_profit_ig_pts or 0.0)
+            indexish = float(track.entry_level or 0.0) > 1000.0
+            if indexish and prev_peak < 1.0 and profit_ig > 12.0:
+                log_engine(
+                    f"DynamicLimit: fantasy first-peak rejected epic={track.epic} "
+                    f"profit={profit_ig:.1f}pt (cap=12 first print)"
+                )
                 continue
-            if profit_ig > 80.0 and float(track.entry_level or 0.0) > 1000.0:
+            if jump > _FANTASY_PEAK_JUMP_PTS:
+                log_engine(
+                    f"DynamicLimit: fantasy peak rejected epic={track.epic} "
+                    f"jump={jump:.1f}pt profit={profit_ig:.1f} prev={prev_peak:.1f}"
+                )
+                continue
+            if profit_ig > _FANTASY_INDEX_PEAK_CAP_PTS and indexish:
                 continue
             track.peak_profit_ig_pts = profit_ig
             if profit_ig < track.trail_trigger_ig_pts:
@@ -284,9 +357,17 @@ def check_limit_hit(epic: str, mid: float) -> list[str]:
     if mid <= 0:
         return hits
     key = str(epic or "").strip()
+    min_hold = _min_hold_before_trail_sec()
+    now = time.time()
     with _lock:
         for track_id, track in list(_tracks.items()):
             if track.epic != key:
+                continue
+            # Min-hold: block trail/target flattens until aged (hard VSL separate).
+            age = now - float(track.armed_at or 0.0)
+            if min_hold > 0 and age < min_hold:
+                continue
+            if _sb_skip_dynamic_trail(track):
                 continue
             d = track.direction
             trailing = track.peak_profit_ig_pts >= track.trail_trigger_ig_pts
@@ -327,7 +408,9 @@ def _broker_mark_for_track(track: DynamicLimitTrack) -> float | None:
     if snap is None or snap.bid <= 0 or snap.offer <= 0:
         return None
     mid = (float(snap.bid) + float(snap.offer)) / 2.0
-    if _quote_mark_trustworthy(track.entry_level, mid, track.epic):
+    from trading.open_position_view import mark_within_ig_basis
+
+    if mark_within_ig_basis(track.entry_level, mid, track.epic, max_ig_pts=25.0):
         return mid
     return None
 
@@ -354,11 +437,14 @@ def on_streaming_mid_tick(epic: str, mid: float) -> None:
     """Hub hook — ratchet profit trail when mark scale matches IG entry."""
     if mid <= 0:
         return
-    from trading.open_position_view import _quote_mark_trustworthy
+    from trading.open_position_view import mark_within_ig_basis
 
     with _lock:
-        entries = [t.entry_level for t in _tracks.values() if t.epic == str(epic or "").strip()]
-    if entries and not any(_quote_mark_trustworthy(e, mid, epic) for e in entries):
+        tracks = [t for t in _tracks.values() if t.epic == str(epic or "").strip()]
+    # Yahoo–IG basis of ~60pt must not false-hit initial TP (peak still 0).
+    if tracks and not any(
+        mark_within_ig_basis(t.entry_level, mid, epic, max_ig_pts=25.0) for t in tracks
+    ):
         return
     update_from_mid(epic, mid)
     for deal_id in check_limit_hit(epic, mid):
@@ -491,6 +577,12 @@ def _take_profit_flatten(deal_id: str) -> None:
         if track is None:
             return
         if _flatten_circuit_open(deal_id):
+            return
+        min_hold = _min_hold_before_trail_sec()
+        age = time.time() - float(track.armed_at or 0.0)
+        if min_hold > 0 and age < min_hold:
+            return
+        if _sb_skip_dynamic_trail(track):
             return
         _in_flight.add(deal_id)
     log_engine(

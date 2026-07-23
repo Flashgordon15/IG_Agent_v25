@@ -75,9 +75,11 @@ class TestDualEngineIsolation:
         blocked_sb, reason_sb = hard_cap_blocks_entry(ACCT_SB, open_count=1)
         assert blocked_cfd is True
         assert "hard_cap" in reason_cfd or "account" in reason_cfd
-        assert blocked_sb is False
-        assert reason_sb == ""
+        # SB hard-cap=1 independent of CFD (forbids same-second opposite opens).
+        assert blocked_sb is True
+        assert "hard_cap" in reason_sb or "account" in reason_sb
         note_account_flat(ACCT_CFD)
+        note_account_flat(ACCT_SB)
         reset_order_mutex_for_tests()
 
     def test_config_dual_ports_accounts(self) -> None:
@@ -187,16 +189,17 @@ class TestEntryPathGates:
         cfg = _load_cfg()
         dc = cfg.get("dual_core") or {}
         sp = (cfg.get("micro_risk") or {}).get("streak_protection") or {}
-        # Soak throughput (2026-07-23): CFD chop + 15m trend/ML/OBI gates OFF so
-        # MEAN_REVERSION DOW can fill both lanes. Hard keep-list is mutex / hard-cap /
-        # streak timers / hour filter / SB long_runner — covered in sibling tests.
+        # Profitability P0 (2026-07-23 eve): Instant/micro require 15m+ML+OBI;
+        # MEAN_REVERSION chop block stays OFF; SB DOW-only allowlist.
         assert dc.get("cfd_block_mean_reversion") is False
-        assert dc.get("cfd_require_15m_trend_ml_obi") is False
+        assert dc.get("cfd_require_15m_trend_ml_obi") is True
         assert sp.get("cfd_block_mean_reversion") is False
-        assert sp.get("cfd_require_15m_trend_ml_obi") is False
+        assert sp.get("cfd_require_15m_trend_ml_obi") is True
         assert sp.get("enabled", True) is True
+        assert dc.get("sb_hot_path_allowlist") == ["IX.D.DOW.IFM.IP"]
         assert (cfg.get("entry_hour_gate") or {}).get("enabled") is True
         assert (cfg.get("long_trade_runner") or {}).get("enabled") is True
+        assert (cfg.get("micro_risk") or {}).get("dow_broker_stop_floor_pts") == 12.0
 
 
 # ---------------------------------------------------------------------------

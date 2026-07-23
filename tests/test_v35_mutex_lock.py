@@ -24,6 +24,7 @@ from execution.order_in_flight_mutex import (
     note_account_open,
     pre_submit_hard_cap_gate,
     reset_order_mutex_for_tests,
+    resolve_account_hard_open_cap,
     try_acquire_order_mutex,
 )
 from intelligence.target_engine import TargetSeekingEngine, reset_target_engine_for_tests
@@ -183,10 +184,14 @@ def test_hard_cap_blocks_when_open_ge_1_allows_when_flat() -> None:
     assert "account_hard_cap" in reason_mem
     note_account_flat(ACCT_CFD)
 
-    # SB sibling must remain independent (no Z6BAH4 hard cap bleed).
-    sb_blocked, sb_reason = hard_cap_blocks_entry(ACCT_SB, open_count=5)
-    assert sb_blocked is False
-    assert sb_reason == ""
+    # SB is independently hard-capped at 1 (no bleed from CFD, same ceiling).
+    sb_blocked, sb_reason = hard_cap_blocks_entry(ACCT_SB, open_count=1)
+    assert sb_blocked is True
+    assert "account_hard_cap" in sb_reason
+    assert "Z6BAH3" in sb_reason
+    sb_flat, sb_flat_reason = hard_cap_blocks_entry(ACCT_SB, open_count=0)
+    assert sb_flat is False
+    assert sb_flat_reason == ""
 
     from system.engine_lane import ENGINE_CFD_SNIPER, ENGINE_SB_SENTINEL, count_cap_for_engine
 
@@ -194,19 +199,20 @@ def test_hard_cap_blocks_when_open_ge_1_allows_when_flat() -> None:
         "engine_position_caps": {"cfd_sniper": 99, "sb_sentinel": 10},
         "max_open_positions": None,
     }
+    # Soft engine caps may differ; runtime HARD_OPEN_CAP is 1 for both accounts.
     assert count_cap_for_engine(ENGINE_CFD_SNIPER, cfg) == 1
-    assert count_cap_for_engine(ENGINE_SB_SENTINEL, cfg) == 10
+    assert resolve_account_hard_open_cap(ACCT_SB) == 1
 
 
 def test_hard_cap_account_forces_15m_trend_lock(monkeypatch) -> None:
-    """Z6BAH4 must not mean-revert against 15m trend (wrong-way pattern, not invert)."""
+    """Hard-capped CFD+SB must not mean-revert against 15m trend."""
     import runtime.dual_core_execution as dce
 
     monkeypatch.setenv("IG_ACCOUNT_ID", ACCT_CFD)
     assert dce.is_core_b_satellite_uncoupled() is False
     monkeypatch.setenv("IG_ACCOUNT_ID", ACCT_SB)
-    # SB not hard-capped — may remain uncoupled when flags True.
-    assert dce.is_core_b_satellite_uncoupled() is True
+    # SB hard-cap=1 also forces 15m trend coupling (same wrong-way pattern).
+    assert dce.is_core_b_satellite_uncoupled() is False
 
 
 def test_ambiguous_over_5s_orchestrator_clears_mutex_and_reconciles(

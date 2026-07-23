@@ -357,7 +357,7 @@ def _attach_broker_stops_on_timeout(
             errors.append(f"{deal_id[:10]}:entry<=0")
             continue
         size = float(pos.get("size") or 0.5)
-        stop_pts = 4.0
+        stop_pts = 12.0  # DOW desk floor — never re-arm IG min 4/6
         limit_pts = 0.0
         if resolve_micro_tp_sl_for_epic is not None:
             try:
@@ -366,6 +366,13 @@ def _attach_broker_stops_on_timeout(
                 limit_pts = float(tp or 0)
             except Exception:
                 pass
+        try:
+            from execution.live_broker_order_router import desk_entry_stop_floor_pts
+
+            stop_pts = max(float(stop_pts), desk_entry_stop_floor_pts(epic, cfg=cfg))
+        except Exception:
+            if "DOW" in str(epic).upper():
+                stop_pts = max(float(stop_pts), 12.0)
         try:
             ok = bool(
                 rest_client.ensure_protective_stops(

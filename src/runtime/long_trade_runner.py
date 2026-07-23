@@ -170,6 +170,14 @@ def effective_lock_ratio(
     return max(0.4, min(0.92, ratio))
 
 
+def skip_dynamic_limit_until_armed(cfg: Any | None = None) -> bool:
+    """When True, SB skips DynamicLimit trail exits until long-runner arms."""
+    block = _runner_block(cfg)
+    if not block.get("enabled", True):
+        return False
+    return bool(block.get("skip_dynamic_limit_until_armed", True))
+
+
 def skip_max_age_close_for_runner(
     *,
     side: str,

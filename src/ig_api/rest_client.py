@@ -1867,11 +1867,15 @@ class IGRestClient:
                 )
             )
 
+        from execution.live_broker_order_router import (
+            desk_entry_stop_floor_pts,
+            floor_stop_distance_points,
+        )
         from runtime.virtual_stop_loss import INTERNAL_RISK_CEILING_PTS
 
-        # ── SEPARATE PAYLOAD FROM STRATEGY ─────────────────────────────────────
-        # Strategy may request 2.0pt internal ceiling; broker payload must match
-        # live exchange minStopOrProfitDistance at transmit time.
+        # ── BROKER STOP: max(requested, IG min, desk floor) ───────────────────
+        # Historic bug discarded strategy stop and wired IG min alone (DOW SB
+        # stopDistance=6). Desk floor aligns DOW with virtual_stop_ceiling=12.
         try:
             market_metadata = self.fetch_market_constraints(epic, budget_priority=True)
             min_allowed_stop = float(
@@ -1885,7 +1889,21 @@ class IGRestClient:
                 f"{type(exc).__name__}: {exc}"
             )
             min_allowed_stop = INTERNAL_RISK_CEILING_PTS
-        broker_stop_distance = max(INTERNAL_RISK_CEILING_PTS, min_allowed_stop)
+        desk_floor = desk_entry_stop_floor_pts(epic)
+        requested_stop = max(float(stop_distance), float(INTERNAL_RISK_CEILING_PTS))
+        stop_res = floor_stop_distance_points(self, epic, requested_stop)
+        broker_stop_distance = max(
+            float(stop_res.effective_points),
+            float(min_allowed_stop),
+            float(desk_floor),
+            float(INTERNAL_RISK_CEILING_PTS),
+        )
+        if broker_stop_distance > requested_stop + 1e-9:
+            log_engine(
+                f"place_market_order: stop floored epic={epic} "
+                f"{requested_stop:g}→{broker_stop_distance:g} "
+                f"(ig_min={min_allowed_stop:g} desk={desk_floor:g})"
+            )
         stop_distance = broker_stop_distance
         if limit_distance is not None and float(limit_distance) > 0:
             limit_distance = max(float(limit_distance), broker_stop_distance)
@@ -1924,7 +1942,7 @@ class IGRestClient:
             "guaranteedStop": False,
             "forceOpen": True,
             "currencyCode": currency_code,
-            "stopDistance": max(INTERNAL_RISK_CEILING_PTS, min_allowed_stop),
+            "stopDistance": float(stop_distance),
         }
         if _use_limit_order and _limit_level > 0:
             payload["level"] = _limit_level
@@ -2127,8 +2145,27 @@ class IGRestClient:
 
         self.ensure_session()
         from execution.ig_rest_traffic_governor import consume_positions_otc_transmit_slot
+        from execution.live_broker_order_router import floor_stop_distance_points
 
         epic = str(body.get("epic") or "")
+        # Last-line DOW desk floor — asymmetric path must never POST stop=6/4.
+        try:
+            raw_stop = float(body.get("stopDistance") or 0.0)
+            stop_res = floor_stop_distance_points(self, epic, raw_stop)
+            stop_n = float(stop_res.effective_points)
+            if stop_n > raw_stop + 1e-9:
+                log_engine(
+                    f"place_otc_market_payload: stop floored epic={epic} "
+                    f"{raw_stop:g}→{stop_n:g}"
+                )
+            body["stopDistance"] = stop_n
+            if body.get("limitDistance") is not None and float(body["limitDistance"]) > 0:
+                body["limitDistance"] = max(float(body["limitDistance"]), stop_n)
+        except Exception as floor_exc:
+            log_engine(
+                f"place_otc_market_payload: stop floor skipped "
+                f"{type(floor_exc).__name__}: {floor_exc}"
+            )
         allowed, governor_reason = consume_positions_otc_transmit_slot(
             epic=epic,
             label="POST /v1/positions/otc — asymmetric MARKET",

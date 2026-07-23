@@ -3059,8 +3059,9 @@ def is_force_channel_z(z: float) -> bool:
 def is_core_b_satellite_uncoupled() -> bool:
     """True when Core B micro-scalper runs outside the 15m macro trend satellite.
 
-    Hard-capped CFD (Z6BAH4) NEVER uncouples — mean-revert against the 15m trend
-    was the wrong-way loss pattern (BUY dips in a BEARISH tape), not a BUY/SELL invert.
+    Hard-capped accounts (Z6BAH4 CFD + Z6BAH3 SB) NEVER uncouple — mean-revert
+    against the 15m trend was the wrong-way loss pattern (BUY dips in a BEARISH
+    tape), not a BUY/SELL invert.
     """
     try:
         from execution.order_in_flight_mutex import resolve_account_hard_open_cap

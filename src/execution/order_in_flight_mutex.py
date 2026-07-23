@@ -29,8 +29,11 @@ HARD_CAP_REJECT_LOG = (
 AMBIGUOUS_ORDER_TIMEOUT_SEC = 5.0
 
 # Un-bypassable concurrent-open ceilings (runtime, independent of soft config).
+# CFD sniper + SB sentinel both hard-capped at 1 — forbids same-second BUY+SELL
+# opposite opens (DIAAAAX6AMAM3AH / DIAAAAX6AL9NQBD class).
 HARD_OPEN_CAP_BY_ACCOUNT: dict[str, int] = {
     "Z6BAH4": 1,
+    "Z6BAH3": 1,
 }
 
 # Process-local open ledger — bridges the REST/snapshot lag between fill and SoT.
@@ -64,9 +67,11 @@ def _disk_ledger_path(account_id: str) -> Path:
     from system.paths import data_dir
 
     acct = _norm_account(account_id) or "DEFAULT"
-    # CFD hard-cap lives under state_cfd; others under state.
+    # Per-lane isolation: CFD under state_cfd, SB under state_sb.
     if acct == "Z6BAH4":
         base = Path(data_dir()) / "state_cfd"
+    elif acct == "Z6BAH3":
+        base = Path(data_dir()) / "state_sb"
     else:
         base = Path(data_dir()) / "state"
     return base / f"hard_cap_ledger_{acct.lower()}.json"
@@ -79,6 +84,9 @@ def _flock_path(account_id: str) -> Path:
     if acct == "Z6BAH4":
         base = Path(data_dir()) / "state_cfd"
         return base / "z6bah4_hard_cap.lock"
+    if acct == "Z6BAH3":
+        base = Path(data_dir()) / "state_sb"
+        return base / "z6bah3_hard_cap.lock"
     base = Path(data_dir()) / "state"
     return base / f"hard_cap_{acct.lower()}.lock"
 

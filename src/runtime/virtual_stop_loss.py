@@ -57,11 +57,23 @@ def stretch_broker_stop_distance(
     epic: str,
     requested_points: float,
 ) -> float:
-    """Stop_Loss = max(2.0, minStopOrProfitDistance, requested)."""
-    from execution.live_broker_order_router import resolve_min_stop_distance_points
+    """Stop_Loss = max(desk floor, minStopOrProfitDistance, requested).
+
+    DOW desk floor is virtual_stop_ceiling (12pt) — never wire IG min 4/6 alone.
+    """
+    from execution.live_broker_order_router import (
+        desk_entry_stop_floor_pts,
+        resolve_min_stop_distance_points,
+    )
 
     broker_min = resolve_min_stop_distance_points(rest_client, epic)
-    return max(INTERNAL_RISK_CEILING_PTS, float(broker_min), float(requested_points))
+    desk_floor = desk_entry_stop_floor_pts(epic)
+    return max(
+        INTERNAL_RISK_CEILING_PTS,
+        float(desk_floor),
+        float(broker_min),
+        float(requested_points),
+    )
 
 
 def _flatten_circuit_open_unlocked(deal_id: str) -> bool:

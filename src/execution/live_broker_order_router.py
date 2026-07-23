@@ -3,6 +3,9 @@ Live broker order router — v31.1 dynamic stop-distance discovery + step-traili
 
 Floors illegal trailing / placement stops to IG market-metadata minimums so
 ``STOPS_NEAREST_ALLOWED_EXCEEDED`` rejections are suppressed before REST dispatch.
+
+Desk policy: DOW entries never submit stopDistance 4/6 — floor to
+``virtual_stop_ceiling_pts`` (12) so SB/CFD broker stops match software ceiling.
 """
 
 from __future__ import annotations
@@ -15,6 +18,9 @@ from system.engine_log import log_engine
 from system.pnl_math import ig_points_to_price_delta, pip_size_for_epic
 
 STOPS_NEAREST_REJECT = "STOPS_NEAREST_ALLOWED_EXCEEDED"
+DOW_EPIC = "IX.D.DOW.IFM.IP"
+# Hard desk floor — never submit IG min (4/6) as the live DOW broker stop.
+DEFAULT_DOW_BROKER_STOP_FLOOR_PTS = 12.0
 
 
 @dataclass(frozen=True)
@@ -26,6 +32,32 @@ class StopDistanceResolution:
     min_points: float
     effective_points: float
     source: str = "dealingRules.minNormalStopOrLimitDistance"
+    desk_floor_points: float = 0.0
+
+
+def desk_entry_stop_floor_pts(epic: str, *, cfg: Any | None = None) -> float:
+    """Per-epic desk floor for attached broker stops (independent of IG min)."""
+    key = str(epic or "").strip()
+    if key != DOW_EPIC:
+        return 0.0
+    floor = float(DEFAULT_DOW_BROKER_STOP_FLOOR_PTS)
+    try:
+        if cfg is None:
+            from system.config_loader import get_config
+
+            cfg = get_config()
+        if cfg is not None and hasattr(cfg, "get"):
+            mr = cfg.get("micro_risk") or {}
+            if isinstance(mr, dict):
+                ceiling = mr.get("virtual_stop_ceiling_pts")
+                if ceiling is not None:
+                    floor = max(floor, float(ceiling))
+                explicit = mr.get("dow_broker_stop_floor_pts")
+                if explicit is not None:
+                    floor = max(floor, float(explicit))
+    except Exception:
+        pass
+    return max(0.0, float(floor))
 
 
 def resolve_min_stop_distance_points(rest_client: Any | None, epic: str) -> float:
@@ -37,23 +69,34 @@ def floor_stop_distance_points(
     rest_client: Any | None,
     epic: str,
     requested_points: float,
+    *,
+    cfg: Any | None = None,
 ) -> StopDistanceResolution:
     """
-    Floor a requested stop distance to the broker minimum (e.g. 2 → 12 points).
+    Floor a requested stop distance to max(broker min, desk floor).
+
+    DOW desk floor is 12pt (virtual_stop_ceiling) so SB/CFD never wire stop=6/4.
     """
     min_pts = resolve_min_stop_distance_points(rest_client, epic)
+    desk_floor = desk_entry_stop_floor_pts(epic, cfg=cfg)
     req = float(requested_points)
-    effective = max(req, min_pts)
+    effective = max(req, min_pts, desk_floor)
     if effective > req + 1e-9:
+        why = []
+        if effective <= min_pts + 1e-9:
+            why.append("broker min")
+        if desk_floor > 0 and effective <= desk_floor + 1e-9:
+            why.append(f"desk floor={desk_floor:g}")
         log_engine(
             f"LiveBrokerOrderRouter: floored stop distance epic={epic} "
-            f"{req:g}→{effective:g} pts (broker min)"
+            f"{req:g}→{effective:g} pts ({' + '.join(why) or 'floor'})"
         )
     return StopDistanceResolution(
         epic=str(epic),
         requested_points=req,
         min_points=min_pts,
         effective_points=effective,
+        desk_floor_points=float(desk_floor),
     )
 
 
