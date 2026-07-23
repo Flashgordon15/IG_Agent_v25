@@ -776,6 +776,33 @@ class LearningStore:
                 row_dict = dict(detail)
                 if is_shadow_registry_row(row_dict):
                     self._route_ig_import_to_shadow(row_dict)
+                # Broker-attached / IG-history closes skip ExitGate — never leave
+                # a DIAAAA* settle silent in daily_journal.csv.
+                try:
+                    from diagnostics.performance_journal import (
+                        ensure_broker_attached_exit_journaled,
+                    )
+
+                    open_deal = str(detail["ig_deal_id"] or ref or "").strip()
+                    ensure_broker_attached_exit_journaled(
+                        deal_id=open_deal,
+                        direction=str(detail["side"] or row.get("side") or ""),
+                        entry_price=(
+                            float(detail["entry"])
+                            if detail["entry"] is not None
+                            else None
+                        ),
+                        exit_price=(
+                            float(detail["exit"])
+                            if detail["exit"] is not None
+                            else None
+                        ),
+                        realized_pnl_gbp=float(ig_pnl),
+                        closed_at=str(detail["closed_at"] or closed_at or "") or None,
+                        engine_origin="broker_attached",
+                    )
+                except Exception:
+                    pass
             return True
 
         from execution.trade_risk import infer_epic_from_row, resolve_stop_price
@@ -888,6 +915,22 @@ class LearningStore:
                 "closed_at": closed_at,
             }
         )
+        try:
+            from diagnostics.performance_journal import (
+                ensure_broker_attached_exit_journaled,
+            )
+
+            ensure_broker_attached_exit_journaled(
+                deal_id=str(ref),
+                direction=str(row.get("side") or ""),
+                entry_price=float(row.get("entry") or 0) or None,
+                exit_price=float(row.get("exit") or 0) or None,
+                realized_pnl_gbp=float(ig_pnl),
+                closed_at=closed_at,
+                engine_origin="broker_attached",
+            )
+        except Exception:
+            pass
         return True
 
     def _route_ig_import_to_shadow(self, row: dict[str, Any]) -> None:

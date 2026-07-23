@@ -362,6 +362,41 @@ class IgTransactionSync:
         if reconciled:
             updated += reconciled
 
+        # Forensic settle: broker-attached SL/TP closes skip ExitGate — ensure
+        # every IG closed deal lands in daily_journal.csv (idempotent).
+        try:
+            from diagnostics.performance_journal import (
+                ensure_broker_attached_exit_journaled,
+            )
+
+            for r in rows:
+                deal = str(r.get("ig_deal_id") or r.get("deal_reference") or "").strip()
+                if not deal:
+                    continue
+                pnl = r.get("ig_pnl_currency")
+                if pnl is None:
+                    pnl = r.get("pnl_points")
+                ensure_broker_attached_exit_journaled(
+                    deal_id=deal,
+                    direction=str(r.get("side") or ""),
+                    entry_price=(
+                        float(r["entry"]) if r.get("entry") is not None else None
+                    ),
+                    exit_price=(
+                        float(r["exit"]) if r.get("exit") is not None else None
+                    ),
+                    realized_pnl_gbp=(
+                        float(pnl) if pnl is not None else None
+                    ),
+                    closed_at=str(r.get("closed_at") or "") or None,
+                    engine_origin="broker_attached",
+                )
+        except Exception as journal_exc:
+            log_engine(
+                f"IG transaction sync journal backfill skipped: "
+                f"{type(journal_exc).__name__}: {journal_exc}"
+            )
+
         if rows:
             refs = [
                 str(r.get("deal_reference") or r.get("ig_deal_id") or "")[:16]

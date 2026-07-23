@@ -45,27 +45,44 @@ def _is_production_state_path(path: Path) -> bool:
         return False
 
 
+def _lane_state_roots() -> list[Path]:
+    """Shared state/ plus CFD/SB lane mirrors (v32 dual-port)."""
+    root = Path(data_dir())
+    out: list[Path] = []
+    seen: set[str] = set()
+    for candidate in (state_dir(), root / "state", root / "state_cfd", root / "state_sb"):
+        try:
+            key = str(candidate.resolve()) if candidate.exists() else str(candidate)
+        except OSError:
+            key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(candidate)
+    return out
+
+
 def _write_flag(name: str, *, active: bool, reason: str) -> dict[str, Any]:
     payload = {
         "active": bool(active),
         "reason": str(reason or ""),
         "ts": time.time(),
     }
-    path = _state_path(name)
-    if _under_pytest_or_harness() and _is_production_state_path(path):
+    text = json.dumps(payload, indent=2)
+    primary = _state_path(name)
+    if _under_pytest_or_harness() and _is_production_state_path(primary):
         # Never let unit tests stamp pause/hold into the live desk tree.
         return payload
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    # Mirror into data_dir()/state for processes that resolve data_dir differently.
-    try:
-        mirror = Path(data_dir()) / "state" / name
-        if _under_pytest_or_harness() and _is_production_state_path(mirror):
-            return payload
-        if mirror.resolve() != path.resolve():
-            mirror.parent.mkdir(parents=True, exist_ok=True)
-            mirror.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    except OSError:
-        pass
+    # Write shared state + lane mirrors so resume clears CFD/SB holds too.
+    for root in _lane_state_roots():
+        try:
+            path = root / name
+            if _under_pytest_or_harness() and _is_production_state_path(path):
+                continue
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        except OSError:
+            continue
     return payload
 
 
@@ -111,7 +128,11 @@ def pause_entries(*, reason: str = "desk_dev_pause") -> dict[str, Any]:
 
 
 def resume_entries(*, reason: str = "desk_dev_resume") -> dict[str, Any]:
-    """Clear entry holds so path_live can recover (supervisors unchanged)."""
+    """Clear entry holds so path_live can recover (supervisors unchanged).
+
+    Clears ``entry_halt`` / ``trading_paused`` / ``offline_for_dev`` under
+    shared ``state/`` **and** lane mirrors ``state_cfd/`` + ``state_sb/``.
+    """
     out: dict[str, Any] = {"ok": True, "mode": "resume_entries", "reason": reason}
     out["entry_halt"] = _write_flag("entry_halt.json", active=False, reason=reason)
     out["trading_paused"] = _write_flag(
@@ -120,6 +141,13 @@ def resume_entries(*, reason: str = "desk_dev_resume") -> dict[str, Any]:
     out["offline_for_dev"] = _write_flag(
         "offline_for_dev.json", active=False, reason=reason
     )
+    cleared_lanes: list[str] = []
+    for root in _lane_state_roots():
+        for name in ("entry_halt.json", "trading_paused.json", "offline_for_dev.json"):
+            path = root / name
+            if path.is_file():
+                cleared_lanes.append(f"{root.name}/{name}")
+    out["lanes_cleared"] = cleared_lanes
     try:
         from runtime.deploy_hold import set_deploy_hold
 

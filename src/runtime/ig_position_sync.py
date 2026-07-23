@@ -923,6 +923,28 @@ class IgPositionSync:
                     ig_pnl_currency=ig_pnl_currency,
                     ig_close_deal_id=ig_close_deal_id,
                 )
+                try:
+                    from diagnostics.performance_journal import (
+                        ensure_broker_attached_exit_journaled,
+                    )
+
+                    if deal_id:
+                        ensure_broker_attached_exit_journaled(
+                            deal_id=deal_id,
+                            direction=side,
+                            entry_price=entry if entry else None,
+                            exit_price=(
+                                float(exit_px) if exit_px is not None else None
+                            ),
+                            realized_pnl_gbp=(
+                                float(ig_pnl_currency)
+                                if ig_pnl_currency is not None
+                                else float(pnl)
+                            ),
+                            engine_origin="broker_attached",
+                        )
+                except Exception:
+                    pass
                 for dup in self._open_rows_for_broker_deal(
                     deal_id=deal_id, deal_ref=ref
                 ):
@@ -1102,6 +1124,25 @@ class IgPositionSync:
                 ig_pnl_currency=ig_pnl_currency,
                 ig_close_deal_id=ig_close_deal_id,
             )
+            try:
+                from diagnostics.performance_journal import (
+                    ensure_broker_attached_exit_journaled,
+                )
+
+                ensure_broker_attached_exit_journaled(
+                    deal_id=deal_id,
+                    direction=side,
+                    entry_price=entry if entry else None,
+                    exit_price=float(exit_px) if exit_px is not None else None,
+                    realized_pnl_gbp=(
+                        float(ig_pnl_currency)
+                        if ig_pnl_currency is not None
+                        else float(pnl)
+                    ),
+                    engine_origin="broker_attached",
+                )
+            except Exception:
+                pass
             with self._lock:
                 self._snapshot.last_ig_event = f"ghost cleanup deal={deal_id}"
             log_engine(

@@ -166,6 +166,8 @@ def test_watchdog_checks_dual_manual_stop_paths():
 
 
 def test_startup_hold_clear_clears_cap_breach_when_flat(tmp_path: Path, monkeypatch) -> None:
+    # Patch the bound name used by startup_hold_clear (from-import), not only paths.
+    monkeypatch.setattr("system.startup_hold_clear.data_dir", lambda: tmp_path)
     monkeypatch.setattr("system.paths.data_dir", lambda: tmp_path)
     cfd = tmp_path / "state_cfd"
     cfd.mkdir(parents=True)
@@ -192,6 +194,7 @@ def test_startup_hold_clear_clears_cap_breach_when_flat(tmp_path: Path, monkeypa
 
 
 def test_startup_hold_clear_skips_when_book_open(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("system.startup_hold_clear.data_dir", lambda: tmp_path)
     monkeypatch.setattr("system.paths.data_dir", lambda: tmp_path)
     cfd = tmp_path / "state_cfd"
     cfd.mkdir(parents=True)

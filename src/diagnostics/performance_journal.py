@@ -348,6 +348,99 @@ def record_trade_close(
         pass
 
 
+def journal_has_deal(deal_id: str, *, path: Path | None = None) -> bool:
+    """True when *deal_id* already has a row in ``daily_journal.csv``."""
+    deal = str(deal_id or "").strip()
+    if not deal:
+        return False
+    p = path or journal_path()
+    if not p.is_file():
+        return False
+    try:
+        with p.open("r", encoding="utf-8", newline="") as fh:
+            reader = csv.DictReader(fh)
+            for row in reader:
+                if str(row.get("DealID") or "").strip() == deal:
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def ensure_broker_attached_exit_journaled(
+    *,
+    deal_id: str,
+    direction: str = "",
+    entry_price: float | None = None,
+    exit_price: float | None = None,
+    realized_pnl_gbp: float | None = None,
+    closed_at: str | None = None,
+    closed_at_ts: float | None = None,
+    account_id: str | None = None,
+    product_type: str | None = None,
+    engine_origin: str | None = None,
+    path: Path | None = None,
+) -> bool:
+    """Idempotently journal a broker-attached / ExitGate-bypass close.
+
+    SL/TP and other IG-attached closes skip ``exit_execution_gate`` — without
+    this hook those DIAAAA* deals can settle on the broker and never appear in
+    ``daily_journal.csv``. Returns True when a new row was written.
+    """
+    deal = str(deal_id or "").strip()
+    if not deal:
+        return False
+    if journal_has_deal(deal, path=path):
+        return False
+    if realized_pnl_gbp is None:
+        # Still journal £0 so soak / DealID round-trip is not silent.
+        pnl = 0.0
+    else:
+        try:
+            pnl = float(realized_pnl_gbp)
+        except (TypeError, ValueError):
+            pnl = 0.0
+
+    ts = closed_at_ts
+    if ts is None and closed_at:
+        raw = str(closed_at).strip().replace("T", " ").replace("Z", "")
+        has_clock = ":" in raw and len(raw) >= 16
+        for fmt, n in (
+            ("%Y-%m-%d %H:%M:%S", 19),
+            ("%Y-%m-%d %H:%M", 16),
+            ("%Y-%m-%d", 10),
+        ):
+            try:
+                dt = datetime.strptime(raw[:n], fmt)
+                if not has_clock and fmt == "%Y-%m-%d":
+                    dt = dt.replace(hour=12, minute=0, second=0)
+                ts = dt.replace(tzinfo=timezone.utc).timestamp()
+                break
+            except ValueError:
+                continue
+
+    origin = str(engine_origin or "").strip() or "broker_attached"
+    record_trade_close(
+        deal_id=deal,
+        direction=direction,
+        entry_price=entry_price,
+        exit_price=exit_price,
+        realized_pnl_gbp=pnl,
+        closed_at_ts=ts,
+        account_id=account_id,
+        product_type=product_type,
+        engine_origin=origin,
+    )
+    try:
+        log_engine(
+            f"PerformanceJournal: broker-attached exit journaled deal={deal[:16]} "
+            f"pnl={pnl:.2f} origin={origin}"
+        )
+    except Exception:
+        pass
+    return True
+
+
 def upsert_journal_cash_close(
     *,
     deal_id: str,

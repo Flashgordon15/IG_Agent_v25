@@ -377,6 +377,25 @@ def test_capital_preservation_no_false_halt_on_inflated_journal() -> None:
     assert engine.capital_preservation is False
 
 
+def test_capital_preservation_trips_when_broker_confirms_target() -> None:
+    """Broker balance-delta at target must still engage capital preservation."""
+    reset_target_engine_for_tests()
+    engine = TargetSeekingEngine(target_daily_gbp=1000.0, enabled=True)
+    engine.bind_store(MagicMock())
+    rest = MagicMock()
+    rest.maybe_refresh_account_summary.return_value = {"balance": 11050.0}
+    engine.bind_rest_client(rest)
+    engine.mark_session_start(10000.0)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            "system.daily_loss_policy.effective_daily_pnl",
+            lambda *_a, **_k: 50.0,
+        )
+        snap = engine.refresh(force_balance=True)
+    assert snap["capital_preservation"] is True
+    reset_target_engine_for_tests()
+
+
 def test_gate_exception_is_fail_closed_not_swallowed(monkeypatch) -> None:
     """Hard-cap gate errors must reject — never fall through to POST."""
     from ig_api.exceptions import IGOrderError
