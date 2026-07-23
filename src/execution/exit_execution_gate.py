@@ -442,12 +442,33 @@ def request_flatten(
             from diagnostics.performance_journal import record_trade_close
 
             conf = confirm if isinstance(confirm, dict) else {}
-            raw = conf.get("raw") if isinstance(conf.get("raw"), dict) else conf
+            raw = conf.get("raw") if isinstance(conf.get("raw"), dict) else {}
+            if not isinstance(raw, dict):
+                raw = {}
+            # Merge common confirm shapes (nested raw vs flat confirm dict).
+            blob: dict[str, Any] = {}
+            if isinstance(close_data, dict):
+                nested = close_data.get("confirm")
+                if isinstance(nested, dict):
+                    blob.update(nested)
+                    nested_raw = nested.get("raw")
+                    if isinstance(nested_raw, dict):
+                        blob.update(nested_raw)
+                blob.update(
+                    {
+                        k: close_data.get(k)
+                        for k in ("profit", "level", "direction", "dealId")
+                        if close_data.get(k) is not None
+                    }
+                )
+            blob.update(conf)
+            blob.update(raw)
+
             profit = None
-            for key in ("profit", "pnl", "realized_pnl"):
-                if raw.get(key) is not None:
+            for key in ("profit", "pnl", "realized_pnl", "profitLoss"):
+                if blob.get(key) is not None:
                     try:
-                        profit = float(raw.get(key))
+                        profit = float(blob.get(key))
                         break
                     except (TypeError, ValueError):
                         pass
@@ -456,25 +477,31 @@ def request_flatten(
                     profit = float(pnl_gbp)
                 except (TypeError, ValueError):
                     profit = None
+            # Still journal with 0.0 when broker omit profit — DealID round-trip proof.
+            if profit is None:
+                profit = 0.0
+
             exit_lvl = None
             for key in ("level", "exit", "exit_price", "price"):
-                if raw.get(key) is not None:
+                if blob.get(key) is not None:
                     try:
-                        exit_lvl = float(raw.get(key))
+                        exit_lvl = float(blob.get(key))
                         break
                     except (TypeError, ValueError):
                         pass
-            if profit is not None:
-                record_trade_close(
-                    deal_id=did,
-                    direction=direction_u,
-                    entry_price=None,
-                    exit_price=exit_lvl,
-                    realized_pnl_gbp=float(profit),
-                    account_id=str(getattr(rest, "account_id", "") or ""),
-                    product_type="",
-                    engine_origin=str(source or "exit_gate"),
-                )
+            record_trade_close(
+                deal_id=did,
+                direction=direction_u,
+                entry_price=None,
+                exit_price=exit_lvl,
+                realized_pnl_gbp=float(profit),
+                account_id=str(getattr(rest, "account_id", "") or ""),
+                product_type="",
+                engine_origin=str(source or "exit_gate"),
+            )
+            log_engine(
+                f"ExitGate: journal recorded deal={did[:12]} pnl={float(profit):.2f}"
+            )
         except Exception as journal_exc:
             log_engine(
                 f"ExitGate: journal record skipped deal={did[:12]} "
