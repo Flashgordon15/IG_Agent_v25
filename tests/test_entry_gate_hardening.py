@@ -90,6 +90,32 @@ def test_obi_depthless_neutral_does_not_permanent_block(monkeypatch):
     assert ratio == 0.0
 
 
+def test_obi_fail_closed_neutral_starves_depthless_proxy_zero(monkeypatch):
+    """fail_closed_on_neutral=true + proxy ratio=0 blocks every side — soak killer on Mini."""
+    cfg = {
+        **CFG,
+        "obi_filter": {
+            **CFG["obi_filter"],
+            "fail_closed_on_neutral": True,
+            "min_abs_ratio": 0.22,
+        },
+    }
+    monkeypatch.setattr(
+        "execution.entry_gate_hardening._obi_from_microkernel",
+        lambda epic: (0.0, False),
+    )
+    monkeypatch.setattr(
+        "execution.entry_gate_hardening._obi_proxy_from_quote",
+        lambda epic, quote: 0.0,
+    )
+    ok, reason, ratio = evaluate_obi_entry_filter(
+        "IX.D.DOW.IFM.IP", "BUY", cfg=cfg
+    )
+    assert ok is False
+    assert "obi_proxy_not_supportive" in reason
+    assert ratio == 0.0
+
+
 def test_obi_informative_misalign_still_blocks(monkeypatch):
     monkeypatch.setattr(
         "execution.entry_gate_hardening._obi_from_microkernel",

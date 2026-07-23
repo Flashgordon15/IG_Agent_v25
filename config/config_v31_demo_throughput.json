@@ -223,8 +223,8 @@
     "soft_loss_ratio": 0.55,
     "target_r_multiple": 2.5,
     "min_profit_target_pts": 1.5,
-    "max_loss_cap_pts": 6.0,
-    "virtual_stop_ceiling_pts": 6.0,
+    "max_loss_cap_pts": 12.0,
+    "virtual_stop_ceiling_pts": 12.0,
     "trail_profit_lock_ratio": 0.78,
     "trail_trigger_pts": 1.0,
     "trail_trigger_gbp": 1.0,
@@ -254,7 +254,8 @@
     ],
     "omit_broker_limit_at_entry": false,
     "omit_broker_trail_updates": true,
-    "_note": "virtual_stop_ceiling aligned to DOW attach floor (~6pt); 3.5 vs 6-12 attach was soft_loss leak. Soft GBP still risk*0.55. omit_broker_trail_updates=true: software DynamicLimit only (no broker PUT trail spam)."
+    "_note": "virtual_stop_ceiling + max_loss_cap both 12pt (DOW). Soft GBP still risk*0.55. omit_broker_trail_updates=true: software DynamicLimit only (no broker PUT trail spam).",
+    "_soak_note": "Ceiling 12pt > typical DOW spread so virtual stop is not same-tick spread stop-out; grace 12s also armed in code. max_loss_cap must not undercut virtual_stop_ceiling."
   },
   "profit_pct_tiers": {
     "enabled": true,

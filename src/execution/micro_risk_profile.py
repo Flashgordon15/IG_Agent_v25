@@ -113,7 +113,12 @@ def resolve_virtual_ceiling_pts(
     broker_stop_pts: float,
     profile: MicroRiskProfile | None = None,
 ) -> float:
-    """Tight internal ceiling — always inside broker stop, capped by micro_risk profile."""
+    """Tight internal ceiling — always inside broker stop.
+
+    Prefer ``virtual_stop_ceiling_pts`` as the intentional software ceiling.
+    Do not silently clamp it by ``max_loss_cap_pts`` — that defeated soak
+    ceiling=12 when max_loss was left at 6 and caused same-tick spread stop-outs.
+    """
     prof = profile or MicroRiskProfile(
         risk_per_trade_gbp=5.0,
         target_r_multiple=1.5,
@@ -122,7 +127,9 @@ def resolve_virtual_ceiling_pts(
         virtual_stop_ceiling_pts=4.0,
     )
     broker = max(0.5, float(broker_stop_pts))
-    ceiling = min(float(prof.virtual_stop_ceiling_pts), float(prof.max_loss_cap_pts))
+    ceiling = float(prof.virtual_stop_ceiling_pts)
+    if ceiling <= 0:
+        ceiling = float(prof.max_loss_cap_pts)
     ceiling = min(ceiling, broker * 0.85)
     return max(0.5, ceiling)
 
