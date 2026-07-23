@@ -216,24 +216,33 @@ def lane_health(base: str) -> dict:
 
 def main() -> int:
     SESSION.parent.mkdir(parents=True, exist_ok=True)
-    start = time.time()
+    # Journal window (may be hours old) vs wall-clock run budget (must be independent).
+    journal_start = time.time()
     if SESSION.is_file():
         try:
             prev = json.loads(SESSION.read_text(encoding="utf-8"))
             if float(prev.get("start_epoch") or 0) > 0:
-                start = float(prev["start_epoch"])
+                journal_start = float(prev["start_epoch"])
         except Exception:
             pass
+    run_started = time.time()
+    deadline = run_started + MAX_SEC
     SESSION.write_text(
         json.dumps(
             {
-                "start_epoch": start,
-                "start_iso": datetime.fromtimestamp(start, tz=timezone.utc).isoformat(),
+                "start_epoch": journal_start,
+                "start_iso": datetime.fromtimestamp(
+                    journal_start, tz=timezone.utc
+                ).isoformat(),
                 "goal": GOAL,
                 "mode": "consecutive_profitable_dual",
                 "ports": {"cfd": 8080, "sb": 8081},
                 "accounts": {"cfd": CFD_ACCT, "sb": SB_ACCT},
                 "monitor_boot_iso": datetime.now(tz=timezone.utc).isoformat(),
+                "run_deadline_iso": datetime.fromtimestamp(
+                    deadline, tz=timezone.utc
+                ).isoformat(),
+                "max_sec": MAX_SEC,
             },
             indent=2,
         ),
@@ -241,7 +250,8 @@ def main() -> int:
     )
     log(
         f"SOAK START dual-engine goal={GOAL} consecutive profitable "
-        f"(CFD:{CFD_URL} {CFD_ACCT} / SB:{SB_URL} {SB_ACCT})"
+        f"(CFD:{CFD_URL} {CFD_ACCT} / SB:{SB_URL} {SB_ACCT}) "
+        f"journal_start={journal_start:.0f} wall_budget_sec={MAX_SEC}"
     )
     cfd_max = 0
     sb_max = 0
@@ -249,7 +259,7 @@ def main() -> int:
     sb_saw_open = False
     sb_healthy = False
 
-    while time.time() - start < MAX_SEC:
+    while time.time() < deadline:
         try:
             cfd = lane_health(CFD_URL)
             sb = lane_health(SB_URL)
@@ -309,7 +319,7 @@ def main() -> int:
                 )
                 return 2
 
-            profits, settled, streak = journal_profits(start)
+            profits, settled, streak = journal_profits(journal_start)
             lanes = {r["lane"] for r in profits}
             styles = {r["style"] for r in profits}
             log(
@@ -371,7 +381,7 @@ def main() -> int:
             log(f"monitor loop error: {type(exc).__name__}: {exc}")
         time.sleep(POLL)
 
-    profits, settled, streak = journal_profits(start)
+    profits, settled, streak = journal_profits(journal_start)
     RESULT.write_text(
         json.dumps(
             {
@@ -384,6 +394,7 @@ def main() -> int:
                 "cascades": cascades,
                 "sb_healthy": sb_healthy,
                 "sb_saw_open": sb_saw_open,
+                "run_elapsed_sec": round(time.time() - run_started, 1),
             },
             indent=2,
         ),
