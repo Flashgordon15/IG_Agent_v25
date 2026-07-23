@@ -20,6 +20,10 @@ from system.pnl_math import ig_points_to_price_delta
 INTERNAL_RISK_CEILING_PTS = 2.0
 internal_risk_ceiling = INTERNAL_RISK_CEILING_PTS  # local virtual watchdog ceiling (pts)
 VIRTUAL_STOP_WATCHDOG_SEC = 0.5
+# DOW/index fill is bid or offer; mid/exit-side marks immediately look
+# ~spread adverse. Ignore ceiling for a short arming grace so scalp isn't
+# systematically flattened the same second as fill (all-loss pattern).
+VIRTUAL_STOP_ARM_GRACE_SEC = 12.0
 
 _lock = threading.Lock()
 _stop = threading.Event()
@@ -114,6 +118,11 @@ def register_virtual_stop(
     ceiling = float(ceiling_pts) if ceiling_pts is not None else INTERNAL_RISK_CEILING_PTS
     track_id = deal_id or f"{epic}:{direction}:{int(time.time() * 1000)}"
     with _lock:
+        # Never collapse an already-armed wide ceiling on reconcile/re-arm
+        # (historic 10.2 → 3.4 wipeouts when IG min-stop was re-fed).
+        prev = _positions.get(track_id)
+        if prev is not None and float(prev.ceiling_pts or 0) > ceiling:
+            ceiling = float(prev.ceiling_pts)
         # Still arm for GUI/coverage, but do not evaluate flatten while circuit is open.
         _positions[track_id] = VirtualStopTrack(
             track_id=track_id,
@@ -122,7 +131,7 @@ def register_virtual_stop(
             direction=str(direction or "BUY").upper(),
             entry_level=float(entry_level),
             size=float(size),
-            armed_at=time.time(),
+            armed_at=float(prev.armed_at) if prev is not None else time.time(),
             ceiling_pts=ceiling,
         )
     log_engine(
@@ -212,10 +221,16 @@ def adverse_points_against_position(
 
 
 def on_streaming_mid_tick(epic: str, mid: float) -> None:
-    """Hook from hub ingest — evaluate virtual ceiling on every fresh mid."""
+    """Hook from hub ingest — evaluate virtual ceiling on every fresh mid.
+
+    Hub/Yahoo mids that sit tens of IG points off the broker fill must not
+    trip the ceiling (that was the all-loss instant-flatten pattern).
+    """
     key = str(epic or "").strip()
     if not key or mid <= 0:
         return
+    from trading.open_position_view import mark_within_ig_basis
+
     tracks: list[VirtualStopTrack] = []
     with _lock:
         for track in _positions.values():
@@ -224,6 +239,15 @@ def on_streaming_mid_tick(epic: str, mid: float) -> None:
     for track in tracks:
         deal_key = str(track.deal_id or track.track_id)
         if flatten_circuit_open(deal_key):
+            continue
+        # Spread-at-fill grace: SELL fill@bid vs mid/offer looks instantly adverse.
+        if (time.time() - float(track.armed_at or 0.0)) < VIRTUAL_STOP_ARM_GRACE_SEC:
+            continue
+        # Allow up to 3× ceiling (or 25pt) basis before treating mark as alien.
+        max_basis = max(float(track.ceiling_pts) * 3.0, 25.0)
+        if not mark_within_ig_basis(
+            track.entry_level, float(mid), track.epic, max_ig_pts=max_basis
+        ):
             continue
         adverse = adverse_points_against_position(
             epic=track.epic,
@@ -379,7 +403,10 @@ def _broker_mark_for_track(track: VirtualStopTrack) -> float | None:
     if snap is None or snap.bid <= 0 or snap.offer <= 0:
         return None
     mid = (float(snap.bid) + float(snap.offer)) / 2.0
-    if _quote_mark_trustworthy(track.entry_level, mid, track.epic):
+    from trading.open_position_view import mark_within_ig_basis
+
+    max_basis = max(float(track.ceiling_pts) * 3.0, 25.0)
+    if mark_within_ig_basis(track.entry_level, mid, track.epic, max_ig_pts=max_basis):
         return mid
     return None
 

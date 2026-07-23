@@ -80,6 +80,32 @@ def test_virtual_ceiling_ignores_short_ig_min_broker_stop():
     assert ceiling != pytest.approx(3.4, abs=0.05)
 
 
+def test_virtual_stop_rearm_never_collapses_ceiling():
+    from runtime import virtual_stop_loss as vsl
+
+    with vsl._lock:
+        vsl._positions.clear()
+    vsl.register_virtual_stop(
+        epic="IX.D.DOW.IFM.IP",
+        direction="BUY",
+        entry_level=52000.0,
+        size=0.5,
+        deal_id="DIATESTCEIL",
+        ceiling_pts=10.2,
+    )
+    vsl.register_virtual_stop(
+        epic="IX.D.DOW.IFM.IP",
+        direction="BUY",
+        entry_level=52000.0,
+        size=0.5,
+        deal_id="DIATESTCEIL",
+        ceiling_pts=3.4,
+    )
+    assert vsl._positions["DIATESTCEIL"].ceiling_pts == pytest.approx(10.2)
+    with vsl._lock:
+        vsl._positions.pop("DIATESTCEIL", None)
+
+
 def test_arm_post_fill_registers_virtual_stop():
     with patch("execution.position_risk_stack.arm_position_risk_stack") as arm:
         arm.return_value = {"ok": True, "virtual_ceiling_pts": 3.0}
