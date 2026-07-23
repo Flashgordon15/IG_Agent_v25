@@ -42,20 +42,14 @@ SB_HARD_CAP = 10  # independent; cascade = > hard-cap, not merge with CFD
 
 def log(msg: str) -> None:
     line = f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | {msg}"
-    print(line, flush=True)
-    # Avoid double-write when stdout is already redirected to LOG.
-    try:
-        import sys
-
-        out_name = getattr(sys.stdout, "name", "") or ""
-        if Path(out_name).resolve() == LOG.resolve():
-            return
-    except Exception:
-        pass
     try:
         LOG.parent.mkdir(parents=True, exist_ok=True)
         with LOG.open("a", encoding="utf-8") as f:
             f.write(line + "\n")
+    except Exception:
+        pass
+    try:
+        print(line, flush=True)
     except Exception:
         pass
 
