@@ -162,7 +162,7 @@
     "_note": "Hold soft losers up to 45s on fresh feed (\u226410s quote age) when regime favours reversion; cut on shift or stale feed. Hard cap always enforced."
   },
   "max_daily_trades": 12,
-  "_max_open_positions_note": "v32 dual-engine: null = no global cap; per-engine limits in engine_position_caps. Z6BAH4 AND Z6BAH3 hard-capped at 1 open in runtime (order_in_flight_mutex) — forbids same-second opposite opens.",
+  "_max_open_positions_note": "v32 dual-engine: null = no global cap; per-engine limits in engine_position_caps. Z6BAH4 AND Z6BAH3 hard-capped at 1 open in runtime (order_in_flight_mutex) \u2014 forbids same-second opposite opens.",
   "max_open_positions": null,
   "max_positions_per_epic": 1,
   "max_position_age_minutes": 0,
@@ -193,7 +193,7 @@
   "entry_protection": {
     "cooldown_minutes_after_close": 5,
     "max_trades_per_epic_per_session": 12,
-    "streak_protection_enabled": true,
+    "streak_protection_enabled": false,
     "post_win_cooldown_sec": 600,
     "post_loss_lock_sec": 900,
     "post_loss_mode": "lock",
@@ -222,7 +222,7 @@
     "active_stack_slots": 2,
     "multi_source_auto_rotation": true,
     "cfd_block_mean_reversion": false,
-    "cfd_require_15m_trend_ml_obi": true,
+    "cfd_require_15m_trend_ml_obi": false,
     "sb_hot_path_allowlist": [
       "IX.D.DOW.IFM.IP"
     ],
@@ -247,13 +247,13 @@
     "min_profit_target_pts": 6.0,
     "max_loss_cap_pts": 12.0,
     "streak_protection": {
-      "enabled": true,
+      "enabled": false,
       "post_win_cooldown_sec": 600,
       "post_loss_lock_sec": 900,
       "cfd_block_mean_reversion": false,
-      "cfd_require_15m_trend_ml_obi": true,
+      "cfd_require_15m_trend_ml_obi": false,
       "_note": "Mirrors entry_protection streak timers; dedicated state under state_cfd/state_sb.",
-      "_soak_note": "2026-07-23 eve: streak ON; Instant/micro require 15m+ML+OBI (reject naked score=100). MEAN_REVERSION chop block stays OFF."
+      "_soak_note": "2026-07-23 soak5: DISABLED \u2014 post-loss/win locks starve dual proof. Re-enable after streak=5."
     },
     "virtual_stop_ceiling_pts": 12.0,
     "dow_broker_stop_floor_pts": 12.0,
