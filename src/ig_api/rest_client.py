@@ -2895,9 +2895,12 @@ class IGRestClient:
                 deal_id=deal_id,
             )
 
-        # Hard-cap accounts: never fall through to forceOpen=false net-close after a
-        # failed/ambiguous DELETE — that path is the wrong-way cascade vector.
-        if not skip_net_close:
+        # Hard-cap accounts: refuse *ungarded* net-close (no epic) after DELETE
+        # fail — that is the wrong-way cascade vector. When epic is known, fall
+        # through to the opposite-side / direction-guarded net-close below so
+        # profit-trail and soft-loss flattens can still settle (DELETE often 404s
+        # with notional.details.null on demo CFD).
+        if not skip_net_close and not epic_use:
             try:
                 from execution.order_in_flight_mutex import resolve_account_hard_open_cap
 

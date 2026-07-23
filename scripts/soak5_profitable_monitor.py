@@ -160,15 +160,24 @@ def flatten_all(reason: str) -> None:
 
 
 def main() -> int:
-    start = time.time()
     SESSION.parent.mkdir(parents=True, exist_ok=True)
+    start = time.time()
+    # Preserve original soak window across monitor restarts.
+    if SESSION.is_file():
+        try:
+            prev = json.loads(SESSION.read_text(encoding="utf-8"))
+            if float(prev.get("start_epoch") or 0) > 0:
+                start = float(prev["start_epoch"])
+        except Exception:
+            pass
     SESSION.write_text(
         json.dumps(
             {
                 "start_epoch": start,
-                "start_iso": datetime.now(tz=timezone.utc).isoformat(),
+                "start_iso": datetime.fromtimestamp(start, tz=timezone.utc).isoformat(),
                 "goal": GOAL,
                 "mode": "profitable",
+                "monitor_boot_iso": datetime.now(tz=timezone.utc).isoformat(),
             },
             indent=2,
         ),
