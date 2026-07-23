@@ -83,14 +83,18 @@ STAGNANT_Z_MAX = +0.50
 STAGNANT_DEAD_ZONE_SEC = 300.0
 STAGNANT_DEAD_ZONE_REASON = "STAGNANT_DEAD_ZONE"
 MULTI_SOURCE_AUTO_ROTATION = True
-MICRO_SCALP_INSTANT_MIN_SCORE = 45.0
-MICRO_SCALP_TARGET_MIN_PTS = 1.5
-MICRO_SCALP_TARGET_MAX_PTS = 4.0
-# Event-driven default: no multi-second cadence smoothing on the tick lane.
-MICRO_SCALP_INSTANT_CADENCE_SEC = 0.0
+MICRO_SCALP_INSTANT_MIN_SCORE = 70.0
+# Must stay compatible with ~10–12pt virtual-stop ceiling (never 1.5–4pt vs 10pt stop).
+MICRO_SCALP_TARGET_MIN_PTS = 6.0
+MICRO_SCALP_TARGET_MAX_PTS = 12.0
+# Default cadence / flip cooldown — kill BUY↔SELL flip storms on tick lane.
+MICRO_SCALP_INSTANT_CADENCE_SEC = 60.0
+MICRO_SCALP_FLIP_COOLDOWN_SEC = 45.0
+MICRO_SCALP_MIN_FORECAST = 0.55
 _micro_scalper_lane_registered = False
 _micro_scalper_lane_unsub: Callable[[], None] | None = None
 _last_instant_scalp_at: dict[str, float] = {}
+_last_instant_scalp_dir: dict[str, str] = {}
 _micro_scalper_lane_lock = threading.Lock()
 
 
@@ -3484,6 +3488,18 @@ def evaluate_predictive_micro_scalp_trigger(
         empty["reason"] = "direction_flat"
         return empty
 
+    if forecast_conf < float(MICRO_SCALP_MIN_FORECAST):
+        empty.update(
+            {
+                "score_pct": score,
+                "promote_tier": tier,
+                "order_flow_aligned": flow_aligned,
+                "forecast_confidence": forecast_conf,
+                "reason": "forecast_confidence_low",
+            }
+        )
+        return empty
+
     # Depthless Yahoo books report order_flow_aligned=False with OBI≈0 forever.
     # Only hard-block when OBI is informative against the side (|obi| ≥ epic threshold).
     obi_ratio = float(mt.get("obi_ratio") or 0.0)
@@ -3506,6 +3522,28 @@ def evaluate_predictive_micro_scalp_trigger(
         )
         return empty
 
+    # Resolve R:R-compatible targets from micro_risk when available.
+    t_min, t_max = float(MICRO_SCALP_TARGET_MIN_PTS), float(MICRO_SCALP_TARGET_MAX_PTS)
+    try:
+        from execution.micro_risk_profile import (
+            resolve_micro_tp_sl_for_epic,
+            resolve_virtual_ceiling_pts,
+        )
+        from system.config_loader import get_config
+
+        cfg_live = get_config()
+        tp_pts, _, prof = resolve_micro_tp_sl_for_epic(key, 0.5, cfg_live)
+        ceiling = resolve_virtual_ceiling_pts(
+            epic=key,
+            broker_stop_pts=max(12.0, float(prof.virtual_stop_ceiling_pts or 12.0)),
+            profile=prof,
+        )
+        # First bank / target at ≥0.5R of software stop; never scalp-tiny vs ceiling.
+        t_min = max(t_min, round(ceiling * 0.5, 2), float(prof.min_profit_target_pts or 0))
+        t_max = max(t_max, round(ceiling * 1.0, 2), float(tp_pts or 0))
+    except Exception:
+        pass
+
     return {
         "armed": True,
         "direction": direction,
@@ -3514,19 +3552,44 @@ def evaluate_predictive_micro_scalp_trigger(
         "order_flow_aligned": True,
         "forecast_confidence": forecast_conf,
         "reason": "predictive_micro_scalp_armed",
-        "target_min_pts": MICRO_SCALP_TARGET_MIN_PTS,
-        "target_max_pts": MICRO_SCALP_TARGET_MAX_PTS,
+        "target_min_pts": t_min,
+        "target_max_pts": t_max,
         "bypass_signal_engine": True,
     }
 
 
-def _resolve_instant_scalp_cadence_sec(cfg: Any | None = None) -> float:
-    """Event-driven tick lane: zero cadence (raw WS). Optional floor from config."""
+def _micro_scalp_instant_enabled(cfg: Any | None = None) -> bool:
+    """Instant tick lane — gated by cadence/flip/forecast; default ON when unset.
+
+    Prefer gating Instant spam over disabling all scalping. Core B /
+    SignalEngine / long_trade_runner paths are independent of this flag.
+    """
     try:
         if cfg is not None and hasattr(cfg, "get"):
-            block = cfg.get("event_driven_tick") or {}
-            if isinstance(block, dict) and bool(block.get("enabled", True)):
+            block = cfg.get("micro_scalp_instant") or {}
+            if isinstance(block, dict) and "enabled" in block:
+                return bool(block.get("enabled"))
+            edt = cfg.get("event_driven_tick") or {}
+            if isinstance(edt, dict) and "micro_scalp_instant_enabled" in edt:
+                return bool(edt.get("micro_scalp_instant_enabled"))
+    except Exception:
+        pass
+    return True
+
+
+def _resolve_instant_scalp_cadence_sec(cfg: Any | None = None) -> float:
+    """Minimum seconds between instant-scalp entries (anti flip-storm)."""
+    try:
+        if cfg is not None and hasattr(cfg, "get"):
+            block = cfg.get("micro_scalp_instant") or {}
+            if isinstance(block, dict) and block.get("min_entry_interval_sec") is not None:
                 return max(0.0, float(block.get("min_entry_interval_sec") or 0.0))
+            edt = cfg.get("event_driven_tick") or {}
+            if isinstance(edt, dict) and edt.get("min_entry_interval_sec") is not None:
+                return max(
+                    float(MICRO_SCALP_INSTANT_CADENCE_SEC),
+                    float(edt.get("min_entry_interval_sec") or 0.0),
+                )
     except Exception:
         pass
     return float(MICRO_SCALP_INSTANT_CADENCE_SEC)
@@ -3548,6 +3611,13 @@ def try_instant_predictive_micro_scalp(
             cfg = get_config()
         except Exception:
             cfg = None
+
+    if not _micro_scalp_instant_enabled(cfg):
+        return {
+            "dispatched": False,
+            "reason": "micro_scalp_instant_disabled",
+            "trigger": {},
+        }
 
     # Absolute front of pipeline — kill before trigger/order/network work.
     try:
@@ -3590,6 +3660,7 @@ def try_instant_predictive_micro_scalp(
     now = time.time()
     with _micro_scalper_lane_lock:
         last = _last_instant_scalp_at.get(key, 0.0)
+        last_dir = str(_last_instant_scalp_dir.get(key) or "")
         cadence = _resolve_instant_scalp_cadence_sec(cfg)
         if cadence > 0 and now - last < cadence:
             return {
@@ -3597,7 +3668,19 @@ def try_instant_predictive_micro_scalp(
                 "trigger": trigger,
                 "reason": "instant_scalp_cadence",
             }
+        # Chop gate: alternating BUY↔SELL within flip cooldown is noise.
+        if (
+            last_dir
+            and last_dir != direction
+            and (now - last) < float(MICRO_SCALP_FLIP_COOLDOWN_SEC)
+        ):
+            return {
+                "dispatched": False,
+                "trigger": trigger,
+                "reason": "instant_scalp_flip_chop",
+            }
         _last_instant_scalp_at[key] = now
+        _last_instant_scalp_dir[key] = direction
 
     if not epic_allowed_on_hot_path(key, cfg):
         return {"dispatched": False, "trigger": trigger, "reason": "hot_path_excluded"}
@@ -3642,9 +3725,11 @@ def try_instant_predictive_micro_scalp(
         set_last_gate_suppression_reason(plan.reason)
         return {"dispatched": False, "trigger": trigger, "reason": plan.reason}
 
+    t_min = float(trigger.get("target_min_pts") or MICRO_SCALP_TARGET_MIN_PTS)
+    t_max = float(trigger.get("target_max_pts") or MICRO_SCALP_TARGET_MAX_PTS)
     plan_dict = plan.to_dict()
-    plan_dict["micro_target_min_pts"] = MICRO_SCALP_TARGET_MIN_PTS
-    plan_dict["micro_target_max_pts"] = MICRO_SCALP_TARGET_MAX_PTS
+    plan_dict["micro_target_min_pts"] = t_min
+    plan_dict["micro_target_max_pts"] = t_max
     plan_dict["instant_scalp_lane"] = True
     plan_dict["bypass_signal_engine"] = True
     plan_dict["predictive_score_pct"] = float(trigger.get("score_pct") or 0.0)
@@ -3663,7 +3748,7 @@ def try_instant_predictive_micro_scalp(
         log_engine(
             f"MicroScalperInstant: {direction} epic={key} score={trigger.get('score_pct'):.1f} "
             f"forecast={trigger.get('forecast_confidence'):.2f} "
-            f"target={MICRO_SCALP_TARGET_MIN_PTS}-{MICRO_SCALP_TARGET_MAX_PTS}pt"
+            f"target={t_min}-{t_max}pt"
         )
         return {"dispatched": True, "trigger": trigger, "plan": plan_dict}
     except Exception as exc:
@@ -3731,6 +3816,7 @@ def reset_micro_scalper_tick_lane_for_tests() -> None:
     stop_micro_scalper_tick_lane()
     with _micro_scalper_lane_lock:
         _last_instant_scalp_at.clear()
+        _last_instant_scalp_dir.clear()
 
 
 def evaluate_micro_scalp_signal(

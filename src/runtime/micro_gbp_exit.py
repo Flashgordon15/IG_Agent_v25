@@ -495,6 +495,15 @@ def _evaluate_track(track: GbpExitTrack, pnl_gbp: float) -> None:
             return
 
     from execution.tiered_profit_banks import tiered_bank_reason
+    from runtime.long_trade_runner import is_long_runner_active
+
+    # Once long-trade mode engages, skip scalp-sized tier banks — trail/4R owns exit.
+    long_runner = is_long_runner_active(
+        armed_at=track.armed_at,
+        peak_profit_gbp=track.peak_profit_gbp,
+        trail_trigger_gbp=track.trail_trigger_gbp,
+        cfg=cfg,
+    )
 
     pct_decision = None
     try:
@@ -513,7 +522,7 @@ def _evaluate_track(track: GbpExitTrack, pnl_gbp: float) -> None:
                 cfg=cfg,
             )
             if pct_decision is not None:
-                if pct_decision.runner_extended:
+                if pct_decision.runner_extended or long_runner:
                     return
                 _flatten(
                     track,
@@ -530,15 +539,16 @@ def _evaluate_track(track: GbpExitTrack, pnl_gbp: float) -> None:
     except Exception:
         pass
 
-    tier_reason = tiered_bank_reason(
-        peak=track.peak_profit_gbp,
-        pnl=pnl_gbp,
-        trail_trigger_gbp=track.trail_trigger_gbp,
-        cfg=cfg,
-    )
-    if tier_reason:
-        _flatten(track, reason=tier_reason, pnl_gbp=pnl_gbp)
-        return
+    if not long_runner:
+        tier_reason = tiered_bank_reason(
+            peak=track.peak_profit_gbp,
+            pnl=pnl_gbp,
+            trail_trigger_gbp=track.trail_trigger_gbp,
+            cfg=cfg,
+        )
+        if tier_reason:
+            _flatten(track, reason=tier_reason, pnl_gbp=pnl_gbp)
+            return
 
     # 5) Quick win bank — optional; disabled when let_winners_run (trail handles exits).
     quick_win_enabled = True

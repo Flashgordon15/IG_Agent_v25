@@ -113,12 +113,17 @@ def resolve_virtual_ceiling_pts(
     broker_stop_pts: float,
     profile: MicroRiskProfile | None = None,
 ) -> float:
-    """Tight internal ceiling — always inside broker stop.
+    """Software virtual-stop ceiling from config (not IG min-stop bleed).
 
     Prefer ``virtual_stop_ceiling_pts`` as the intentional software ceiling.
-    Do not silently clamp it by ``max_loss_cap_pts`` — that defeated soak
-    ceiling=12 when max_loss was left at 6 and caused same-tick spread stop-outs.
+    Effective arm = configured × 0.85 (e.g. 12 → ~10.2).
+
+    Never collapse that floor when callers pass a short/stale ``broker_stop_pts``
+    (IG min ~4pt previously produced ceiling=3.4 and inverted R:R wipeouts).
+    Only tighten further when the live broker stop is at least the configured
+    ceiling (stay inside a real wide broker stop).
     """
+    del epic  # reserved for future per-epic overrides
     prof = profile or MicroRiskProfile(
         risk_per_trade_gbp=5.0,
         target_r_multiple=1.5,
@@ -126,12 +131,15 @@ def resolve_virtual_ceiling_pts(
         max_loss_cap_pts=4.0,
         virtual_stop_ceiling_pts=4.0,
     )
+    configured = float(prof.virtual_stop_ceiling_pts)
+    if configured <= 0:
+        configured = float(prof.max_loss_cap_pts)
+    configured = max(0.5, configured)
+    effective = configured * 0.85
     broker = max(0.5, float(broker_stop_pts))
-    ceiling = float(prof.virtual_stop_ceiling_pts)
-    if ceiling <= 0:
-        ceiling = float(prof.max_loss_cap_pts)
-    ceiling = min(ceiling, broker * 0.85)
-    return max(0.5, ceiling)
+    if broker + 1e-9 >= configured:
+        effective = min(effective, broker * 0.85)
+    return max(0.5, effective)
 
 
 # Non-GBP spreadbet contract specs (mirrors open_position_view).

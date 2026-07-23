@@ -67,6 +67,19 @@ def test_virtual_ceiling_prefers_virtual_stop_over_max_loss_cap():
     assert ceiling > 6.0
 
 
+def test_virtual_ceiling_ignores_short_ig_min_broker_stop():
+    """P0: IG min ~4pt must NOT collapse configured 12 → 3.4; expect ~10.2."""
+    from execution.micro_risk_profile import MicroRiskProfile
+
+    prof = MicroRiskProfile(4.0, 2.5, 6.0, 12.0, 12.0)
+    ceiling = resolve_virtual_ceiling_pts(
+        epic="IX.D.DOW.IFM.IP", broker_stop_pts=4.0, profile=prof
+    )
+    assert ceiling == pytest.approx(10.2, abs=0.05)
+    assert ceiling >= 10.0
+    assert ceiling != pytest.approx(3.4, abs=0.05)
+
+
 def test_arm_post_fill_registers_virtual_stop():
     with patch("execution.position_risk_stack.arm_position_risk_stack") as arm:
         arm.return_value = {"ok": True, "virtual_ceiling_pts": 3.0}

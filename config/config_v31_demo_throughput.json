@@ -92,8 +92,14 @@
   "event_driven_tick": {
     "enabled": true,
     "coalesce_sec": 0.0,
-    "min_entry_interval_sec": 0.0,
-    "_note": "Raw WS tick path \u2014 no multi-second cadence / TWMA coalesce on entry lane"
+    "min_entry_interval_sec": 60.0,
+    "micro_scalp_instant_enabled": true,
+    "_note": "Anti flip-storm: 60s min entry interval on Instant tick lane; Core B / SignalEngine / long_trade_runner remain"
+  },
+  "micro_scalp_instant": {
+    "enabled": true,
+    "min_entry_interval_sec": 60.0,
+    "_note": "Gated Instant (cadence+flip cooldown+forecast/OBI) — not a full scalp disable. Legitimate Core B scalp + long_trade_runner still fire."
   },
   "asymmetric_ioc_routing": {
     "enabled": true,
@@ -222,13 +228,13 @@
     "risk_per_trade_gbp": 4.0,
     "soft_loss_ratio": 0.55,
     "target_r_multiple": 2.5,
-    "min_profit_target_pts": 1.5,
+    "min_profit_target_pts": 6.0,
     "max_loss_cap_pts": 12.0,
     "virtual_stop_ceiling_pts": 12.0,
     "trail_profit_lock_ratio": 0.78,
-    "trail_trigger_pts": 1.0,
-    "trail_trigger_gbp": 1.0,
-    "min_bank_win_gbp": 0.8,
+    "trail_trigger_pts": 6.0,
+    "trail_trigger_gbp": 2.5,
+    "min_bank_win_gbp": 2.0,
     "max_giveback_ratio": 0.22,
     "gbp_poll_sec": 0.25,
     "quick_win_bank_enabled": true,
@@ -254,8 +260,8 @@
     ],
     "omit_broker_limit_at_entry": false,
     "omit_broker_trail_updates": true,
-    "_note": "virtual_stop_ceiling + max_loss_cap both 12pt (DOW). Soft GBP still risk*0.55. omit_broker_trail_updates=true: software DynamicLimit only (no broker PUT trail spam).",
-    "_soak_note": "Ceiling 12pt > typical DOW spread so virtual stop is not same-tick spread stop-out; grace 12s also armed in code. max_loss_cap must not undercut virtual_stop_ceiling."
+    "_note": "Ceiling 12pt (~10.2 armed) for scalp AND long holds (max-loss, not profit exit). Targets/trail >=6pt fix scalp R:R; long_trade_runner extends to 4R after 3m once peak>=trail_trigger_gbp. Soft GBP risk*0.55. omit_broker_trail_updates=true.",
+    "_soak_note": "Effective virtual ceiling = 12*0.85≈10.2 even when IG min stop is ~4pt. Tiered banks only below trail_trigger; trail/long_runner own exits above."
   },
   "profit_pct_tiers": {
     "enabled": true,
@@ -338,7 +344,7 @@
     "widened_giveback_ratio": 0.4,
     "relaxed_lock_ratio": 0.65,
     "skip_max_age_on_profit": true,
-    "_note": "After 3m in profit: target \u00a316, 40% giveback, 65% lock cap \u2014 longer trades"
+    "_note": "After 3m with peak>=trail_trigger_gbp (2.5): target 4R, 40% giveback, 65% lock — longer trades coexist with gated scalp; hard-cap still 1 open/account"
   },
   "broker_upl_hard_floor": {
     "enabled": true,

@@ -79,3 +79,24 @@ class LongTradeRunnerTests(unittest.TestCase):
                 side="BUY", entry=100.0, px=99.0, cfg=_cfg()
             )
         )
+
+    def test_runner_engages_with_soak_trail_trigger_gbp(self) -> None:
+        """micro_risk.trail_trigger_gbp=2.5 must still unlock 4R long-runner."""
+        armed = time.time() - 240.0
+        self.assertTrue(
+            is_long_runner_active(
+                armed_at=armed,
+                peak_profit_gbp=2.5,
+                trail_trigger_gbp=2.5,
+                cfg=_cfg(),
+            )
+        )
+        tgt = effective_target_gbp(
+            loss_cap_gbp=4.0,
+            base_target_gbp=6.0,
+            armed_at=armed,
+            peak_profit_gbp=2.5,
+            trail_trigger_gbp=2.5,
+            cfg=_cfg(),
+        )
+        self.assertEqual(tgt, 16.0)

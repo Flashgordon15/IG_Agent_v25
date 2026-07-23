@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -168,7 +169,7 @@ def test_regime_entropy_blocks_stagnant_dead_zone():
 def test_predictive_micro_scalp_trigger_requires_high_tier_and_obi():
     with patch("apex.microkernel.get_microkernel") as mock_mk:
         mock_mk.return_value.micro_trend_for.return_value = {
-            "score_pct": 48.0,
+            "score_pct": 75.0,
             "promote_tier": "high",
             "direction": "BUY",
             "order_flow_aligned": True,
@@ -182,17 +183,18 @@ def test_predictive_micro_scalp_trigger_requires_high_tier_and_obi():
     assert trigger["armed"] is True
     assert trigger["direction"] == "BUY"
     assert trigger["bypass_signal_engine"] is True
+    assert float(trigger["target_min_pts"]) >= 6.0
 
 
 def test_predictive_micro_scalp_blocked_when_obi_not_aligned():
     with patch("apex.microkernel.get_microkernel") as mock_mk:
         mock_mk.return_value.micro_trend_for.return_value = {
-            "score_pct": 48.0,
+            "score_pct": 75.0,
             "promote_tier": "high",
             "direction": "BUY",
             "order_flow_aligned": False,
             "obi_ratio": -0.22,
-            "forecast_confidence": 0.40,
+            "forecast_confidence": 0.62,
         }
         trigger = dce.evaluate_predictive_micro_scalp_trigger(
             epic="CS.D.EURUSD.CFD.IP",
@@ -203,6 +205,24 @@ def test_predictive_micro_scalp_blocked_when_obi_not_aligned():
     assert trigger["reason"] == "obi_not_aligned"
 
 
+def test_predictive_micro_scalp_blocked_low_forecast():
+    with patch("apex.microkernel.get_microkernel") as mock_mk:
+        mock_mk.return_value.micro_trend_for.return_value = {
+            "score_pct": 75.0,
+            "promote_tier": "high",
+            "direction": "BUY",
+            "order_flow_aligned": True,
+            "forecast_confidence": 0.40,
+        }
+        trigger = dce.evaluate_predictive_micro_scalp_trigger(
+            epic="CS.D.EURUSD.CFD.IP",
+            bid=1.0850,
+            offer=1.0852,
+        )
+    assert trigger["armed"] is False
+    assert trigger["reason"] == "forecast_confidence_low"
+
+
 def test_predictive_micro_scalp_allows_depthless_neutral_obi():
     """Yahoo/rest_poll OBI≈0 must not freeze the instant lane forever."""
     with patch(
@@ -210,7 +230,7 @@ def test_predictive_micro_scalp_allows_depthless_neutral_obi():
         return_value=(True, ""),
     ), patch("apex.microkernel.get_microkernel") as mock_mk:
         mock_mk.return_value.micro_trend_for.return_value = {
-            "score_pct": 48.0,
+            "score_pct": 75.0,
             "promote_tier": "high",
             "direction": "BUY",
             "order_flow_aligned": False,
@@ -224,6 +244,50 @@ def test_predictive_micro_scalp_allows_depthless_neutral_obi():
         )
     assert trigger["armed"] is True
     assert trigger["direction"] == "BUY"
+
+
+def test_micro_scalp_instant_can_be_kill_switched():
+    out = dce.try_instant_predictive_micro_scalp(
+        "IX.D.DOW.IFM.IP",
+        52000.0,
+        52003.0,
+        cfg={"micro_scalp_instant": {"enabled": False}},
+    )
+    assert out["dispatched"] is False
+    assert out["reason"] == "micro_scalp_instant_disabled"
+
+
+def test_micro_scalp_instant_enabled_still_respects_cadence_and_flip():
+    dce.reset_micro_scalper_tick_lane_for_tests()
+    cfg = {
+        "micro_scalp_instant": {"enabled": True, "min_entry_interval_sec": 60.0},
+    }
+    with patch("apex.microkernel.get_microkernel") as mock_mk, patch(
+        "runtime.master_orchestrator.validate_regime_entropy_arbitration",
+        return_value=(True, ""),
+    ), patch(
+        "execution.pre_entry_regime_veto.evaluate_pre_entry_regime_veto",
+        return_value=(True, ""),
+    ), patch(
+        "runtime.trade_manager.dispatch_piercing_zone_order",
+    ) as dispatch:
+        mock_mk.return_value.micro_trend_for.return_value = {
+            "score_pct": 80.0,
+            "promote_tier": "high",
+            "direction": "BUY",
+            "order_flow_aligned": True,
+            "forecast_confidence": 0.70,
+        }
+        # Force cadence hit on second call without needing a real dispatch path.
+        with dce._micro_scalper_lane_lock:
+            dce._last_instant_scalp_at["IX.D.DOW.IFM.IP"] = time.time()
+            dce._last_instant_scalp_dir["IX.D.DOW.IFM.IP"] = "BUY"
+        out = dce.try_instant_predictive_micro_scalp(
+            "IX.D.DOW.IFM.IP", 52000.0, 52003.0, cfg=cfg
+        )
+    assert out["dispatched"] is False
+    assert out["reason"] == "instant_scalp_cadence"
+    dispatch.assert_not_called()
 
 
 def test_micro_scalper_tick_lane_registers_hub_listener():

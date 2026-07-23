@@ -385,13 +385,27 @@ def _rearm_after_clear(rest: Any, row: dict[str, Any]) -> None:
             entry_level=entry,
             cfg=cfg,
         )
+        # Use configured virtual_stop_ceiling (12pt), not a hardcoded 4pt IG min —
+        # short broker_stop_pts previously collapsed software ceiling to 3.4pt.
+        broker_stop_pts = 12.0
+        try:
+            from execution.micro_risk_profile import resolve_micro_tp_sl_for_epic
+
+            _, sl_pts, prof = resolve_micro_tp_sl_for_epic(epic, size, cfg)
+            broker_stop_pts = max(
+                float(prof.virtual_stop_ceiling_pts or 12.0),
+                float(sl_pts or 0.0),
+                12.0,
+            )
+        except Exception:
+            broker_stop_pts = 12.0
         arm_virtual_stop_for_position(
             deal_id=did,
             epic=epic,
             direction=direction,
             size=size,
             entry_level=entry,
-            broker_stop_pts=4.0,
+            broker_stop_pts=float(broker_stop_pts),
             cfg=cfg,
         )
         limit_pts = None
@@ -409,7 +423,7 @@ def _rearm_after_clear(rest: Any, row: dict[str, Any]) -> None:
             direction=direction,
             size=size,
             entry_level=entry,
-            broker_stop_pts=4.0,
+            broker_stop_pts=float(broker_stop_pts),
             limit_distance_pts=limit_pts,
             cfg=cfg,
             rest_client=rest,
