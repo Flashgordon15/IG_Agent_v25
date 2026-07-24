@@ -68,7 +68,23 @@ def parse_ts(s):
     if not s:
         return None
     try:
-        return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        ts = dt.timestamp()
+        # Broker sync often writes Europe/London wall clock with a trailing Z.
+        # If that lands >2m ahead of wall clock, reinterpret as London local.
+        if ts > time.time() + 120:
+            try:
+                from zoneinfo import ZoneInfo
+
+                naive = dt.replace(tzinfo=None)
+                ts = (
+                    naive.replace(tzinfo=ZoneInfo("Europe/London"))
+                    .astimezone(timezone.utc)
+                    .timestamp()
+                )
+            except Exception:
+                ts = ts - 3600.0
+        return ts
     except Exception:
         return None
 
@@ -114,14 +130,8 @@ def journal_profits(start_epoch: float):
             continue
         if deal in seen:
             continue
-        # IG sync sometimes stamps Europe/London wall clock with a trailing Z.
-        # Allow several hours of "future" so those rows still count for soak.
         if ts > time.time() + 4 * 3600:
             continue
-        if ts > time.time() + 120:
-            ts = ts - 3600.0  # best-effort BST→UTC correction for Z-mislabeled rows
-            if ts > time.time() + 120:
-                continue
         try:
             pnl = float(str(row.get("RealizedPnL_GBP") or "nan"))
         except Exception:
