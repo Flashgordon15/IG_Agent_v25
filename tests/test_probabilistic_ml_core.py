@@ -115,11 +115,12 @@ def test_extreme_spread_widening_edge_case_blocks_gold_even_with_obi():
     assert result.features.get("extreme_weight", 0) > 0.5
 
 
-def test_flash_crash_telemetry_dropout_fails_open_at_asset_threshold():
-    """Edge: telemetry dropout (empty features) fail-opens at asset-class gate."""
+def test_flash_crash_telemetry_dropout_fails_closed_obi_unavailable():
+    """Edge: telemetry dropout (empty OBI plane) fail-closes — never thr-stamp approve."""
     from alpha.micro_sniper_ml import evaluate_live_sniper_probability
 
-    # Force empty feature plane via monkeypatched live gatherers in-process
+    # With zero features the sigmoid sits mid — may or may not clear.
+    # Live path must NOT fail-open at asset-class gate:
     result = QuantumSniperMLCore().evaluate_entry_probability(
         obi_velocity=0.0,
         spread_elasticity=1.0,
@@ -128,23 +129,22 @@ def test_flash_crash_telemetry_dropout_fails_open_at_asset_threshold():
         epic="IX.D.DOW.IFM.IP",
         direction="BUY",
     )
-    # With zero features the sigmoid sits mid — may or may not clear.
-    # Live path fail-open is tested via features_unavailable path:
     live = evaluate_live_sniper_probability(
         "IX.D.DOW.IFM.IP",
         "BUY",
         cfg={"grok_macro_bias": "NEUTRAL"},
         quote=None,
     )
-    # Depthless empty plane → fail-open at index threshold (not hard reject)
-    if live.features.get("features_unavailable_fail_open"):
-        assert live.approved is True
-        assert live.threshold == pytest.approx(THRESHOLD_INDEX)
-        assert live.p_success == pytest.approx(THRESHOLD_INDEX)
+    # Depthless empty plane → fail-closed (obi_unavailable), not mid-thr approval
+    if live.features.get("obi_unavailable") or live.reason == "obi_unavailable":
+        assert live.approved is False
+        assert live.features.get("features_unavailable_fail_open") is not True
+        assert live.p_success <= SAFETY_BASELINE + 1e-9
     else:
-        # If hub injected features, still must not crash / return valid envelope
+        # If hub injected real OBI features, still must not crash / return valid envelope
         assert 0.0 < live.p_success <= 0.99
         assert live.threshold == pytest.approx(THRESHOLD_INDEX)
+        assert live.features.get("features_unavailable_fail_open") is not True
     assert result.features.get("asset_class") == "INDEX"
 
 

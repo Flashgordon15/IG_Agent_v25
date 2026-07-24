@@ -79,8 +79,12 @@ def test_obi_depthless_neutral_does_not_permanent_block(monkeypatch):
         lambda epic: (0.0, False),
     )
     monkeypatch.setattr(
-        "execution.entry_gate_hardening._obi_proxy_from_quote",
-        lambda epic, quote: 0.0,
+        "execution.entry_gate_hardening._obi_from_order_book",
+        lambda epic, quote=None: (None, False),
+    )
+    monkeypatch.setattr(
+        "execution.entry_gate_hardening._obi_proxy_from_quote_available",
+        lambda epic, quote: (0.0, True),
     )
     ok, reason, ratio = evaluate_obi_entry_filter(
         "IX.D.DOW.IFM.IP", "BUY", cfg=CFG
@@ -105,14 +109,40 @@ def test_obi_fail_closed_neutral_starves_depthless_proxy_zero(monkeypatch):
         lambda epic: (0.0, False),
     )
     monkeypatch.setattr(
-        "execution.entry_gate_hardening._obi_proxy_from_quote",
-        lambda epic, quote: 0.0,
+        "execution.entry_gate_hardening._obi_from_order_book",
+        lambda epic, quote=None: (None, False),
+    )
+    monkeypatch.setattr(
+        "execution.entry_gate_hardening._obi_proxy_from_quote_available",
+        lambda epic, quote: (0.0, True),
     )
     ok, reason, ratio = evaluate_obi_entry_filter(
         "IX.D.DOW.IFM.IP", "BUY", cfg=cfg
     )
     assert ok is False
     assert "obi_proxy_not_supportive" in reason
+    assert ratio == 0.0
+
+
+def test_obi_truly_unavailable_fail_closed(monkeypatch):
+    """No book + no proxy history → explicit obi_unavailable (not blind accept)."""
+    monkeypatch.setattr(
+        "execution.entry_gate_hardening._obi_from_microkernel",
+        lambda epic: (None, None),
+    )
+    monkeypatch.setattr(
+        "execution.entry_gate_hardening._obi_from_order_book",
+        lambda epic, quote=None: (None, False),
+    )
+    monkeypatch.setattr(
+        "execution.entry_gate_hardening._obi_proxy_from_quote_available",
+        lambda epic, quote: (0.0, False),
+    )
+    ok, reason, ratio = evaluate_obi_entry_filter(
+        "IX.D.DOW.IFM.IP", "BUY", cfg=CFG
+    )
+    assert ok is False
+    assert "obi_unavailable" in reason
     assert ratio == 0.0
 
 

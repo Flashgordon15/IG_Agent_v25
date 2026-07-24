@@ -31,6 +31,9 @@ THRESHOLD_LIQUIDITY_STRESS_CEILING = 0.82
 _VOL_TICK_WINDOW = 30
 _MIN_VOL_TICKS_FOR_DYNAMIC = 10
 
+# Rolling raw OBI (10 ticks) — only meaningful once raw OBI is available.
+_OBI_TICK_WINDOW = 10
+
 # Reweighted feature plane: penalize wide premium, reward clean momentum,
 # de-emphasize depthless Mini OBI noise.
 W_BIAS = 0.50
@@ -51,6 +54,7 @@ _last_global: dict[str, Any] = {
     "features": {},
 }
 _vol_tick_history: dict[str, deque[tuple[float, float]]] = {}
+_obi_tick_history: dict[str, deque[float]] = {}
 
 
 @dataclass(frozen=True)
@@ -121,9 +125,10 @@ def sniper_threshold_for_epic(epic: str = "") -> float:
 
 
 def reset_volatility_feature_history_for_tests() -> None:
-    global _vol_tick_history
+    global _vol_tick_history, _obi_tick_history
     with _lock:
         _vol_tick_history = {}
+        _obi_tick_history = {}
 
 
 def observe_volatility_features(
@@ -144,6 +149,33 @@ def observe_volatility_features(
             hist = deque(maxlen=_VOL_TICK_WINDOW)
             _vol_tick_history[key] = hist
         hist.append((elast, atr_v))
+
+
+def observe_obi_tick(epic: str, raw_obi: float) -> float:
+    """Push raw OBI into a 10-tick ring; return rolling mean (or raw if empty)."""
+    key = str(epic or "").strip()
+    if not key:
+        return float(raw_obi or 0.0)
+    val = _clamp(float(raw_obi or 0.0), -1.0, 1.0)
+    with _lock:
+        hist = _obi_tick_history.get(key)
+        if hist is None:
+            hist = deque(maxlen=_OBI_TICK_WINDOW)
+            _obi_tick_history[key] = hist
+        hist.append(val)
+        return sum(hist) / float(len(hist))
+
+
+def rolling_obi_for(epic: str) -> float | None:
+    """Latest 10-tick rolling OBI mean, or None when no samples yet."""
+    key = str(epic or "").strip()
+    if not key:
+        return None
+    with _lock:
+        hist = _obi_tick_history.get(key)
+        if not hist:
+            return None
+        return sum(hist) / float(len(hist))
 
 
 def _liquidity_stress_blend(epic: str) -> tuple[float, dict[str, float]]:
@@ -363,8 +395,12 @@ def evaluate_live_sniper_probability(
     cfg: Any | None = None,
     quote: Any | None = None,
 ) -> SniperProbabilityResult:
-    """Gather live features and score — fail-soft toward chop isolation."""
+    """Gather live features and score — fail-closed when OBI plane is blind."""
     obi_v = 0.0
+    raw_obi = 0.0
+    rolling_obi = 0.0
+    obi_source = "obi_unavailable"
+    obi_available = False
     elast = 1.0
     accel = 0.0
     atr_v = 0.0
@@ -378,19 +414,37 @@ def evaluate_live_sniper_probability(
     except Exception:
         bias = "NEUTRAL"
 
+    # Prefer explicit availability-aware OBI (book → microkernel → quote proxy).
+    try:
+        from execution.entry_gate_hardening import resolve_obi_signal
+
+        raw_obi, obi_source, obi_available = resolve_obi_signal(
+            str(epic or ""), quote=quote
+        )
+    except Exception:
+        raw_obi, obi_source, obi_available = 0.0, "obi_unavailable", False
+
+    # Microkernel ofi_delta is velocity when present; else use raw / rolling.
     try:
         from apex.microkernel import get_microkernel
 
         mt = get_microkernel().micro_trend_for(str(epic or ""))
         if isinstance(mt, dict):
-            if mt.get("ofi_delta") is not None:
+            if mt.get("ofi_delta") is not None and abs(float(mt.get("ofi_delta") or 0.0)) > 1e-12:
                 obi_v = float(mt.get("ofi_delta") or 0.0)
+                if not obi_available and mt.get("obi_ratio") is not None:
+                    # ofi with a stamped ratio counts as available flow
+                    raw_obi = float(mt.get("obi_ratio") or 0.0)
+                    obi_available = True
+                    obi_source = "microkernel_ofi"
             elif mt.get("obi_ratio") is not None and mt.get("prior_obi_ratio") is not None:
                 obi_v = float(mt.get("obi_ratio") or 0.0) - float(
                     mt.get("prior_obi_ratio") or 0.0
                 )
-            elif mt.get("obi_ratio") is not None:
-                obi_v = float(mt.get("obi_ratio") or 0.0)
+                if not obi_available:
+                    raw_obi = float(mt.get("obi_ratio") or 0.0)
+                    obi_available = True
+                    obi_source = "microkernel"
             if mt.get("tick_acceleration") is not None:
                 accel = float(mt.get("tick_acceleration") or 0.0)
             elif mt.get("forecast_confidence") is not None:
@@ -403,6 +457,15 @@ def evaluate_live_sniper_probability(
                 accel = conf * sign
     except Exception:
         pass
+
+    if obi_available:
+        prior_roll = rolling_obi_for(str(epic or ""))
+        rolling_obi = observe_obi_tick(str(epic or ""), float(raw_obi))
+        if abs(obi_v) < 1e-12:
+            if prior_roll is not None:
+                obi_v = float(raw_obi) - float(prior_roll)
+            else:
+                obi_v = float(raw_obi)
 
     bid = 0.0
     offer = 0.0
@@ -444,36 +507,34 @@ def evaluate_live_sniper_probability(
     except Exception:
         elast = 1.0
 
-    # Fail-open when feature plane is empty (no L2 OBI, no mid history, elast≈1).
-    # Depthless Yahoo/rest_poll otherwise yields P≈0.5 forever → silent chop lock.
+    # Fail-CLOSED when OBI plane is blind — never stamp mid-thr "approvals".
     # Crash/melt-up remains enforced by evaluate_obi_entry_filter / regime veto.
-    features_unavailable = (
-        abs(float(obi_v)) < 1e-12
-        and abs(float(accel)) < 1e-12
-        and float(elast) <= 1.0 + 1e-9
-        and str(bias or "NEUTRAL").upper() in ("", "NEUTRAL")
-    )
-    if features_unavailable:
+    if not obi_available:
         result = SniperProbabilityResult(
-            p_success=float(thr),
-            approved=True,
+            p_success=float(SAFETY_BASELINE),
+            approved=False,
             threshold=float(thr),
             logit=0.0,
             features={
                 "obi_velocity": 0.0,
+                "obi_raw": 0.0,
+                "obi_rolling": 0.0,
+                "obi_source": "obi_unavailable",
+                "obi_available": False,
                 "spread_elasticity": float(elast),
-                "tick_acceleration": 0.0,
+                "tick_acceleration": float(accel),
                 "grok_macro_bias": str(bias or "NEUTRAL"),
                 "direction": str(direction or "").upper(),
-                "features_unavailable_fail_open": True,
+                "features_unavailable_fail_open": False,
+                "obi_unavailable": True,
                 "asset_class": asset_class_for_epic(epic),
             },
-            reason="sniper_ml_features_unavailable_fail_open",
+            reason="obi_unavailable",
         )
         get_sniper_ml_core()._publish_cache(epic=str(epic or ""), result=result)
         return result
 
-    return get_sniper_ml_core().evaluate_entry_probability(
+    result = get_sniper_ml_core().evaluate_entry_probability(
         obi_velocity=obi_v,
         spread_elasticity=elast,
         tick_acceleration=accel,
@@ -482,6 +543,31 @@ def evaluate_live_sniper_probability(
         direction=str(direction or ""),
         atr_velocity=atr_v,
     )
+    # Stamp availability metadata onto features for probe / ElasticGate.
+    try:
+        feats = dict(result.features or {})
+        feats.update(
+            {
+                "obi_raw": round(float(raw_obi), 6),
+                "obi_rolling": round(float(rolling_obi), 6),
+                "obi_source": str(obi_source),
+                "obi_available": True,
+                "obi_unavailable": False,
+                "features_unavailable_fail_open": False,
+            }
+        )
+        result = SniperProbabilityResult(
+            p_success=result.p_success,
+            approved=result.approved,
+            threshold=result.threshold,
+            logit=result.logit,
+            features=feats,
+            reason=result.reason,
+        )
+        get_sniper_ml_core()._publish_cache(epic=str(epic or ""), result=result)
+    except Exception:
+        pass
+    return result
 
 
 def sniper_ml_desk_payload(*, epics: list[str] | None = None) -> dict[str, Any]:

@@ -526,6 +526,7 @@ def request_flatten(
                 hold_sec=hold_hint,
                 style=style_hint,
                 epic=epic_s,
+                # ml_score / regime recovered inside record_trade_close
             )
             log_engine(
                 f"ExitGate: journal recorded deal={did[:12]} pnl={float(profit):.2f}"

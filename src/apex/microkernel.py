@@ -333,9 +333,11 @@ class ApexMicroKernel:
         depth = self._extract_order_book_depth(raw)
         if depth is not None:
             try:
-                from intelligence.order_book_imbalance import compute_obi_ratio
+                from intelligence.order_book_imbalance import compute_obi_ratio_available
 
-                obi_ratio = float(compute_obi_ratio(depth))
+                obi_ratio, book_ok = compute_obi_ratio_available(depth)
+                if not book_ok:
+                    obi_ratio = 0.0
             except Exception:
                 obi_ratio = 0.0
         elif raw.get("obi_ratio") is not None:

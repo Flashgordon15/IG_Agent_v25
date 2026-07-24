@@ -121,7 +121,21 @@
     "min_abs_obi": 0.25,
     "require_15m_trend_ml_obi": true,
     "allow_non_dow": false,
-    "_note": "Live DOW selectivity — volume collapse vs soak baseline; Gold/EURUSD/FTSE rejected on hot path."
+    "elastic_gate_enabled": true,
+    "_note": "Live DOW selectivity — volume collapse vs soak baseline; Gold/EURUSD/FTSE rejected on hot path.",
+    "_v37_note": "ElasticGate on: healthy plane P in [0.68,0.72]; stressed/wide/thin P>=0.78-0.82; OBI unavailable rejects. Never loosen below 0.68."
+  },
+  "elastic_gate": {
+    "enabled": true,
+    "healthy_p_lo": 0.68,
+    "healthy_p_hi": 0.72,
+    "stressed_p_lo": 0.78,
+    "stressed_p_hi": 0.82,
+    "tight_spread_elasticity": 1.12,
+    "wide_spread_elasticity": 1.35,
+    "healthy_obi_abs": 0.22,
+    "thin_obi_abs": 0.15,
+    "_note": "Volatility-Adaptive daytime floor. Requires |OBI|; fail-closed when OBI unavailable."
   },
   "profit_run": {
     "enabled": true,

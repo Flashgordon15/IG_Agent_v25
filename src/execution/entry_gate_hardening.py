@@ -99,15 +99,24 @@ def _obi_proxy_from_quote(epic: str, quote: Any | None) -> float:
 
     Uses short-horizon mid drift vs spread: crashing books show offer-heavy
     pressure (negative OBI) when mid is falling through a wide ask.
+    Missing history returns 0.0 — prefer ``_obi_proxy_from_quote_available``.
     """
+    ratio, _available = _obi_proxy_from_quote_available(epic, quote)
+    return ratio
+
+
+def _obi_proxy_from_quote_available(
+    epic: str, quote: Any | None
+) -> tuple[float, bool]:
+    """Return ``(proxy_obi, available)`` — available only when mid history exists."""
     q = quote if quote is not None else _hub_quote(epic)
     if q is None:
-        return 0.0
+        return 0.0, False
     try:
         bid = float(getattr(q, "bid", 0) or 0)
         offer = float(getattr(q, "offer", 0) or 0)
         if bid <= 0 or offer <= bid:
-            return 0.0
+            return 0.0, False
         mid = (bid + offer) / 2.0
         spread = offer - bid
         # Prefer hub last mid if available
@@ -117,20 +126,90 @@ def _obi_proxy_from_quote(epic: str, quote: Any | None) -> float:
                 from system.market_data_hub import get_market_data_hub
 
                 snap = get_market_data_hub().get_snapshot(str(epic or ""))
-                hist = getattr(snap, "mid_history", None) or getattr(snap, "recent_mids", None)
+                hist = getattr(snap, "mid_history", None) or getattr(
+                    snap, "recent_mids", None
+                )
                 if hist and len(hist) >= 2:
                     prev = float(hist[-2])
             except Exception:
                 prev = 0.0
         if prev <= 0:
-            # Neutral when no history — caller may fail-closed separately
-            return 0.0
+            return 0.0, False
         delta = mid - prev
         # Normalize by spread so one-tick drift ≈ meaningful imbalance
         raw = delta / max(spread, 1e-9)
-        return max(-1.0, min(1.0, raw))
+        return max(-1.0, min(1.0, raw)), True
     except Exception:
-        return 0.0
+        return 0.0, False
+
+
+def _obi_from_order_book(
+    epic: str, quote: Any | None = None
+) -> tuple[float | None, bool]:
+    """Try L2 depth on quote / hub — ``(ratio, available)``."""
+    try:
+        from intelligence.order_book_imbalance import (
+            compute_obi_ratio_available,
+            extract_order_book_depth,
+        )
+    except Exception:
+        return None, False
+
+    depth = extract_order_book_depth(quote)
+    if depth is None:
+        try:
+            from system.market_data_hub import get_market_data_hub
+
+            snap = get_market_data_hub().get_snapshot(str(epic or ""))
+            depth = extract_order_book_depth(snap)
+            if depth is None and snap is not None:
+                depth = extract_order_book_depth(
+                    getattr(snap, "raw", None)
+                    or getattr(snap, "__dict__", None)
+                )
+        except Exception:
+            depth = None
+    if depth is None:
+        return None, False
+    ratio, available = compute_obi_ratio_available(depth)
+    if not available:
+        return None, False
+    return float(ratio), True
+
+
+def resolve_obi_signal(
+    epic: str,
+    *,
+    quote: Any | None = None,
+) -> tuple[float, str, bool]:
+    """
+    Resolve signed OBI with explicit availability.
+
+    Returns ``(ratio, source, available)``. When ``available`` is False the
+    ratio is a non-informative stub (0.0) — callers must fail-closed rather
+    than treat it as balanced flow.
+    """
+    # 1) Real L2 book when present (rest_poll Mini often lacks this).
+    book_ratio, book_ok = _obi_from_order_book(epic, quote)
+    if book_ok and book_ratio is not None:
+        return float(book_ratio), "order_book", True
+
+    # 2) Microkernel cache (populated when ticks carry depth / obi_ratio).
+    ratio, aligned = _obi_from_microkernel(epic)
+    if ratio is not None and not (
+        abs(float(ratio)) < 1e-9 and aligned is False
+    ):
+        # Informative microkernel reading (incl. true near-zero with align).
+        return float(ratio), "microkernel", True
+    if ratio is not None and abs(float(ratio)) >= 1e-9:
+        return float(ratio), "microkernel", True
+
+    # 3) Depth-free mid-drift proxy — only when history exists.
+    proxy, proxy_ok = _obi_proxy_from_quote_available(epic, quote)
+    if proxy_ok:
+        return float(proxy), "quote_proxy", True
+
+    return 0.0, "obi_unavailable", False
 
 
 def resolve_raw_obi_ratio(
@@ -139,15 +218,7 @@ def resolve_raw_obi_ratio(
     quote: Any | None = None,
 ) -> tuple[float, str]:
     """Return signed OBI ratio in [-1, 1] without entry-filter vetoes (for sovereign bypass)."""
-    ratio, _aligned = _obi_from_microkernel(epic)
-    source = "microkernel"
-    if ratio is None or (
-        source == "microkernel"
-        and abs(float(ratio)) < 1e-9
-        and _aligned is False
-    ):
-        ratio = _obi_proxy_from_quote(epic, quote)
-        source = "quote_proxy"
+    ratio, source, _available = resolve_obi_signal(epic, quote=quote)
     return float(ratio or 0.0), source
 
 
@@ -189,19 +260,12 @@ def evaluate_obi_entry_filter(
         min_tpm = float(block.get("min_tpm_confirm") or 8.0)
         dir_u = str(direction or "BUY").upper()
 
-        ratio, aligned = _obi_from_microkernel(epic)
-        source = "microkernel"
-        # Yahoo / rest_poll hosts have no L2 depth → microkernel OBI stays ~0 and
-        # order_flow_aligned stays False forever. Treat that as "no depth signal"
-        # and fall through to the quote mid-drift proxy instead of a permanent veto.
-        if ratio is None or (
-            source == "microkernel"
-            and abs(float(ratio)) < 1e-9
-            and aligned is False
-        ):
-            ratio = _obi_proxy_from_quote(epic, quote)
-            source = "quote_proxy"
-            aligned = None
+        ratio, source, available = resolve_obi_signal(epic, quote=quote)
+        aligned = None
+        if source == "microkernel":
+            _r, aligned = _obi_from_microkernel(epic)
+        if not available:
+            return False, "obi_unavailable", 0.0
 
         # Depthless Mini: low-TPM quote_proxy OBI is noise — require volume confirm.
         tpm = 0.0

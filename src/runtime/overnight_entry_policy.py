@@ -366,6 +366,216 @@ class SelectivityDecision:
     trend_ok: bool
 
 
+@dataclass(frozen=True)
+class ElasticGateDecision:
+    allow: bool
+    reason: str
+    min_p: float
+    abs_obi: float
+    p_success: float | None
+    band: str  # "healthy" | "stressed" | "obi_unavailable"
+
+
+# ElasticGate floors — never loosen below 0.68 while OBI is the primary feature.
+_ELASTIC_HEALTHY_LO = 0.68
+_ELASTIC_HEALTHY_HI = 0.72
+_ELASTIC_STRESSED_LO = 0.78
+_ELASTIC_STRESSED_HI = 0.82
+
+
+def elastic_gate_enabled(cfg: Any | None = None) -> bool:
+    """Opt-in Volatility-Adaptive ElasticGate (daytime selectivity)."""
+    sel = _cfg_block(cfg, "selectivity_gates")
+    elastic = _cfg_block(cfg, "elastic_gate")
+    if elastic.get("enabled") is not None:
+        return bool(elastic.get("enabled"))
+    return bool(sel.get("elastic_gate_enabled", False))
+
+
+def resolve_elastic_min_p(
+    *,
+    spread_elasticity: float | None = None,
+    abs_obi: float | None = None,
+    obi_available: bool = True,
+    depth_expanding: bool | None = None,
+    cfg: Any | None = None,
+) -> tuple[float, str]:
+    """
+    Map microstructure health → daytime P floor.
+
+    Healthy (tight spread + expanding depth + informative |OBI|) → [0.68, 0.72]
+    Stressed (wide spread / thin OBI) → [0.78, 0.82]
+    Never below 0.68.
+    """
+    elastic = _cfg_block(cfg, "elastic_gate")
+    healthy_lo = float(elastic.get("healthy_p_lo") or _ELASTIC_HEALTHY_LO)
+    healthy_hi = float(elastic.get("healthy_p_hi") or _ELASTIC_HEALTHY_HI)
+    stressed_lo = float(elastic.get("stressed_p_lo") or _ELASTIC_STRESSED_LO)
+    stressed_hi = float(elastic.get("stressed_p_hi") or _ELASTIC_STRESSED_HI)
+    # Hard floor — operator may tighten but never loosen below 0.68.
+    healthy_lo = max(0.68, healthy_lo)
+    healthy_hi = max(healthy_lo, healthy_hi)
+    stressed_lo = max(healthy_hi, stressed_lo)
+    stressed_hi = max(stressed_lo, stressed_hi)
+
+    if not obi_available:
+        return stressed_hi, "obi_unavailable"
+
+    elast = float(spread_elasticity if spread_elasticity is not None else 1.0)
+    aobi = abs(float(abs_obi if abs_obi is not None else 0.0))
+    thin_obi = aobi < float(elastic.get("thin_obi_abs") or 0.15)
+    wide_spread = elast >= float(elastic.get("wide_spread_elasticity") or 1.35)
+    expanding = bool(depth_expanding) if depth_expanding is not None else (aobi >= 0.25)
+    tight = elast <= float(elastic.get("tight_spread_elasticity") or 1.12)
+
+    if wide_spread or thin_obi:
+        # Interpolate within stressed band by how bad the plane is.
+        stress = 0.0
+        if wide_spread:
+            stress += min(1.0, (elast - 1.35) / 1.0)
+        if thin_obi:
+            stress += min(1.0, (0.15 - aobi) / 0.15)
+        stress = min(1.0, stress / 2.0)
+        min_p = stressed_lo + (stressed_hi - stressed_lo) * stress
+        return float(min_p), "stressed"
+
+    if tight and expanding and aobi >= float(elastic.get("healthy_obi_abs") or 0.22):
+        # Healthier plane → lower end of healthy band (still ≥0.68).
+        quality = min(1.0, (aobi - 0.22) / 0.30)
+        min_p = healthy_hi - (healthy_hi - healthy_lo) * quality
+        return float(min_p), "healthy"
+
+    # Default mid daytime — upper healthy / lower stressed transition.
+    return float(max(healthy_hi, min(stressed_lo, 0.75))), "neutral"
+
+
+def evaluate_elastic_gate(
+    *,
+    epic: str,
+    direction: str,
+    p_success: float | None,
+    obi: float | None,
+    obi_available: bool = True,
+    spread_elasticity: float | None = None,
+    depth_expanding: bool | None = None,
+    trend_15m: str | None = None,
+    cfg: Any | None = None,
+    force_require: bool | None = None,
+) -> ElasticGateDecision:
+    """Volatility-adaptive P floor + mandatory |OBI| when feature plane is live."""
+    _min_p_cfg, min_obi, require = selectivity_thresholds(cfg)
+    if force_require is not None:
+        require = bool(force_require)
+    if not require and not elastic_gate_enabled(cfg):
+        return ElasticGateDecision(
+            allow=True,
+            reason="elastic_gate_not_required",
+            min_p=_min_p_cfg,
+            abs_obi=abs(float(obi or 0.0)),
+            p_success=normalize_ml_probability(p_success),
+            band="neutral",
+        )
+
+    if not obi_available or obi is None:
+        return ElasticGateDecision(
+            allow=False,
+            reason="elastic_obi_unavailable",
+            min_p=_ELASTIC_STRESSED_HI,
+            abs_obi=0.0,
+            p_success=normalize_ml_probability(p_success),
+            band="obi_unavailable",
+        )
+
+    try:
+        abs_obi = abs(float(obi))
+    except (TypeError, ValueError):
+        return ElasticGateDecision(
+            allow=False,
+            reason="elastic_obi_unavailable",
+            min_p=_ELASTIC_STRESSED_HI,
+            abs_obi=0.0,
+            p_success=normalize_ml_probability(p_success),
+            band="obi_unavailable",
+        )
+
+    min_p, band = resolve_elastic_min_p(
+        spread_elasticity=spread_elasticity,
+        abs_obi=abs_obi,
+        obi_available=True,
+        depth_expanding=depth_expanding,
+        cfg=cfg,
+    )
+    # Never undercut configured overnight / rigid floor when it is higher.
+    min_p = max(float(min_p), float(_min_p_cfg) if band == "stressed" else float(min_p))
+    if band == "healthy":
+        # Healthy band may ease toward 0.68–0.72 but never below config healthy floor
+        # AND never below 0.68. Do not inherit rigid 0.78 here.
+        min_p = max(0.68, float(min_p))
+    else:
+        min_p = max(float(min_p), float(_min_p_cfg) if _min_p_cfg >= 0.78 else float(min_p))
+
+    p = normalize_ml_probability(p_success)
+    dir_u = str(direction or "").upper()
+    trend_u = str(trend_15m or "").upper()
+    trend_ok = (
+        (trend_u == "BULLISH" and dir_u == "BUY")
+        or (trend_u == "BEARISH" and dir_u == "SELL")
+        or (not require)
+    )
+
+    # Always require |OBI| gate when rolling/raw OBI is available.
+    obi_floor = float(min_obi) if min_obi > 0 else 0.22
+    if abs_obi < obi_floor:
+        return ElasticGateDecision(
+            allow=False,
+            reason=f"elastic_obi_fail |obi|={abs_obi:.3f}<{obi_floor}",
+            min_p=min_p,
+            abs_obi=abs_obi,
+            p_success=p,
+            band=band,
+        )
+    if p is None or p < min_p:
+        return ElasticGateDecision(
+            allow=False,
+            reason=f"elastic_p_fail p={p}<{min_p:.3f} band={band}",
+            min_p=min_p,
+            abs_obi=abs_obi,
+            p_success=p,
+            band=band,
+        )
+    if require and not trend_ok:
+        return ElasticGateDecision(
+            allow=False,
+            reason=f"elastic_trend_disagree trend={trend_u}",
+            min_p=min_p,
+            abs_obi=abs_obi,
+            p_success=p,
+            band=band,
+        )
+    epic_s = str(epic or "").strip()
+    if epic_s and epic_s != DOW:
+        allow_non_dow = bool(
+            _cfg_block(cfg, "selectivity_gates").get("allow_non_dow", False)
+        )
+        if not allow_non_dow:
+            return ElasticGateDecision(
+                allow=False,
+                reason="elastic_non_dow_rejected",
+                min_p=min_p,
+                abs_obi=abs_obi,
+                p_success=p,
+                band=band,
+            )
+    return ElasticGateDecision(
+        allow=True,
+        reason=f"elastic_ok band={band} min_p={min_p:.3f}",
+        min_p=min_p,
+        abs_obi=abs_obi,
+        p_success=p,
+        band=band,
+    )
+
+
 def evaluate_selectivity_gates(
     *,
     epic: str,
@@ -375,12 +585,53 @@ def evaluate_selectivity_gates(
     trend_15m: str | None = None,
     cfg: Any | None = None,
     force_require: bool | None = None,
+    obi_available: bool | None = None,
+    spread_elasticity: float | None = None,
+    depth_expanding: bool | None = None,
 ) -> SelectivityDecision:
-    """P / |OBI| / 15m trend agree gates (DOW-centric selectivity)."""
+    """P / |OBI| / 15m trend agree gates (DOW-centric selectivity).
+
+    When ``elastic_gate.enabled``, delegates to Volatility-Adaptive ElasticGate
+    (healthy plane → P∈[0.68,0.72]; stressed → P≥0.78–0.82; OBI missing → reject).
+    """
+    if elastic_gate_enabled(cfg):
+        # Infer availability: explicit flag wins; None obi → unavailable.
+        avail = True if obi_available is None else bool(obi_available)
+        if obi_available is None and obi is None:
+            avail = False
+        eg = evaluate_elastic_gate(
+            epic=epic,
+            direction=direction,
+            p_success=p_success,
+            obi=obi,
+            obi_available=avail,
+            spread_elasticity=spread_elasticity,
+            depth_expanding=depth_expanding,
+            trend_15m=trend_15m,
+            cfg=cfg,
+            force_require=force_require,
+        )
+        return SelectivityDecision(
+            allow=eg.allow,
+            reason=eg.reason,
+            p_success=eg.p_success,
+            abs_obi=eg.abs_obi,
+            trend_ok=("trend_disagree" not in eg.reason),
+        )
+
     min_p, min_obi, require = selectivity_thresholds(cfg)
     if force_require is not None:
         require = bool(force_require)
     p = normalize_ml_probability(p_success)
+    # Fail-closed when caller marks OBI unavailable (even on rigid path).
+    if obi_available is False:
+        return SelectivityDecision(
+            allow=False,
+            reason="selectivity_obi_unavailable",
+            p_success=p,
+            abs_obi=0.0,
+            trend_ok=False,
+        )
     try:
         abs_obi = abs(float(obi if obi is not None else 0.0))
     except (TypeError, ValueError):

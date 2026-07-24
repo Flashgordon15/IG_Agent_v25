@@ -403,17 +403,64 @@ def record_trade_close(
         engine_origin=engine_origin,
         engine_id=engine_id,
     )
+    epic_s = str(epic or "").strip()
+    deal_s = str(deal_id or "").strip() or "UNKNOWN"
+
+    # Attribution recovery — every DIAAAA close should stamp ml / regime / hold.
+    resolved_ml = ml_score
+    if resolved_ml is None:
+        try:
+            from diagnostics.ml_trade_outcomes import resolve_ml_score_for_close
+
+            resolved_ml = resolve_ml_score_for_close(
+                ml_score=None, deal_id=deal_s, epic=epic_s
+            )
+        except Exception:
+            resolved_ml = None
+
+    resolved_hold = hold_sec
+    if resolved_hold is None and deal_s:
+        try:
+            from runtime.micro_gbp_exit import hold_sec_for_deal
+
+            resolved_hold = hold_sec_for_deal(deal_s)
+        except Exception:
+            resolved_hold = None
+
+    resolved_regime = str(regime or "").strip()
+    if not resolved_regime:
+        try:
+            from system.regime_state import get_regime_state_snapshot
+
+            snap = get_regime_state_snapshot() or {}
+            resolved_regime = str(
+                snap.get("regime")
+                or snap.get("market_regime")
+                or snap.get("label")
+                or ""
+            )
+            if not resolved_regime and epic_s:
+                by_epic = snap.get("by_epic") or snap.get("markets") or {}
+                if isinstance(by_epic, dict):
+                    row = by_epic.get(epic_s) or {}
+                    if isinstance(row, dict):
+                        resolved_regime = str(
+                            row.get("regime") or row.get("label") or ""
+                        )
+        except Exception:
+            resolved_regime = ""
+
     style_tag = infer_trade_style(
         engine_origin=meta["engine_origin"],
         exit_reason=str(exit_reason or ""),
-        hold_sec=float(hold_sec) if hold_sec is not None else None,
+        hold_sec=float(resolved_hold) if resolved_hold is not None else None,
         style=style,
     )
     _enqueue(
         _JournalEvent(
             kind="trade_close",
             ts=float(closed_at_ts) if closed_at_ts is not None else time.time(),
-            deal_id=str(deal_id or "").strip() or "UNKNOWN",
+            deal_id=deal_s,
             direction=str(direction or "").upper(),
             entry=float(entry_price) if entry_price is not None else None,
             exit=float(exit_price) if exit_price is not None else None,
@@ -422,11 +469,11 @@ def record_trade_close(
             product_type=meta["product_type"],
             engine_origin=meta["engine_origin"],
             exit_reason=str(exit_reason or ""),
-            hold_sec=float(hold_sec) if hold_sec is not None else None,
+            hold_sec=float(resolved_hold) if resolved_hold is not None else None,
             style=style_tag,
-            epic=str(epic or ""),
-            ml_score=float(ml_score) if ml_score is not None else None,
-            regime=str(regime or ""),
+            epic=epic_s,
+            ml_score=float(resolved_ml) if resolved_ml is not None else None,
+            regime=str(resolved_regime or ""),
         )
     )
     try:
@@ -441,15 +488,15 @@ def record_trade_close(
 
         record_ml_trade_outcome(
             account_id=meta["account_id"],
-            epic=str(epic or ""),
+            epic=epic_s,
             side=str(direction or "").upper(),
-            ml_score=float(ml_score) if ml_score is not None else None,
-            regime=str(regime or ""),
+            ml_score=float(resolved_ml) if resolved_ml is not None else None,
+            regime=str(resolved_regime or ""),
             style=style_tag,
             pnl=float(realized_pnl_gbp) if realized_pnl_gbp is not None else None,
-            deal_id=str(deal_id or "").strip(),
+            deal_id=deal_s,
             exit_reason=str(exit_reason or ""),
-            hold_sec=float(hold_sec) if hold_sec is not None else None,
+            hold_sec=float(resolved_hold) if resolved_hold is not None else None,
             engine_origin=meta["engine_origin"],
         )
     except Exception:
@@ -462,7 +509,7 @@ def record_trade_close(
         arm_streak_protection_on_close(
             account_id=meta.get("account_id") or account_id,
             realized_pnl_gbp=realized_pnl_gbp,
-            deal_id=str(deal_id or ""),
+            deal_id=deal_s,
         )
     except Exception:
         pass
@@ -503,6 +550,8 @@ def ensure_broker_attached_exit_journaled(
     hold_sec: float | None = None,
     style: str | None = None,
     epic: str | None = None,
+    ml_score: float | None = None,
+    regime: str | None = None,
     path: Path | None = None,
 ) -> bool:
     """Idempotently journal a broker-attached / ExitGate-bypass close.
@@ -565,6 +614,8 @@ def ensure_broker_attached_exit_journaled(
         hold_sec=hold_sec,
         style=style,
         epic=epic,
+        ml_score=ml_score,
+        regime=regime,
     )
     try:
         log_engine(
