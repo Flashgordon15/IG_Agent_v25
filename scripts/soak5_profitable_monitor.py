@@ -114,8 +114,14 @@ def journal_profits(start_epoch: float):
             continue
         if deal in seen:
             continue
-        if ts > time.time() + 120:
+        # IG sync sometimes stamps Europe/London wall clock with a trailing Z.
+        # Allow several hours of "future" so those rows still count for soak.
+        if ts > time.time() + 4 * 3600:
             continue
+        if ts > time.time() + 120:
+            ts = ts - 3600.0  # best-effort BST→UTC correction for Z-mislabeled rows
+            if ts > time.time() + 120:
+                continue
         try:
             pnl = float(str(row.get("RealizedPnL_GBP") or "nan"))
         except Exception:
