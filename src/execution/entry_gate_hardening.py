@@ -262,6 +262,7 @@ def evaluate_sniper_ml_gate(
 
     Returns (approved, reason, p_success). P < 0.68 → chop isolation block.
     Fail-closed on unexpected errors.
+    When ``ml_unblind.enabled``, null/NaN p_success hard-aborts submit.
     """
     try:
         block: dict[str, Any] = {}
@@ -271,11 +272,30 @@ def evaluate_sniper_ml_gate(
             return True, "sniper_ml_off", 1.0
 
         from alpha.micro_sniper_ml import evaluate_live_sniper_probability
+        from runtime.overnight_entry_policy import (
+            ml_unblind_enabled,
+            normalize_ml_probability,
+            score_entry_candidate_ml,
+        )
 
         result = evaluate_live_sniper_probability(
             epic, direction, cfg=cfg, quote=quote
         )
-        p = float(result.p_success)
+        p_norm = normalize_ml_probability(getattr(result, "p_success", None))
+        if ml_unblind_enabled(cfg):
+            stamp = score_entry_candidate_ml(
+                epic=epic,
+                direction=direction,
+                cfg=cfg,
+                quote=quote,
+                p_success=p_norm,
+                invoke_scorer=False,
+            )
+            if not stamp.allow_submit:
+                return False, stamp.reason, 0.0
+            p = float(stamp.ml_score_at_entry or 0.0)
+        else:
+            p = float(result.p_success) if p_norm is None else float(p_norm)
         if not result.approved:
             return False, result.reason, p
         return True, result.reason, p

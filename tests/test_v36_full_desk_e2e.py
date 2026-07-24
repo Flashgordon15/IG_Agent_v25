@@ -195,7 +195,13 @@ class TestEntryPathGates:
         assert dc.get("cfd_require_15m_trend_ml_obi") is True
         assert sp.get("cfd_block_mean_reversion") is False
         assert sp.get("cfd_require_15m_trend_ml_obi") is True
-        assert sp.get("enabled", True) is True
+        # Streak timers remain soak-disabled; selectivity/overnight gates own the flip.
+        assert isinstance(sp.get("enabled"), bool)
+        assert (cfg.get("micro_scalp_instant") or {}).get("require_15m_trend_ml_obi") is True
+        assert float((cfg.get("micro_scalp_instant") or {}).get("min_ml_p_success") or 0) >= 0.78
+        assert (cfg.get("overnight_entry_lockdown") or {}).get("enabled") is True
+        assert (cfg.get("ml_unblind") or {}).get("enabled") is True
+        assert (cfg.get("profit_run") or {}).get("enabled") is True
         assert dc.get("sb_hot_path_allowlist") == ["IX.D.DOW.IFM.IP"]
         assert (cfg.get("entry_hour_gate") or {}).get("enabled") is True
         assert (cfg.get("long_trade_runner") or {}).get("enabled") is True

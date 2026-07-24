@@ -45,8 +45,49 @@ _YAHOO_POLL_SEC = 2.0
 # rejections that indicate the key is bad back off much harder.
 _FEED_RECONNECT_BASE_SEC = 2.0
 _FEED_RECONNECT_CAP_SEC = 120.0
-_FEED_REJECT_MIN_BACKOFF_SEC = 30.0
+_FEED_REJECT_MIN_BACKOFF_SEC = 30.0  # ≥10s floor for 429 storms
 _FEED_REJECT_CAP_SEC = 300.0
+
+
+def compute_feed_reject_backoff(
+    exc: BaseException | str,
+    current_backoff: float,
+    *,
+    reject_min_sec: float | None = None,
+    reject_cap_sec: float | None = None,
+    reconnect_cap_sec: float | None = None,
+) -> tuple[float, float, bool]:
+    """Pure backoff helper for Finnhub/secondary 429 storms.
+
+    Returns ``(wait_sec, next_backoff_sec, is_reject)``. Reject paths
+    (HTTP 429 / 401 / 403) use a hard floor ≥10s (default 30s).
+    """
+    detail = str(exc).lower()
+    rejected = any(
+        tok in detail
+        for tok in ("429", " 401", " 403", "http 401", "http 403", "rejected", "rate limit")
+    ) or (
+        getattr(exc, "status_code", None) == 429
+        if not isinstance(exc, str)
+        else False
+    )
+    reject_min = float(
+        reject_min_sec if reject_min_sec is not None else _FEED_REJECT_MIN_BACKOFF_SEC
+    )
+    reject_cap = float(
+        reject_cap_sec if reject_cap_sec is not None else _FEED_REJECT_CAP_SEC
+    )
+    recon_cap = float(
+        reconnect_cap_sec if reconnect_cap_sec is not None else _FEED_RECONNECT_CAP_SEC
+    )
+    backoff = max(0.0, float(current_backoff or 0.0))
+    if rejected:
+        wait = max(backoff, reject_min, 10.0)
+        nxt = min(wait * 2.0, reject_cap)
+        return wait, nxt, True
+    wait = max(backoff, _FEED_RECONNECT_BASE_SEC)
+    nxt = min(max(backoff * 2.0, _FEED_RECONNECT_BASE_SEC), recon_cap)
+    return wait, nxt, False
 
 
 def _resolve_finnhub_key() -> str:
@@ -348,19 +389,11 @@ class RacingMultiFeedHub:
         401, 403, "rejected") means retrying fast is pointless and abusive — jump
         to a long floor so an exhausted/invalid key stops storming the provider.
         """
-        detail = str(exc).lower()
-        rejected = any(
-            tok in detail
-            for tok in ("429", " 401", " 403", "http 401", "http 403", "rejected")
-        )
+        wait, nxt, rejected = compute_feed_reject_backoff(exc, backoff)
         if rejected:
-            wait = max(backoff, _FEED_REJECT_MIN_BACKOFF_SEC)
-            nxt = min(wait * 2.0, _FEED_REJECT_CAP_SEC)
             st = _FEED_STATUS.setdefault(provider, {})
             st["throttled"] = True
-        else:
-            wait = backoff
-            nxt = min(backoff * 2.0, _FEED_RECONNECT_CAP_SEC)
+            st["last_reject_backoff_sec"] = float(wait)
         await asyncio.sleep(wait)
         return nxt
 

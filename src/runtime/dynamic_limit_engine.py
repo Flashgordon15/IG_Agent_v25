@@ -369,6 +369,19 @@ def check_limit_hit(epic: str, mid: float) -> list[str]:
                 continue
             if _sb_skip_dynamic_trail(track):
                 continue
+            # Profit-run: skip hyper-sensitive DynamicLimit trail flattens; hard VSL stays.
+            try:
+                from runtime.profit_run_policy import should_skip_dynamic_limit_hyper
+
+                approx_gbp = float(track.peak_profit_ig_pts or 0.0) * float(
+                    track.size or 0.5
+                )
+                if should_skip_dynamic_limit_hyper(
+                    unrealized_pnl_gbp=approx_gbp, cfg=None
+                ):
+                    continue
+            except Exception:
+                pass
             d = track.direction
             trailing = track.peak_profit_ig_pts >= track.trail_trigger_ig_pts
             if d == "BUY":

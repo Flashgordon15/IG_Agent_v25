@@ -2622,6 +2622,68 @@ def _dispatch_piercing_zone_order(epic: str, z_score: float, cfg: Any | None) ->
         )
         return
     try:
+        from runtime.overnight_entry_policy import (
+            evaluate_overnight_entry_policy,
+            long_runner_overnight_gates_ok,
+            overnight_lockdown_enabled,
+            in_overnight_lockdown_window,
+            resolve_account_id,
+            ACCT_SB,
+        )
+
+        if overnight_lockdown_enabled(cfg) and in_overnight_lockdown_window(cfg=cfg):
+            acct = resolve_account_id(cfg)
+            if acct == ACCT_SB or str(
+                (__import__("os").environ.get("IG_ENGINE_ORIGIN") or "")
+            ).upper() == "MACRO_SENTINEL":
+                # SB overnight: Instant already blocked; Core B → LTR only + full gates.
+                direction_guess = "BUY" if float(z_score) <= PIERCE_LOWER_Z else "SELL"
+                p_guess = None
+                obi_guess = None
+                trend_guess = None
+                try:
+                    from execution.entry_gate_hardening import evaluate_sniper_ml_gate
+                    from apex.microkernel import get_microkernel
+
+                    _ok, _detail, p_guess = evaluate_sniper_ml_gate(
+                        str(epic), direction_guess, cfg=cfg
+                    )
+                    mt = get_microkernel().micro_trend_for(str(epic))
+                    if isinstance(mt, dict):
+                        obi_guess = mt.get("obi_ratio")
+                    trend_guess = resolve_live_15min_macro_trend(str(epic))
+                except Exception:
+                    pass
+                gates_ok = long_runner_overnight_gates_ok(
+                    p_success=p_guess,
+                    obi=obi_guess,
+                    trend_15m=str(trend_guess or ""),
+                    direction=direction_guess,
+                    cfg=cfg,
+                )
+                od = evaluate_overnight_entry_policy(
+                    epic=str(epic),
+                    path="long_trade_runner",
+                    account_id=acct or ACCT_SB,
+                    cfg=cfg,
+                    long_runner_gates_ok=gates_ok,
+                )
+            else:
+                od = evaluate_overnight_entry_policy(
+                    epic=str(epic),
+                    path="core_b",
+                    cfg=cfg,
+                    long_runner_gates_ok=False,
+                )
+            if not od.allow:
+                set_last_gate_suppression_reason(od.reason)
+                log_engine(
+                    f"ParallelStrategySweep: overnight blocked epic={epic} reason={od.reason}"
+                )
+                return
+    except Exception:
+        pass
+    try:
         from system.strategy_quality_gate import evaluate_entry_hour_gate
 
         hour_ok, hour_reason, _hour_meta = evaluate_entry_hour_gate(
@@ -3657,6 +3719,27 @@ def evaluate_predictive_micro_scalp_trigger(
                 }
             )
             return empty
+        # Live selectivity floor |OBI| (default 0.25 when selectivity_gates set).
+        try:
+            from runtime.overnight_entry_policy import selectivity_thresholds
+
+            _min_p, min_abs_obi, _req = selectivity_thresholds(cfg_sel)
+            if min_abs_obi > 0 and abs(obi_ratio) < float(min_abs_obi):
+                empty.update(
+                    {
+                        "score_pct": score,
+                        "promote_tier": tier,
+                        "order_flow_aligned": flow_aligned,
+                        "forecast_confidence": forecast_conf,
+                        "reason": (
+                            f"instant_obi_below_floor |obi|={abs(obi_ratio):.3f}"
+                            f"<{float(min_abs_obi):.3f}"
+                        ),
+                    }
+                )
+                return empty
+        except Exception:
+            pass
 
     # Resolve R:R-compatible targets from micro_risk when available.
     t_min, t_max = float(MICRO_SCALP_TARGET_MIN_PTS), float(MICRO_SCALP_TARGET_MAX_PTS)
@@ -3754,6 +3837,25 @@ def try_instant_predictive_micro_scalp(
             "reason": "micro_scalp_instant_disabled",
             "trigger": {},
         }
+
+    try:
+        from runtime.overnight_entry_policy import evaluate_overnight_entry_policy
+
+        od = evaluate_overnight_entry_policy(
+            epic=key,
+            path="instant",
+            cfg=cfg,
+            long_runner_gates_ok=False,
+        )
+        if not od.allow:
+            set_last_gate_suppression_reason(od.reason)
+            return {
+                "dispatched": False,
+                "reason": od.reason,
+                "trigger": {},
+            }
+    except Exception:
+        pass
 
     try:
         from system.strategy_quality_gate import evaluate_entry_hour_gate

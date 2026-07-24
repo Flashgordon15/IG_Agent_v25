@@ -119,12 +119,15 @@ def record_ml_trade_outcome(
         "epic": str(epic or ""),
         "side": str(side or "").upper(),
         "ml_score": None if resolved is None else round(float(resolved), 6),
+        "ml_score_at_entry": None if resolved is None else round(float(resolved), 6),
         "regime": str(regime or ""),
+        "market_regime": str(regime or ""),
         "style": str(style or ""),
         "pnl": None if pnl is None else round(float(pnl), 4),
         "deal_id": deal,
         "exit_reason": str(exit_reason or "")[:160],
         "hold_sec": None if hold_sec is None else round(float(hold_sec), 1),
+        "hold_duration_seconds": None if hold_sec is None else round(float(hold_sec), 1),
         "engine_origin": str(engine_origin or ""),
     }
     out = path or outcomes_path()

@@ -38,6 +38,8 @@ _HEADER = [
     "ExitReason",
     "HoldSec",
     "Style",
+    "MlScoreAtEntry",
+    "MarketRegime",
 ]
 
 # Hold ≥ 3m (long_trade_runner arm window) tags SB/CFD closes as long.
@@ -173,6 +175,8 @@ def ensure_benchmark_offset(*, path: Path | None = None) -> Path:
                 "",
                 "",
                 "",
+                "",
+                "",
             ]
         )
     return p
@@ -297,6 +301,8 @@ def _append_row(ev: _JournalEvent) -> None:
                 hold_sec=ev.hold_sec,
             )
         ),
+        _fmt(None if ev.ml_score is None else round(float(ev.ml_score), 6)),
+        str(ev.regime or ""),
     ]
     with _lock:
         with path.open("a", encoding="utf-8", newline="") as fh:

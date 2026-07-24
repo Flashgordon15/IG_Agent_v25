@@ -509,8 +509,25 @@ def _evaluate_track(track: GbpExitTrack, pnl_gbp: float) -> None:
     hold_age = max(0.0, time.time() - float(track.armed_at or 0.0))
     trail_hold_ok = hold_age >= min_hold
 
+    # Profit-run (UPL>=threshold): skip hyper-trail giveback flattens; keep hard stops.
+    profit_run_hold = False
+    try:
+        from runtime.profit_run_policy import evaluate_profit_run
+
+        _pr = evaluate_profit_run(unrealized_pnl_gbp=pnl_gbp, cfg=cfg)
+        profit_run_hold = bool(_pr.active and _pr.skip_hyper_trail)
+        if profit_run_hold and sb_long:
+            # Prefer long_trade_runner continue-hold under profit-run.
+            long_runner = True
+    except Exception:
+        profit_run_hold = False
+
     # 4) Trailing profit exit — controlled giveback from peak.
-    if trail_hold_ok and track.peak_profit_gbp >= track.trail_trigger_gbp:
+    if (
+        trail_hold_ok
+        and track.peak_profit_gbp >= track.trail_trigger_gbp
+        and not profit_run_hold
+    ):
         floor = max(
             track.trail_floor_gbp,
             _update_trail_floor(track, track.peak_profit_gbp, cfg=cfg),

@@ -100,10 +100,34 @@
     "enabled": true,
     "min_entry_interval_sec": 60.0,
     "side_persistence_sec": 8.0,
-    "require_15m_trend_ml_obi": false,
-    "min_ml_p_success": 0.55,
+    "require_15m_trend_ml_obi": true,
+    "min_ml_p_success": 0.78,
     "_note": "Gated Instant: cadence+flip+side persistence + 15m/ML/OBI agree \u2014 rejects naked score=100. Core B / long_trade_runner remain.",
-    "_soak_note": "soak5: Instant 15m/ML/OBI hard-require OFF so entries can fire overnight"
+    "_v36_note": "2026-07-24 turnaround: P>=0.78 |OBI|>=0.25 require_15m_trend_ml_obi=true (Nightmare Night + Profit Barrage green)"
+  },
+  "overnight_entry_lockdown": {
+    "enabled": true,
+    "start": "21:00",
+    "end": "07:00",
+    "timezone": "Europe/London",
+    "_note": "CFD: block ALL new entries 21:00-07:00 London. SB: block Instant/micro; allow only long_trade_runner when P/OBI/trend gates pass. Management/exits continue."
+  },
+  "ml_unblind": {
+    "enabled": true,
+    "_note": "Pre-submit ML attribution on entry-candidates; null/NaN/missing ml_score_at_entry hard-aborts submit."
+  },
+  "selectivity_gates": {
+    "min_ml_p_success": 0.78,
+    "min_abs_obi": 0.25,
+    "require_15m_trend_ml_obi": true,
+    "allow_non_dow": false,
+    "_note": "Live DOW selectivity — volume collapse vs soak baseline; Gold/EURUSD/FTSE rejected on hot path."
+  },
+  "profit_run": {
+    "enabled": true,
+    "upl_threshold_gbp": 15.0,
+    "breakeven_offset_pts": 1.0,
+    "_note": "UPL>=\u00a315: skip micro_gbp hyper-trail + DynamicLimit hyper exits; floor BE+1pt; keep hard virtual/broker stop; long_trade_runner may hold."
   },
   "asymmetric_ioc_routing": {
     "enabled": true,
@@ -224,7 +248,7 @@
     "active_stack_slots": 2,
     "multi_source_auto_rotation": true,
     "cfd_block_mean_reversion": false,
-    "cfd_require_15m_trend_ml_obi": false,
+    "cfd_require_15m_trend_ml_obi": true,
     "sb_hot_path_allowlist": [
       "IX.D.DOW.IFM.IP"
     ],
@@ -234,7 +258,8 @@
       "CS.D.CRUDE.CFD.IP",
       "IX.D.NIKKEI.IFM.IP"
     ],
-    "_note": "Hot path: CFD may rotate multi-market; SB allowlist DOW-only until Gold/EURUSD/Nikkei certified. Instant/micro require 15m+ML+OBI. Nikkei excluded until JPY PnL certified."
+    "_note": "Hot path: CFD may rotate multi-market; SB allowlist DOW-only until Gold/EURUSD/Nikkei certified. Instant/micro require 15m+ML+OBI. Nikkei excluded until JPY PnL certified.",
+    "_v36_note": "2026-07-24: cfd_require_15m_trend_ml_obi=true after Nightmare Night + Profit Barrage green"
   },
   "ig_deal_size_floors": {
     "_note": "Authoritative min \u00a3/pt \u2014 mirrored in execution/size_floors.py SPREADBET_MIN_DEAL_BY_EPIC",
@@ -253,9 +278,10 @@
       "post_win_cooldown_sec": 600,
       "post_loss_lock_sec": 900,
       "cfd_block_mean_reversion": false,
-      "cfd_require_15m_trend_ml_obi": false,
+      "cfd_require_15m_trend_ml_obi": true,
       "_note": "Mirrors entry_protection streak timers; dedicated state under state_cfd/state_sb.",
-      "_soak_note": "2026-07-23 soak5: DISABLED \u2014 post-loss/win locks starve dual proof. Re-enable after streak=5."
+      "_soak_note": "2026-07-23 soak5: DISABLED \u2014 post-loss/win locks starve dual proof. Re-enable after streak=5.",
+      "_v36_note": "2026-07-24: cfd_require_15m_trend_ml_obi=true (streak timers remain soak-disabled)"
     },
     "virtual_stop_ceiling_pts": 12.0,
     "dow_broker_stop_floor_pts": 12.0,
