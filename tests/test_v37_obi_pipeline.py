@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections import deque
 from types import SimpleNamespace
 
 import pytest
@@ -14,18 +15,24 @@ from alpha.micro_sniper_ml import (
     rolling_obi_for,
 )
 from cockpit.telemetry_schema import OrderBookDepthPayload
-from execution.entry_gate_hardening import resolve_obi_signal
+from execution.entry_gate_hardening import (
+    reset_obi_proxy_history_for_tests,
+    resolve_obi_signal,
+)
 from intelligence.order_book_imbalance import (
     compute_obi_ratio,
     compute_obi_ratio_available,
+    compute_proxy_obi_from_mids,
 )
 
 
 @pytest.fixture(autouse=True)
 def _reset_sniper() -> None:
     reset_sniper_ml_cache_for_tests()
+    reset_obi_proxy_history_for_tests()
     yield
     reset_sniper_ml_cache_for_tests()
+    reset_obi_proxy_history_for_tests()
 
 
 def _buy_heavy_book(epic: str = "IX.D.DOW.IFM.IP") -> OrderBookDepthPayload:
@@ -77,6 +84,58 @@ def test_missing_book_obi_unavailable() -> None:
         "IX.D.DOW.IFM.IP",
         quote=SimpleNamespace(bid=0, offer=0),
     )
+    assert available is False
+    assert source == "obi_unavailable"
+    assert ratio == 0.0
+
+
+def test_proxy_obi_synthetic_rising_mids_nonzero() -> None:
+    mids = [39000.0, 39000.8, 39001.5, 39002.0, 39003.0]
+    ratio, available = compute_proxy_obi_from_mids(mids, spread=1.5)
+    assert available is True
+    assert ratio > 0.5
+
+
+def test_proxy_obi_flat_or_missing_unavailable() -> None:
+    assert compute_proxy_obi_from_mids([], 1.0) == (0.0, False)
+    assert compute_proxy_obi_from_mids([39000.0], 1.0) == (0.0, False)
+    ratio, available = compute_proxy_obi_from_mids([39000.0] * 10, spread=1.5)
+    assert available is False
+    assert ratio == 0.0
+
+
+def test_resolve_quote_proxy_from_mid_history() -> None:
+    """rest_poll path: no L2, but rolling hub/quote mids → quote_proxy OBI."""
+    epic = "IX.D.DOW.IFM.IP"
+    mids = deque([39000.0, 39001.0, 39002.5, 39003.0, 39004.0], maxlen=32)
+    quote = SimpleNamespace(
+        bid=39003.5,
+        offer=39004.5,
+        mid_history=mids,
+    )
+    ratio, source, available = resolve_obi_signal(epic, quote=quote)
+    assert available is True
+    assert source == "quote_proxy"
+    assert ratio > 0.0
+
+    # Rolling 10-tick buffer populated after sniper observes raw OBI.
+    live = evaluate_live_sniper_probability(epic, "BUY", quote=quote)
+    assert live.features.get("obi_available") is True
+    assert live.features.get("obi_source") == "quote_proxy"
+    assert abs(float(live.features.get("obi_raw") or 0.0)) > 0.0
+    roll = rolling_obi_for(epic)
+    assert roll is not None
+    assert abs(float(roll)) > 0.0
+
+
+def test_resolve_flat_mid_history_still_unavailable() -> None:
+    epic = "IX.D.DOW.IFM.IP"
+    quote = SimpleNamespace(
+        bid=39000.0,
+        offer=39001.0,
+        mid_history=deque([39000.5] * 8, maxlen=32),
+    )
+    ratio, source, available = resolve_obi_signal(epic, quote=quote)
     assert available is False
     assert source == "obi_unavailable"
     assert ratio == 0.0

@@ -12,7 +12,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
@@ -200,6 +200,13 @@ class QuoteSnapshot:
     updated_at: float
     source: str = "ig"
     quote_time: float | None = None
+    # Rolling mids for depth-free OBI proxy on Mini rest_poll (not L2).
+    mid_history: deque[float] = field(default_factory=lambda: deque(maxlen=32))
+
+    def __post_init__(self) -> None:
+        mid = (float(self.bid) + float(self.offer)) / 2.0
+        if mid > 0.0 and not self.mid_history:
+            self.mid_history.append(mid)
 
     def refresh(
         self,
@@ -216,6 +223,9 @@ class QuoteSnapshot:
         self.updated_at = updated_at
         self.source = source
         self.quote_time = quote_time
+        mid = (float(bid) + float(offer)) / 2.0
+        if mid > 0.0:
+            self.mid_history.append(mid)
 
     def _reference_epoch(self) -> float:
         return float(self.quote_time if self.quote_time is not None else self.updated_at)

@@ -1826,6 +1826,21 @@ def get_z_score_stream(epic: str | None = None) -> list[float]:
         return [round(v, 4) for v in list(_z_history)]
 
 
+def mid_history_for(epic: str, *, max_n: int = 32) -> list[float]:
+    """Recent dual-core mid samples for quote-proxy OBI (not L2 depth)."""
+    key = str(epic or "").strip()
+    if not key:
+        return []
+    with _lock:
+        hist = _mid_history.get(key)
+        if not hist:
+            return []
+        vals = [float(x) for x in hist]
+    if max_n > 0 and len(vals) > max_n:
+        return vals[-max_n:]
+    return vals
+
+
 def _record_tick_velocity(epic: str, mid: float) -> float:
     """Composite tick velocity — arrivals per 500ms + normalized price impulse."""
     now = time.time()

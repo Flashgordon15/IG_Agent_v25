@@ -97,18 +97,96 @@ def _obi_proxy_from_quote(epic: str, quote: Any | None) -> float:
     """
     Depth-free OBI proxy in [-1, 1].
 
-    Uses short-horizon mid drift vs spread: crashing books show offer-heavy
-    pressure (negative OBI) when mid is falling through a wide ask.
-    Missing history returns 0.0 — prefer ``_obi_proxy_from_quote_available``.
+    Uses rolling mid return imbalance vs spread (quote-proxy, **not** true L2).
+    Missing/flat history returns 0.0 — prefer ``_obi_proxy_from_quote_available``.
     """
     ratio, _available = _obi_proxy_from_quote_available(epic, quote)
     return ratio
 
 
+_PROXY_MID_HISTORY: dict[str, Any] = {}
+_PROXY_MID_MAX = 32
+
+
+def reset_obi_proxy_history_for_tests() -> None:
+    """Clear module-level proxy mid buffers (unit tests only)."""
+    _PROXY_MID_HISTORY.clear()
+
+
+def _observe_proxy_mid(epic: str, mid: float) -> list[float]:
+    """Append mid into a per-epic rolling buffer; return recent series."""
+    from collections import deque
+
+    key = str(epic or "").strip()
+    if not key or mid <= 0:
+        return []
+    hist = _PROXY_MID_HISTORY.get(key)
+    if hist is None:
+        hist = deque(maxlen=_PROXY_MID_MAX)
+        _PROXY_MID_HISTORY[key] = hist
+    hist.append(float(mid))
+    return [float(x) for x in hist]
+
+
+def _collect_proxy_mids(epic: str, quote: Any | None, mid: float) -> list[float]:
+    """
+    Build a mid series for proxy OBI.
+
+    Preference: hub ``QuoteSnapshot.mid_history`` (filled on every rest_poll /
+    Yahoo publish), then the local observe buffer. Always include the current mid.
+
+    Dual-core bootstrap seeds are intentionally **not** used — they are a
+    synthetic linear ramp and would stamp a false |OBI|≈1 after every restart.
+    """
+    series: list[float] = []
+    key = str(epic or "").strip()
+
+    # 1) Hub rolling mids (authoritative on Mini rest_poll after QuoteSnapshot fix).
+    try:
+        from system.market_data_hub import get_market_data_hub
+
+        snap = get_market_data_hub().get_snapshot(key) if key else None
+        if snap is not None:
+            hist = getattr(snap, "mid_history", None) or getattr(
+                snap, "recent_mids", None
+            )
+            if hist:
+                series = [float(x) for x in list(hist) if float(x) > 0]
+    except Exception:
+        pass
+
+    # 2) Module observe buffer — grows across repeated resolve calls / probes.
+    local = _observe_proxy_mid(key, mid)
+    if len(local) > len(series):
+        series = local
+
+    # Quote-carried history (tests / injected snapshots).
+    if quote is not None:
+        for attr in ("mid_history", "recent_mids"):
+            hist = getattr(quote, attr, None)
+            if hist and len(list(hist)) >= len(series):
+                series = [float(x) for x in list(hist) if float(x) > 0]
+                break
+        prev = float(
+            getattr(quote, "prev_mid", 0) or getattr(quote, "last_mid", 0) or 0
+        )
+        if prev > 0 and mid > 0 and len(series) < 2:
+            series = [prev, float(mid)]
+
+    if mid > 0 and (not series or abs(float(series[-1]) - mid) > 1e-12):
+        series = list(series) + [float(mid)]
+    return series[-_PROXY_MID_MAX:]
+
+
 def _obi_proxy_from_quote_available(
     epic: str, quote: Any | None
 ) -> tuple[float, bool]:
-    """Return ``(proxy_obi, available)`` — available only when mid history exists."""
+    """
+    Return ``(proxy_obi, available)``.
+
+    Available only when a non-flat mid series can be formed. This is a
+    **quote-proxy** (rolling mid/return imbalance), not true L2 depth.
+    """
     q = quote if quote is not None else _hub_quote(epic)
     if q is None:
         return 0.0, False
@@ -119,26 +197,10 @@ def _obi_proxy_from_quote_available(
             return 0.0, False
         mid = (bid + offer) / 2.0
         spread = offer - bid
-        # Prefer hub last mid if available
-        prev = float(getattr(q, "prev_mid", 0) or getattr(q, "last_mid", 0) or 0)
-        if prev <= 0:
-            try:
-                from system.market_data_hub import get_market_data_hub
+        series = _collect_proxy_mids(str(epic or ""), q, mid)
+        from intelligence.order_book_imbalance import compute_proxy_obi_from_mids
 
-                snap = get_market_data_hub().get_snapshot(str(epic or ""))
-                hist = getattr(snap, "mid_history", None) or getattr(
-                    snap, "recent_mids", None
-                )
-                if hist and len(hist) >= 2:
-                    prev = float(hist[-2])
-            except Exception:
-                prev = 0.0
-        if prev <= 0:
-            return 0.0, False
-        delta = mid - prev
-        # Normalize by spread so one-tick drift ≈ meaningful imbalance
-        raw = delta / max(spread, 1e-9)
-        return max(-1.0, min(1.0, raw)), True
+        return compute_proxy_obi_from_mids(series, spread)
     except Exception:
         return 0.0, False
 
@@ -204,7 +266,8 @@ def resolve_obi_signal(
     if ratio is not None and abs(float(ratio)) >= 1e-9:
         return float(ratio), "microkernel", True
 
-    # 3) Depth-free mid-drift proxy — only when history exists.
+    # 3) Depth-free rolling mid/return proxy (Mini rest_poll — not true L2).
+    # Fail-closed when even the proxy cannot be formed (missing/flat mids).
     proxy, proxy_ok = _obi_proxy_from_quote_available(epic, quote)
     if proxy_ok:
         return float(proxy), "quote_proxy", True
