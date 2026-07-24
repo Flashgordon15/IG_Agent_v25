@@ -135,7 +135,23 @@
     "wide_spread_elasticity": 1.35,
     "healthy_obi_abs": 0.22,
     "thin_obi_abs": 0.15,
-    "_note": "Volatility-Adaptive daytime floor. Requires |OBI|; fail-closed when OBI unavailable."
+    "_note": "Volatility-Adaptive daytime floor. Requires |OBI|; fail-closed when OBI unavailable. CFD-owned knobs — do not hard-recalibrate 0.72/0.82 until daylight witness SUCCESS."
+  },
+  "dual_regime": {
+    "enabled": true,
+    "elastic_gate_owner": "QUANT_SNIPER",
+    "sb_forbid_obi_velocity_scalp": true,
+    "sb_disable_instant_micro": true,
+    "sb_disable_core_b_micro": true,
+    "sb_macro_ltr_entries_only": true,
+    "trend_retention": {
+      "upl_threshold_gbp": 15.0,
+      "breakeven_offset_pts": 1.0,
+      "giveback_ratio": 0.2,
+      "_note": "SB MACRO_SENTINEL: UPL>=£15 → kill micro trails → BE+1 → ~20% peak giveback"
+    },
+    "_note": "V37/V38: CFD QUANT_SNIPER keeps Instant/ENGINE_B_MICRO_SCALPER (when unpaused). SB MACRO_SENTINEL hard-disables Instant + Core-B micro — entries only via macro/directional + LTR/Trend-Retention. Forbid shared mutable gate/ML arrays across accounts.",
+    "_v38_note": "2026-07-24 flat cutover: SB Instant/micro bleed (~19% WR) → sb_disable_* + sb_macro_ltr_entries_only. REST MICRO confirm fail-fast already in IGRestClient.confirm_deal (reload loads it)."
   },
   "profit_run": {
     "enabled": true,
@@ -272,12 +288,39 @@
       "CS.D.CRUDE.CFD.IP",
       "IX.D.NIKKEI.IFM.IP"
     ],
-    "_note": "Hot path: CFD may rotate multi-market; SB allowlist DOW-only until Gold/EURUSD/Nikkei certified. Instant/micro require 15m+ML+OBI. Nikkei excluded until JPY PnL certified.",
-    "_v36_note": "2026-07-24: cfd_require_15m_trend_ml_obi=true after Nightmare Night + Profit Barrage green"
+    "rotation_failover_enabled": true,
+    "ranked_rotator_mode": true,
+    "ranked_promote_top_n": 2,
+    "ranked_rerank_min_sec": 5.0,
+    "ranked_use_journal_expectancy": true,
+    "ranked_confidence_weight": 40.0,
+    "ranked_setup_bonus": 8.0,
+    "min_confidence_lead": 0.05,
+    "min_hold_scans": 3,
+    "ranked_candidate_epics": [
+      "IX.D.DOW.IFM.IP",
+      "CS.D.CFPGOLD.CFP.IP",
+      "CS.D.EURUSD.CFD.IP",
+      "IX.D.FTSE.IFM.IP"
+    ],
+    "rotation_failover_stale_minutes": 8,
+    "rotation_failover_recover_minutes": 3,
+    "rotation_failover_confidence_floor": 0.68,
+    "failover_epics": [
+      "CS.D.CFPGOLD.CFP.IP",
+      "CS.D.EURUSD.CFD.IP",
+      "IX.D.FTSE.IFM.IP"
+    ],
+    "_note": "Hot path: CFD may rotate multi-market; SB baseline allowlist DOW-only, superseded by ranked rotator top-N when enabled. Instant/micro require 15m+ML+OBI. Nikkei excluded until JPY PnL certified.",
+    "_v36_note": "2026-07-24: cfd_require_15m_trend_ml_obi=true after Nightmare Night + Profit Barrage green",
+    "_failover_note": "2026-07-24 RANKED ROTATOR: score DOW/Gold/EURUSD/FTSE with sniper confidence + tradeability; hysteresis via min_confidence_lead/min_hold_scans. Promote top-N to SB allowlist (DOW demoted when weaker). EURUSD SB wire via broker_epic_resolver → CS.D.EURUSD.TODAY.IP. Still respects Gold 10£/pt, EURUSD 1£/pt, DOW/FTSE 0.5, overnight bans, SB Instant/micro HARD OFF, REST budget, hard-cap 1. See docs/ROTATION_FAILOVER_POLICY.md"
   },
   "ig_deal_size_floors": {
     "_note": "Authoritative min \u00a3/pt \u2014 mirrored in execution/size_floors.py SPREADBET_MIN_DEAL_BY_EPIC",
     "CS.D.CFPGOLD.CFP.IP": 10.0,
+    "CS.D.EURUSD.CFD.IP": 1.0,
+    "CS.D.EURUSD.TODAY.IP": 1.0,
+    "IX.D.FTSE.IFM.IP": 0.5,
     "IX.D.NIKKEI.IFM.IP": 0.5,
     "IX.D.DOW.IFM.IP": 0.5
   },
@@ -411,6 +454,7 @@
     "min_age_minutes": 3,
     "extended_target_r_multiple": 4.0,
     "widened_giveback_ratio": 0.4,
+    "trend_retention_giveback_ratio": 0.2,
     "relaxed_lock_ratio": 0.65,
     "skip_max_age_on_profit": true,
     "sb_prefer_long_hold": true,
@@ -422,7 +466,7 @@
     "sb_engine_origins": [
       "MACRO_SENTINEL"
     ],
-    "_note": "After 3m with peak>=trail_trigger_gbp (2.5): target 4R, 40% giveback, 65% lock. SB skips scalp banks AND DynamicLimit trail until long-runner armed; CFD sniper keeps scalp banks. Hard-cap=1 per-account (CFD+SB)."
+    "_note": "After 3m with peak>=trail_trigger_gbp (2.5): target 4R, 40% giveback, 65% lock. SB Trend-Retention (UPL>=£15) uses trend_retention_giveback_ratio~0.20 so winners breathe. SB skips scalp banks AND DynamicLimit trail until long-runner armed; CFD sniper keeps scalp banks. Hard-cap=1 per-account (CFD+SB)."
   },
   "broker_upl_hard_floor": {
     "enabled": true,

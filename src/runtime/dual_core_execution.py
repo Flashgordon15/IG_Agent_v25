@@ -269,7 +269,14 @@ def refresh_active_stack_tradeability(*, cfg: Any | None = None, rest: Any | Non
 
 
 def _sb_hot_path_allowlist(cfg: Any | None = None) -> set[str] | None:
-    """SB-only allowlist (DOW until Gold/EURUSD/Nikkei certified). None = no SB filter."""
+    """SB-only allowlist. None = no SB filter.
+
+    Static ``sb_hot_path_allowlist`` is the baseline (often DOW-only). When
+    ``dual_core.rotation_failover_enabled`` + ranked rotator are on, the
+    effective set becomes the top-ranked candidates (DOW not permanently
+    privileged). Legacy DOW-stale mode unions failover epics onto the base.
+    """
+    base: set[str] | None = None
     try:
         if cfg is None:
             from system.config_loader import get_config
@@ -280,10 +287,17 @@ def _sb_hot_path_allowlist(cfg: Any | None = None) -> set[str] | None:
             if isinstance(dual, dict):
                 allow = dual.get("sb_hot_path_allowlist")
                 if isinstance(allow, list) and allow:
-                    return {str(e).strip() for e in allow if str(e).strip()}
+                    base = {str(e).strip() for e in allow if str(e).strip()}
     except Exception:
-        pass
-    return None
+        base = None
+    if base is None:
+        return None
+    try:
+        from runtime.rotation_failover import effective_sb_allowlist
+
+        return effective_sb_allowlist(base, cfg)
+    except Exception:
+        return base
 
 
 def _is_sb_lane_process() -> bool:
@@ -317,6 +331,15 @@ def epic_allowed_on_hot_path(epic: str, cfg: Any | None = None) -> bool:
         allow = _sb_hot_path_allowlist(cfg)
         if allow is not None and key not in allow:
             return False
+        # Ranked / failover promotion — entry-eligible without waiting for
+        # stack eviction races (still gated by rotation_failover_enabled).
+        try:
+            from runtime.rotation_failover import failover_allows_epic
+
+            if failover_allows_epic(key, cfg):
+                return True
+        except Exception:
+            pass
 
     excluded: set[str] = set()
     try:
@@ -486,6 +509,9 @@ _tick_arrivals: dict[str, deque[float]] = {
     epic: deque(maxlen=256) for epic in ROTATION_UNIVERSE
 }
 _ml_dynamic_overrides: dict[str, Any] = {}
+# V37: engine-keyed mirror so CFD scalp fills cannot clobber SB macro overrides
+# when both lanes are exercised in-process (tests / shared harness).
+_ml_dynamic_overrides_by_engine: dict[str, dict[str, Any]] = {}
 _ml_sovereignty_active: bool = False
 _failover_state: str = FAILOVER_STATE_NORMAL
 _failover_active: bool = False
@@ -1051,7 +1077,42 @@ def get_rotation_state_locked() -> dict[str, Any]:
         ),
         "rotation_scores": _rotation_scores_unlocked(),
         "rotation_history": list(_rotation_history)[-15:],
+        **_ranked_rotator_state_unlocked(),
     }
+
+
+def _ranked_rotator_state_unlocked() -> dict[str, Any]:
+    """Desk Intent / API visibility for ranked multi-market rotator."""
+    try:
+        from runtime.rotation_failover import get_rotation_failover_state
+
+        st = get_rotation_failover_state()
+        prefer = st.get("prefer_epic") or st.get("ranked_rotator_dominant")
+        return {
+            "ranked_rotator": {
+                "active": bool(st.get("rotation_failover_active")),
+                "mode": st.get("ranked_rotator_mode_label") or "off",
+                "dominant": st.get("ranked_rotator_dominant"),
+                "promoted": list(st.get("rotation_failover_promoted") or []),
+                "reason": st.get("rotation_failover_reason") or "",
+                "rows": list(st.get("ranked_rotator_rows") or [])[:8],
+                "prefer_epic": prefer,
+                "preference_reason": st.get("preference_reason") or "",
+                "per_epic_confidence": dict(st.get("per_epic_confidence") or {}),
+                "hold_challenger": st.get("hold_challenger"),
+                "hold_scans": st.get("hold_scans"),
+            },
+            "prefer_epic": prefer,
+            "preference_reason": st.get("preference_reason") or "",
+            "per_epic_confidence": dict(st.get("per_epic_confidence") or {}),
+        }
+    except Exception:
+        return {
+            "ranked_rotator": {"active": False, "mode": "off", "promoted": []},
+            "prefer_epic": None,
+            "preference_reason": "",
+            "per_epic_confidence": {},
+        }
 
 
 def _in_quiet_center_channel(z: float) -> bool:
@@ -1520,6 +1581,30 @@ def evaluate_multi_source_rotation_sweep(*, cfg: Any | None = None) -> dict[str,
     except Exception:
         pass
 
+    # Ranked multi-market rotator / legacy DOW-stale failover — gated; default OFF.
+    try:
+        from runtime.rotation_failover import tick_rotation_failover_from_sniper
+
+        tick_rotation_failover_from_sniper(cfg=cfg)
+    except Exception:
+        pass
+
+    # Surface dominant ranked epic onto routing for Desk Intent focus.
+    try:
+        from runtime.rotation_failover import get_rotation_failover_state
+        from system.unified_runtime_state import update_routing
+
+        st = get_rotation_failover_state()
+        dom = st.get("ranked_rotator_dominant")
+        if st.get("rotation_failover_active") and dom:
+            update_routing(
+                current_epic=str(dom),
+                rotation_active=True,
+                rotation_reason=str(st.get("rotation_failover_reason") or "ranked_rotator"),
+            )
+    except Exception:
+        pass
+
     return get_rotation_state() | {"stagnant_rotated": stagnant_flags}
 
 
@@ -1733,23 +1818,48 @@ def apply_failover_ml_sovereignty(
 
 
 def get_effective_micro_z_threshold() -> float:
+    origin = _active_engine_origin()
     with _lock:
-        return float(_ml_dynamic_overrides.get("micro_z_threshold", MICRO_Z_THRESHOLD))
+        scoped = _ml_dynamic_overrides_by_engine.get(origin) or _ml_dynamic_overrides
+        return float(scoped.get("micro_z_threshold", MICRO_Z_THRESHOLD))
+
+
+def _active_engine_origin() -> str:
+    try:
+        from system.dual_regime import normalize_engine_origin
+
+        return normalize_engine_origin()
+    except Exception:
+        import os
+
+        return str(os.environ.get("IG_ENGINE_ORIGIN") or "MACRO_SENTINEL").upper()
 
 
 def get_effective_micro_tp_sl() -> tuple[float, float]:
+    origin = _active_engine_origin()
     with _lock:
-        tp = float(_ml_dynamic_overrides.get("micro_tp_points", MICRO_TP_POINTS))
-        sl = float(_ml_dynamic_overrides.get("micro_sl_points", MICRO_SL_POINTS))
+        scoped = _ml_dynamic_overrides_by_engine.get(origin) or _ml_dynamic_overrides
+        tp = float(scoped.get("micro_tp_points", MICRO_TP_POINTS))
+        sl = float(scoped.get("micro_sl_points", MICRO_SL_POINTS))
     return tp, sl
 
 
 def apply_ml_cognitive_overrides(epic: str, overrides: dict[str, Any]) -> None:
     global _ml_dynamic_overrides, _ml_sovereignty_active
+    origin = _active_engine_origin()
+    body = dict(overrides)
     with _lock:
-        _ml_dynamic_overrides = dict(overrides)
+        _ml_dynamic_overrides_by_engine[origin] = body
+        # Preserve legacy process-local view for the active engine only.
+        _ml_dynamic_overrides = body
         _ml_sovereignty_active = True
         _execution_focus_target = str(epic or _execution_focus_target)
+    try:
+        from system.dual_regime import apply_ml_overrides_for_engine
+
+        apply_ml_overrides_for_engine(origin, body, epic=epic)
+    except Exception:
+        pass
 
 
 def get_execution_focus_state() -> dict[str, Any]:
@@ -2638,6 +2748,7 @@ def _dispatch_piercing_zone_order(epic: str, z_score: float, cfg: Any | None) ->
         return
     try:
         from runtime.overnight_entry_policy import (
+            evaluate_engine_entry_path_policy,
             evaluate_overnight_entry_policy,
             long_runner_overnight_gates_ok,
             overnight_lockdown_enabled,
@@ -2646,11 +2757,30 @@ def _dispatch_piercing_zone_order(epic: str, z_score: float, cfg: Any | None) ->
             ACCT_SB,
         )
 
+        acct = resolve_account_id(cfg)
+        is_sb = acct == ACCT_SB or str(
+            (__import__("os").environ.get("IG_ENGINE_ORIGIN") or "")
+        ).upper() == "MACRO_SENTINEL"
+
+        # Day+night: SB Instant/Core-B micro hard-disabled when dual_regime flags set.
+        if is_sb:
+            ed = evaluate_engine_entry_path_policy(
+                epic=str(epic),
+                path="core_b",
+                account_id=acct or ACCT_SB,
+                engine_origin="MACRO_SENTINEL",
+                cfg=cfg,
+                long_runner_gates_ok=False,
+            )
+            if not ed.allow:
+                set_last_gate_suppression_reason(ed.reason)
+                log_engine(
+                    f"ParallelStrategySweep: SB micro veto epic={epic} reason={ed.reason}"
+                )
+                return
+
         if overnight_lockdown_enabled(cfg) and in_overnight_lockdown_window(cfg=cfg):
-            acct = resolve_account_id(cfg)
-            if acct == ACCT_SB or str(
-                (__import__("os").environ.get("IG_ENGINE_ORIGIN") or "")
-            ).upper() == "MACRO_SENTINEL":
+            if is_sb:
                 # SB overnight: Instant already blocked; Core B → LTR only + full gates.
                 direction_guess = "BUY" if float(z_score) <= PIERCE_LOWER_Z else "SELL"
                 p_guess = None
@@ -3039,6 +3169,7 @@ def reset_cognitive_cascade_for_tests() -> None:
         _focus_tick_velocity = 0.0
         _velocity_by_epic.clear()
         _ml_dynamic_overrides.clear()
+        _ml_dynamic_overrides_by_engine.clear()
         _ml_sovereignty_active = False
         _failover_state = FAILOVER_STATE_NORMAL
         _failover_active = False
@@ -3433,6 +3564,19 @@ def ingest_hub_mid(epic: str, mid: float, cfg: Any | None = None) -> DualCoreSna
             f"{type(exc).__name__}: {exc}"
         )
         return None
+
+    # SB: never arm ENGINE_B_MICRO_SCALPER when dual_regime hard-disable is on.
+    if micro_on and _is_sb_lane_process():
+        try:
+            from system.dual_regime import sb_disable_core_b_micro
+
+            if sb_disable_core_b_micro(cfg):
+                micro_on = False
+                if mode == MODE_MICRO:
+                    mode = MODE_MACRO if macro_on else MODE_NEUTRAL
+                    macro_on = bool(macro_on) or mode == MODE_MACRO
+        except Exception:
+            pass
 
     snap = DualCoreSnapshot(
         volatility_z_score=z,
@@ -3854,9 +3998,9 @@ def try_instant_predictive_micro_scalp(
         }
 
     try:
-        from runtime.overnight_entry_policy import evaluate_overnight_entry_policy
+        from runtime.overnight_entry_policy import evaluate_engine_entry_path_policy
 
-        od = evaluate_overnight_entry_policy(
+        od = evaluate_engine_entry_path_policy(
             epic=key,
             path="instant",
             cfg=cfg,

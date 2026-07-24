@@ -81,6 +81,11 @@ def get_rotation_status_response() -> dict[str, Any]:
             "feed_health": feed_state.get("health"),
             "primary_feed": feed_state.get("primary_feed"),
         },
+        # Hoisted for Desk Intent / operators (also nested under rotation.ranked_rotator).
+        "prefer_epic": rot.get("prefer_epic"),
+        "preference_reason": rot.get("preference_reason") or "",
+        "per_epic_confidence": rot.get("per_epic_confidence") or {},
+        "ranked_rotator": rot.get("ranked_rotator") or {},
     }
 
 
