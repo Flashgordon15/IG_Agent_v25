@@ -1,7 +1,7 @@
 /** £1,000/Day Roadmap telemetry helpers — graceful fallbacks for dashboard UI. */
 
-export const APP_VERSION_LABEL = "v30.0";
-export const APP_VERSION_FULL = "30.0.0";
+export const APP_VERSION_LABEL = "v31.1";
+export const APP_VERSION_FULL = "31.1.0";
 
 const MEDALS = ["🥇", "🥈", "🥉"];
 

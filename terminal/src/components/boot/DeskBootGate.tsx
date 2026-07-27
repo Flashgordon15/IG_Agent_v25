@@ -11,8 +11,9 @@ type Props = {
 const MIN_SPLASH_MS = 1800;
 
 /**
- * Blocks the main Trading Desk until AI harness ready_for_desk=true.
- * Never greenwashes — splash stays until gate clears.
+ * Blocks the main Trading Desk until dual-desk harness clears for view
+ * (ready_for_desk or ready_for_view / SoT-safe twin). Entry-armed remains
+ * stricter and is shown on the splash — not required to open the desk UI.
  */
 export function DeskBootGate({ children }: Props) {
   const [ready, setReady] = useState(false);

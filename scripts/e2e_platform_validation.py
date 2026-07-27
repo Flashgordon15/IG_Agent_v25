@@ -535,17 +535,50 @@ def run_layer2(ctx: ValidationContext) -> LayerSummary:
         )
     )
 
-    max_global = int(getattr(ctx.cfg, "max_open_positions", 0) or 0)
+    # v32 dual-engine: global max_open_positions may be null; real caps live in
+    # engine_position_caps + position_management.enforce_cap_breach.
+    raw_global = getattr(ctx.cfg, "max_open_positions", None)
+    max_global = None if raw_global is None else int(raw_global)
     max_epic = int(getattr(ctx.cfg, "max_positions_per_epic", 0) or 0)
-    caps_ok = max_global == 5 and max_epic == 2
+    try:
+        from system.engine_lane import engine_position_caps
+
+        eng_caps = dict(engine_position_caps(ctx.cfg) or {})
+    except Exception:
+        eng_caps = {}
+    cfd_cap = eng_caps.get("cfd_sniper")
+    sb_cap = eng_caps.get("sb_sentinel")
+    pm = getattr(ctx.cfg, "position_management", None) or {}
+    if not isinstance(pm, dict):
+        try:
+            pm = dict(ctx.cfg.get("position_management") or {})
+        except Exception:
+            pm = {}
+    enforce_cap = bool(pm.get("enforce_cap_breach", True))
+    # Accept dual-engine contract: null global + per-engine caps + enforce_cap_breach
+    # OR legacy v29.1 global=5 / per-epic=2.
+    dual_ok = (
+        max_global is None
+        and max_epic >= 1
+        and cfd_cap is not None
+        and int(cfd_cap) >= 1
+        and sb_cap is not None
+        and int(sb_cap) >= 1
+        and enforce_cap
+    )
+    legacy_ok = max_global == 5 and max_epic == 2
+    caps_ok = dual_ok or legacy_ok
     layer.checks.append(
         _check(
             "2",
             "2.4",
-            "Portfolio exposure caps (v29.1: global 5, per-epic 2)",
+            "Portfolio exposure caps (dual-engine or v29.1)",
             caps_ok,
-            expected="max_open_positions=5, max_positions_per_epic=2",
-            got=f"max_open_positions={max_global}, max_positions_per_epic={max_epic}",
+            expected="null global + engine_position_caps + enforce_cap_breach (or global=5/epic=2)",
+            got=(
+                f"max_open_positions={max_global}, max_positions_per_epic={max_epic}, "
+                f"cfd_sniper={cfd_cap}, sb_sentinel={sb_cap}, enforce_cap_breach={enforce_cap}"
+            ),
         )
     )
     return layer
@@ -1234,10 +1267,26 @@ def run_layer6(ctx: ValidationContext) -> LayerSummary:
 
     from system.rest_api_budget import RestApiBudget, RestBudgetPausedError
 
-    budget = RestApiBudget(min_interval_seconds=0.001, warn_per_minute=6)
+    # Essential labels (GET /positions) are exempt from hard cap — probe a
+    # non-essential path so RestBudgetPausedError is the expected outcome.
+    # Pre-seed the rolling window so the check is instant (no min-interval sleeps).
+    import time as _time
+
+    from system.rest_api_budget import RestCallRecord
+
+    budget = RestApiBudget(
+        min_interval_seconds=0.5, warn_per_minute=6, hard_cap_per_minute=3
+    )
     crashed = False
     warn_seen = False
     try:
+        now = _time.time()
+        with budget._lock:
+            for _ in range(3):
+                budget._recent.append(
+                    RestCallRecord(now, "GET /accounts", "account", exempt_preemptive=False)
+                )
+            budget._last_ts = now - 10.0
         with (
             patch.object(budget, "_maybe_warn_locked"),
             patch.object(budget, "_maybe_periodic_log_locked"),
@@ -1245,16 +1294,18 @@ def run_layer6(ctx: ValidationContext) -> LayerSummary:
                 "system.rest_api_budget.hub_quote_stream_genuinely_stale",
                 return_value=True,
             ),
+            patch(
+                "system.rest_api_budget._demo_throughput_rest_bypass",
+                return_value=False,
+            ),
             patch("system.rate_limit_manager.get_rate_limit_manager") as mgr,
         ):
             mgr.return_value.check_rest_allowed.return_value = None
             mgr.return_value.is_rest_blocked.return_value = False
-            for _ in range(8):
-                try:
-                    budget.acquire(label="GET /positions")
-                except RestBudgetPausedError:
-                    warn_seen = True
-                    break
+            try:
+                budget.acquire(label="GET /accounts")
+            except RestBudgetPausedError:
+                warn_seen = True
         # Loop continues with cached path — no uncaught exception
         budget_ok = warn_seen or budget._preemptive_pause_active()
     except Exception:

@@ -132,7 +132,45 @@ def effective_giveback_ratio(
     peak_profit_gbp: float,
     trail_trigger_gbp: float,
     cfg: Any | None = None,
+    engine_origin: str | None = None,
+    account_id: str | None = None,
+    unrealized_pnl_gbp: float | None = None,
 ) -> float:
+    """Return peak giveback ratio.
+
+    V37 SB Trend-Retention: when UPL≥£15 on MACRO_SENTINEL, prefer ~20% giveback
+    so winners breathe (overrides the 40% LTR widen while retention is armed).
+    """
+    try:
+        from system.dual_regime import evaluate_exit_matrix
+
+        mx = evaluate_exit_matrix(
+            engine_origin=engine_origin,
+            account_id=account_id,
+            unrealized_pnl_gbp=unrealized_pnl_gbp,
+            cfg=cfg,
+        )
+        if mx.mode == "sb_trend_retention" and mx.giveback_ratio is not None:
+            return float(mx.giveback_ratio)
+        # Explicit SB config knob even when LTR age gate not yet armed.
+        if str(engine_origin or "").upper() == "MACRO_SENTINEL" or (
+            str(account_id or "").upper() == "Z6BAH3"
+        ):
+            block = _runner_block(cfg)
+            tr_gb = block.get("trend_retention_giveback_ratio")
+            if tr_gb is not None and unrealized_pnl_gbp is not None:
+                from runtime.profit_run_policy import (
+                    profit_run_enabled,
+                    profit_run_upl_threshold_gbp,
+                )
+
+                if profit_run_enabled(cfg) and float(unrealized_pnl_gbp) >= float(
+                    profit_run_upl_threshold_gbp(cfg)
+                ):
+                    return float(tr_gb)
+    except Exception:
+        pass
+
     if is_long_runner_active(
         armed_at=armed_at,
         peak_profit_gbp=peak_profit_gbp,

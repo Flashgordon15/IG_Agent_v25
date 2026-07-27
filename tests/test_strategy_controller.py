@@ -51,6 +51,29 @@ def test_scalp_blocks_path_a_allows_micro():
     assert "SCALP_OWNS_EPIC" in decision.enforcement_flags
 
 
+def test_sb_macro_scalp_carve_allows_path_a(monkeypatch):
+    from unittest.mock import patch
+
+    monkeypatch.setenv("IG_ENGINE_ORIGIN", "MACRO_SENTINEL")
+    monkeypatch.setenv("IG_ACCOUNT_ID", "Z6BAH3")
+    cfg = {
+        "dual_regime": {
+            "enabled": True,
+            "sb_disable_instant_micro": True,
+            "sb_disable_core_b_micro": True,
+            "sb_macro_ltr_entries_only": True,
+        }
+    }
+    with patch("system.config_loader.get_config", return_value=cfg):
+        decision = decide_epic(
+            _epic_row(active_strategy_profile="SCALP", strategy_source="MICRO")
+        )
+    assert ExecutionPath.PATH_A.value in [p.value for p in decision.allowed_paths]
+    assert ExecutionPath.PATH_A.value not in [p.value for p in decision.blocked_paths]
+    assert ExecutionPath.MICRO.value in [p.value for p in decision.blocked_paths]
+    assert "SB_MACRO_PATH_A_CARVE" in decision.enforcement_flags
+
+
 def test_momentum_blocks_micro_allows_path_a():
     decision = decide_epic(_epic_row(active_strategy_profile="MOMENTUM", strategy_source="PATH_A"))
     assert ExecutionPath.PATH_A.value in [p.value for p in decision.allowed_paths]

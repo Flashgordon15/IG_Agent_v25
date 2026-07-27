@@ -1650,6 +1650,13 @@ class TradeManager:
         )
 
         msgs: list[str] = []
+        try:
+            from execution.macro_path_a_exit_guard import scalping_be_suppressed_for_path_a
+
+            if scalping_be_suppressed_for_path_a(cfg=self._cfg):
+                return msgs
+        except Exception:
+            pass
         be_trigger = breakeven_trigger_points(quote, self._cfg, epic=epic)
         be_offset = breakeven_stop_offset(quote, self._cfg, epic=epic)
         profit = self._profit_ig_points(side, entry, px, epic)

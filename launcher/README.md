@@ -1,54 +1,45 @@
-# IG Agent v25 — macOS desktop launcher
+# Legacy launchers — RETIRED
 
-## Build app + Desktop icon
-
-From project root:
+**Canonical product:** `Trading_Desk.app` at repo root (also installed to Desktop via `scripts/install_trading_desk_app.sh`).
 
 ```bash
-python3 launcher/build_mac_app.py
+# Install / refresh Desktop app
+./scripts/install_trading_desk_app.sh
+
+# Or silent launch
+./scripts/trading_desk_silent.sh
 ```
 
-This creates `launcher/IG Agent v25.app` and a symlink on your Desktop:
-`~/Desktop/IG Agent v25.app` (symlink — shows the real app icon; not a Finder alias).
+Opens **Quantum Terminal** on `:3000` with agent API on `:8080` and config
+`config/config_v31_demo_throughput.json`.
 
-Double-click starts the agent in the background (no Terminal window) and opens
-http://localhost:8080/ in your default browser when the API is healthy.
+The apps under `launcher/` (Flight Deck, v29.0, Apex Cockpit) are historical
+bundles. Prefer Desktop `Trading_Desk.app`. `flight_deck_launch.sh` redirects
+here automatically.
 
-Equivalent command:
+## Desk UI always-on (viewer only)
+
+Keeps the **Quantum Terminal (:3000)** and **Trading Desk pywebview shell** running
+across logout/login and after the window is closed. Does **not** start, stop, or
+signal trading agents on `:8080`/`:8081`.
+
+| Piece | Role |
+|-------|------|
+| `com.igagent.trading_desk` | LaunchAgent KeepAlive → `scripts/trading_desk_viewer_keepalive.sh` (shell) |
+| `com.igagent.v30.ui` | Existing LaunchAgent → `scripts/ui_terminal_daemon.sh` (:3000) |
 
 ```bash
-cd /path/to/IG_Agent_v25
-PYTHONPATH=src python3 src/main.py
+# Enable (safe while agents are live / A2 CFD pause)
+./scripts/install_trading_desk_always_on.sh --enable
+
+# Or refresh Desktop app + enable
+./scripts/install_trading_desk_app.sh --with-always-on
+
+# Status / disable
+./scripts/install_trading_desk_always_on.sh --status
+./scripts/install_trading_desk_always_on.sh --disable          # shell KeepAlive only
+./scripts/install_trading_desk_always_on.sh --disable-all-ui   # shell + :3000 UI agent
 ```
 
-## What the launcher does
-
-- Resolves project root from the app bundle location
-- Refuses start if `emergency_stop.lock` exists
-- Clears stale instance lock / duplicate `main.py` processes
-- Uses Python 3.14 from the spec path when available
-- Logs to `src/data/logs/launcher.log`
-
-## Overnight / unattended trading
-
-**Safe to Leave = overnight bundle.** Clicking it in the dashboard:
-
-1. Ensures **launchd** watchdog + caffeinate are loaded (auto-bootstrap if plists exist)
-2. Runs all trust checks (health, gates, quotes, AC power, telegram, …)
-3. **Arms overnight mode** — you may close Cursor and the browser tab
-
-The agent does **not** depend on Cursor. Use Cursor only for code changes.
-
-One-time install:
-
-```bash
-./scripts/install_launchd.sh
-```
-
-Before bed (CLI equivalent of the dashboard button):
-
-```bash
-./scripts/ensure_overnight_ready.sh
-```
-
-**Stop Agent** clears overnight armed and stops launchd watchdog (no auto-restart for 10 min).
+Plists land in `~/Library/LaunchAgents/`. Closing the Desk window relaunches the
+shell within ~10s (`ThrottleInterval`). Agents remain untouched.

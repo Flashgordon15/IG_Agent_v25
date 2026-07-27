@@ -222,9 +222,10 @@ print(int(ok), why)
 
 restart_fresh_agent() {
   log "[AGENT] restarting fresh interpreter after stuck-port escalate"
-  export DAEMON_SUPERVISOR_REDIRECT=1
   rm -f "${IG_DATA_ROOT}/supervisor.pid"
-  nohup "${IG_AGENT_ROOT}/scripts/daemon_supervisor.sh" >> "${SUP_LOG}" 2>&1 &
+  # shellcheck source=../../scripts/lib/detach_exec.sh
+  source "${IG_AGENT_ROOT}/scripts/lib/detach_exec.sh"
+  "${IG_AGENT_ROOT}/scripts/daemon_supervisor.sh"
   wait_for_supervisor_pid || true
 }
 
@@ -381,8 +382,8 @@ launch_electron_gui() {
     chmod +x "${launcher}" 2>/dev/null || true
   fi
   if [[ -x "${launcher}" ]]; then
-    log "[ELECTRON] opening native Apex window"
-    /bin/bash "${launcher}" || log "[ELECTRON] WARN: GUI launch failed — see logs/electron_gui.log"
+    log "[DESK] opening Trading Desk dashboard (browser — Apex Electron disabled)"
+    /bin/bash "${launcher}" || log "[DESK] WARN: dashboard open failed — see logs/trading_desk_gui.log"
   else
     log "[ELECTRON] WARN: launch_electron_gui.sh missing"
   fi
@@ -418,16 +419,17 @@ else
   if [[ "${APP_MODE}" == "TESTBED" ]]; then
     "${IG_AGENT_PY}" -c "from system.shutdown_cleanup import clear_manual_stop; clear_manual_stop()" \
       2>/dev/null || true
-    nohup env PYTHONPATH=src "${IG_AGENT_PY}" -u "${IG_AGENT_ROOT}/src/main.py" \
-      >> "${IG_DATA_ROOT}/logs/agent_stdout.log" 2>&1 &
-    echo $! > "${IG_DATA_ROOT}/agent.pid"
+    # shellcheck source=../../scripts/lib/detach_exec.sh
+    source "${IG_AGENT_ROOT}/scripts/lib/detach_exec.sh"
+    detach_exec --log "${IG_DATA_ROOT}/logs/agent_stdout.log" -- \
+      env PYTHONPATH=src "${IG_AGENT_PY}" -u "${IG_AGENT_ROOT}/src/main.py"
+    echo "${DETACH_PID}" > "${IG_DATA_ROOT}/agent.pid"
   else
     # Release hold only when spawning supervisor — watchdog defers via supervisor_managed().
     "${IG_AGENT_PY}" -c "from system.shutdown_cleanup import clear_manual_stop; clear_manual_stop()" \
       2>/dev/null || true
-    export DAEMON_SUPERVISOR_REDIRECT=1
     rm -f "${IG_DATA_ROOT}/supervisor.pid"
-    nohup "${IG_AGENT_ROOT}/scripts/daemon_supervisor.sh" >> "${SUP_LOG}" 2>&1 &
+    "${IG_AGENT_ROOT}/scripts/daemon_supervisor.sh"
     wait_for_supervisor_pid || log "WARN: supervisor pid not confirmed"
   fi
 fi

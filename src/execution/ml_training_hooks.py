@@ -93,39 +93,117 @@ def record_ml_entry_from_signal(
         daily_range_ratio = (spread_val / atr_val) if atr_val > 0 else 0.0
         # limit_to_atr_ratio: how realistic the profit target is vs recent volatility.
         limit_to_atr_ratio = (limit_pts / atr_val) if atr_val > 0 and limit_pts > 0 else 0.0
-        _ml_store.record_entry(
-            deal_id,
-            {
-                "confidence": conf,
-                # Core model features (must match ml_scorer feature_names)
-                "adjusted_score": conf,
-                "raw_score": raw_conf,
-                "fired": 1,
-                "stop_pts": stop_pts,
-                "confidence_band": band,
-                "setup_name": signal.setup_key,
-                "trend_bias": trend,
-                "rsi": float(_snapshot_field(snap, "rsi", 0.0)),
-                "atr": atr_val,
-                "spread": spread_val,
-                # Range/spread awareness features
-                "daily_range_ratio": daily_range_ratio,
-                "limit_to_atr_ratio": limit_to_atr_ratio,
-                "limit_pts": limit_pts,
-                "net_profit_pts": limit_pts - spread_val,
-                "volume_regime": str(snap.get("vol_regime") or "unknown"),
-                "session_window": session_name(signal.quote.time),
-                "signal_mid": signal_mid,
-                "entry_price": entry_px,
-                "slippage_pts": slippage_pts,
-                "entry_time": MLTrainingStore.iso_now(),
-                "fitness_score": fitness,
-                "points_state": points.get_state() if points is not None else "HEALTHY",
-                "size_multiplier": mult,
-                "instrument": signal.market,
-                "version": ML_VERSION,
-            },
+        # Stamp sniper P(success) at fill so journal closes can recover MlScoreAtEntry
+        # after the live snapshot rotates (deal-keyed, not last-by-epic).
+        from diagnostics.stamp_provenance import (
+            ML_SOURCE_ABSENT,
+            ML_SOURCE_EPIC_SNAPSHOT,
+            ML_SOURCE_EXECUTION_PARAMS,
+            ML_SOURCE_MODEL,
+            classify_ml_score,
         )
+
+        ml_at_entry = None
+        ml_source = ML_SOURCE_ABSENT
+        for key in ("ml_score_at_entry", "p_success", "ml_score"):
+            if snap.get(key) is not None:
+                try:
+                    ml_at_entry = float(snap[key])
+                    ml_source = ML_SOURCE_MODEL
+                    break
+                except (TypeError, ValueError):
+                    pass
+        if ml_at_entry is None and execution_params.get("ml_score_at_entry") is not None:
+            try:
+                ml_at_entry = float(execution_params["ml_score_at_entry"])
+                ml_source = ML_SOURCE_EXECUTION_PARAMS
+            except (TypeError, ValueError):
+                ml_at_entry = None
+        if ml_at_entry is None and execution_params.get("p_success") is not None:
+            try:
+                ml_at_entry = float(execution_params["p_success"])
+                ml_source = ML_SOURCE_EXECUTION_PARAMS
+            except (TypeError, ValueError):
+                ml_at_entry = None
+        if ml_at_entry is None:
+            # Last resort: the per-epic cache. Several deals on one epic share
+            # this row, so it is recorded as a fallback and never counted as a
+            # per-trade inference.
+            try:
+                from alpha.micro_sniper_ml import latest_sniper_ml_snapshot
+
+                sn = latest_sniper_ml_snapshot(
+                    epic=str(signal.epic or signal.market or "") or None
+                )
+                if isinstance(sn, dict) and sn.get("p_success") is not None:
+                    ml_at_entry = float(sn["p_success"])
+                    ml_source = ML_SOURCE_EPIC_SNAPSHOT
+            except Exception:
+                ml_at_entry = None
+        ml_stamp = classify_ml_score(ml_at_entry, source=ml_source)
+        regime_at_entry = str(
+            snap.get("market_regime")
+            or snap.get("regime")
+            or execution_params.get("market_regime")
+            or execution_params.get("regime")
+            or ""
+        ).strip()
+        if not regime_at_entry:
+            try:
+                from system.regime_state import get_regime_state_snapshot
+
+                rs = get_regime_state_snapshot() or {}
+                regime_at_entry = str(
+                    rs.get("regime") or rs.get("market_regime") or rs.get("label") or ""
+                ).strip()
+            except Exception:
+                regime_at_entry = ""
+        entry_payload: dict[str, Any] = {
+            "confidence": conf,
+            # Core model features (must match ml_scorer feature_names)
+            "adjusted_score": conf,
+            "raw_score": raw_conf,
+            "fired": 1,
+            "stop_pts": stop_pts,
+            "confidence_band": band,
+            "setup_name": signal.setup_key,
+            "trend_bias": trend,
+            "rsi": float(_snapshot_field(snap, "rsi", 0.0)),
+            "atr": atr_val,
+            "spread": spread_val,
+            # Range/spread awareness features
+            "daily_range_ratio": daily_range_ratio,
+            "limit_to_atr_ratio": limit_to_atr_ratio,
+            "limit_pts": limit_pts,
+            "net_profit_pts": limit_pts - spread_val,
+            "volume_regime": str(snap.get("vol_regime") or "unknown"),
+            "session_window": session_name(signal.quote.time),
+            "signal_mid": signal_mid,
+            "entry_price": entry_px,
+            "slippage_pts": slippage_pts,
+            "entry_time": MLTrainingStore.iso_now(),
+            "fitness_score": fitness,
+            "points_state": points.get_state() if points is not None else "HEALTHY",
+            "size_multiplier": mult,
+            "instrument": signal.market,
+            "epic": str(signal.epic or signal.market or ""),
+            "version": ML_VERSION,
+        }
+        if ml_stamp["ml_score_at_entry"] is not None:
+            entry_payload["ml_score_at_entry"] = ml_stamp["ml_score_at_entry"]
+            entry_payload["p_success"] = ml_stamp["ml_score_at_entry"]
+        entry_payload["ml_score_source"] = ml_stamp["ml_score_source"]
+        entry_payload["ml_score_trusted"] = ml_stamp["ml_score_trusted"]
+        if ml_stamp["ml_score_out_of_bounds"]:
+            entry_payload["ml_score_out_of_bounds"] = True
+            log_engine(
+                f"ml stamp out of bounds deal={deal_id} raw={ml_at_entry!r} "
+                f"clamped={ml_stamp['ml_score_at_entry']}"
+            )
+        if regime_at_entry:
+            entry_payload["market_regime"] = regime_at_entry
+            entry_payload["regime"] = regime_at_entry
+        _ml_store.record_entry(deal_id, entry_payload)
         from ml.interim_scorer import invalidate_ml_clean_training_rows_cache
 
         invalidate_ml_clean_training_rows_cache()
@@ -170,11 +248,22 @@ def record_ml_exit_for_deal(
     profit_pct_of_target: float | None = None,
     hold_sec: float | None = None,
     session_slot: str | None = None,
+    engine_origin: str | None = None,
+    style: str | None = None,
+    epic: str | None = None,
 ) -> None:
     try:
         if _ml_store is None:
             return
         gbp = float(ig_pnl)
+        from ml.style_epic import resolve_ml_style
+
+        resolved_style = resolve_ml_style(
+            style_hint=style,
+            engine_origin=engine_origin,
+            exit_reason=exit_reason,
+            hold_sec=hold_sec,
+        )
         payload: dict[str, Any] = {
             "exit_price": float(exit_price),
             "exit_time": MLTrainingStore.iso_now(),
@@ -187,7 +276,11 @@ def record_ml_exit_for_deal(
             "confirmed": True,
             "source": "agent",
             "version": ML_VERSION,
+            "style": resolved_style,
+            "engine_origin": str(engine_origin or ""),
         }
+        if epic:
+            payload["epic"] = str(epic)
         if profit_tier_pct is not None:
             payload["profit_tier_pct"] = float(profit_tier_pct)
         if peak_pct_of_target is not None:

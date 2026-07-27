@@ -5,8 +5,10 @@
  */
 
 import {
+  applyDeskIntentHold,
   buildDeskIntentView,
   formatMarketHierarchy,
+  initialDeskIntentHoldState,
   pickSniperForConfidence,
   resolvePreferFromMarketRows,
   resolveRotation,
@@ -272,6 +274,126 @@ function main(): void {
   });
   assert(rot.kind === "on", "ranked rotation kind on");
   assert(rot.label.startsWith("ranked"), "ranked label prefix");
+
+  // Primary SB truth: ranked/per-epic can flash DOW SETUP while SB ops is WAIT —
+  // mapper must not advertise primary SETUP against SB aggregate WAIT.
+  const contradictionRot: DeskIntentRotationSlice = {
+    ok: true,
+    prefer_epic: DOW,
+    preference_reason: "dominant DOW",
+    per_epic_confidence: {
+      [DOW]: { p_success: 0.7, approved: true, threshold: 0.68, mode: "SETUP" },
+      [GOLD]: { p_success: 0.4, approved: false, threshold: 0.68, mode: "WAIT" },
+    },
+    rotation: {
+      multi_source_auto_rotation: true,
+      ranked_rotator: {
+        active: true,
+        mode: "ranked",
+        dominant: DOW,
+        prefer_epic: DOW,
+        promoted: [DOW, GOLD],
+      },
+    },
+  };
+  const contradiction = buildDeskIntentView({
+    cfdOnline: true,
+    sbOnline: true,
+    cfdHealth: cfdPausedHealth,
+    sbHealth: sbArmedHealth,
+    cfdOps,
+    sbOps, // DOW 44% WAIT
+    cfdRot: null,
+    sbRot: contradictionRot,
+    sbSniperByEpic: {
+      ok: true,
+      by_epic: {
+        // Missing DOW → SB account falls back to ops_strip WAIT
+        [GOLD]: { p_success: 0.4, approved: false, threshold: 0.68 },
+      },
+    },
+  });
+  assert(
+    contradiction.confidenceAccounts[1].mode === "WAIT",
+    `SB aggregate WAIT got ${contradiction.confidenceAccounts[1].mode}`,
+  );
+  assert(
+    contradiction.setupMode === "WAIT",
+    `primary must not SETUP while SB WAIT got ${contradiction.setupMode}`,
+  );
+
+  // SETUP hold: raw SETUP must not surface until holdMs elapses.
+  let hold = initialDeskIntentHoldState();
+  const t0 = 1_000_000;
+  let step = applyDeskIntentHold({
+    nowMs: t0,
+    rawSetupMode: "SETUP",
+    rawHierarchy: "DOW 70% SETUP → prefer DOW",
+    prev: hold,
+    setupHoldMs: 20_000,
+    hierarchyDebounceMs: 12_000,
+  });
+  assert(step.setupMode === "WAIT", "SETUP not shown before hold");
+  hold = step.state;
+  step = applyDeskIntentHold({
+    nowMs: t0 + 5_000,
+    rawSetupMode: "SETUP",
+    rawHierarchy: "DOW 70% SETUP → prefer DOW",
+    prev: hold,
+    setupHoldMs: 20_000,
+    hierarchyDebounceMs: 12_000,
+  });
+  assert(step.setupMode === "WAIT", "SETUP still held at 5s");
+  hold = step.state;
+  step = applyDeskIntentHold({
+    nowMs: t0 + 20_000,
+    rawSetupMode: "SETUP",
+    rawHierarchy: "DOW 70% SETUP → prefer DOW",
+    prev: hold,
+    setupHoldMs: 20_000,
+    hierarchyDebounceMs: 12_000,
+  });
+  assert(step.setupMode === "SETUP", "SETUP after 20s hold");
+  hold = step.state;
+  step = applyDeskIntentHold({
+    nowMs: t0 + 21_000,
+    rawSetupMode: "WAIT",
+    rawHierarchy: "DOW 44% WAIT → prefer DOW",
+    prev: hold,
+    setupHoldMs: 20_000,
+    hierarchyDebounceMs: 12_000,
+  });
+  assert(step.setupMode === "WAIT", "WAIT demotes immediately");
+  // Hierarchy: first non-null sticks; flicker candidate needs debounce.
+  hold = step.state;
+  const h1 = "DOW 44% WAIT · GOLD 71% SETUP → prefer GOLD";
+  const h2 = "DOW 70% SETUP · GOLD 40% WAIT → prefer DOW";
+  step = applyDeskIntentHold({
+    nowMs: t0 + 22_000,
+    rawSetupMode: "WAIT",
+    rawHierarchy: h1,
+    prev: initialDeskIntentHoldState(),
+    hierarchyDebounceMs: 12_000,
+  });
+  assert(step.marketHierarchy === h1, "first hierarchy accepted");
+  hold = step.state;
+  step = applyDeskIntentHold({
+    nowMs: t0 + 23_000,
+    rawSetupMode: "WAIT",
+    rawHierarchy: h2,
+    prev: hold,
+    hierarchyDebounceMs: 12_000,
+  });
+  assert(step.marketHierarchy === h1, "hierarchy flicker held");
+  hold = step.state;
+  step = applyDeskIntentHold({
+    nowMs: t0 + 23_000 + 12_000,
+    rawSetupMode: "WAIT",
+    rawHierarchy: h2,
+    prev: hold,
+    hierarchyDebounceMs: 12_000,
+  });
+  assert(step.marketHierarchy === h2, "hierarchy updates after debounce");
 
   console.log("desk-intent.selftest: OK");
   console.log("  primary:", view.confidenceBand, view.confidencePct, view.confidenceSource);

@@ -7,6 +7,14 @@ set -euo pipefail
 ROOT="/Users/chrisgordon/Projects/IG_Agent_v25"
 cd "$ROOT"
 
+# Durable interim offline hold — refuse cold-start / auto-boot of twins + UI stack.
+if [[ -f "${ROOT}/src/data/v31-production/state/desk_offline_hold.json" ]] \
+  || [[ -f "${ROOT}/src/data/state/desk_offline_hold.json" ]]; then
+  echo "ABORT: desk_offline_hold active — Trading Desk will not auto-boot." >&2
+  echo "Clear: PYTHONPATH=src .venv/bin/python3 -c \"from runtime.desk_offline_hold import clear_desk_offline_hold; print(clear_desk_offline_hold())\"" >&2
+  exit 78
+fi
+
 export PYTHONPATH="${ROOT}/src"
 export PATH="${ROOT}/.venv/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export VIRTUAL_ENV="${ROOT}/.venv"

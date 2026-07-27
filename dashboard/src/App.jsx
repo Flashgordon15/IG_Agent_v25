@@ -349,16 +349,14 @@ function createSoundEngine() {
 export default function App() {
   const apexShell = isApexDesktopShell();
   const shadowBrainUi = isShadowSimulatorPort();
-  const unifiedPerfUi = isUnifiedEnginePort() && !apexShell;
+  const unifiedPerfUi = false;
   const TABS = shadowBrainUi
     ? SHADOW_ALPHA_TABS
-    : unifiedPerfUi
-      ? UNIFIED_PERF_TABS
-      : apexShell
-        ? [APEX_TAB, ...BASE_TABS]
-        : BASE_TABS;
+    : apexShell
+      ? [APEX_TAB, ...BASE_TABS]
+      : BASE_TABS;
   const [tab, setTab] = useState(
-    shadowBrainUi ? "alpha_matrix" : unifiedPerfUi ? "fulfillment" : apexShell ? "apex" : "live"
+    shadowBrainUi ? "alpha_matrix" : apexShell ? "apex" : "live"
   );
   const [state, setState] = useState(null);
   const [wsConnected, setWsConnected] = useState(false);
@@ -1077,6 +1075,7 @@ export default function App() {
     envScorerFallbackActive: Boolean(
       mergedState?.env_scorer_fallback_active ?? mergedState?.health?.env_scorer_fallback_active,
     ),
+    exchangeOnline: mergedState?.exchange_online,
     systemStandbyActive,
     rotationFilterEnabled: Boolean(
       mergedState?.config?.enforce_top3_rotation_filter ??
@@ -1387,6 +1386,17 @@ export default function App() {
           if (digestDay) setDigestDay(digestDay);
         }}
       />
+
+      <div className="legacy-desk-banner shrink-0 border-b border-emerald-500/30 bg-emerald-950/40 px-3 py-2 text-center text-[11px] sm:text-xs">
+        Legacy Adaptive Logistics API dashboard — product desk is{" "}
+        <a
+          href="http://127.0.0.1:3000/desk"
+          className="font-semibold text-emerald-300 underline underline-offset-2 hover:text-emerald-200"
+        >
+          Quantum Terminal /desk
+        </a>
+        {" "}(Today&apos;s P&amp;L · open &amp; closed trades)
+      </div>
 
       <nav className="sticky top-0 z-10 flex shrink-0 gap-0 overflow-x-auto border-b border-border bg-card px-1 sm:px-2">
         {!unifiedPerfUi &&

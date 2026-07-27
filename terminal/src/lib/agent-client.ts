@@ -144,6 +144,9 @@ export type AgentHealth = {
   agent_alive?: boolean;
   port_bound?: boolean;
   agent_pid?: number;
+  /** A2 / operator entry freeze — prefer over fulfillment when set. */
+  trading_paused?: boolean;
+  trade_ready?: boolean;
 };
 
 /** Desk port online when HTTP health responds and engine is trading-ready (orchestrator-aligned). */

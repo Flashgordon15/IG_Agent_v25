@@ -151,9 +151,19 @@ def train_model_from_store(cfg: Config | None = None) -> dict[str, Any]:
             f"features={scorer.feature_names}"
         )
         try:
+            from diagnostics.ml_strategy_review import (
+                improvement_epoch_eligible_for_verdict,
+                load_latest_review_verdict,
+            )
             from runtime.strategy_improvement_tracker import note_ml_model_trained
+            from system.paths import data_dir
 
-            note_ml_model_trained()
+            verdict, _path = load_latest_review_verdict(Path(data_dir()))
+            eligible = improvement_epoch_eligible_for_verdict(verdict)
+            note_ml_model_trained(
+                improvement_epoch=eligible,
+                review_verdict=verdict,
+            )
         except Exception:
             pass
         return {

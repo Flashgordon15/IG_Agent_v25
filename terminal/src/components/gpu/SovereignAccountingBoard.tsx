@@ -3,9 +3,11 @@
 import { useEffect, useRef } from "react";
 import { cfdHttpBase, fetchDeskJson, sbHttpBase } from "@/lib/desk-api-bases";
 import {
+  enrichClosedTradesFromJournal,
   mergeSimplifiedAccounting,
   type ClosedTradeRow,
   type DailyHistoryRow,
+  type JournalEnrichRow,
   type SimplifiedAccountingPayload,
 } from "@/lib/desk-accounting-merge";
 
@@ -33,13 +35,15 @@ function fmtGbp(v: number): string {
 }
 
 function resolveAccount(row: ClosedTradeRow): string {
-  if (row.account_id) return row.account_id;
+  const acct = String(row.account_id || "").trim();
+  if (acct && acct.toUpperCase() !== "SHARED") return acct;
   const tag = row.engine_label || row.engine_origin || "";
   return ENGINE_ACCOUNT[tag]?.accountId || "—";
 }
 
 function resolveProduct(row: ClosedTradeRow): string {
-  if (row.product_type) return row.product_type;
+  const prod = String(row.product_type || "").trim().toUpperCase();
+  if (prod && prod !== "JOURNAL" && prod !== "SHARED") return prod;
   const tag = row.engine_label || row.engine_origin || "";
   return ENGINE_ACCOUNT[tag]?.productType || "—";
 }
@@ -99,7 +103,7 @@ export function SovereignAccountingBoard({ onHealth }: Props) {
     };
 
     const pull = async () => {
-      const [cfdRes, sbRes] = await Promise.all([
+      const [cfdRes, sbRes, journalRes, ledgerRes] = await Promise.all([
         fetchDeskJson<SimplifiedAccounting>(
           cfdBase,
           "/api/desk/simplified_accounting",
@@ -116,6 +120,35 @@ export function SovereignAccountingBoard({ onHealth }: Props) {
         )
           .then((p) => ({ ok: true as const, payload: p }))
           .catch(() => ({ ok: false as const, payload: null })),
+        // Same-origin Next routes — enrich AccountID/Product/epic without agent restart.
+        fetch("/api/desk/journal", { cache: "no-store" })
+          .then(async (r) => {
+            if (!r.ok) return [] as JournalEnrichRow[];
+            const body = (await r.json()) as { rows?: JournalEnrichRow[] };
+            return body.rows ?? [];
+          })
+          .catch(() => [] as JournalEnrichRow[]),
+        fetch("/api/desk/closed_ledger", { cache: "no-store" })
+          .then(async (r) => {
+            if (!r.ok) return [] as JournalEnrichRow[];
+            const body = (await r.json()) as {
+              rows?: Array<{
+                dealId?: string;
+                market?: string;
+                epic?: string;
+                direction?: string;
+                timestamp?: string;
+              }>;
+            };
+            return (body.rows ?? []).map((row) => ({
+              dealId: row.dealId,
+              market: row.market,
+              epic: row.epic,
+              direction: row.direction,
+              timestamp: row.timestamp,
+            }));
+          })
+          .catch(() => [] as JournalEnrichRow[]),
       ]);
       if (!alive) return;
 
@@ -127,7 +160,11 @@ export function SovereignAccountingBoard({ onHealth }: Props) {
 
       const today = merged.today_net_realized_pnl_gbp ?? 0;
       const prevCash = lastCashRef.current;
-      const nextRows = merged.last_10_closed_trades ?? [];
+      const nextRows = enrichClosedTradesFromJournal(
+        merged.last_10_closed_trades ?? [],
+        journalRes,
+        ledgerRes,
+      );
       const nextHasCash =
         Math.abs(today) > 1e-9 ||
         nextRows.some((r) => Math.abs(r.net_pnl_gbp) > 1e-9);
@@ -146,11 +183,14 @@ export function SovereignAccountingBoard({ onHealth }: Props) {
         }`;
       }
       if (sourceRef.current) {
+        const deduped = Boolean(merged.system_state?.shared_journal_deduped);
         sourceRef.current.textContent = !merged
           ? "WAITING"
-          : merged.source === "dual_merged"
-            ? `DUAL · ${cfdRes.ok ? "8080✓" : "8080↓"} ${sbRes.ok ? "8081✓" : "8081↓"}`
-            : String(merged.source || "JOURNAL").toUpperCase();
+          : deduped
+            ? `SHARED JOURNAL · ONCE · ${cfdRes.ok ? "8080✓" : "8080↓"} ${sbRes.ok ? "8081✓" : "8081↓"}`
+            : merged.source === "dual_merged"
+              ? `DUAL · ${cfdRes.ok ? "8080✓" : "8080↓"} ${sbRes.ok ? "8081✓" : "8081↓"}`
+              : String(merged.source || "JOURNAL").toUpperCase();
       }
       paintRows(nextRows);
       onHealth?.(merged.system_state);
@@ -175,7 +215,9 @@ export function SovereignAccountingBoard({ onHealth }: Props) {
           <strong ref={cashRef} className="v36-acct-cash gpu-ledger-mono sovereign-pnl--mute">
             —
           </strong>
-          <span className="v36-acct-sub">Today · net realized · dual-port merge</span>
+          <span className="v36-acct-sub">
+            Today · net realized · dual-port (shared journal once)
+          </span>
         </div>
         <span ref={sourceRef} className="gpu-chip gpu-chip--mono">
           WAITING

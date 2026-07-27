@@ -1,9 +1,9 @@
-/** v30 Apex desktop monolith — unified API port :9090 (shell + sidecar parity). */
-export const APP_VERSION = "30.0.0";
-export const APP_VERSION_LABEL = "v30.0";
-export const DEFAULT_API_PORT = 9090;
-/** Legacy alias — desktop container never probes launchd :8080. */
-export const PRODUCTION_API_PORT = 9090;
+/** IG Trading Agent v31.1 — dashboard binds to the page origin (:8080 live Vanguard). */
+export const APP_VERSION = "31.1.0";
+export const APP_VERSION_LABEL = "v31.1";
+export const DEFAULT_API_PORT = 8080;
+/** Legacy Apex shadow monolith port — not used by Trading Desk desktop. */
+export const PRODUCTION_API_PORT = 8080;
 /** Live Vanguard bind port (parallel track supervisor). */
 export const LIVE_VANGUARD_PORT = 8080;
 /** Shadow simulator bind port (v30 parallel track). */
@@ -20,6 +20,15 @@ export function isShadowSimulatorPort() {
 /** Single-process unified engine dashboard (:8080). */
 export function isUnifiedEnginePort() {
   return resolveTargetPort() === LIVE_VANGUARD_PORT;
+}
+
+/** Native pywebview Trading Desk shell (not Apex Electron, not :8787 Flight Deck). */
+export function isTradingDeskNative() {
+  if (typeof window === "undefined") return false;
+  if (window.__IG_TRADING_DESK_NATIVE__ === true) return true;
+  const port = Number(window.location?.port || "0");
+  const apexShell = Boolean(window.apexIPC?.isDesktopShell?.());
+  return port === LIVE_VANGUARD_PORT && !apexShell;
 }
 
 /**

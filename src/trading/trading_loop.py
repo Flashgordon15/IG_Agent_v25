@@ -3794,6 +3794,24 @@ class TradingLoop:
         except Exception as exc:
             log_guarded_exception("trading_loop", exc)
 
+        # APP hard-block: process /api/stop pause OR CFD A2 marker (learning-loop Step 2).
+        # Fail closed — pause-check errors must never open the entry path.
+        try:
+            from api.agent_control import new_entries_hard_blocked
+
+            paused_block, pause_reason = new_entries_hard_blocked()
+            if paused_block:
+                return self._hard_block_all_gates(
+                    pause_reason or "api_trading_paused",
+                    primary_gate="broker_feed",
+                )
+        except Exception as exc:
+            log_guarded_exception("trading_loop", exc)
+            return self._hard_block_all_gates(
+                f"api_trading_paused_fail_closed:{type(exc).__name__}",
+                primary_gate="broker_feed",
+            )
+
         try:
             from system.agent_execution_mode import demo_sandbox_unblock_active
             from system.qmm_process_supervisor import process_entry_blocked

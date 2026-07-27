@@ -23,6 +23,7 @@ HEAL_LOOPS_NOT_ARMING = "loops_not_arming_unpause_or_recycle"
 HEAL_UI_DOWN = "ui_restart_only"
 HEAL_SILENCE_SOFT_PAUSE = "armed_silence_soft_pause_sb"
 HEAL_REAPPLY_A2 = "reapply_a2_cfd_pause"
+HEAL_ENSURE_BLEED_HALT = "ensure_operator_bleed_halt"
 
 ALLOWED_HEALS = frozenset(
     {
@@ -31,6 +32,7 @@ ALLOWED_HEALS = frozenset(
         HEAL_UI_DOWN,
         HEAL_SILENCE_SOFT_PAUSE,
         HEAL_REAPPLY_A2,
+        HEAL_ENSURE_BLEED_HALT,
     }
 )
 
@@ -47,6 +49,10 @@ FORBIDDEN_ACTIONS = frozenset(
         "lift_a2_without_operator",
     }
 )
+
+# Durable operator bleed / halt locks — heal must NEVER POST /api/start while present.
+OPERATOR_BLEED_LOCK_GLOB = "operator_bleed_lock_*.json"
+OPERATOR_BLEED_LOCK_REASON_DEFAULT = "operator_halt_unacceptable_bleed"
 
 DEFAULT_HEAL_CAP_PER_HOUR = int(os.environ.get("IG_GUI_SUP_HEAL_CAP_PER_HOUR", "2"))
 DEFAULT_SILENCE_SOFT_PAUSE = os.environ.get("IG_GUI_SUP_SILENCE_SOFT_PAUSE", "1").strip() not in (
@@ -167,6 +173,150 @@ def books_flat(payload: dict[str, Any]) -> bool:
         return int(cfd_b or 0) == 0 and int(sb_b or 0) == 0
     except (TypeError, ValueError):
         return False
+
+
+def operator_bleed_lock_paths(*, root: Path | None = None) -> list[Path]:
+    """Known durable lock locations under state_cfd / state_sb (and legacy state/)."""
+    data_root = root or _data_root()
+    dirs = (data_root / "state_cfd", data_root / "state_sb", data_root / "state")
+    found: list[Path] = []
+    for d in dirs:
+        if not d.is_dir():
+            continue
+        try:
+            found.extend(sorted(d.glob(OPERATOR_BLEED_LOCK_GLOB)))
+        except OSError:
+            continue
+    return found
+
+
+def load_operator_bleed_lock(*, root: Path | None = None) -> dict[str, Any] | None:
+    """Return first active bleed lock with do_not_auto_resume, else None."""
+    for path in operator_bleed_lock_paths(root=root):
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(raw, dict):
+            continue
+        active = raw.get("active", True)
+        if active is False:
+            continue
+        # Default True when key omitted — operator halt is sticky.
+        if raw.get("do_not_auto_resume", True) is False:
+            continue
+        out = dict(raw)
+        out["_path"] = str(path)
+        return out
+    return None
+
+
+def operator_bleed_lock_blocks_resume(*, root: Path | None = None) -> tuple[bool, dict[str, Any] | None]:
+    lock = load_operator_bleed_lock(root=root)
+    return (lock is not None, lock)
+
+
+def write_operator_bleed_locks(
+    *,
+    root: Path | None = None,
+    reason: str = OPERATOR_BLEED_LOCK_REASON_DEFAULT,
+    detail: dict[str, Any] | None = None,
+) -> list[str]:
+    """Write durable do_not_auto_resume locks under state_cfd + state_sb (idempotent)."""
+    data_root = root or _data_root()
+    day = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
+    engaged = _now_iso()
+    epoch = time.time()
+    written: list[str] = []
+    body_base: dict[str, Any] = {
+        "active": True,
+        "mode": "OPERATOR_HALT_BLEED",
+        "date": day,
+        "reason": reason,
+        "do_not_auto_resume": True,
+        "engaged_at": engaged,
+        "engaged_at_epoch": epoch,
+        "scope": "BOTH :8080 CFD QUANT_SNIPER and :8081 SB MACRO_SENTINEL",
+        "mechanism": [
+            "POST /api/stop on :8080 and :8081",
+            "durable operator_bleed_lock_*.json under state_cfd + state_sb",
+            "Phase2 heal must NOT POST /api/start while lock present",
+        ],
+        "forbidden_while_locked": [
+            "POST /api/start on either port (auto or probe)",
+            "re-enable Instant/micro",
+            "ranked loosen / one more probe",
+        ],
+        "unlock_requires": (
+            "explicit operator action after review — remove BOTH lock files "
+            "then curl POST /api/start per port"
+        ),
+        "source": "gui_desk_supervisor_ensure_bleed_halt",
+    }
+    if detail:
+        body_base["supervisor_detail"] = detail
+    for lane, sub in (("state_cfd", "state_cfd"), ("state_sb", "state_sb")):
+        d = data_root / sub
+        d.mkdir(parents=True, exist_ok=True)
+        path = d / f"operator_bleed_lock_{day}.json"
+        # Respect existing lock content — only refresh sticky fields, never clear.
+        existing: dict[str, Any] = {}
+        if path.is_file():
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    existing = raw
+            except Exception:
+                existing = {}
+        body = dict(existing)
+        body.update(body_base)
+        body["lane"] = lane
+        body["active"] = True
+        body["do_not_auto_resume"] = True
+        if existing.get("engaged_at"):
+            body["engaged_at"] = existing.get("engaged_at")
+            body["engaged_at_epoch"] = existing.get("engaged_at_epoch", epoch)
+            body["reasserted_at"] = engaged
+        path.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
+        written.append(str(path))
+    return written
+
+
+def ensure_operator_bleed_halt(
+    *,
+    ports: list[int] | None = None,
+    root: Path | None = None,
+    reason: str = OPERATOR_BLEED_LOCK_REASON_DEFAULT,
+    detail: dict[str, Any] | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Force-pause both desks + write bleed locks. Never POST /api/start."""
+    ports = ports or [8080, 8081]
+    root = root or _data_root()
+    summary: dict[str, Any] = {
+        "action": HEAL_ENSURE_BLEED_HALT,
+        "dry_run": dry_run,
+        "reason": reason,
+        "ports": list(ports),
+        "used_sigkill": False,
+        "posted_start": False,
+    }
+    if dry_run:
+        summary["ok"] = True
+        summary["planned"] = [
+            f"POST /api/stop on {ports}",
+            "write operator_bleed_lock_*.json (do_not_auto_resume)",
+            "NEVER POST /api/start",
+        ]
+        return summary
+    stops: list[dict[str, Any]] = []
+    for port in ports:
+        stops.append({"port": int(port), **_post_api(int(port), "/api/stop")})
+    summary["stops"] = stops
+    summary["locks"] = write_operator_bleed_locks(root=root, reason=reason, detail=detail)
+    summary["ok"] = True
+    _audit("ensure_operator_bleed_halt", summary, root=root)
+    return summary
 
 
 def _http_json(url: str, *, method: str = "GET", timeout: float = HTTP_TIMEOUT_SEC) -> tuple[dict[str, Any] | None, str | None]:
@@ -362,6 +512,24 @@ def plan_heals(payload: dict[str, Any], *, silence_soft_pause: bool | None = Non
             }
         )
 
+    # Journal/session bleed / SESSION_KILL → ensure both paused + durable locks (never start)
+    if (
+        payload.get("ensure_bleed_halt")
+        or _has("BLEED:", severity="fail")
+        or _has("SESSION_KILL:", severity="fail")
+    ):
+        plans.append(
+            {
+                "action": HEAL_ENSURE_BLEED_HALT,
+                "requires_flat": False,
+                "reason": "BLEED/SESSION_KILL — force pause both + write do_not_auto_resume locks",
+                "ports": [
+                    int((ports.get("cfd") or {}).get("port") or 8080),
+                    int((ports.get("sb") or {}).get("port") or 8081),
+                ],
+            }
+        )
+
     # De-dupe by action+ports
     seen: set[str] = set()
     out: list[dict[str, Any]] = []
@@ -466,6 +634,20 @@ def soft_pause_sb(*, port: int = 8081, dry_run: bool = False, root: Path | None 
 
 def unpause_port(*, port: int, dry_run: bool = False, root: Path | None = None) -> dict[str, Any]:
     summary: dict[str, Any] = {"action": "unpause", "port": port, "dry_run": dry_run}
+    blocked, lock = operator_bleed_lock_blocks_resume(root=root)
+    if blocked:
+        summary["ok"] = False
+        summary["blocked_by_operator_bleed_lock"] = True
+        summary["lock"] = {
+            "path": (lock or {}).get("_path"),
+            "reason": (lock or {}).get("reason"),
+            "do_not_auto_resume": True,
+        }
+        summary["error"] = "operator_bleed_lock_blocks_api_start"
+        if dry_run:
+            summary["planned"] = "SKIP POST /api/start — operator bleed lock present"
+        _audit("heal_unpause_blocked_bleed_lock", summary, root=root)
+        return summary
     if dry_run:
         summary["ok"] = True
         summary["planned"] = f"POST http://127.0.0.1:{port}/api/start"
@@ -578,8 +760,19 @@ def soft_recycle_port(
         summary["a2"] = reapply_a2_cfd_pause(port=8080, dry_run=False, root=root)
 
     if start_sb_if_armed:
-        # Ensure SB entries path is running when CFD was the recycle target
-        summary["sb_start"] = unpause_port(port=sb_port, dry_run=False, root=root)
+        # Ensure SB entries path is running when CFD was the recycle target —
+        # but NEVER while operator bleed lock is active.
+        blocked, lock = operator_bleed_lock_blocks_resume(root=root)
+        if blocked:
+            summary["sb_start"] = {
+                "ok": False,
+                "skipped": True,
+                "blocked_by_operator_bleed_lock": True,
+                "lock_path": (lock or {}).get("_path"),
+                "reason": (lock or {}).get("reason"),
+            }
+        else:
+            summary["sb_start"] = unpause_port(port=sb_port, dry_run=False, root=root)
 
     try:
         from system.shutdown_cleanup import clear_manual_stop
@@ -639,8 +832,28 @@ def execute_heal_plan(
             skipped.append({**plan, "skip_reason": "not_allowlisted"})
             escalations.append(f"blocked non-allowlisted action: {action}")
             continue
+        # Operator bleed lock: silence/loops heals may still soft-PAUSE, never unpause/start.
+        # ensure_bleed_halt is pause+lock only — always allowed under lock.
+        bleed_blocked, bleed_lock = operator_bleed_lock_blocks_resume(root=root)
+        if bleed_blocked and action in (HEAL_LOOPS_NOT_ARMING,):
+            skipped.append(
+                {
+                    **plan,
+                    "skip_reason": "operator_bleed_lock",
+                    "lock_path": (bleed_lock or {}).get("_path"),
+                }
+            )
+            escalations.append(
+                f"{action} blocked — operator bleed lock "
+                f"{(bleed_lock or {}).get('_path')} (do_not_auto_resume)"
+            )
+            continue
+        if bleed_blocked and action == HEAL_PORT_HUNG and plan.get("restart_sb_if_armed"):
+            # Recycle may still TERM hung API, but must not restart via /api/start.
+            plan = {**plan, "restart_sb_if_armed": False}
+
         if plan.get("blocked_by_open_book") and action in (HEAL_PORT_HUNG, HEAL_LOOPS_NOT_ARMING):
-            # Unpause-only path for loops may still run
+            # Unpause-only path for loops may still run — unless bleed lock (handled above).
             if action == HEAL_LOOPS_NOT_ARMING and plan.get("try_unpause_first"):
                 port = int((plan.get("ports") or [8081])[0])
                 res = unpause_port(port=port, dry_run=dry_run, root=root)
@@ -657,6 +870,14 @@ def execute_heal_plan(
 
         if action == HEAL_UI_DOWN:
             res = heal_ui_only(dry_run=dry_run, root=root)
+        elif action == HEAL_ENSURE_BLEED_HALT:
+            res = ensure_operator_bleed_halt(
+                ports=[int(p) for p in (plan.get("ports") or [8080, 8081])],
+                dry_run=dry_run,
+                root=root,
+                reason=str(plan.get("reason") or OPERATOR_BLEED_LOCK_REASON_DEFAULT),
+                detail={"plan_reason": plan.get("reason")},
+            )
         elif action == HEAL_REAPPLY_A2:
             port = int((plan.get("ports") or [8080])[0])
             res = reapply_a2_cfd_pause(port=port, dry_run=dry_run, root=root)

@@ -19,6 +19,7 @@ type ClosedRow = {
   exit: number | null;
   realizedGbp: number | null;
   market: string;
+  epic: string;
   result: string;
   size: number | null;
   pnlPoints: number | null;
@@ -128,6 +129,7 @@ export async function GET() {
           exit,
           realizedGbp: gbp,
           market: String(r.market || r.epic || ""),
+          epic: String(r.epic || ""),
           result,
           size,
           pnlPoints: pts,

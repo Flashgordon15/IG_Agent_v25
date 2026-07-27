@@ -213,7 +213,7 @@ export function useGpuExecutionStream(): {
     structureRevision: 0,
     quoteAgeMs: null,
     sniperArm: "SUPPRESSED",
-    gateVerdict: "GATE_UNKNOWN",
+    gateVerdict: "GATE_STANDBY_WAITING_BREAKOUT",
     sessionRealizedGbp: 0,
     sessionUnrealizedGbp: 0,
     muxSource: "idle",

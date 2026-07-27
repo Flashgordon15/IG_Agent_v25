@@ -26,6 +26,33 @@ def _locked(method):
     return wrapper
 
 
+def _hold_sec_between(opened_at: Any, closed_at: Any) -> float | None:
+    """Seconds between two ISO/SQL timestamps; None when not both parseable."""
+    def _parse(ts: Any) -> datetime | None:
+        text = str(ts or "").strip()
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+                try:
+                    return datetime.strptime(text[:19], fmt)
+                except ValueError:
+                    continue
+        return None
+
+    t0 = _parse(opened_at)
+    t1 = _parse(closed_at)
+    if t0 is None or t1 is None:
+        return None
+    try:
+        delta = (t1 - t0).total_seconds()
+    except (TypeError, ValueError):
+        return None
+    return delta if delta >= 0 else None
+
+
 def _best_pnl_points(row: Any) -> float:
     """
     Return the best available P&L figure in index-points units.
@@ -491,6 +518,38 @@ class LearningStore:
                                 continue
                 except Exception:
                     closed_ts = None
+                hold_hint: float | None = None
+                try:
+                    opened_raw = str(
+                        row["opened_at"] if "opened_at" in row_keys else ""
+                    ).replace("T", " ").replace("Z", "")
+                    if opened_raw and closed_ts is not None and _raw_has_clock_time(
+                        opened_raw
+                    ):
+                        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+                            try:
+                                opened_ts = datetime.strptime(
+                                    opened_raw[:19], fmt
+                                ).timestamp()
+                                hold_hint = max(
+                                    0.0, float(closed_ts) - float(opened_ts)
+                                )
+                                break
+                            except ValueError:
+                                continue
+                except Exception:
+                    hold_hint = None
+                ml_hint: float | None = None
+                try:
+                    for col in ("adjusted_confidence", "confidence", "ml_score"):
+                        if col in row_keys and row[col] is not None:
+                            ml_hint = float(row[col])
+                            # confidence often 0-100; journal MlScoreAtEntry is 0-1.
+                            if ml_hint > 1.0:
+                                ml_hint = ml_hint / 100.0
+                            break
+                except Exception:
+                    ml_hint = None
                 record_trade_close(
                     deal_id=str(
                         row["ig_deal_id"] if "ig_deal_id" in row_keys else trade_id
@@ -519,6 +578,17 @@ class LearningStore:
                         if "engine_origin" in row_keys and row["engine_origin"]
                         else None
                     ),
+                    epic=(
+                        str(row["epic"])
+                        if "epic" in row_keys and row["epic"]
+                        else (
+                            str(row["market"])
+                            if "market" in row_keys and row["market"]
+                            else None
+                        )
+                    ),
+                    hold_sec=hold_hint,
+                    ml_score=ml_hint,
                 )
         except Exception:
             pass
@@ -1169,13 +1239,19 @@ class LearningStore:
 
                 closed = self.conn.execute(
                     """
-                    SELECT ig_deal_id, exit AS exit_price, pnl_points, result
+                    SELECT ig_deal_id, exit AS exit_price, pnl_points, result,
+                           epic, engine_origin, opened_at, closed_at
                     FROM trades WHERE id=?
                     """,
                     (row["id"],),
                 ).fetchone()
                 exit_px = float(closed["exit_price"] or 0) if closed else 0.0
                 pts = float(closed["pnl_points"] or 0) if closed else 0.0
+                closed_keys = closed.keys() if closed else []
+                hold = _hold_sec_between(
+                    closed["opened_at"] if "opened_at" in closed_keys else None,
+                    closed["closed_at"] if "closed_at" in closed_keys else None,
+                )
                 record_ml_exit_for_deal(
                     str(deal_id or deal_reference),
                     ig_pnl=float(ig_pnl),
@@ -1183,6 +1259,17 @@ class LearningStore:
                     exit_price=exit_px,
                     pts_pnl=pts,
                     exit_reason="ig_transaction_sync",
+                    hold_sec=hold,
+                    engine_origin=(
+                        str(closed["engine_origin"])
+                        if "engine_origin" in closed_keys and closed["engine_origin"]
+                        else None
+                    ),
+                    epic=(
+                        str(closed["epic"])
+                        if "epic" in closed_keys and closed["epic"]
+                        else None
+                    ),
                 )
             except Exception as e:
                 from system.engine_log import log_engine
@@ -1241,6 +1328,9 @@ class LearningStore:
                 gbp = float(ig_pnl_currency)
             else:
                 gbp = float(pnl_points or 0.0) * size
+            hold = _hold_sec_between(
+                row_dict.get("opened_at"), row_dict.get("closed_at")
+            )
             record_ml_exit_for_deal(
                 deal_id,
                 ig_pnl=gbp,
@@ -1248,6 +1338,9 @@ class LearningStore:
                 exit_price=float(exit_price or 0.0),
                 pts_pnl=float(pnl_points or 0.0),
                 exit_reason=exit_reason,
+                hold_sec=hold,
+                engine_origin=str(row_dict.get("engine_origin") or "") or None,
+                epic=str(row_dict.get("epic") or "") or None,
             )
         except Exception as exc:
             from system.engine_log import log_engine
@@ -2473,3 +2566,58 @@ class LearningStore:
         )
         self.conn.commit()
         return cur.rowcount
+
+
+def hold_sec_from_learning_deal(deal_id: str) -> float | None:
+    """Best-effort HoldSec from learning DB open→close for journal stamping."""
+    deal = str(deal_id or "").strip()
+    if not deal:
+        return None
+    try:
+        from data.ml_training_store import deal_id_aliases
+        from system.paths import data_dir
+
+        db = data_dir() / "learning_db.sqlite3"
+        if not db.is_file():
+            return None
+        store = LearningStore(str(db))
+        aliases = deal_id_aliases(deal) or [deal]
+        marks = ",".join("?" for _ in aliases)
+        row = store.conn.execute(
+            f"""
+            SELECT opened_at, closed_at FROM trades
+            WHERE ig_deal_id IN ({marks}) OR deal_reference IN ({marks})
+               OR CAST(id AS TEXT)=?
+            ORDER BY id DESC LIMIT 1
+            """,
+            (*aliases, *aliases, deal),
+        ).fetchone()
+        if row is None:
+            return None
+        opened = str(row["opened_at"] or "").replace("T", " ").replace("Z", "").strip()
+        closed = str(row["closed_at"] or "").replace("T", " ").replace("Z", "").strip()
+        if not opened or not closed:
+            return None
+        if not _raw_has_clock_time(opened) or not _raw_has_clock_time(closed):
+            return None
+        opened_ts = closed_ts = None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+            try:
+                opened_ts = datetime.strptime(opened[:19], fmt).timestamp()
+                break
+            except ValueError:
+                continue
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+            try:
+                closed_ts = datetime.strptime(closed[:19], fmt).timestamp()
+                break
+            except ValueError:
+                continue
+        if opened_ts is None or closed_ts is None:
+            return None
+        hold = float(closed_ts) - float(opened_ts)
+        if hold < 0 or hold > 7 * 24 * 3600:
+            return None
+        return hold
+    except Exception:
+        return None

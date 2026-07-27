@@ -58,6 +58,22 @@ class MLTrainingHooksTests(unittest.TestCase):
         record_ml_entry_from_signal("DEAL1", _signal(), {"size": 1.0})
         self.assertTrue(self.store.is_pending("DEAL1"))
 
+    @patch(
+        "alpha.micro_sniper_ml.latest_sniper_ml_snapshot",
+        return_value={"p_success": 0.733},
+    )
+    def test_entry_stamps_ml_score_at_entry(self, _snap: MagicMock) -> None:
+        from data.ml_training_store import peek_buffered_entry
+
+        record_ml_entry_from_signal(
+            "DIAAAAXML001", _signal(), {"size": 1.0, "p_success": 0.733}
+        )
+        buffered = peek_buffered_entry("DIAAAAXML001")
+        self.assertIsNotNone(buffered)
+        assert buffered is not None
+        self.assertAlmostEqual(float(buffered["ml_score_at_entry"]), 0.733)
+        self.assertAlmostEqual(float(buffered["p_success"]), 0.733)
+
     def test_entry_exit_append_to_store(self) -> None:
         record_ml_entry_from_signal("DEAL2", _signal(), {"size": 1.0}, fill_price=100.25)
         record_ml_exit_for_deal(

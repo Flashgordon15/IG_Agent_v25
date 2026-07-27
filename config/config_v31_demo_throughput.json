@@ -153,6 +153,12 @@
     "_note": "V37/V38: CFD QUANT_SNIPER keeps Instant/ENGINE_B_MICRO_SCALPER (when unpaused). SB MACRO_SENTINEL hard-disables Instant + Core-B micro — entries only via macro/directional + LTR/Trend-Retention. Forbid shared mutable gate/ML arrays across accounts.",
     "_v38_note": "2026-07-24 flat cutover: SB Instant/micro bleed (~19% WR) → sb_disable_* + sb_macro_ltr_entries_only. REST MICRO confirm fail-fast already in IGRestClient.confirm_deal (reload loads it)."
   },
+  "desk_intent": {
+    "setup_hold_sec": 20,
+    "hierarchy_debounce_sec": 12,
+    "path_a_setup_hold_sec": null,
+    "_note": "Quantum Terminal Desk Intent (UI): WAIT→SETUP must hold setup_hold_sec; hierarchy string debounced. path_a_setup_hold_sec is reserved — NOT wired into agent RAM (avoids restart); Path A already has selectivity/elastic gates. Instant/micro remain HARD OFF. Matching constants: terminal DESK_INTENT_SETUP_HOLD_MS / DESK_INTENT_HIERARCHY_DEBOUNCE_MS."
+  },
   "profit_run": {
     "enabled": true,
     "upl_threshold_gbp": 15.0,
@@ -566,8 +572,10 @@
     "stagnant_pnl_band_gbp": 0.85,
     "manager_tick_timeout_sec": 35,
     "manager_tick_stale_sec": 50,
+    "unmonitored_grace_sec": 45,
+    "flatten_unmonitored_after_grace": true,
     "single_exit_authority": "exit_execution_gate",
-    "_note": "All flattens route through exit_execution_gate (is_executing lock). Hard floor air-gap at \u2212\u00a3100 broker UPL."
+    "_note": "All flattens route through exit_execution_gate (is_executing lock). Hard floor air-gap at \u2212\u00a3100 broker UPL. Unmonitored (no GBP track) force-arms then fail-closed flattens after unmonitored_grace_sec — APP class RISK_STACK_DID_NOT_CUT."
   },
   "ml_learning": {
     "enabled": true,
@@ -647,6 +655,7 @@
   "profit_philosophy": {
     "enabled": true,
     "marginal_ml_veto": true,
+    "require_ml_probability": true,
     "min_ml_probability": 0.52,
     "session_hot_wr": 0.65,
     "session_cold_wr": 0.45,
@@ -654,7 +663,7 @@
     "session_cold_penalty_pts": 8.0,
     "recent_trades_lookback": 10,
     "min_recent_for_session_adj": 5,
-    "_note": "Skip marginal ML entries; tighten on cold session streaks toward 70% WR"
+    "_note": "Fail-closed: require real ML prob (not threshold 0.68 fallback); skip <0.52. 24 Jul had 31 losers below floor + 26 fake 0.68 stamps."
   },
   "ml_veto": {
     "enabled": true,

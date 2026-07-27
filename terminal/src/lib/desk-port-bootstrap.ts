@@ -109,9 +109,15 @@ async function bootstrapPortRest(
       all_ready:
         (fulfillment as { all_ready?: boolean }).all_ready ??
         (state as { all_ready?: boolean }).all_ready,
-      trading_paused:
-        (fulfillment as { trading_paused?: boolean }).trading_paused ??
-        (state as { trading_paused?: boolean }).trading_paused,
+      // Health is SoT for A2 entry freeze; do not prefer fulfillment=false over health=true.
+      trading_paused: (() => {
+        const h = (health as { trading_paused?: boolean } | null)?.trading_paused;
+        if (typeof h === "boolean") return h;
+        const f = (fulfillment as { trading_paused?: boolean }).trading_paused;
+        if (typeof f === "boolean") return f;
+        const s = (state as { trading_paused?: boolean }).trading_paused;
+        return typeof s === "boolean" ? s : undefined;
+      })(),
       market_quotes: (fulfillment as { market_quotes?: unknown }).market_quotes,
       trading_path_live: (ops as { trading_path_live?: boolean }).trading_path_live,
       trading_path_badge: (ops as { trading_path_badge?: string }).trading_path_badge,

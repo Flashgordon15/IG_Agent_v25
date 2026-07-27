@@ -17,8 +17,26 @@ from typing import Any
 from system.engine_log import log_engine
 
 _lock = threading.RLock()
-_STATE_PATH = Path(__file__).resolve().parents[1] / "data" / "strategy_improvement.json"
 _WIN_RATE_TARGET = 0.70
+
+
+def _state_path() -> Path:
+    """Persist under ``data_dir()`` (v31-production when APP_MODE applies).
+
+    Falls back to legacy ``src/data/strategy_improvement.json`` only when
+    ``data_dir()`` is unavailable — callers/review should treat legacy as
+    potentially contaminated.
+    """
+    try:
+        from system.paths import data_dir
+
+        return Path(data_dir()) / "strategy_improvement.json"
+    except Exception:
+        return Path(__file__).resolve().parents[1] / "data" / "strategy_improvement.json"
+
+
+def _legacy_state_path() -> Path:
+    return Path(__file__).resolve().parents[1] / "data" / "strategy_improvement.json"
 
 
 @dataclass
@@ -55,6 +73,8 @@ class StrategyImprovementState:
     epoch_started_at: float = 0.0
     last_overlay_hash: str = ""
     last_model_train_ts: float = 0.0
+    last_model_review_verdict: str = ""
+    last_model_epoch_annotated: bool = False
     closes: list[dict[str, Any]] = field(default_factory=list)
     by_exit_reason: dict[str, WindowStats] = field(default_factory=dict)
 
@@ -194,14 +214,36 @@ def record_managed_close(
     return session_slot
 
 
-def note_ml_model_trained() -> None:
-    """Call after auto_trainer completes — starts new measurement epoch."""
+def note_ml_model_trained(
+    *,
+    improvement_epoch: bool = True,
+    review_verdict: str | None = None,
+) -> None:
+    """Call after auto_trainer completes.
+
+    Always records ``last_model_train_ts``. Rotates ``strategy_epoch`` only when
+    ``improvement_epoch`` is True — callers must gate on ml_strategy_review
+    (skip when verdict is NOT_MEASURABLE / APP_BLOCKED / missing).
+    """
     global _state
     with _lock:
         _state.last_model_train_ts = time.time()
-        _state.strategy_epoch = f"ml_{int(time.time())}"
-        _state.epoch_started_at = time.time()
-        log_engine(f"strategy_improvement: ML retrain epoch {_state.strategy_epoch}")
+        verdict = str(review_verdict or "").strip().upper()
+        _state.last_model_review_verdict = verdict
+        if improvement_epoch:
+            _state.strategy_epoch = f"ml_{int(time.time())}"
+            _state.epoch_started_at = time.time()
+            _state.last_model_epoch_annotated = True
+            log_engine(
+                f"strategy_improvement: ML retrain epoch {_state.strategy_epoch}"
+                + (f" (review={verdict})" if verdict else "")
+            )
+        else:
+            _state.last_model_epoch_annotated = False
+            log_engine(
+                "strategy_improvement: ML model trained but improvement epoch "
+                f"SKIPPED (review_verdict={verdict or 'missing'})"
+            )
         _persist_unlocked()
 
 
@@ -283,30 +325,44 @@ def snapshot(*, window: int = 20) -> dict[str, Any]:
 
 def _persist_unlocked() -> None:
     try:
-        _STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        path = _state_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "strategy_epoch": _state.strategy_epoch,
             "epoch_started_at": _state.epoch_started_at,
             "last_overlay_hash": _state.last_overlay_hash,
             "last_model_train_ts": _state.last_model_train_ts,
+            "last_model_review_verdict": _state.last_model_review_verdict,
+            "last_model_epoch_annotated": _state.last_model_epoch_annotated,
             "closes": _state.closes[-200:],
         }
-        _STATE_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     except Exception:
         pass
 
 
 def load_persisted_state() -> None:
     global _state
-    if not _STATE_PATH.exists():
-        return
+    path = _state_path()
+    if not path.exists():
+        legacy = _legacy_state_path()
+        if legacy.exists() and legacy.resolve() != path.resolve():
+            path = legacy
+        else:
+            return
     try:
-        raw = json.loads(_STATE_PATH.read_text(encoding="utf-8"))
+        raw = json.loads(path.read_text(encoding="utf-8"))
         with _lock:
             _state.strategy_epoch = str(raw.get("strategy_epoch") or "init")
             _state.epoch_started_at = float(raw.get("epoch_started_at") or time.time())
             _state.last_overlay_hash = str(raw.get("last_overlay_hash") or "")
             _state.last_model_train_ts = float(raw.get("last_model_train_ts") or 0)
+            _state.last_model_review_verdict = str(
+                raw.get("last_model_review_verdict") or ""
+            )
+            _state.last_model_epoch_annotated = bool(
+                raw.get("last_model_epoch_annotated")
+            )
             closes = raw.get("closes")
             _state.closes = list(closes) if isinstance(closes, list) else []
     except Exception:
@@ -317,7 +373,9 @@ def _ensure_persisted_loaded() -> None:
     with _lock:
         if _state.closes:
             return
-    if _STATE_PATH.exists():
+    path = _state_path()
+    legacy = _legacy_state_path()
+    if path.exists() or legacy.exists():
         load_persisted_state()
 
 

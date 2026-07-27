@@ -1902,9 +1902,13 @@ def main() -> None:
     _boot_milestone("pre_runtime")
 
     try:
-        from runtime.pid_registry import write_agent_pid
+        from runtime.pid_registry import reconcile_agent_pid_with_self, write_agent_pid
 
         written = write_agent_pid()
+        try:
+            reconcile_agent_pid_with_self()
+        except Exception:
+            pass
         if written:
             _log_engine(f"pid_registry: agent.pid mirrored → {', '.join(written)}")
     except Exception as exc:

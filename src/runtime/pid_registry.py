@@ -59,6 +59,41 @@ def write_agent_pid(pid: int | None = None) -> list[str]:
     return written
 
 
+def reconcile_agent_pid_with_self(*, api_port: int | None = None) -> list[str]:
+    """Rewrite pid file(s) when this process owns the API listen port.
+
+    Fixes stale lane pid files left by a failed/raced spawn that wrote a
+    different DETACH_PID while we kept the port.
+    """
+    me = os.getpid()
+    port = api_port
+    if port is None:
+        try:
+            port = int(os.environ.get("IG_API_PORT") or os.environ.get("PORT") or "0")
+        except ValueError:
+            port = 0
+    if port:
+        try:
+            import subprocess
+
+            out = subprocess.run(
+                ["lsof", "-nP", f"-iTCP:{int(port)}", "-sTCP:LISTEN", "-t"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            holders = [
+                int(x.strip())
+                for x in (out.stdout or "").splitlines()
+                if x.strip().isdigit()
+            ]
+            if holders and me not in holders:
+                return []
+        except Exception:
+            pass
+    return write_agent_pid(me)
+
+
 def write_ui_pid(pid: int | None = None) -> str | None:
     """Write Quantum Terminal / pywebview shell pid."""
     want = int(pid or os.getpid())

@@ -9,24 +9,24 @@
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>CFBundleIdentifier</key>
-  <string>com.igagent.flightdeck</string>
+  <string>com.igagent.trading-desk</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
-  <string>Iron Cage Flight Deck</string>
+  <string>IG Trading Desk</string>
   <key>CFBundleDisplayName</key>
-  <string>Iron Cage Flight Deck</string>
+  <string>IG Trading Desk</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>29.1</string>
+  <string>31.1</string>
   <key>CFBundleVersion</key>
-  <string>291</string>
+  <string>31.1.0</string>
   <key>LSMinimumSystemVersion</key>
   <string>12.0</string>
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSAppleEventsUsageDescription</key>
-  <string>Iron Cage Flight Deck opens the native trading cockpit after boot.</string>
+  <string>IG Trading Desk opens the native v31.1 trading agent dashboard.</string>
 </dict>
 </plist>

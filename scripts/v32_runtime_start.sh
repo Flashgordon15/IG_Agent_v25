@@ -140,10 +140,16 @@ generate_dual_plist() {
     <key>CORE_DETACHED</key>
     <string>${CORE_DETACHED:-FALSE}</string>
   </dict>
+  <!-- KeepAlive+RunAtLoad required: watchdog.sh is a long-running dual-port
+       observer loop. With both false, bootstrap loaded the label but never
+       supervised :8080/:8081. Dual mode defers single-engine restarts so it
+       does not fight live twins (heal via v32_runtime_start.sh). -->
   <key>RunAtLoad</key>
-  <false/>
+  <true/>
   <key>KeepAlive</key>
-  <false/>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
   <key>StandardOutPath</key>
   <string>${DATA_ROOT}/logs/watchdog_v32_dual.log</string>
   <key>StandardErrorPath</key>
@@ -577,13 +583,39 @@ launch_engine() {
     --account-id="$account" \
     --origin="$origin"
   local pid="${DETACH_PID}"
+  # Write spawn pid immediately, then reconcile to the actual LISTEN holder
+  # after bind (avoids stale state_sb/agent.pid when heal/relaunch races).
   echo "$pid" > "$pid_file"
+  local listener="" attempt=0
+  while (( attempt < 40 )); do
+    listener="$(lsof -nP -iTCP:"${port}" -sTCP:LISTEN -t 2>/dev/null | head -1 || true)"
+    if [[ -n "$listener" ]]; then
+      if [[ "$listener" != "$pid" ]]; then
+        echo -e "${YEL}${label}: pid file reconciled ${pid} → listener ${listener} on :${port}${NC}" >&2
+      fi
+      echo "$listener" > "$pid_file"
+      pid="$listener"
+      break
+    fi
+    # Spawn died before bind — leave spawn pid for status diagnostics.
+    if ! kill -0 "$pid" 2>/dev/null; then
+      echo -e "${YEL}${label}: spawn pid ${pid} exited before :${port} listen${NC}" >&2
+      break
+    fi
+    sleep 0.25
+    attempt=$((attempt + 1))
+  done
   echo "$pid"
 }
 
 start_both() {
   require_python
   ensure_dirs
+  # Durable interim offline — never auto/manual start twins while hold is set.
+  if [[ -f "${DATA_ROOT}/state/desk_offline_hold.json" ]] \
+    || [[ -f "${ROOT}/src/data/state/desk_offline_hold.json" ]]; then
+    die "desk_offline_hold active — refusing start. Clear with: PYTHONPATH=src .venv/bin/python3 -c \"from runtime.desk_offline_hold import clear_desk_offline_hold; print(clear_desk_offline_hold())\""
+  fi
   check_flat_book
   # Forceful env reset FIRST — fuser -k + lock flush for clean baseline.
   forceful_environmental_reset
@@ -594,6 +626,7 @@ start_both() {
     die "Ports :${CFD_PORT}/:${SB_PORT} still bound after eviction — resolve manually (desk_deploy runbook)"
   fi
   # Clear prior stop/hold flags so twin boot is not blocked by v32 stop or orchestrator port_offline hold.
+  # Never clears desk_offline_hold (explicit operator reopen required).
   PYTHONPATH="${PYTHONPATH}" "$PYTHON_BIN" -c "from system.shutdown_cleanup import clear_manual_stop; clear_manual_stop()" 2>/dev/null || true
   PYTHONPATH="${PYTHONPATH}" "$PYTHON_BIN" -c "
 from system.startup_hold_clear import clear_stale_entry_holds_if_flat

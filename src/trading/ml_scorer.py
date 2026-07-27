@@ -162,24 +162,45 @@ class MLScorer:
             df["atr_ratio"] = df["atr"]
             df["spread_ratio"] = df["spread"] if "spread" in df.columns else 0.0
 
-        # Core features always used when present; optional tier/slot only if
-        # enough labelled rows carry them (keeps legacy 2-feature models safe).
+        # Core features always used when present; widened OHLC/regime set is
+        # included when ≥10% of labelled rows carry the column (legacy 2-feature
+        # CSVs keep working). Optional tier/slot follow the same fill gate.
+        from ml.replay_features import FEATURE_NAMES as _WIDENED_FEATURES
+
         core_features = [
             "adjusted_score",
             "raw_score",
             "rsi",
             "atr_ratio",
+            "spread_ratio",
         ]
-        optional_features = ["profit_tier_pct", "session_slot_idx"]
+        optional_features = [
+            "profit_tier_pct",
+            "session_slot_idx",
+            "range_ratio",
+            "ret_1",
+            "ret_3",
+            "ret_6",
+            "ret_12",
+            "momentum_12",
+            "vol_regime_idx",
+            "session_window_idx",
+        ]
+        # Prefer the documented widened order when columns exist.
+        ordered = [c for c in _WIDENED_FEATURES if c in df.columns]
         keep = [c for c in core_features if c in df.columns]
+        for c in ordered:
+            if c not in keep and c in df.columns:
+                keep.append(c)
         n_rows = max(1, len(df))
         for col in optional_features:
-            if col not in df.columns:
+            if col not in df.columns or col in keep:
                 continue
             filled = df[col].notna().sum()
             if filled / n_rows >= 0.10:
                 keep.append(col)
         X = df[keep].copy()
+        X = X.fillna(0.0)
         if "fired" in X.columns:
             X["fired"] = X["fired"].astype(int)
 

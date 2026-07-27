@@ -309,14 +309,50 @@ def _is_sb_lane_process() -> bool:
     return product in ("SPREADBET", "SPREAD_BET")
 
 
+def epic_hard_policy_blocked(
+    epic: str, cfg: Any | None = None
+) -> tuple[bool, str]:
+    """Durable epic policy for last-line order reject (exclude + SB allowlist).
+
+    Does not consult active-stack / exploration — those are soft dispatch gates.
+    Fail-closed callers treat exceptions as blocked.
+    """
+    key = str(epic or "").strip()
+    if not key:
+        return True, "epic_policy_empty"
+    try:
+        if cfg is None:
+            from system.config_loader import get_config
+
+            cfg = get_config()
+        dual: dict[str, Any] = {}
+        if cfg is not None and hasattr(cfg, "get"):
+            raw = cfg.get("dual_core") or {}
+            if isinstance(raw, dict):
+                dual = raw
+        excluded = {
+            str(e).strip() for e in (dual.get("exclude_from_hot_path") or []) if str(e).strip()
+        }
+        if key in excluded:
+            return True, f"epic_policy_excluded:{key}"
+        if _is_sb_lane_process():
+            allow = _sb_hot_path_allowlist(cfg)
+            if allow is not None and key not in allow:
+                return True, f"epic_policy_sb_allowlist:{key}"
+        return False, ""
+    except Exception as exc:
+        return True, f"epic_policy_fail_closed:{type(exc).__name__}"
+
+
 def epic_allowed_on_hot_path(epic: str, cfg: Any | None = None) -> bool:
     """Reject dispatch on epics outside active stack or on exclude list.
 
-    Config ``exclude_from_hot_path`` is authoritative. The desk hot-path epic
-    (DOW) must never be false-blocked by in-memory stack races or chop freeze —
-    those gates belong downstream (regime veto / strategy matrix), not here.
-    Misleading ``hot_path_epic_excluded`` logs for DOW starve fills while
-    ``trading_path_live`` stays green.
+    Config ``exclude_from_hot_path`` is authoritative and checked FIRST — never
+    bypassed by ranked/failover early-allow (Nikkei/DAX APP leak fix).
+
+    The desk hot-path epic (DOW) must never be false-blocked by in-memory stack
+    races or chop freeze — those gates belong downstream (regime veto /
+    strategy matrix), not here.
 
     SB lane: ``sb_hot_path_allowlist`` (default DOW-only) blocks Gold/EURUSD noise.
 
@@ -326,23 +362,13 @@ def epic_allowed_on_hot_path(epic: str, cfg: Any | None = None) -> bool:
     if not key:
         return False
 
-    # SB DOW-only until non-DOW epics are PnL-certified.
-    if _is_sb_lane_process():
-        allow = _sb_hot_path_allowlist(cfg)
-        if allow is not None and key not in allow:
-            return False
-        # Ranked / failover promotion — entry-eligible without waiting for
-        # stack eviction races (still gated by rotation_failover_enabled).
-        try:
-            from runtime.rotation_failover import failover_allows_epic
-
-            if failover_allows_epic(key, cfg):
-                return True
-        except Exception:
-            pass
-
+    # Authoritative exclude — always win over failover / allowlist promote.
     excluded: set[str] = set()
     try:
+        if cfg is None:
+            from system.config_loader import get_config
+
+            cfg = get_config()
         if cfg is not None and hasattr(cfg, "get"):
             dual = cfg.get("dual_core") or {}
             if isinstance(dual, dict):
@@ -350,14 +376,28 @@ def epic_allowed_on_hot_path(epic: str, cfg: Any | None = None) -> bool:
                     str(e).strip() for e in (dual.get("exclude_from_hot_path") or [])
                 }
                 if dual.get("forex_rotation_locked"):
-                    # Config-level forex lock — only EUR/GBP stack (handled below
-                    # via active stack / exploration); DOW is not authoritative.
                     if key == "IX.D.DOW.IFM.IP":
                         return False
     except Exception:
         excluded = set()
     if key in excluded:
         return False
+
+    # SB DOW-only / ranked allowlist until non-DOW epics are PnL-certified.
+    if _is_sb_lane_process():
+        allow = _sb_hot_path_allowlist(cfg)
+        if allow is not None and key not in allow:
+            return False
+        # Ranked / failover promotion — entry-eligible without waiting for
+        # stack eviction races (still gated by rotation_failover_enabled).
+        # Exclude already checked above — never promote Nikkei/DAX.
+        try:
+            from runtime.rotation_failover import failover_allows_epic
+
+            if failover_allows_epic(key, cfg):
+                return True
+        except Exception:
+            pass
 
     # multi_market_promote: prepared gates stay OFF until enabled; Nikkei never
     # auto-promotes (nikkei_hot_path must be explicit true + removed from exclude).
@@ -2043,12 +2083,14 @@ def lite_valve_block_status() -> str:
     except Exception:
         pass
     try:
-        from api.agent_control import is_paused
+        from api.agent_control import new_entries_hard_blocked
 
-        if is_paused():
-            reasons.append("api_trading_paused")
+        blocked, pause_reason = new_entries_hard_blocked()
+        if blocked:
+            reasons.append(pause_reason or "api_trading_paused")
     except Exception:
-        pass
+        # Fail closed — never let a pause-check error open the valve.
+        reasons.append("api_trading_paused_fail_closed")
     try:
         from runtime.deploy_hold import is_deploy_hold_active
 
@@ -2131,12 +2173,14 @@ def lite_valve_block_status() -> str:
 
 
 def is_api_trading_paused() -> bool:
+    """True when process pause or CFD A2 marker blocks new entries (fail closed)."""
     try:
-        from api.agent_control import is_paused
+        from api.agent_control import new_entries_hard_blocked
 
-        return bool(is_paused())
+        blocked, _reason = new_entries_hard_blocked()
+        return bool(blocked)
     except Exception:
-        return False
+        return True
 
 
 ROUTE_LIMIT_CHASE_HF = "limit_chase_hf"
@@ -3387,10 +3431,11 @@ def resolve_core_b_gate_stack() -> dict[str, Any]:
     except Exception:
         pass
     try:
-        from api.agent_control import is_paused
+        from api.agent_control import new_entries_hard_blocked
 
-        if is_paused():
-            risk_reasons.append("api_trading_paused")
+        blocked, pause_reason = new_entries_hard_blocked()
+        if blocked:
+            risk_reasons.append(pause_reason or "api_trading_paused")
     except Exception:
         pass
     try:

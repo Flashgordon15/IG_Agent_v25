@@ -112,7 +112,7 @@ function sniperConversion(
     (r) => r.statusKind === "long" || r.statusKind === "short",
   ).length;
   const proxy = scanner.filter((r) => r.statusKind === "proxy").length;
-  const stack = scanner.filter((r) => r.inActiveStack).length;
+  const stack = scanner.filter((r) => r.inActiveStack || r.inPromoted).length;
   return `${armed} ARMED · ${stack} STACK · ${proxy} PROXY · ${openCount} OPEN`;
 }
 

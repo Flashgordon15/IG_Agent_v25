@@ -7,18 +7,20 @@ Writes SoT under IG_DATA_ROOT for Cursor / operator handoff.
 
 from __future__ import annotations
 
+import csv
 import json
 import os
 import socket
+import statistics
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 PHASE = 2
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 DEFAULT_PORTS = {
     "cfd": int(os.environ.get("IG_GUI_SUP_CFD_PORT", "8080")),
     "sb": int(os.environ.get("IG_GUI_SUP_SB_PORT", "8081")),
@@ -29,8 +31,23 @@ CASH_NEAR_EQUAL_GBP = 2.0
 HISTORY_MAX_LINES = 500
 LOG_TAIL_BYTES = int(os.environ.get("IG_GUI_SUP_LOG_TAIL_BYTES", "65536"))
 DOW_EPIC = "IX.D.DOW.IFM.IP"
+NIKKEI_EPIC = "IX.D.NIKKEI.IFM.IP"
 SILENCE_MINUTES = float(os.environ.get("IG_GUI_SUP_SILENCE_MINUTES", "30"))
 AUTO_HEAL_DEFAULT = os.environ.get("IG_GUI_SUP_AUTO_HEAL", "0").strip() in ("1", "true", "True", "yes")
+
+# --- Phase-2 desk integrity thresholds (env-overridable) ---
+BLEED_WINDOW_MINUTES = float(os.environ.get("IG_GUI_SUP_BLEED_WINDOW_MINUTES", "180"))
+BLEED_MIN_TRADES = int(os.environ.get("IG_GUI_SUP_BLEED_MIN_TRADES", "5"))
+BLEED_MAX_WR = float(os.environ.get("IG_GUI_SUP_BLEED_MAX_WR", "0.25"))  # FAIL when WR < this
+BLEED_MAX_NET_GBP = float(os.environ.get("IG_GUI_SUP_BLEED_MAX_NET_GBP", "-50.0"))  # FAIL when net <= this
+MICRO_HOLD_MEDIAN_SEC = float(os.environ.get("IG_GUI_SUP_MICRO_HOLD_MEDIAN_SEC", "60"))
+MICRO_HOLD_AVG_SEC = float(os.environ.get("IG_GUI_SUP_MICRO_HOLD_AVG_SEC", "90"))
+MICRO_HOLD_MIN_SAMPLES = int(os.environ.get("IG_GUI_SUP_MICRO_HOLD_MIN_SAMPLES", "3"))
+SESSION_KILL_NET_GBP = float(os.environ.get("IG_GUI_SUP_SESSION_KILL_NET_GBP", "-150.0"))
+POST_CUTOVER_MINUTES = float(os.environ.get("IG_GUI_SUP_POST_CUTOVER_MINUTES", "30"))
+POST_CUTOVER_HOLD_SEC = float(os.environ.get("IG_GUI_SUP_POST_CUTOVER_HOLD_SEC", "120"))
+FLICKER_WINDOW_MINUTES = float(os.environ.get("IG_GUI_SUP_FLICKER_WINDOW_MINUTES", "15"))
+FLICKER_MAX_FLIPS = int(os.environ.get("IG_GUI_SUP_FLICKER_MAX_FLIPS", "6"))
 
 
 def _repo_root() -> Path:
@@ -157,10 +174,41 @@ def _read_gate_funnel(data_root: Path) -> dict[str, Any]:
         alt = data_root / "reports" / "gate_funnel_report.json"
         path = alt if alt.is_file() else path
     if not path.is_file():
-        return {}
+        return {"status": "unavailable"}
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-        return raw if isinstance(raw, dict) else {}
+        if not isinstance(raw, dict):
+            return {"status": "unavailable"}
+        try:
+            from trading.gate_funnel_counter import classify_funnel_status
+
+            raw = dict(raw)
+            raw["status"] = classify_funnel_status(raw)
+        except Exception:
+            raw.setdefault("status", "ok")
+        return raw
+    except Exception:
+        return {"status": "unavailable"}
+
+
+def _latest_ml_strategy_review(data_root: Path) -> dict[str, Any]:
+    """Read newest ml_strategy_review_*.json (observe-only)."""
+    try:
+        from diagnostics.ml_strategy_review import load_latest_review_verdict
+
+        verdict, path = load_latest_review_verdict(data_root)
+        if not path:
+            return {}
+        payload: dict[str, Any] = {"verdict": verdict, "path": str(path)}
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                payload["day"] = raw.get("day")
+                payload["next_one_step"] = raw.get("next_one_step")
+                payload["generated_at"] = raw.get("generated_at")
+        except Exception:
+            pass
+        return payload
     except Exception:
         return {}
 
@@ -522,9 +570,886 @@ def _cheap_log_tick_smell(log_path: Path, *, max_bytes: int = LOG_TAIL_BYTES) ->
     return out
 
 
+def _parse_iso_ts(raw: str | None) -> datetime | None:
+    s = (raw or "").strip()
+    if not s:
+        return None
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _journal_path(data_root: Path) -> Path:
+    return data_root / "metrics" / "daily_journal.csv"
+
+
+def _ml_outcomes_path(data_root: Path) -> Path:
+    return data_root / "metrics" / "ml_trade_outcomes.jsonl"
+
+
+def _epic_from_journal_row(row: dict[str, Any]) -> str | None:
+    for key in ("Epic", "epic", "Instrument", "Asset"):
+        val = str(row.get(key) or "").strip()
+        if val.startswith(("IX.", "CS.", "KA.")):
+            return val
+    # Infer from common labels when epic column absent
+    asset = str(row.get("Asset") or row.get("asset") or "").upper()
+    if "NIKKEI" in asset or "JAPAN" in asset:
+        return NIKKEI_EPIC
+    if "DOW" in asset or "WALL" in asset:
+        return DOW_EPIC
+    if "GOLD" in asset:
+        return "CS.D.CFPGOLD.CFP.IP"
+    if "EUR" in asset:
+        return "CS.D.EURUSD.CFD.IP"
+    return None
+
+
+def _read_recent_closes(
+    data_root: Path,
+    *,
+    window_minutes: float,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Recent DI* closes from daily_journal (+ hold enrichment from ml outcomes)."""
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(minutes=float(window_minutes))
+    holds_by_deal: dict[str, float] = {}
+    ml_path = _ml_outcomes_path(data_root)
+    if ml_path.is_file():
+        try:
+            with ml_path.open(encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except Exception:
+                        continue
+                    if not isinstance(row, dict):
+                        continue
+                    did = str(row.get("deal_id") or row.get("DealID") or "").strip()
+                    hs = row.get("hold_sec")
+                    if hs is None:
+                        hs = row.get("hold_duration_seconds")
+                    if not did or hs is None:
+                        continue
+                    try:
+                        holds_by_deal[did] = float(hs)
+                    except (TypeError, ValueError):
+                        continue
+        except OSError:
+            pass
+
+    out: list[dict[str, Any]] = []
+    path = _journal_path(data_root)
+    if not path.is_file():
+        return out
+    try:
+        with path.open(encoding="utf-8", newline="") as fh:
+            reader = csv.DictReader(fh)
+            for row in reader:
+                did = str(row.get("DealID") or "").strip()
+                if not did.startswith("DI"):
+                    continue
+                ts = _parse_iso_ts(row.get("Timestamp"))
+                if ts is None or ts < cutoff:
+                    continue
+                try:
+                    pnl = float(row.get("RealizedPnL_GBP") or 0.0)
+                except (TypeError, ValueError):
+                    pnl = 0.0
+                hold: float | None = None
+                raw_hold = row.get("HoldSec")
+                if raw_hold not in (None, ""):
+                    try:
+                        hold = float(raw_hold)
+                    except (TypeError, ValueError):
+                        hold = None
+                if hold is None and did in holds_by_deal:
+                    hold = holds_by_deal[did]
+                out.append(
+                    {
+                        "deal_id": did,
+                        "ts": ts,
+                        "pnl_gbp": pnl,
+                        "hold_sec": hold,
+                        "epic": _epic_from_journal_row(row),
+                        "account_id": str(row.get("AccountID") or "").strip() or None,
+                        "product_type": str(row.get("ProductType") or "").strip() or None,
+                        "engine_origin": str(row.get("EngineOrigin") or "").strip() or None,
+                    }
+                )
+    except OSError:
+        return out
+    out.sort(key=lambda r: r["ts"])
+    return out
+
+
+def _close_stats(closes: list[dict[str, Any]]) -> dict[str, Any]:
+    n = len(closes)
+    if n == 0:
+        return {
+            "n": 0,
+            "wins": 0,
+            "losses": 0,
+            "wr": None,
+            "net_gbp": 0.0,
+            "holds": [],
+            "median_hold_sec": None,
+            "avg_hold_sec": None,
+            "hold_samples": 0,
+        }
+    wins = sum(1 for c in closes if float(c.get("pnl_gbp") or 0) > 0)
+    losses = sum(1 for c in closes if float(c.get("pnl_gbp") or 0) < 0)
+    net = sum(float(c.get("pnl_gbp") or 0) for c in closes)
+    holds = [float(c["hold_sec"]) for c in closes if c.get("hold_sec") is not None]
+    return {
+        "n": n,
+        "wins": wins,
+        "losses": losses,
+        "wr": (wins / n) if n else None,
+        "net_gbp": round(net, 4),
+        "holds": holds,
+        "median_hold_sec": round(statistics.median(holds), 3) if holds else None,
+        "avg_hold_sec": round(statistics.mean(holds), 3) if holds else None,
+        "hold_samples": len(holds),
+    }
+
+
+def _calendar_day_net_gbp(data_root: Path, *, day: str | None = None) -> dict[str, Any]:
+    """Today's calendar-day journal net (London-ish date string YYYY-MM-DD)."""
+    day = day or datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
+    closes = _read_recent_closes(data_root, window_minutes=36 * 60)
+    day_closes = [c for c in closes if c["ts"].astimezone().strftime("%Y-%m-%d") == day]
+    stats = _close_stats(day_closes)
+    stats["day"] = day
+    return stats
+
+
+def _reopen_witness_path(data_root: Path) -> Path:
+    return data_root / "state" / "operator_reopen_witness.json"
+
+
+def write_reopen_witness(
+    data_root: Path,
+    *,
+    day_net_at_reopen: float | None = None,
+    reason: str = "operator_reopen_live_witness",
+) -> dict[str, Any]:
+    """Stamp witness mode so pre-halt journal damage does not instantly re-lock."""
+    path = _reopen_witness_path(data_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = {
+        "active": True,
+        "reason": reason,
+        "reopened_at": _now_iso(),
+        "reopened_at_epoch": time.time(),
+        "day_net_at_reopen_gbp": day_net_at_reopen,
+        "policy": (
+            "ensure_bleed_halt only on NEW closes after reopened_at_epoch "
+            "or day_net worsening vs day_net_at_reopen; Instant/micro stay HARD OFF"
+        ),
+    }
+    path.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
+    return body
+
+
+def _load_reopen_witness(data_root: Path) -> dict[str, Any] | None:
+    path = _reopen_witness_path(data_root)
+    if not path.is_file():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(raw, dict) or raw.get("active") is False:
+        return None
+    return raw
+
+
+def _load_bleed_lock(data_root: Path) -> dict[str, Any] | None:
+    try:
+        from runtime.gui_desk_supervisor_heal import load_operator_bleed_lock
+
+        return load_operator_bleed_lock(root=data_root)
+    except Exception:
+        # Fallback: direct glob
+        for sub in ("state_cfd", "state_sb", "state"):
+            d = data_root / sub
+            if not d.is_dir():
+                continue
+            for path in sorted(d.glob("operator_bleed_lock_*.json")):
+                try:
+                    raw = json.loads(path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if isinstance(raw, dict) and raw.get("active", True) is not False:
+                    if raw.get("do_not_auto_resume", True) is not False:
+                        out = dict(raw)
+                        out["_path"] = str(path)
+                        return out
+        return None
+
+
+def _flicker_state_path(data_root: Path) -> Path:
+    return data_root / "state" / "gui_supervisor_flicker.json"
+
+
+def _update_flicker_tracker(
+    *,
+    data_root: Path,
+    prefer_epic: str | None,
+    setup_epics: list[str],
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Track prefer/SETUP flips across supervisor cycles (cheap disk state)."""
+    now = float(now if now is not None else time.time())
+    path = _flicker_state_path(data_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    state: dict[str, Any] = {"events": []}
+    if path.is_file():
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                state = raw
+        except Exception:
+            state = {"events": []}
+    events = [e for e in (state.get("events") or []) if isinstance(e, dict)]
+    cutoff = now - float(FLICKER_WINDOW_MINUTES) * 60.0
+    events = [e for e in events if float(e.get("ts") or 0) >= cutoff]
+    prev_prefer = state.get("last_prefer_epic")
+    prev_setup = set(str(x) for x in (state.get("last_setup_epics") or []))
+    cur_setup = set(str(x) for x in setup_epics if str(x).strip())
+    flipped = False
+    if prev_prefer is not None and str(prefer_epic or "") != str(prev_prefer or ""):
+        events.append(
+            {
+                "ts": now,
+                "kind": "prefer",
+                "from": prev_prefer,
+                "to": prefer_epic,
+            }
+        )
+        flipped = True
+    if prev_setup and cur_setup != prev_setup:
+        events.append(
+            {
+                "ts": now,
+                "kind": "setup",
+                "from": sorted(prev_setup),
+                "to": sorted(cur_setup),
+            }
+        )
+        flipped = True
+    state = {
+        "last_prefer_epic": prefer_epic,
+        "last_setup_epics": sorted(cur_setup),
+        "events": events[-80:],
+        "flip_count_window": len(events),
+        "window_minutes": FLICKER_WINDOW_MINUTES,
+        "threshold_flips": FLICKER_MAX_FLIPS,
+        "updated_at": now,
+        "last_flipped": flipped,
+    }
+    path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+    return state
+
+
+def _extract_rotation_gui_signals(rotation: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(rotation, dict):
+        return {
+            "prefer_epic": None,
+            "preference_reason": None,
+            "setup_epics": [],
+            "wait_epics": [],
+            "rows": [],
+            "per_epic": {},
+        }
+    rot = rotation.get("rotation") if isinstance(rotation.get("rotation"), dict) else rotation
+    ranked = rot.get("ranked_rotator") if isinstance(rot.get("ranked_rotator"), dict) else {}
+    prefer = (
+        rot.get("prefer_epic")
+        or rotation.get("prefer_epic")
+        or ranked.get("prefer_epic")
+        or ranked.get("dominant")
+    )
+    prefer_s = str(prefer).strip() if prefer else None
+    reason = rot.get("preference_reason") or rotation.get("preference_reason") or ranked.get("preference_reason")
+    rows = list(ranked.get("rows") or [])
+    per_epic = (
+        rot.get("per_epic_confidence")
+        or rotation.get("per_epic_confidence")
+        or ranked.get("per_epic_confidence")
+        or {}
+    )
+    if not isinstance(per_epic, dict):
+        per_epic = {}
+    setup_epics: list[str] = []
+    wait_epics: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        epic = str(row.get("epic") or "").strip()
+        mode = str(row.get("mode") or "").upper()
+        if not epic:
+            continue
+        if mode == "SETUP":
+            setup_epics.append(epic)
+        elif mode == "WAIT":
+            wait_epics.append(epic)
+    for epic, meta in per_epic.items():
+        if not isinstance(meta, dict):
+            continue
+        mode = str(meta.get("mode") or "").upper()
+        e = str(epic).strip()
+        if mode == "SETUP" and e and e not in setup_epics:
+            setup_epics.append(e)
+        if mode == "WAIT" and e and e not in wait_epics:
+            wait_epics.append(e)
+    return {
+        "prefer_epic": prefer_s,
+        "preference_reason": reason,
+        "setup_epics": setup_epics,
+        "wait_epics": wait_epics,
+        "rows": rows,
+        "per_epic": per_epic,
+    }
+
+
+def _sb_aggregate_setup_mode(ops_strip: dict[str, Any] | None, gui_sig: dict[str, Any]) -> str | None:
+    """Approximate Intent SB aggregate: SETUP only when sniper approved above threshold."""
+    sniper = None
+    if isinstance(ops_strip, dict):
+        sniper = ops_strip.get("sniper_ml") if isinstance(ops_strip.get("sniper_ml"), dict) else None
+    if isinstance(sniper, dict) and sniper.get("p_success") is not None:
+        try:
+            p = float(sniper.get("p_success"))
+        except (TypeError, ValueError):
+            p = None
+        try:
+            thr = float(sniper.get("threshold")) if sniper.get("threshold") is not None else 0.68
+        except (TypeError, ValueError):
+            thr = 0.68
+        approved = sniper.get("approved") is True
+        if p is not None:
+            return "SETUP" if approved and p >= thr else "WAIT"
+    # Fallback: prefer epic mode from ranked
+    prefer = gui_sig.get("prefer_epic")
+    per = gui_sig.get("per_epic") if isinstance(gui_sig.get("per_epic"), dict) else {}
+    if prefer and prefer in per and isinstance(per[prefer], dict):
+        mode = str(per[prefer].get("mode") or "").upper()
+        if mode in ("SETUP", "WAIT"):
+            return mode
+    return None
+
+
+def _phase2_integrity_checks(
+    *,
+    data_root: Path,
+    findings: list[dict[str, Any]],
+    area_grades: dict[str, str],
+    dual_cfg: dict[str, Any],
+    sb_paused: bool | None,
+    cfd_paused: bool | None,
+    sb_bundle: dict[str, Any],
+    cfd_bundle: dict[str, Any],
+    path_a_claimed: bool,
+) -> dict[str, Any]:
+    """BLEED / MICRO_HOLD / GUI_LIE / FLICKER / SESSION_KILL / POST_CUTOVER / EPIC_POLICY / HALTED."""
+    meta: dict[str, Any] = {
+        "halted": False,
+        "ensure_bleed_halt": False,
+        "alerts": [],
+        "bleed_lock": None,
+        "journal_window": {},
+        "session_day": {},
+        "post_cutover": {},
+        "flicker": {},
+        "gui_signals": {},
+    }
+    alerts: list[str] = []
+
+    lock = _load_bleed_lock(data_root)
+    meta["bleed_lock"] = (
+        {k: lock.get(k) for k in ("active", "reason", "do_not_auto_resume", "mode", "_path", "date") if k in lock}
+        if isinstance(lock, dict)
+        else None
+    )
+    locked = bool(lock)
+    witness = _load_reopen_witness(data_root)
+    meta["reopen_witness"] = (
+        {
+            k: witness.get(k)
+            for k in ("active", "reason", "reopened_at", "reopened_at_epoch", "day_net_at_reopen_gbp")
+            if isinstance(witness, dict) and k in witness
+        }
+        if isinstance(witness, dict)
+        else None
+    )
+    witness_epoch = None
+    if isinstance(witness, dict) and witness.get("reopened_at_epoch") is not None:
+        try:
+            witness_epoch = float(witness.get("reopened_at_epoch"))
+        except (TypeError, ValueError):
+            witness_epoch = None
+
+    window_closes = _read_recent_closes(data_root, window_minutes=BLEED_WINDOW_MINUTES)
+    window_stats = _close_stats(window_closes)
+    window_stats["window_minutes"] = BLEED_WINDOW_MINUTES
+    meta["journal_window"] = window_stats
+
+    day_stats = _calendar_day_net_gbp(data_root)
+    meta["session_day"] = day_stats
+
+    cutover_closes = _read_recent_closes(data_root, window_minutes=POST_CUTOVER_MINUTES)
+    cutover_stats = _close_stats(cutover_closes)
+    cutover_stats["window_minutes"] = POST_CUTOVER_MINUTES
+    meta["post_cutover"] = cutover_stats
+
+    # Post-reopen: only NEW closes arm auto-lock (pre-halt journal must not instantly re-lock).
+    fresh_closes = window_closes
+    if witness_epoch is not None:
+        fresh_closes = [
+            c
+            for c in window_closes
+            if float(c["ts"].timestamp()) >= witness_epoch
+        ]
+    fresh_stats = _close_stats(fresh_closes)
+    meta["journal_fresh_since_reopen"] = {
+        **fresh_stats,
+        "witness_epoch": witness_epoch,
+    }
+
+    # --- HALTED / BLEED lock posture ---
+    if locked:
+        meta["halted"] = True
+        alerts.append("HALTED")
+        alerts.append("BLEED")
+        area_grades["halted_posture"] = "FAIL"
+        findings.append(
+            _finding(
+                rank=1,
+                severity="fail",
+                klass="ops",
+                title="HALTED: operator bleed lock active (do_not_auto_resume)",
+                detail=(
+                    f"lock={lock.get('_path')} reason={lock.get('reason')} — "
+                    "heals must NOT POST /api/start; chip must not show PASS"
+                ),
+                needs_ops=True,
+                evidence={"lock": meta["bleed_lock"]},
+            )
+        )
+    else:
+        area_grades["halted_posture"] = "PASS"
+
+    # --- BLEED (recent WR/net) ---
+    bleed_hit = False
+    wr = window_stats.get("wr")
+    net = float(window_stats.get("net_gbp") or 0.0)
+    n = int(window_stats.get("n") or 0)
+    fresh_n = int(fresh_stats.get("n") or 0)
+    fresh_wr = fresh_stats.get("wr")
+    fresh_net = float(fresh_stats.get("net_gbp") or 0.0)
+    bleed_window_hit = n >= BLEED_MIN_TRADES and (
+        (wr is not None and float(wr) < BLEED_MAX_WR) or net <= BLEED_MAX_NET_GBP
+    )
+    bleed_fresh_hit = fresh_n >= BLEED_MIN_TRADES and (
+        (fresh_wr is not None and float(fresh_wr) < BLEED_MAX_WR) or fresh_net <= BLEED_MAX_NET_GBP
+    )
+    if bleed_window_hit:
+        bleed_hit = True
+        if "BLEED" not in alerts:
+            alerts.append("BLEED")
+        # Under witness, pre-reopen window damage is WATCH unless fresh closes also bleed.
+        sev = "fail" if (not witness_epoch or bleed_fresh_hit or locked) else "watch"
+        area_grades["bleed"] = "FAIL" if sev == "fail" else "WATCH"
+        findings.append(
+            _finding(
+                rank=1 if sev == "fail" else 2,
+                severity=sev,
+                klass="ops",
+                title="BLEED: recent closes WR/net below threshold",
+                detail=(
+                    f"window={BLEED_WINDOW_MINUTES:.0f}m n={n} wr={wr} "
+                    f"(max_ok={BLEED_MAX_WR}) net=£{net} (floor={BLEED_MAX_NET_GBP}). "
+                    + (
+                        f"Witness: fresh_n={fresh_n} fresh_net=£{fresh_net} "
+                        f"auto-lock={'YES' if bleed_fresh_hit else 'held (prior damage)'}."
+                        if witness_epoch
+                        else "Ensure pause both + durable bleed lock."
+                    )
+                ),
+                needs_ops=True,
+                evidence={
+                    "stats": window_stats,
+                    "fresh_stats": fresh_stats,
+                    "witness": meta["reopen_witness"],
+                    "thresholds": {
+                        "window_minutes": BLEED_WINDOW_MINUTES,
+                        "min_trades": BLEED_MIN_TRADES,
+                        "max_wr": BLEED_MAX_WR,
+                        "max_net_gbp": BLEED_MAX_NET_GBP,
+                    },
+                    "heal": "ensure_operator_bleed_halt" if (not witness_epoch or bleed_fresh_hit) else None,
+                },
+            )
+        )
+        if not locked and (bleed_fresh_hit if witness_epoch else True):
+            meta["ensure_bleed_halt"] = True
+    else:
+        area_grades.setdefault("bleed", "PASS" if not locked else "FAIL")
+
+    # --- SESSION_KILL (day net) ---
+    day_net = float(day_stats.get("net_gbp") or 0.0)
+    day_n = int(day_stats.get("n") or 0)
+    day_net_at_reopen = None
+    if isinstance(witness, dict) and witness.get("day_net_at_reopen_gbp") is not None:
+        try:
+            day_net_at_reopen = float(witness.get("day_net_at_reopen_gbp"))
+        except (TypeError, ValueError):
+            day_net_at_reopen = None
+    day_worsened = (
+        day_net_at_reopen is not None and day_net <= (day_net_at_reopen - 1.0)
+    )
+    if day_n > 0 and day_net <= SESSION_KILL_NET_GBP:
+        if "BLEED" not in alerts:
+            alerts.append("BLEED")
+        alerts.append("SESSION_KILL")
+        # Witness: prior day breach is visible WATCH until PnL worsens after reopen.
+        sev = "fail" if (not witness_epoch or day_worsened or locked) else "watch"
+        area_grades["session_kill"] = "FAIL" if sev == "fail" else "WATCH"
+        findings.append(
+            _finding(
+                rank=1 if sev == "fail" else 2,
+                severity=sev,
+                klass="ops",
+                title="SESSION_KILL: day realized PnL beyond −£X",
+                detail=(
+                    f"day={day_stats.get('day')} n={day_n} net=£{day_net} "
+                    f"(kill_floor={SESSION_KILL_NET_GBP}). "
+                    + (
+                        f"Witness reopen_net=£{day_net_at_reopen}; "
+                        f"worsened={day_worsened}; auto-lock={'YES' if day_worsened else 'held'}."
+                        if witness_epoch
+                        else "Stop both + lock."
+                    )
+                ),
+                needs_ops=True,
+                evidence={
+                    "day_stats": day_stats,
+                    "witness": meta["reopen_witness"],
+                    "day_worsened": day_worsened,
+                    "heal": "ensure_operator_bleed_halt" if (not witness_epoch or day_worsened) else None,
+                },
+            )
+        )
+        if not locked and (day_worsened if witness_epoch else True):
+            meta["ensure_bleed_halt"] = True
+            bleed_hit = True
+    else:
+        area_grades["session_kill"] = "PASS"
+
+    # --- MICRO_HOLD ---
+    med = window_stats.get("median_hold_sec")
+    avg = window_stats.get("avg_hold_sec")
+    hold_n = int(window_stats.get("hold_samples") or 0)
+    if path_a_claimed and hold_n >= MICRO_HOLD_MIN_SAMPLES and (
+        (med is not None and float(med) < MICRO_HOLD_MEDIAN_SEC)
+        or (avg is not None and float(avg) < MICRO_HOLD_AVG_SEC)
+    ):
+        alerts.append("MICRO_HOLD")
+        area_grades["micro_hold"] = "FAIL"
+        findings.append(
+            _finding(
+                rank=1,
+                severity="fail",
+                klass="code",
+                title="MICRO_HOLD: holds too short while macro/Path A claimed",
+                detail=(
+                    f"median_hold={med}s avg_hold={avg}s samples={hold_n} "
+                    f"(limits median<{MICRO_HOLD_MEDIAN_SEC}s or avg<{MICRO_HOLD_AVG_SEC}s) "
+                    "with SB Path A / macro carve expected — micro masquerading as macro."
+                ),
+                needs_code=True,
+                needs_ops=True,
+                evidence={
+                    "stats": window_stats,
+                    "path_a_claimed": path_a_claimed,
+                    "heal": "ensure_operator_bleed_halt",
+                },
+            )
+        )
+        # APP: MICRO_HOLD FAIL must force pause + durable lock (same as BLEED).
+        if not locked:
+            meta["ensure_bleed_halt"] = True
+    elif path_a_claimed and n >= BLEED_MIN_TRADES and hold_n == 0:
+        area_grades["micro_hold"] = "WATCH"
+        findings.append(
+            _finding(
+                rank=3,
+                severity="watch",
+                klass="code",
+                title="MICRO_HOLD: hold telemetry missing under Path A",
+                detail=f"n={n} closes in window but HoldSec samples=0 — cannot certify macro holds",
+                needs_code=True,
+                evidence={"stats": window_stats},
+            )
+        )
+    else:
+        area_grades["micro_hold"] = "PASS"
+
+    # --- POST_CUTOVER_OUTCOME ---
+    c_net = float(cutover_stats.get("net_gbp") or 0.0)
+    c_n = int(cutover_stats.get("n") or 0)
+    c_med = cutover_stats.get("median_hold_sec")
+    short_cutover = (
+        c_n > 0
+        and c_net < 0
+        and (
+            (c_med is not None and float(c_med) < POST_CUTOVER_HOLD_SEC)
+            or int(cutover_stats.get("hold_samples") or 0) == 0
+        )
+    )
+    if short_cutover:
+        sev = "fail" if (c_med is not None and float(c_med) < POST_CUTOVER_HOLD_SEC) or c_net <= BLEED_MAX_NET_GBP else "watch"
+        if sev == "fail":
+            alerts.append("POST_CUTOVER")
+        area_grades["post_cutover"] = "FAIL" if sev == "fail" else "WATCH"
+        findings.append(
+            _finding(
+                rank=1 if sev == "fail" else 2,
+                severity=sev,
+                klass="ops",
+                title="POST_CUTOVER_OUTCOME: recent closes net-neg / short holds",
+                detail=(
+                    f"last {POST_CUTOVER_MINUTES:.0f}m n={c_n} net=£{c_net} "
+                    f"median_hold={c_med}s — never score PASS/PIPELINE_OK"
+                ),
+                needs_ops=True,
+                needs_code=sev == "fail",
+                evidence={"stats": cutover_stats},
+            )
+        )
+    else:
+        area_grades["post_cutover"] = "PASS"
+
+    # --- GUI_LIE / FLICKER from rotation APIs ---
+    sb_rot = sb_bundle.get("rotation") if isinstance(sb_bundle.get("rotation"), dict) else None
+    gui_sig = _extract_rotation_gui_signals(sb_rot)
+    meta["gui_signals"] = {
+        "prefer_epic": gui_sig.get("prefer_epic"),
+        "setup_epics": gui_sig.get("setup_epics"),
+        "wait_epics": gui_sig.get("wait_epics"),
+        "preference_reason": gui_sig.get("preference_reason"),
+    }
+    sb_ops = sb_bundle.get("ops_strip") if isinstance(sb_bundle.get("ops_strip"), dict) else None
+    sb_agg = _sb_aggregate_setup_mode(sb_ops, gui_sig)
+    prefer = gui_sig.get("prefer_epic")
+    setup_epics = list(gui_sig.get("setup_epics") or [])
+    prefer_mode = None
+    if prefer and isinstance(gui_sig.get("per_epic"), dict):
+        meta_pe = gui_sig["per_epic"].get(prefer)
+        if isinstance(meta_pe, dict):
+            prefer_mode = str(meta_pe.get("mode") or "").upper() or None
+    if prefer_mode is None and prefer in setup_epics:
+        prefer_mode = "SETUP"
+
+    gui_lie = False
+    # Prefer / SETUP while the *armed* SB desk is paused = trust break.
+    # CFD A2 pause with SB live + ranked SETUP is the intended Step-2 posture (not a lie).
+    if sb_paused is True and (prefer or setup_epics):
+        gui_lie = True
+        alerts.append("GUI_LIE")
+        area_grades["gui_lie"] = "FAIL"
+        findings.append(
+            _finding(
+                rank=1,
+                severity="fail",
+                klass="ui",
+                title="GUI_LIE: prefer/SETUP while desk paused",
+                detail=(
+                    f"sb_paused={sb_paused} cfd_paused={cfd_paused} "
+                    f"prefer={prefer} setup_epics={setup_epics} — Intent must not show SETUP on paused SB"
+                ),
+                needs_code=True,
+                evidence={
+                    "gui_signals": meta["gui_signals"],
+                    "sb_paused": sb_paused,
+                    "cfd_paused": cfd_paused,
+                },
+            )
+        )
+    elif cfd_paused is True and sb_paused is not True and (prefer or setup_epics):
+        # A2 CFD pause — note only; SB is the Intent primary.
+        findings.append(
+            _finding(
+                rank=91,
+                severity="info",
+                klass="ignore",
+                title="A2 CFD pause with SB prefer/SETUP (expected)",
+                detail=f"cfd_paused=true sb live; prefer={prefer} setup_epics={setup_epics}",
+                evidence={"prefer": prefer, "setup_epics": setup_epics},
+            )
+        )
+    # SETUP on prefer while SB aggregate WAIT
+    elif prefer_mode == "SETUP" and sb_agg == "WAIT" and sb_paused is not True:
+        gui_lie = True
+        alerts.append("GUI_LIE")
+        area_grades["gui_lie"] = "FAIL"
+        findings.append(
+            _finding(
+                rank=1,
+                severity="fail",
+                klass="ui",
+                title="GUI_LIE: Intent SETUP vs SB WAIT contradiction",
+                detail=(
+                    f"prefer={prefer} prefer_mode=SETUP but SB aggregate={sb_agg} — "
+                    "strip would flash SETUP against WAIT"
+                ),
+                needs_code=True,
+                evidence={"prefer": prefer, "prefer_mode": prefer_mode, "sb_aggregate": sb_agg},
+            )
+        )
+    elif setup_epics and sb_agg == "WAIT" and sb_paused is not True:
+        alerts.append("GUI_LIE")
+        area_grades["gui_lie"] = "WATCH"
+        findings.append(
+            _finding(
+                rank=2,
+                severity="watch",
+                klass="ui",
+                title="GUI_LIE: ranked SETUP rows while SB aggregate WAIT",
+                detail=f"setup_epics={setup_epics} sb_aggregate=WAIT prefer={prefer}",
+                needs_code=True,
+                evidence={"setup_epics": setup_epics, "sb_aggregate": sb_agg},
+            )
+        )
+        gui_lie = True
+    else:
+        area_grades.setdefault("gui_lie", "PASS")
+
+    flicker = _update_flicker_tracker(
+        data_root=data_root,
+        prefer_epic=prefer,
+        setup_epics=setup_epics,
+    )
+    meta["flicker"] = {
+        "flip_count_window": flicker.get("flip_count_window"),
+        "threshold_flips": flicker.get("threshold_flips"),
+        "window_minutes": flicker.get("window_minutes"),
+        "last_prefer_epic": flicker.get("last_prefer_epic"),
+    }
+    flips = int(flicker.get("flip_count_window") or 0)
+    if flips >= FLICKER_MAX_FLIPS:
+        alerts.append("FLICKER")
+        area_grades["flicker"] = "WATCH"
+        findings.append(
+            _finding(
+                rank=3,
+                severity="watch",
+                klass="ui",
+                title="FLICKER: prefer/SETUP flip rate elevated",
+                detail=(
+                    f"{flips} flips in {FLICKER_WINDOW_MINUTES:.0f}m "
+                    f"(threshold={FLICKER_MAX_FLIPS}) prefer={prefer}"
+                ),
+                needs_code=True,
+                evidence=meta["flicker"],
+            )
+        )
+    else:
+        area_grades["flicker"] = "PASS"
+
+    # --- EPIC_POLICY (excluded hot-path) ---
+    excluded = set(str(e) for e in (dual_cfg.get("exclude_from_hot_path") or []) if str(e).strip())
+    if not excluded:
+        excluded = {NIKKEI_EPIC}
+    bad_closes = [
+        c for c in window_closes if c.get("epic") and str(c.get("epic")) in excluded
+    ]
+    prefer_excluded = bool(prefer and prefer in excluded)
+    promoted_bad = []
+    ranked = _ranked_from_rotation(sb_rot)
+    for e in ranked.get("promoted") or []:
+        if e in excluded:
+            promoted_bad.append(e)
+    if bad_closes or prefer_excluded or promoted_bad:
+        alerts.append("EPIC_POLICY")
+        area_grades["epic_policy"] = "FAIL"
+        findings.append(
+            _finding(
+                rank=1,
+                severity="fail",
+                klass="code",
+                title="EPIC_POLICY: excluded epic close/prefer/promote",
+                detail=(
+                    f"excluded={sorted(excluded)} bad_closes={len(bad_closes)} "
+                    f"prefer={prefer} prefer_excluded={prefer_excluded} "
+                    f"promoted_intersect_exclude={promoted_bad}"
+                ),
+                needs_code=True,
+                needs_ops=True,
+                evidence={
+                    "bad_deal_ids": [c.get("deal_id") for c in bad_closes[:8]],
+                    "prefer": prefer,
+                    "promoted_bad": promoted_bad,
+                },
+            )
+        )
+    else:
+        area_grades["epic_policy"] = "PASS"
+
+    # Dedupe alerts preserve order
+    seen_a: set[str] = set()
+    ordered_alerts: list[str] = []
+    for a in alerts:
+        if a not in seen_a:
+            seen_a.add(a)
+            ordered_alerts.append(a)
+    meta["alerts"] = ordered_alerts
+    meta["bleed_hit"] = bleed_hit
+    meta["gui_lie"] = gui_lie
+    _ = cfd_bundle  # reserved for future dual-port GUI_LIE
+    return meta
+
+
 def _suspected_files_for(title: str, detail: str = "") -> list[str]:
     blob = f"{title} {detail}".lower()
     files: list[str] = []
+    if any(x in blob for x in ("gui_lie", "setup", "prefer", "flicker", "desk intent", "intent")):
+        files += [
+            "terminal/src/lib/desk-intent.ts",
+            "terminal/src/components/gpu/GuiSupervisorChip.tsx",
+            "src/runtime/gui_desk_supervisor.py",
+        ]
+    if any(x in blob for x in ("bleed", "session_kill", "post_cutover", "halted")):
+        files += [
+            "src/runtime/gui_desk_supervisor.py",
+            "src/runtime/gui_desk_supervisor_heal.py",
+            "docs/GUI_DESK_SUPERVISOR.md",
+            "docs/DESK_REOPEN_CHECKLIST.md",
+        ]
+    if any(x in blob for x in ("micro_hold", "hold_sec", "hold telemetry")):
+        files += [
+            "src/diagnostics/performance_journal.py",
+            "src/diagnostics/ml_trade_outcomes.py",
+            "src/system/dual_regime.py",
+        ]
+    if any(x in blob for x in ("epic_policy", "nikkei", "exclude_from_hot")):
+        files += [
+            "config/config_v31_demo_throughput.json",
+            "src/runtime/dual_core_execution.py",
+            "src/runtime/rotation_failover.py",
+        ]
     if any(x in blob for x in ("accepting_ticks", "tick loop", "paused_at_boot", "dormant")):
         files += [
             "src/runtime/market_orchestrator.py",
@@ -580,14 +1505,20 @@ def _build_cursor_handoff(
         for f in findings
         if f.get("needs_code") and f.get("severity") in ("fail", "watch")
     ]
-    if not code_findings:
+    ops_findings = [
+        f
+        for f in findings
+        if f.get("needs_ops") and f.get("severity") in ("fail", "watch")
+    ]
+    queue = code_findings or ops_findings
+    if not queue:
         return None
-    top = code_findings[0]
+    top = queue[0]
     evidence: dict[str, Any] = {}
-    for f in code_findings[:5]:
+    for f in queue[:5]:
         evidence[str(f.get("title") or f"finding_{f.get('rank')}")] = f.get("evidence") or {}
     suspected: list[str] = []
-    for f in code_findings[:5]:
+    for f in queue[:5]:
         suspected.extend(_suspected_files_for(str(f.get("title") or ""), str(f.get("detail") or "")))
     suspected_u: list[str] = []
     seen: set[str] = set()
@@ -595,20 +1526,21 @@ def _build_cursor_handoff(
         if x not in seen:
             seen.add(x)
             suspected_u.append(x)
-    lines = [
-        f"- [{f.get('class')}] {f.get('title')}: {f.get('detail')}" for f in code_findings[:8]
-    ]
+    lines = [f"- [{f.get('class')}] {f.get('title')}: {f.get('detail')}" for f in queue[:8]]
     blurb = (
         "Cursor handoff (GUI desk supervisor queue):\n"
         f"Score={score}. Read `src/data/v31-production/state/gui_supervisor_latest.json`.\n"
-        "Preserve A2 CFD pause on :8080. Phase-2 heals are allowlisted only "
-        "(port hung soft-recycle, loops unpause/recycle if flat, UI restart, silence soft-pause SB).\n"
+        "Preserve A2 CFD pause on :8080. Honour operator bleed locks "
+        "(never POST /api/start while do_not_auto_resume).\n"
+        "Phase-2 heals are allowlisted only "
+        "(port hung soft-recycle, loops unpause/recycle if flat, UI restart, "
+        "silence soft-pause SB, ensure_operator_bleed_halt).\n"
         "Do not kill -9 / raise REST / re-enable Instant-micro / loosen ElasticGate.\n"
-        "Code-class findings:\n" + "\n".join(lines)
+        "Actionable findings:\n" + "\n".join(lines)
     )
     return {
         "score": score,
-        "symptom": str(top.get("title") or "code finding"),
+        "symptom": str(top.get("title") or "supervisor finding"),
         "detail": str(top.get("detail") or ""),
         "top_finding": {
             "rank": top.get("rank"),
@@ -616,7 +1548,8 @@ def _build_cursor_handoff(
             "class": top.get("class"),
             "title": top.get("title"),
             "detail": top.get("detail"),
-            "needs_code": True,
+            "needs_code": bool(top.get("needs_code")),
+            "needs_ops": bool(top.get("needs_ops")),
         },
         "evidence": evidence,
         "suspected_files": suspected_u[:12],
@@ -627,19 +1560,19 @@ def _build_cursor_handoff(
             "Rebuild Quantum Terminal :3000 after UI changes",
             "Preserve A2 / ranked / Path A carve posture in checks and fixes",
             "Run allowlisted Phase-2 heals via gui_desk_supervisor --heal/--heal-dry-run",
+            "For BLEED/HALTED: keep paused + locks; follow docs/DESK_REOPEN_CHECKLIST.md (no auto start)",
         ],
         "forbidden_actions": [
             "kill -9 / SIGKILL / isolated kill of main.py",
             "Raise REST 3/min hard cap",
             "Re-enable Instant/micro or loosen ElasticGate/OBI fail-open",
             "Strategy/alpha rewrites or allow_non_dow global unlock",
-            "POST /api/start on :8080 while A2 marker active (lift A2)",
+            "POST /api/start while operator bleed lock / A2 marker active",
+            "Remove operator_bleed_lock_*.json without explicit operator unlock",
             "Edit SQLite history / learning DB schema",
             "Heal beyond allowlist or after 2/hour cap",
         ],
-        "state_path": "src/data/v31-production/state/gui_supervisor_latest.md".replace(
-            ".md", ".json"
-        ),
+        "state_path": "src/data/v31-production/state/gui_supervisor_latest.json",
         "md_path": "src/data/v31-production/reports/gui_supervisor_latest.md",
         "preserve_a2": True,
         "blurb": blurb,
@@ -874,6 +1807,43 @@ def assess(*, ports: dict[str, int] | None = None, data_root: Path | None = None
                     needs_ops=True,
                 )
             )
+
+    # ML strategy review APP_BLOCKED → code finding (never auto-resume / loosen)
+    ml_review = _latest_ml_strategy_review(root)
+    ml_verdict = str(ml_review.get("verdict") or "").strip().upper()
+    if ml_verdict == "APP_BLOCKED":
+        area_grades["ml_strategy_review"] = "FAIL"
+        findings.append(
+            _finding(
+                rank=2,
+                severity="fail",
+                klass="code",
+                title="ML strategy review APP_BLOCKED",
+                detail=(
+                    "APP/stamp share dominates measurement — fix APP tickets; "
+                    "do NOT loosen LOGIC strategy params; do NOT POST /api/start"
+                ),
+                needs_code=True,
+                evidence={
+                    "verdict": ml_verdict,
+                    "day": ml_review.get("day"),
+                    "path": ml_review.get("path"),
+                    "next_one_step": ml_review.get("next_one_step"),
+                },
+            )
+        )
+    elif ml_verdict:
+        area_grades["ml_strategy_review"] = "WATCH" if ml_verdict == "NOT_MEASURABLE" else "PASS"
+        findings.append(
+            _finding(
+                rank=95,
+                severity="info",
+                klass="ignore",
+                title=f"ML strategy review {ml_verdict}",
+                detail=str(ml_review.get("next_one_step") or "")[:240],
+                evidence={"verdict": ml_verdict, "day": ml_review.get("day"), "path": ml_review.get("path")},
+            )
+        )
 
     # Cash merge
     if cash.get("double_count_risk"):
@@ -1410,9 +2380,13 @@ def assess(*, ports: dict[str, int] | None = None, data_root: Path | None = None
         and (sb_loops.get("trade_ready") is True or sb_loops.get("boot_ready") is True or sb_loops.get("running") is True)
     )
     funnel_passed = 0
+    funnel_status = str(funnel.get("status") or "")
     try:
         funnel_passed = int(funnel.get("all_passed_ticks") or 0)
     except (TypeError, ValueError):
+        funnel_passed = 0
+    # Stale/empty funnel must not look like live activity forever.
+    if funnel_status in {"stale", "empty", "unavailable"}:
         funnel_passed = 0
     activity = sb_broker > 0 or funnel_passed > 0
     silence = _update_silence_tracker(
@@ -1467,6 +2441,22 @@ def assess(*, ports: dict[str, int] | None = None, data_root: Path | None = None
     else:
         area_grades["sb_armed_silence"] = "PASS"
 
+    # --- Desk integrity: BLEED / MICRO_HOLD / GUI_LIE / FLICKER / SESSION_KILL / … ---
+    path_a_claimed = bool(dual_cfg.get("sb_path_a_carve_expected")) or (
+        "PATH_A" in set(sb_posture.get("hard_allow") or [])
+    )
+    integrity = _phase2_integrity_checks(
+        data_root=root,
+        findings=findings,
+        area_grades=area_grades,
+        dual_cfg=dual_cfg,
+        sb_paused=sb_paused,
+        cfd_paused=cfd_paused,
+        sb_bundle=sb,
+        cfd_bundle=cfd,
+        path_a_claimed=path_a_claimed,
+    )
+
     # Rank findings: fail first, then watch, then info; stable by existing rank
     sev_order = {"fail": 0, "watch": 1, "info": 2}
     findings.sort(key=lambda f: (sev_order.get(str(f.get("severity")), 9), int(f.get("rank") or 99)))
@@ -1488,25 +2478,60 @@ def assess(*, ports: dict[str, int] | None = None, data_root: Path | None = None
     elif score == "PASS" and any(g == "WATCH" for g in area_grades.values()):
         score = "WATCH"
 
+    # POST_CUTOVER / HALTED: never green PASS
+    if integrity.get("halted") or "POST_CUTOVER" in (integrity.get("alerts") or []):
+        if score == "PASS":
+            score = "WATCH" if not fail_n else "FAIL"
+        if integrity.get("halted"):
+            score = "FAIL"
+
     needs_code = any(bool(f.get("needs_code")) for f in findings if f.get("severity") in ("fail", "watch"))
     needs_ops = any(bool(f.get("needs_ops")) for f in findings if f.get("severity") in ("fail", "watch"))
 
-    handoff = _build_cursor_handoff(score=score, findings=findings) if needs_code else None
+    # Handoff for code (GUI_LIE/MICRO_HOLD/…) and ops-critical BLEED/HALTED
+    handoff = None
+    if needs_code or (
+        needs_ops
+        and any(
+            str(f.get("title") or "").startswith(("BLEED:", "HALTED:", "SESSION_KILL:"))
+            for f in findings
+            if f.get("severity") in ("fail", "watch")
+        )
+    ):
+        handoff = _build_cursor_handoff(score=score, findings=findings)
 
     top_actionable = next(
         (f for f in findings if f.get("severity") in ("fail", "watch")),
         None,
     )
+    alerts = list(integrity.get("alerts") or [])
+    halted = bool(integrity.get("halted"))
+    if halted and "HALTED" not in alerts:
+        alerts.insert(0, "HALTED")
+    alert_label = " · ".join(alerts) if alerts else ""
+    if halted:
+        chip_label = "SUPERVISOR HALTED · BLEED LOCK"
+        chip_tone = "red"
+        chip_visible = True
+    elif score in ("WATCH", "FAIL"):
+        chip_label = f"SUPERVISOR {score}" + (f" · {alert_label}" if alert_label else "")
+        chip_tone = "red" if score == "FAIL" else "amber"
+        chip_visible = True
+    else:
+        chip_label = "SUPERVISOR PASS"
+        chip_tone = "green"
+        chip_visible = False
+    chip_summary = (
+        alert_label + (" · " if alert_label and top_actionable else "")
+        + (str(top_actionable.get("title") or "") if top_actionable else ("all clear" if score == "PASS" else score))
+    )
     chip = {
-        "visible": score in ("WATCH", "FAIL"),
-        "score": score,
-        "label": f"SUPERVISOR {score}" if score in ("WATCH", "FAIL") else "SUPERVISOR PASS",
-        "summary": (
-            str(top_actionable.get("title") or "")
-            if top_actionable
-            else ("all clear" if score == "PASS" else score)
-        ),
-        "tone": "red" if score == "FAIL" else ("amber" if score == "WATCH" else "green"),
+        "visible": chip_visible,
+        "score": "HALTED" if halted else score,
+        "label": chip_label,
+        "summary": chip_summary,
+        "tone": chip_tone,
+        "alerts": alerts,
         "state_path": "src/data/v31-production/state/gui_supervisor_latest.json",
         "needs_code": needs_code,
         "needs_ops": needs_ops,
@@ -1521,10 +2546,24 @@ def assess(*, ports: dict[str, int] | None = None, data_root: Path | None = None
         "ts": time.time(),
         "checked_at": _now_iso(),
         "score": score,
+        "halted": halted,
+        "ensure_bleed_halt": bool(integrity.get("ensure_bleed_halt")),
+        "alerts": alerts,
         "needs_code": needs_code,
         "needs_ops": needs_ops,
         "cursor_handoff": handoff,
         "dashboard_chip": chip,
+        "integrity": {
+            "bleed_lock": integrity.get("bleed_lock"),
+            "reopen_witness": integrity.get("reopen_witness"),
+            "journal_window": integrity.get("journal_window"),
+            "journal_fresh_since_reopen": integrity.get("journal_fresh_since_reopen"),
+            "session_day": integrity.get("session_day"),
+            "post_cutover": integrity.get("post_cutover"),
+            "flicker": integrity.get("flicker"),
+            "gui_signals": integrity.get("gui_signals"),
+            "alerts": alerts,
+        },
         "top_finding": (
             {
                 "rank": top_actionable.get("rank"),
@@ -1613,16 +2652,25 @@ def assess(*, ports: dict[str, int] | None = None, data_root: Path | None = None
                 "ui_restart_only",
                 "armed_silence_soft_pause_sb",
                 "reapply_a2_cfd_pause",
+                "ensure_operator_bleed_halt",
             ],
             "heal_cap_per_hour": int(os.environ.get("IG_GUI_SUP_HEAL_CAP_PER_HOUR", "2")),
             "silence_minutes": SILENCE_MINUTES,
+            "bleed_window_minutes": BLEED_WINDOW_MINUTES,
+            "bleed_max_wr": BLEED_MAX_WR,
+            "bleed_max_net_gbp": BLEED_MAX_NET_GBP,
+            "session_kill_net_gbp": SESSION_KILL_NET_GBP,
+            "micro_hold_median_sec": MICRO_HOLD_MEDIAN_SEC,
+            "post_cutover_minutes": POST_CUTOVER_MINUTES,
             "writes": [
                 "gui_supervisor_latest.json",
                 "gui_supervisor_latest.md",
                 "gui_supervisor_history.jsonl",
                 "gui_supervisor_silence.json",
+                "gui_supervisor_flicker.json",
                 "gui_supervisor_heal_log.jsonl",
                 "gui_supervisor_heal_budget.json",
+                "operator_bleed_lock_*.json (ensure halt only)",
             ],
         },
     }
@@ -1630,11 +2678,13 @@ def assess(*, ports: dict[str, int] | None = None, data_root: Path | None = None
 
 
 def _markdown_report(payload: dict[str, Any]) -> str:
+    alerts = payload.get("alerts") or []
     lines = [
         f"# GUI Desk Supervisor — Phase {payload.get('phase')}",
         "",
         f"**Score: {payload.get('score')}**  ",
         f"Checked: `{payload.get('checked_at')}`  ",
+        f"halted={payload.get('halted')} · alerts=`{' · '.join(alerts) if alerts else '—'}`  ",
         f"needs_code={payload.get('needs_code')} · needs_ops={payload.get('needs_ops')}",
         "",
         "## Area grades",
@@ -1680,6 +2730,16 @@ def _markdown_report(payload: dict[str, Any]) -> str:
             f"- label: `{chip.get('label')}`",
             f"- summary: {chip.get('summary')}",
             f"- tone: `{chip.get('tone')}`",
+            f"- alerts: `{chip.get('alerts') or alerts}`",
+            "",
+        ]
+    integrity = payload.get("integrity") or {}
+    if integrity:
+        lines += [
+            "",
+            "## Integrity plane",
+            "",
+            f"```json\n{json.dumps({k: integrity.get(k) for k in ('bleed_lock', 'journal_window', 'session_day', 'post_cutover', 'flicker', 'gui_signals', 'alerts')}, indent=2, default=str)}\n```",
             "",
         ]
     handoff = payload.get("cursor_handoff")
@@ -1790,6 +2850,59 @@ def run_once(
     heal_dry_run: bool = False,
 ) -> dict[str, Any]:
     payload = assess()
+    # Safety-critical: BLEED/SESSION_KILL while unlocked → force pause+lock (never /api/start).
+    # If locks present but a port is not paused, reassert stop+locks. Never remove locks.
+    cfd_paused_now = ((payload.get("ports") or {}).get("cfd") or {}).get("trading_paused")
+    sb_paused_now = ((payload.get("ports") or {}).get("sb") or {}).get("trading_paused")
+    need_reassert_pause = bool(payload.get("halted")) and (
+        cfd_paused_now is not True or sb_paused_now is not True
+    )
+    if payload.get("ensure_bleed_halt") or need_reassert_pause:
+        from runtime.gui_desk_supervisor_heal import ensure_operator_bleed_halt
+
+        if not heal_dry_run:
+            halt_res = ensure_operator_bleed_halt(
+                ports=[
+                    int(((payload.get("ports") or {}).get("cfd") or {}).get("port") or 8080),
+                    int(((payload.get("ports") or {}).get("sb") or {}).get("port") or 8081),
+                ],
+                dry_run=False,
+                reason="operator_halt_unacceptable_bleed",
+                detail={
+                    "alerts": payload.get("alerts"),
+                    "score": payload.get("score"),
+                    "ensure_bleed_halt": payload.get("ensure_bleed_halt"),
+                    "halted": payload.get("halted"),
+                    "reassert_pause": need_reassert_pause,
+                },
+            )
+            payload["bleed_halt"] = halt_res
+        else:
+            payload["bleed_halt"] = ensure_operator_bleed_halt(dry_run=True)
+
+    if payload.get("halted") or payload.get("ensure_bleed_halt") or payload.get("bleed_halt"):
+        payload["halted"] = True
+        payload["score"] = "FAIL"
+        alerts = list(payload.get("alerts") or [])
+        for tag in ("HALTED", "BLEED"):
+            if tag not in alerts:
+                alerts.insert(0, tag)
+        payload["alerts"] = alerts
+        chip = payload.get("dashboard_chip") if isinstance(payload.get("dashboard_chip"), dict) else {}
+        chip.update(
+            {
+                "visible": True,
+                "score": "HALTED",
+                "label": "SUPERVISOR HALTED · BLEED LOCK",
+                "summary": chip.get("summary") or " · ".join(alerts),
+                "tone": "red",
+                "alerts": alerts,
+                "needs_ops": True,
+            }
+        )
+        payload["dashboard_chip"] = chip
+        payload["needs_ops"] = True
+
     # Explicit --heal executes; --heal-dry-run or IG_GUI_SUP_AUTO_HEAL=1 plans dry-run only
     if heal or heal_dry_run or AUTO_HEAL_DEFAULT:
         from runtime.gui_desk_supervisor_heal import execute_heal_plan, plan_heals

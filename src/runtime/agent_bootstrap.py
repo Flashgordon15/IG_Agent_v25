@@ -469,12 +469,31 @@ def build_market_orchestrator(
             from execution.pending_order_reconcile import recover_pending_state_for_startup
 
             recover_pending_state_for_startup()
-            from api.agent_control import is_paused, start_trading
+            from api.agent_control import (
+                engage_pause_from_a2_marker_if_needed,
+                is_paused,
+                new_entries_hard_blocked,
+                start_trading,
+            )
 
-            if is_paused():
-                start_trading()  # auto-unpause if somehow paused at startup
+            # Learning-loop Step 2: CFD A2 marker survives restart; re-arm pause
+            # before any auto-unpause so QUANT_SNIPER cannot enter while SB-only.
+            a2_engage = engage_pause_from_a2_marker_if_needed()
+            if a2_engage.get("action") == "paused_from_a2_marker":
+                log_engine(
+                    "startup smoke-test: A2 CFD marker → pause engaged "
+                    "(no auto-unpause; SB-only Step 2)"
+                )
+            hard_blocked, hard_reason = new_entries_hard_blocked()
+            if is_paused() and not hard_blocked:
+                start_trading()  # auto-unpause only when no pause/A2 hard block
                 log_engine(
                     "startup smoke-test: auto-unpaused trading (was paused at startup)"
+                )
+            elif hard_blocked:
+                log_engine(
+                    f"startup smoke-test: entries hard-blocked ({hard_reason}) — "
+                    "skip auto-unpause"
                 )
             _startup_mark("smoke_test", "clear")
             log_engine("startup smoke-test: no blocking conditions detected")

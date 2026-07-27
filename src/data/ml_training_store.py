@@ -48,6 +48,8 @@ REQUIRED_FIELDS = (
     "deal_id",
     "source",
     "version",
+    "style",
+    "epic",
 )
 
 _lock = threading.RLock()
@@ -119,6 +121,41 @@ def reset_ml_training_store_for_tests() -> None:
         _path_override = None
 
 
+def deal_id_aliases(deal_id: str) -> list[str]:
+    """Return deal-id spellings used across journal / learning / IG short refs."""
+    raw = str(deal_id or "").strip()
+    if not raw:
+        return []
+    out: list[str] = []
+    for cand in (raw, raw.upper()):
+        if cand and cand not in out:
+            out.append(cand)
+    u = raw.upper()
+    if u.startswith("DIAAAAX") and len(u) > 8:
+        short = u[8:]
+        if short and short not in out:
+            out.append(short)
+    elif u.startswith("DIAAAA") and len(u) > 6:
+        short = u[6:]
+        if short and short not in out:
+            out.append(short)
+    elif not u.startswith("DIAAAA") and len(u) >= 6 and u.isalnum():
+        long_x = f"DIAAAAX{u}"
+        if long_x not in out:
+            out.append(long_x)
+    return out
+
+
+def peek_buffered_entry(deal_id: str) -> dict[str, Any] | None:
+    """Non-destructive lookup of the in-memory (disk-restored) entry buffer."""
+    for key in deal_id_aliases(deal_id):
+        with _lock:
+            row = _entry_buffer.get(key)
+        if isinstance(row, dict) and row:
+            return dict(row)
+    return None
+
+
 def _is_excluded(deal_id: str, data: dict[str, Any]) -> bool:
     row = dict(data)
     row.setdefault("deal_id", deal_id)
@@ -139,7 +176,19 @@ def _is_excluded(deal_id: str, data: dict[str, Any]) -> bool:
 def _normalize_record(
     entry: dict[str, Any], exit_data: dict[str, Any], deal_id: str
 ) -> dict[str, Any]:
+    from ml.style_epic import epic_for_instrument, resolve_ml_style
+
     merged = {**entry, **exit_data}
+    epic = epic_for_instrument(
+        merged.get("instrument"),
+        fallback_epic=merged.get("epic"),
+    )
+    style = resolve_ml_style(
+        style_hint=merged.get("style"),
+        engine_origin=merged.get("engine_origin"),
+        exit_reason=merged.get("exit_reason"),
+        hold_sec=merged.get("hold_sec"),
+    )
     record = {
         "confidence": float(merged.get("confidence", 0.0)),
         "confidence_band": str(merged.get("confidence_band", "marginal")),
@@ -167,12 +216,16 @@ def _normalize_record(
         "deal_id": str(deal_id),
         "source": str(merged.get("source", "agent")),
         "version": str(merged.get("version", ML_VERSION)),
+        "style": style,
+        "epic": epic,
     }
     for opt_key in (
         "profit_tier_pct",
         "peak_pct_of_target",
         "profit_pct_of_target",
         "hold_sec",
+        "ml_score_at_entry",
+        "p_success",
     ):
         if merged.get(opt_key) is not None:
             try:
@@ -288,6 +341,38 @@ class MLTrainingStore:
                 return
             data = dict(entry_data or {})
             data.setdefault("version", self._version)
+            # Stamp market regime at entry when callers omit it — close path
+            # recovers from this buffer; blank regime made ML review unmeasurable.
+            if not str(data.get("market_regime") or data.get("regime") or "").strip():
+                try:
+                    from system.regime_state import get_regime_state_snapshot
+
+                    snap = get_regime_state_snapshot() or {}
+                    label = str(
+                        snap.get("regime")
+                        or snap.get("market_regime")
+                        or snap.get("label")
+                        or ""
+                    ).strip()
+                    epic = str(
+                        data.get("instrument")
+                        or data.get("epic")
+                        or data.get("market")
+                        or ""
+                    ).strip()
+                    if not label and epic:
+                        by_epic = snap.get("by_epic") or snap.get("markets") or {}
+                        if isinstance(by_epic, dict):
+                            row = by_epic.get(epic) or {}
+                            if isinstance(row, dict):
+                                label = str(
+                                    row.get("regime") or row.get("label") or ""
+                                ).strip()
+                    if label and label.upper() not in {"UNKNOWN", "NONE", "NULL"}:
+                        data["market_regime"] = label
+                        data.setdefault("regime", label)
+                except Exception:
+                    pass
             if _is_excluded(did, data):
                 log_engine(f"ml_training_store skip entry (excluded) deal={did}")
                 return
@@ -335,6 +420,14 @@ class MLTrainingStore:
                     _entry_buffer.pop(did, None)
                 _persist_entry_buffer()
                 log_engine(f"ml_training_store exit skipped (excluded) deal={did}")
+                return
+
+            # Explicit confirmed=False must never write a training label — heuristics
+            # below only upgrade when the caller left confirmation unset/True.
+            if exit_payload.get("confirmed") is False:
+                log_engine(
+                    f"ml_training_store exit buffered — not IG-confirmed deal={did}"
+                )
                 return
 
             confirmed = bool(exit_payload.get("confirmed", False))

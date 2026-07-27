@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.igagent.trading_desk</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>__REPO_ROOT__/scripts/trading_desk_viewer_keepalive.sh</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>__REPO_ROOT__</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<key>ProcessType</key>
+	<string>Interactive</string>
+	<key>StandardOutPath</key>
+	<string>__REPO_ROOT__/logs/trading_desk_launchd.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>__REPO_ROOT__/logs/trading_desk_launchd.err.log</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>IG_AGENT_ROOT</key>
+		<string>__REPO_ROOT__</string>
+	</dict>
+</dict>
+</plist>

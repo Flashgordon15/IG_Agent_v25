@@ -13,7 +13,9 @@ SPREADBET_MIN_DEAL_BY_EPIC: dict[str, float] = {
     "IX.D.FTSE.IFM.IP": 0.5,
     "IX.D.NASDAQ.IFM.IP": 0.5,
     "CS.D.EURUSD.CFD.IP": 1.0,
+    "CS.D.EURUSD.TODAY.IP": 1.0,
     "CS.D.GBPUSD.CFD.IP": 1.0,
+    "CS.D.GBPUSD.TODAY.IP": 1.0,
 }
 
 # CFD / integer-lot path defaults when epic not listed.

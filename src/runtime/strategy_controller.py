@@ -138,6 +138,20 @@ def _paths_for_ownership(
 
     if ownership is StrategyOwnership.SCALP:
         flags.append("SCALP_OWNS_EPIC")
+        try:
+            from system.dual_regime import sb_macro_path_a_carve_active
+
+            _sb_path_a = sb_macro_path_a_carve_active()
+        except Exception:
+            _sb_path_a = False
+        if _sb_path_a:
+            flags.append("SB_MACRO_PATH_A_CARVE")
+            allowed = [ExecutionPath.PATH_A]
+            blocked = [ExecutionPath.MICRO, ExecutionPath.PATH_B_HANDOFF]
+            reason_suffix = (
+                "SCALP owns epic — SB macro carve allows Path A; micro blocked"
+            )
+            return allowed, blocked, flags, reason_suffix
         allowed = [ExecutionPath.MICRO, ExecutionPath.PATH_B_HANDOFF]
         blocked = [ExecutionPath.PATH_A]
         reason_suffix = "SCALP owns epic — micro and Path B handoff only"
@@ -354,9 +368,13 @@ def check_execution_permission(
     path: ExecutionPath | str,
 ) -> PermissionResult:
     try:
+        import os
+
         from system.demo_execution_plane import execution_guards_relaxed
 
-        if execution_guards_relaxed(epic=epic):
+        if os.environ.get("IG_AGENT_PYTEST") != "1" and execution_guards_relaxed(
+            epic=epic
+        ):
             return PermissionResult(allowed=True)
     except Exception:
         pass

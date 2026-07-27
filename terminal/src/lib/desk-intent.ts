@@ -192,6 +192,121 @@ export const RANKED_INTENT_CANDIDATES = [
   "IX.D.FTSE.IFM.IP",
 ] as const;
 
+/**
+ * Desk Intent SETUP hold / hierarchy debounce (UI plane).
+ * Matches config `desk_intent.setup_hold_sec` / `hierarchy_debounce_sec`.
+ * Agent Path A entry is separately gated — no Instant/micro re-enable.
+ */
+export const DESK_INTENT_SETUP_HOLD_MS = 20_000;
+export const DESK_INTENT_HIERARCHY_DEBOUNCE_MS = 12_000;
+
+export type DeskIntentHoldState = {
+  /** Last raw SETUP/WAIT candidate from the mapper. */
+  setupCandidate: DeskIntentSetupMode;
+  /** Wall-clock when setupCandidate first became SETUP. */
+  setupCandidateSinceMs: number | null;
+  /** Debounced mode shown to the pilot. */
+  heldSetupMode: DeskIntentSetupMode;
+  hierarchyCandidate: string | null;
+  hierarchyCandidateSinceMs: number | null;
+  heldHierarchy: string | null;
+};
+
+export function initialDeskIntentHoldState(): DeskIntentHoldState {
+  return {
+    setupCandidate: null,
+    setupCandidateSinceMs: null,
+    heldSetupMode: null,
+    hierarchyCandidate: null,
+    hierarchyCandidateSinceMs: null,
+    heldHierarchy: null,
+  };
+}
+
+/**
+ * WAIT demotes immediately; SETUP only after confidence holds ≥ holdMs.
+ * Prefer-X / hierarchy string updates only after debounceMs of stability.
+ */
+export function applyDeskIntentHold(args: {
+  nowMs: number;
+  rawSetupMode: DeskIntentSetupMode;
+  rawHierarchy: string | null;
+  prev: DeskIntentHoldState;
+  setupHoldMs?: number;
+  hierarchyDebounceMs?: number;
+}): { setupMode: DeskIntentSetupMode; marketHierarchy: string | null; state: DeskIntentHoldState } {
+  const setupHoldMs = args.setupHoldMs ?? DESK_INTENT_SETUP_HOLD_MS;
+  const hierarchyDebounceMs =
+    args.hierarchyDebounceMs ?? DESK_INTENT_HIERARCHY_DEBOUNCE_MS;
+  const prev = args.prev;
+  const rawMode = args.rawSetupMode;
+  const rawHierarchy = args.rawHierarchy;
+
+  let setupCandidate = rawMode;
+  let setupCandidateSinceMs = prev.setupCandidateSinceMs;
+  let heldSetupMode = prev.heldSetupMode;
+
+  if (rawMode === "SETUP") {
+    if (prev.setupCandidate !== "SETUP" || setupCandidateSinceMs == null) {
+      setupCandidateSinceMs = args.nowMs;
+    }
+    if (
+      prev.heldSetupMode === "SETUP" ||
+      args.nowMs - (setupCandidateSinceMs ?? args.nowMs) >= setupHoldMs
+    ) {
+      heldSetupMode = "SETUP";
+    } else {
+      // Still arming — never flash SETUP (held is WAIT or null here).
+      heldSetupMode = "WAIT";
+    }
+  } else {
+    setupCandidate = rawMode;
+    setupCandidateSinceMs = null;
+    heldSetupMode = rawMode;
+  }
+
+  let hierarchyCandidate = rawHierarchy;
+  let hierarchyCandidateSinceMs = prev.hierarchyCandidateSinceMs;
+  let heldHierarchy = prev.heldHierarchy;
+
+  if (rawHierarchy == null) {
+    hierarchyCandidate = null;
+    hierarchyCandidateSinceMs = null;
+    heldHierarchy = null;
+  } else if (rawHierarchy === prev.heldHierarchy) {
+    hierarchyCandidate = rawHierarchy;
+    hierarchyCandidateSinceMs = null;
+    heldHierarchy = rawHierarchy;
+  } else if (rawHierarchy === prev.hierarchyCandidate) {
+    const since = hierarchyCandidateSinceMs ?? args.nowMs;
+    hierarchyCandidateSinceMs = since;
+    if (args.nowMs - since >= hierarchyDebounceMs || prev.heldHierarchy == null) {
+      heldHierarchy = rawHierarchy;
+      hierarchyCandidateSinceMs = null;
+    }
+  } else {
+    hierarchyCandidate = rawHierarchy;
+    hierarchyCandidateSinceMs = args.nowMs;
+    if (prev.heldHierarchy == null) {
+      heldHierarchy = rawHierarchy;
+      hierarchyCandidateSinceMs = null;
+    }
+  }
+
+  return {
+    setupMode: heldSetupMode,
+    marketHierarchy: heldHierarchy,
+    state: {
+      setupCandidate,
+      setupCandidateSinceMs,
+      heldSetupMode,
+      hierarchyCandidate,
+      hierarchyCandidateSinceMs,
+      heldHierarchy,
+    },
+  };
+}
+
 /** Prefer SB ranked snapshot when CFD is paused/blocked (A2). */
 export function pickRankedRotator(args: {
   cfd: DeskIntentRotationSlice | null;
@@ -961,6 +1076,21 @@ export function buildDeskIntentView(args: {
       else confidenceBand = "Low";
       confidenceSource = "SB macro";
     }
+  }
+
+  // Align primary SB truth: never advertise SETUP while the armed SB account
+  // line is WAIT (stops "DOW 70% SETUP" flashing against "SB Low 43% WAIT").
+  // Ranked prefer of a *different* SETUP market is allowed only when the SB
+  // account row itself already resolved to SETUP for that prefer epic.
+  if (
+    preferSb &&
+    !primaryAccount.suppressed &&
+    primaryAccount.mode === "WAIT" &&
+    setupMode === "SETUP"
+  ) {
+    setupMode = "WAIT";
+    confidenceBand = primaryAccount.band;
+    confidencePct = primaryAccount.pct ?? confidencePct;
   }
 
   return {

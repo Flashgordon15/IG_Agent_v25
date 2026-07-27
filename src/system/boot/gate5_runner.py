@@ -83,6 +83,28 @@ def force_gate5_ready_degraded(
     snap = state.snapshot_model()
     total_loops = int(snap.loops.built or len(getattr(orch, "loops", []) or []))
     ready_label = str(detail or "watchdog_degraded")
+    # Seal any prior gates still RUNNING (classic: G2 stuck on Authenticating…)
+    # so force READY does not leave the desk with G5=complete + G2=running.
+    for gid in _PRIOR_GATES:
+        try:
+            g = snap.gates[gid]
+            status = _coerce_gate_status_str(getattr(g, "status", None))
+        except Exception:
+            status = ""
+        if status in ("", "running", "pending", "failed"):
+            seal_detail = f"sealed_by_{ready_label}"
+            if gid == "G2":
+                seal_detail = f"auth_sealed_by_{ready_label}"
+            try:
+                mark_gate_sideband(gid, detail=seal_detail)
+            except Exception:
+                pass
+            try:
+                state.mark_gate_complete(gid, detail=seal_detail)
+            except Exception:
+                pass
+            log_engine(f"Gate5: force READY sealed incomplete {gid} ({seal_detail})")
+
     mark_gate_sideband("G5", detail=ready_label)
     state.set_ready(label=ready_label)
     state.update_state(
@@ -123,6 +145,15 @@ def force_gate5_ready_degraded(
 
     threading.Thread(target=_post_ready, name="gate5-degraded-post-ready", daemon=True).start()
     log_engine(f"Gate5: degraded READY flip detail={ready_label} loops={total_loops}")
+
+
+def _coerce_gate_status_str(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        return str(getattr(value, "value", value) or "").strip().lower()
+    except Exception:
+        return str(value).strip().lower()
 
 
 def try_heal_stuck_g5(

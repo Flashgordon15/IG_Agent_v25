@@ -18,6 +18,24 @@ def get_boot_rest_client() -> Any | None:
     return _boot_rest_client
 
 
+def bind_boot_rest_client(rest: Any | None) -> None:
+    """Update the post-ready shared REST handle after deferred G2 auth."""
+    global _boot_rest_client
+    _boot_rest_client = rest
+    if rest is None:
+        return
+    try:
+        from runtime.open_position_manager import ensure_open_position_manager
+        from system.config_loader import get_config
+
+        ensure_open_position_manager(rest, cfg=get_config())
+    except Exception as exc:
+        log_engine(
+            f"post-ready: bind_boot_rest_client OPM ensure failed: "
+            f"{type(exc).__name__}: {exc}"
+        )
+
+
 def _log_step_outcome(label: str, started: float, *, error: Exception | None = None) -> None:
     elapsed_ms = (time.perf_counter() - started) * 1000.0
     if error is None:
@@ -134,6 +152,18 @@ def materialize_post_g5_execution_plane(context: BootContext) -> None:
     cfg = context.config
     if rest is None:
         log_engine("post-ready: execution plane skipped — no rest_client on BootContext")
+        # Still arm OPM so a deferred G2 auth cannot leave opens unsupervised;
+        # ensure_open_position_manager will bind rest later.
+        try:
+            from runtime.open_position_manager import ensure_open_position_manager
+
+            ensure_open_position_manager(None, cfg=cfg)
+            log_engine("post-ready: OpenPositionManager armed without rest (deferred bind)")
+        except Exception as e:
+            log_engine(
+                f"post-ready: open position manager deferred-arm failed: "
+                f"{type(e).__name__}: {e}"
+            )
         return
 
     try:
@@ -273,9 +303,9 @@ def materialize_post_g5_execution_plane(context: BootContext) -> None:
         log_engine(f"post-ready: micro gbp exit skipped: {type(e).__name__}: {e}")
 
     try:
-        from runtime.open_position_manager import start_open_position_manager
+        from runtime.open_position_manager import ensure_open_position_manager
 
-        start_open_position_manager(rest, cfg=cfg)
+        ensure_open_position_manager(rest, cfg=cfg)
         log_engine("post-ready: OpenPositionManager supervisor armed")
     except Exception as e:
         log_engine(f"post-ready: open position manager skipped: {type(e).__name__}: {e}")
@@ -528,6 +558,9 @@ def start_post_ready_services(context: BootContext) -> None:
             iron_gauge_mark(GaugePhase.POST_EXECUTION_PLANE, PhaseStatus.OK)
         except Exception:
             pass
+    else:
+        # Deferred G2 auth: still materialize the no-rest arm path (OPM ensure).
+        materialize_post_g5_execution_plane(context)
     try:
         from api.health_light import start_health_light_refresher
 

@@ -408,26 +408,90 @@ def record_trade_close(
 
     # Attribution recovery — every DIAAAA close should stamp ml / regime / hold.
     resolved_ml = ml_score
+    ml_source = "execution_params" if ml_score is not None else "absent"
     if resolved_ml is None:
         try:
-            from diagnostics.ml_trade_outcomes import resolve_ml_score_for_close
+            from diagnostics.ml_trade_outcomes import resolve_ml_score_and_source
 
-            resolved_ml = resolve_ml_score_for_close(
+            resolved_ml, ml_source = resolve_ml_score_and_source(
                 ml_score=None, deal_id=deal_s, epic=epic_s
             )
         except Exception:
-            resolved_ml = None
+            try:
+                from diagnostics.ml_trade_outcomes import resolve_ml_score_for_close
+
+                resolved_ml = resolve_ml_score_for_close(
+                    ml_score=None, deal_id=deal_s, epic=epic_s
+                )
+                ml_source = "epic_snapshot_fallback" if resolved_ml is not None else "absent"
+            except Exception:
+                resolved_ml = None
+                ml_source = "absent"
+
+    from diagnostics.stamp_provenance import (
+        HOLD_SOURCE_ABSENT,
+        HOLD_SOURCE_OPEN_CLOSE,
+        HOLD_SOURCE_TRACKED,
+        classify_exit_authority,
+        classify_hold,
+        classify_ml_score,
+    )
+
+    # Journal previously wrote raw scores (e.g. 1.15) while ml_trade_outcomes
+    # clamped — autopsy then joined the unclamped journal value. Clamp here.
+    ml_stamp = classify_ml_score(resolved_ml, source=ml_source)
+    resolved_ml = ml_stamp["ml_score_at_entry"]
 
     resolved_hold = hold_sec
+    hold_source = HOLD_SOURCE_TRACKED if hold_sec is not None else HOLD_SOURCE_ABSENT
     if resolved_hold is None and deal_s:
         try:
             from runtime.micro_gbp_exit import hold_sec_for_deal
 
             resolved_hold = hold_sec_for_deal(deal_s)
+            if resolved_hold is not None:
+                hold_source = HOLD_SOURCE_TRACKED
         except Exception:
             resolved_hold = None
+    if resolved_hold is None and deal_s:
+        # Deal-keyed entry buffer first, then learning DB open→close. This
+        # covers broker-attached / ghost sync closes after micro tracking ended.
+        try:
+            from diagnostics.ml_trade_outcomes import resolve_hold_sec_for_close
+
+            resolved_hold = resolve_hold_sec_for_close(
+                deal_id=deal_s,
+                closed_at_ts=(
+                    float(closed_at_ts) if closed_at_ts is not None else time.time()
+                ),
+            )
+            if resolved_hold is not None:
+                hold_source = HOLD_SOURCE_OPEN_CLOSE
+        except Exception:
+            pass
+
+    hold_stamp = classify_hold(
+        resolved_hold,
+        exit_reason=str(exit_reason or ""),
+        engine_origin=meta["engine_origin"],
+        source=hold_source,
+    )
+    resolved_hold = hold_stamp["hold_sec"]
+    exit_authority = classify_exit_authority(
+        exit_reason=str(exit_reason or ""),
+        engine_origin=meta["engine_origin"],
+    )
 
     resolved_regime = str(regime or "").strip()
+    if not resolved_regime:
+        try:
+            from diagnostics.ml_trade_outcomes import resolve_regime_for_close
+
+            resolved_regime = resolve_regime_for_close(
+                regime=None, deal_id=deal_s, epic=epic_s
+            )
+        except Exception:
+            resolved_regime = ""
     if not resolved_regime:
         try:
             from system.regime_state import get_regime_state_snapshot
@@ -448,6 +512,16 @@ def record_trade_close(
                             row.get("regime") or row.get("label") or ""
                         )
         except Exception:
+            resolved_regime = ""
+    # Leave blank when unresolved — "UNKNOWN" is a placeholder that previously
+    # fooled autopsy stamp gates into treating regime as present.
+    try:
+        from diagnostics.stamp_provenance import is_placeholder_regime
+
+        if is_placeholder_regime(resolved_regime):
+            resolved_regime = ""
+    except Exception:
+        if str(resolved_regime or "").strip().upper() in {"", "UNKNOWN", "NONE", "NULL"}:
             resolved_regime = ""
 
     style_tag = infer_trade_style(
@@ -498,6 +572,8 @@ def record_trade_close(
             exit_reason=str(exit_reason or ""),
             hold_sec=float(resolved_hold) if resolved_hold is not None else None,
             engine_origin=meta["engine_origin"],
+            hold_sec_source=hold_stamp["hold_sec_source"],
+            exit_authority=exit_authority,
         )
     except Exception:
         pass
@@ -902,7 +978,11 @@ def _is_zero_stub_row(row: dict[str, Any]) -> bool:
 
 
 def _learning_deal_epic_map() -> dict[str, str]:
-    """deal_id → epic lookup for enriching journal stubs (local DB, no REST)."""
+    """deal_id → epic lookup for enriching journal stubs (local DB, no REST).
+
+    Learning often stores truncated IG deal ids (last 8 chars). Index both the
+    raw key and the trailing 8 so journal ``DIAAAA…`` rows resolve to epics.
+    """
     try:
         import sqlite3
 
@@ -913,9 +993,9 @@ def _learning_deal_epic_map() -> dict[str, str]:
             return {}
         out: dict[str, str] = {}
         with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as con:
-            for deal, epic in con.execute(
+            for deal, epic, market in con.execute(
                 """
-                SELECT ig_deal_id, epic FROM trades
+                SELECT ig_deal_id, epic, market FROM trades
                 WHERE ig_deal_id IS NOT NULL AND epic IS NOT NULL
                   AND closed_at IS NOT NULL
                 ORDER BY id DESC LIMIT 2000
@@ -923,8 +1003,18 @@ def _learning_deal_epic_map() -> dict[str, str]:
             ):
                 d = str(deal or "").strip()
                 e = str(epic or "").strip()
-                if d and e and d not in out:
+                if not d or not e:
+                    continue
+                if d not in out:
                     out[d] = e
+                # Trailing-8 suffix (journal DIAAAA… ↔ learning short id)
+                if len(d) >= 8:
+                    suf = d[-8:]
+                    out.setdefault(suf, e)
+                # Market name as weak secondary key for label helpers
+                m = str(market or "").strip()
+                if m and f"market:{m}" not in out:
+                    out[f"market:{m}"] = e
         return out
     except Exception:
         return {}
@@ -1064,12 +1154,20 @@ def _journal_closed_rows(*, path: Path | None = None) -> list[dict[str, Any]]:
                     exit_f = float(exit_s) if exit_s else None
                 except (TypeError, ValueError):
                     entry_f, exit_f = None, None
-                epic = deal_map.get(deal, "")
+                epic = ""
+                if deal:
+                    epic = deal_map.get(deal, "") or (
+                        deal_map.get(deal[-8:], "") if len(deal) >= 8 else ""
+                    )
+                market_hint = ""
+                if not epic and deal_map:
+                    # No direct deal hit — leave epic blank; asset falls back carefully.
+                    market_hint = ""
                 out.append(
                     _enrich_accounting_row(
                         {
                             "timestamp": ts,
-                            "asset": _asset_label(epic, None, deal),
+                            "asset": _asset_label(epic, market_hint or None, deal),
                             "direction": direction or "—",
                             "net_pnl_gbp": round(pnl, 4),
                             "deal_id": deal,
@@ -1153,14 +1251,31 @@ def _last_n_closed_for_display(
         pool = ordered
     last: list[dict[str, Any]] = []
     for r in pool[:n]:
-        last.append(
-            {
-                "timestamp": r.get("timestamp") or "—",
-                "asset": r.get("asset") or "—",
-                "direction": r.get("direction") or "—",
-                "net_pnl_gbp": float(r.get("net_pnl_gbp") or 0),
-            }
-        )
+        pnl = float(r.get("net_pnl_gbp") or 0)
+        account_id = str(r.get("account_id") or "").strip()
+        product_type = str(r.get("product_type") or "").strip()
+        engine_origin = str(r.get("engine_origin") or "").strip()
+        epic = str(r.get("epic") or "").strip()
+        deal_id = str(r.get("deal_id") or "").strip()
+        row_out: dict[str, Any] = {
+            "timestamp": r.get("timestamp") or "—",
+            "asset": r.get("asset") or "—",
+            "direction": r.get("direction") or "—",
+            "net_pnl_gbp": pnl,
+            "result": str(r.get("result") or _result_label(pnl)),
+        }
+        # Pass journal identity through — UI must not invent SHARED/JOURNAL.
+        if account_id:
+            row_out["account_id"] = account_id
+        if product_type:
+            row_out["product_type"] = product_type
+        if engine_origin:
+            row_out["engine_origin"] = engine_origin
+        if epic:
+            row_out["epic"] = epic
+        if deal_id:
+            row_out["deal_id"] = deal_id
+        last.append(row_out)
     return last
 
 

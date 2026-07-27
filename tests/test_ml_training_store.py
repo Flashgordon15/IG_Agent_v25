@@ -88,6 +88,10 @@ class MLTrainingStoreTests(unittest.TestCase):
         self.assertAlmostEqual(line["gbp_pnl"], 42.0)
         self.assertEqual(line["version"], "25.1.0")
         self.assertEqual(set(line.keys()), set(mls.REQUIRED_FIELDS))
+        # Every persisted row carries style + epic (default-stamped, never absent).
+        self.assertIn("style", line)
+        self.assertIn("epic", line)
+        self.assertEqual(line["epic"], "IX.D.NIKKEI.IFM.IP")
 
     def test_sim_exclusion(self) -> None:
         entry = _entry()

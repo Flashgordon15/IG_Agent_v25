@@ -12,6 +12,10 @@ import {
   type GpuExecutionBuffer,
   type GpuExecPosition,
 } from "@/lib/gpu-execution-buffer";
+import {
+  CHART_EMPTY_WATERMARK,
+  sanitizePriceSeries,
+} from "@/lib/chart-series";
 
 type Props = {
   bufferRef: MutableRefObject<GpuExecutionBuffer>;
@@ -67,11 +71,10 @@ function drawStandby(ctx: CanvasRenderingContext2D, cssW: number, cssH: number):
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillStyle = "rgba(148, 163, 184, 0.42)";
-  ctx.fillText(
-    "[📉 NO OPEN TRACKING PATHS - GPU STANDBY]",
-    cssW / 2,
-    cssH / 2,
-  );
+  ctx.fillText(CHART_EMPTY_WATERMARK, cssW / 2, cssH / 2 - 10);
+  ctx.fillStyle = "rgba(148, 163, 184, 0.28)";
+  ctx.font = FONT_SM;
+  ctx.fillText("NO OPEN TRACKING PATHS · GPU STANDBY", cssW / 2, cssH / 2 + 12);
   ctx.textAlign = "start";
   ctx.textBaseline = "alphabetic";
 }
@@ -103,8 +106,11 @@ function drawChannel(
   const pad = { t: 28, r: 14, b: 36, l: 52 };
   const focus: GpuExecPosition | undefined =
     buf.positions.find((p) => p.epic === buf.focusEpic) ?? buf.positions[0];
-  const mids = buf.mids;
-  const entry = focus?.entry ?? 0;
+  const mids = sanitizePriceSeries(buf.mids);
+  const entry =
+    focus?.entry != null && Number.isFinite(focus.entry) && focus.entry > 0
+      ? focus.entry
+      : 0;
 
   const softGbp =
     focus?.softLossGbp != null && focus.softLossGbp > 0
@@ -137,15 +143,15 @@ function drawChannel(
         )
       : null;
 
-  const levels = [
+  const levels = sanitizePriceSeries([
     ...mids,
     ...buf.trailCrawl,
     ...buf.softCrawl,
     entry,
-    softLevel,
-    trailLevel,
+    softLevel ?? undefined,
+    trailLevel ?? undefined,
     buf.lastMid,
-  ].filter((v): v is number => v != null && v > 0);
+  ]);
 
   // Header chrome drawn on canvas (no DOM text churn)
   ctx.font = FONT_SM;
@@ -157,9 +163,28 @@ function drawChannel(
   ctx.fillText(buf.wsLive ? "WS LIVE" : "WS FALLBACK", cssW - pad.r - 72, 14);
 
   if (!levels.length) {
-    ctx.fillStyle = "rgba(148, 163, 184, 0.55)";
+    const step = 32;
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.035)";
+    ctx.lineWidth = 1;
+    for (let x = pad.l; x <= cssW - pad.r; x += step) {
+      ctx.beginPath();
+      ctx.moveTo(x, pad.t);
+      ctx.lineTo(x, cssH - pad.b);
+      ctx.stroke();
+    }
+    for (let y = pad.t; y <= cssH - pad.b; y += step) {
+      ctx.beginPath();
+      ctx.moveTo(pad.l, y);
+      ctx.lineTo(cssW - pad.r, y);
+      ctx.stroke();
+    }
     ctx.font = FONT;
-    ctx.fillText("AWAITING LIVE TICK STREAM…", pad.l, cssH / 2);
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "rgba(148, 163, 184, 0.5)";
+    ctx.fillText(CHART_EMPTY_WATERMARK, cssW / 2, cssH / 2);
+    ctx.textAlign = "start";
+    ctx.textBaseline = "alphabetic";
     return;
   }
 
@@ -249,13 +274,14 @@ function drawChannel(
   }
 
   // Soft loss — static rail + crawl history
-  if (buf.softCrawl.length >= 2) {
+  const softCrawl = sanitizePriceSeries(buf.softCrawl);
+  if (softCrawl.length >= 2) {
     ctx.strokeStyle = "rgba(255, 77, 109, 0.55)";
     ctx.lineWidth = 1.4;
     ctx.setLineDash([3, 3]);
     ctx.beginPath();
-    buf.softCrawl.forEach((v, i) => {
-      const x = xOf(i, buf.softCrawl.length);
+    softCrawl.forEach((v, i) => {
+      const x = xOf(i, softCrawl.length);
       const y = yOf(v);
       if (i === 0) ctx.moveTo(x, y);
       else ctx.lineTo(x, y);
@@ -266,21 +292,22 @@ function drawChannel(
   rail(softLevel, "rgba(255, 77, 109, 0.95)", [5, 4], 1.7);
 
   // Trail floor — crawling indicator climbing with profit
-  if (buf.trailCrawl.length >= 2) {
+  const trailCrawl = sanitizePriceSeries(buf.trailCrawl);
+  if (trailCrawl.length >= 2) {
     ctx.strokeStyle = "rgba(251, 191, 36, 0.7)";
     ctx.lineWidth = 2;
     ctx.setLineDash([]);
     ctx.beginPath();
-    buf.trailCrawl.forEach((v, i) => {
-      const x = xOf(i, buf.trailCrawl.length);
+    trailCrawl.forEach((v, i) => {
+      const x = xOf(i, trailCrawl.length);
       const y = yOf(v);
       if (i === 0) ctx.moveTo(x, y);
       else ctx.lineTo(x, y);
     });
     ctx.stroke();
     // Head marker
-    const hx = xOf(buf.trailCrawl.length - 1, buf.trailCrawl.length);
-    const hy = yOf(buf.trailCrawl[buf.trailCrawl.length - 1]!);
+    const hx = xOf(trailCrawl.length - 1, trailCrawl.length);
+    const hy = yOf(trailCrawl[trailCrawl.length - 1]!);
     ctx.fillStyle = "rgba(251, 191, 36, 1)";
     ctx.beginPath();
     ctx.arc(hx, hy, 3.5, 0, Math.PI * 2);

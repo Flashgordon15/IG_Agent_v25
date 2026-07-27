@@ -143,7 +143,7 @@ def heal_governance() -> bool:
 
 
 def heal_execution() -> bool:
-    """Restart stacked dual-asset execution loop only."""
+    """Restart stacked dual-asset execution loop and ensure OPM daemon."""
     if not _cooldown_ok("execution"):
         return False
     try:
@@ -156,6 +156,25 @@ def heal_execution() -> bool:
     from system.boot.boot_orchestrator import SubsystemId, mark_subsystem_healing
 
     mark_subsystem_healing(SubsystemId.EXECUTION, action="restart_stacked_sweep")
+    opm_ok = False
+    try:
+        from runtime.open_position_manager import ensure_open_position_manager
+        from system.boot.post_ready_services import get_boot_rest_client
+        from system.config_loader import get_config
+        from system.credentials_loader import try_load_credentials
+        from system.ig_rest_session import get_shared_rest_client
+
+        rest = get_boot_rest_client()
+        if rest is None:
+            cred = try_load_credentials()
+            if cred.ok and cred.credentials:
+                rest = get_shared_rest_client(cred.credentials)
+        ensured = ensure_open_position_manager(rest, cfg=get_config())
+        opm_ok = bool(ensured.get("ok"))
+        if opm_ok:
+            log_engine("boot_heal: OpenPositionManager ensured active")
+    except Exception as exc:
+        log_engine(f"boot_heal: OPM ensure failed {type(exc).__name__}: {exc}")
     try:
         from runtime.dual_core_execution import (
             _ensure_stacked_sweep_running,
@@ -166,10 +185,10 @@ def heal_execution() -> bool:
             return True
         _ensure_stacked_sweep_running()
         log_engine("boot_heal: stacked execution sweep restarted")
-        return _stacked_sweep_is_productive()
+        return bool(_stacked_sweep_is_productive() or opm_ok)
     except Exception as exc:
         log_engine(f"boot_heal: execution restart failed {type(exc).__name__}: {exc}")
-        return False
+        return opm_ok
 
 
 def run_targeted_heal(subsystem_id: str) -> bool:

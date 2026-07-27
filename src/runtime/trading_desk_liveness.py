@@ -83,7 +83,9 @@ def evaluate_liveness() -> dict[str, Any]:
         connections["position_manager"] = mgr_active and (
             mgr_tick_age is None or mgr_tick_age <= STALE_MANAGER_TICK_SEC
         )
-        if mgr_active and mgr_tick_age is not None and mgr_tick_age > STALE_MANAGER_TICK_SEC:
+        if not mgr_active:
+            issues.append("position_manager_inactive")
+        elif mgr_tick_age is not None and mgr_tick_age > STALE_MANAGER_TICK_SEC:
             issues.append("position_manager_stale")
         if str(mgr.get("last_error") or "").strip():
             issues.append("position_manager_error")
@@ -232,7 +234,36 @@ def run_recovery_tick(*, force: bool = False) -> dict[str, Any]:
     # Flat book: never hammer GET /positions via OPM tick / risk_stack reconcile.
     # That path exhausted ChaosGuardian tokens and starved micro order dispatch.
     if not has_open_risk:
-        # Best-effort phantom lifecycle cleanup (no REST) when broker SoT is flat.
+        # Flat book: never hammer GET /positions via OPM tick / risk_stack reconcile.
+        # That path exhausted ChaosGuardian tokens and starved micro order dispatch.
+        # Still re-arm the OPM daemon if it died after deferred auth / recycle —
+        # supervision must be live before the next open appears.
+        try:
+            from runtime.open_position_manager import (
+                ensure_open_position_manager,
+                snapshot as mgr_snap,
+            )
+            from system.config_loader import get_config
+            from system.credentials_loader import try_load_credentials
+            from system.ig_rest_session import get_shared_rest_client
+
+            mgr = mgr_snap() or {}
+            if not mgr.get("active"):
+                rest = None
+                cred = try_load_credentials()
+                if cred.ok and cred.credentials:
+                    rest = get_shared_rest_client(cred.credentials)
+                ensured = ensure_open_position_manager(rest, cfg=get_config())
+                if ensured.get("ok"):
+                    actions.append(
+                        "position_manager_ensure"
+                        + (":rearmed" if ensured.get("rearmed") else "")
+                    )
+                else:
+                    actions.append("position_manager_ensure_failed")
+        except Exception as exc:
+            actions.append(f"position_manager_ensure_failed:{type(exc).__name__}")
+
         try:
             from runtime.active_lifecycle_trades import reconcile_active_lifecycle_trades
             from data.learning_store import LearningStore
@@ -264,8 +295,10 @@ def run_recovery_tick(*, force: bool = False) -> dict[str, Any]:
     needs_mgr = any(
         i in liv["issues"]
         for i in (
+            "position_manager_inactive",
             "position_manager_stale",
             "position_manager_error",
+            "position_manager_unavailable",
             "positions_degraded",
             "positions_snapshot_stale",
         )
@@ -275,7 +308,10 @@ def run_recovery_tick(*, force: bool = False) -> dict[str, Any]:
 
     if needs_mgr:
         try:
-            from runtime.open_position_manager import run_management_tick
+            from runtime.open_position_manager import (
+                ensure_open_position_manager,
+                run_management_tick,
+            )
             from system.config_loader import get_config
             from system.credentials_loader import try_load_credentials
             from system.ig_rest_session import get_shared_rest_client
@@ -285,6 +321,9 @@ def run_recovery_tick(*, force: bool = False) -> dict[str, Any]:
             cred = try_load_credentials()
             if cred.ok and cred.credentials:
                 rest = get_shared_rest_client(cred.credentials)
+            ensured = ensure_open_position_manager(rest, cfg=cfg)
+            if ensured.get("rearmed"):
+                actions.append("position_manager_ensure:rearmed")
             if rest is not None:
                 run_management_tick(rest, cfg, execute=True)
                 actions.append("position_manager_tick")

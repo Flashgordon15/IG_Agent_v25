@@ -64,11 +64,14 @@ export_launch_env() {
   export IG_AGENT_FROM_LAUNCHER=1
   export IG_NON_BLOCKING_BOOT=1
   if [[ "${LAUNCHER_DESKTOP:-}" == "1" ]]; then
-    export IG_AGENT_DESKTOP_LAUNCH=1
-    export IG_APEX_DESKTOP=1
     export LAUNCHER_BIND_DEADLINE_SEC="${LAUNCHER_BIND_DEADLINE_SEC:-180}"
     export LAUNCHER_G5_STUCK_ESCALATE_SEC="${LAUNCHER_G5_STUCK_ESCALATE_SEC:-60}"
     export LAUNCHER_G5_HYDRATION_PASS_SEC="${LAUNCHER_G5_HYDRATION_PASS_SEC:-45}"
+    # Trading Desk native shell must stay on production :8080 — never Apex shadow :9090.
+    if [[ "${IG_TRADING_DESK_NATIVE:-}" != "1" ]]; then
+      export IG_AGENT_DESKTOP_LAUNCH=1
+      export IG_APEX_DESKTOP=1
+    fi
   fi
 }
 

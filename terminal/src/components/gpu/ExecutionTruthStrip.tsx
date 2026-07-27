@@ -9,6 +9,7 @@ import { useEffect, useRef, type MutableRefObject } from "react";
 import type { GpuExecutionChrome } from "@/hooks/useGpuExecutionStream";
 import type { GpuExecutionBuffer } from "@/lib/gpu-execution-buffer";
 import { resolveQuoteBudgetMs } from "@/lib/desk-multiplex";
+import { mapGateVerdictLabel } from "@/lib/gate-label";
 
 type Props = {
   bufferRef: MutableRefObject<GpuExecutionBuffer>;
@@ -44,7 +45,7 @@ export function ExecutionTruthStrip({ bufferRef, chrome }: Props) {
         armRef.current.dataset.arm = t.sniperArm.toLowerCase();
       }
       if (gateRef.current) {
-        gateRef.current.textContent = t.gateVerdict || "GATE_UNKNOWN";
+        gateRef.current.textContent = mapGateVerdictLabel(t.gateVerdict);
       }
       rafRef.current = requestAnimationFrame(loop);
     };
@@ -83,10 +84,10 @@ export function ExecutionTruthStrip({ bufferRef, chrome }: Props) {
         <div className="exec-truth-cell exec-truth-cell--wide">
           <span className="gpu-metric-key">ACTIVE GATE VERDICT</span>
           <span ref={gateRef} className="exec-truth-value exec-truth-gate">
-            {chrome.gateVerdict}
+            {mapGateVerdictLabel(chrome.gateVerdict)}
           </span>
           <span className="exec-truth-sub">
-            raw agent gate / wait / veto — no UI proxies
+            agent gate / wait / veto · unknown → standby (not SETUP)
           </span>
         </div>
       </div>

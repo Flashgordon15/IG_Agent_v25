@@ -914,6 +914,14 @@ def _on_closing() -> bool:
             _LAUNCHER_PROC.terminate()
         except OSError:
             pass
+    # Trading Desk is a viewer shell over live dual engines. Closing the window must
+    # never mark_manual_stop / kill :8080/:8081 — KeepAlive relaunches the UI only.
+    if _is_trading_desk_mode():
+        log_engine(
+            "DesktopShell: Trading Desk close — viewer-only exit "
+            "(preserving agents on :8080/:8081)"
+        )
+        return True
     execute_sequential_desktop_teardown(root=_project_root(), deadline_sec=1.0)
     return True
 

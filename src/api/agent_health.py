@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import os
 import socket
 import subprocess
 import threading
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from api.agent_control import get_trading_loop, is_paused, is_trading_running
@@ -634,7 +636,7 @@ def build_health_status() -> dict[str, Any]:
         loops_running = True
         if gate_age is None:
             gate_age = 0.0
-    paused = is_paused()
+    paused = _effective_trading_paused()
     with timed_section("health.watchdog"):
         watchdog = _watchdog_active()
     log_age = _engine_log_age_sec()
@@ -939,15 +941,70 @@ def _health_cache_stub() -> dict[str, Any]:
         "health_cache_warming": True,
         "issues": ["health_cache_warming"],
         "trading_loops_running": is_trading_running(),
-        "trading_paused": is_paused(),
+        "trading_paused": _effective_trading_paused(),
     }
 
 
+def overlay_pause_on_health_cache(paused: bool) -> None:
+    """Immediately stamp trading_paused on the health cache (stop/start path)."""
+    with _HEALTH_CACHE_LOCK:
+        if _HEALTH_CACHE is None:
+            return
+        _HEALTH_CACHE["trading_paused"] = bool(paused)
+        if paused:
+            issues = list(_HEALTH_CACHE.get("issues") or [])
+            if "trading_paused" not in issues:
+                issues.append("trading_paused")
+            _HEALTH_CACHE["issues"] = issues
+        else:
+            issues = [
+                i
+                for i in list(_HEALTH_CACHE.get("issues") or [])
+                if i != "trading_paused"
+            ]
+            _HEALTH_CACHE["issues"] = issues
+
+
+def _effective_trading_paused() -> bool:
+    """Live pause SoT: process flag OR this lane's trading_paused.json."""
+    try:
+        if is_paused():
+            return True
+    except Exception:
+        return True
+    try:
+        from system.paths import state_dir
+
+        path = Path(state_dir()) / "trading_paused.json"
+        if not path.is_file():
+            return False
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return bool(isinstance(raw, dict) and raw.get("active") is True)
+    except Exception:
+        return False
+
+
 def get_cached_health_status(*, allow_slow_fallback: bool = True) -> dict[str, Any]:
-    """Return the latest cached health snapshot without blocking HTTP handlers."""
+    """Return the latest cached health snapshot without blocking HTTP handlers.
+
+    Always overlays live pause SoT so a POST /api/stop cannot race a stale
+    5s cache that still shows trading_paused=false.
+    """
     with _HEALTH_CACHE_LOCK:
         if _HEALTH_CACHE is not None:
-            return dict(_HEALTH_CACHE)
+            out = dict(_HEALTH_CACHE)
+        else:
+            out = None
+    if out is not None:
+        paused = _effective_trading_paused()
+        out["trading_paused"] = paused
+        issues = list(out.get("issues") or [])
+        if paused and "trading_paused" not in issues:
+            issues.append("trading_paused")
+        elif not paused:
+            issues = [i for i in issues if i != "trading_paused"]
+        out["issues"] = issues
+        return out
     if not allow_slow_fallback:
         return _health_cache_stub()
     return _build_fast_health_status()

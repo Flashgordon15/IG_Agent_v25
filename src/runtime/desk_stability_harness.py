@@ -1049,6 +1049,40 @@ def compute_boot_gate(
         and "desk_critical" not in blockers
     )
 
+    # ready_for_view — unlock Trading Desk GUI while entries may be paused
+    # (A2 CFD stop, REST amber, path down). Hard safety still blocks.
+    view_hard = {
+        "cap_breach",
+        "sot_stale",
+        "opm_unhealthy",
+        "liveness_degraded",
+        "trade_support_down",
+        "healing_in_progress",
+        "offline_for_dev",
+    }
+    flat_or_supervised = bool(components.flat_book) or (
+        not bool(components.has_open_risk)
+        and int(components.broker_open or 0) == 0
+    ) or (
+        bool(components.has_open_risk)
+        and bool(components.trade_support_running)
+        and bool(components.opm_ok)
+        and bool(components.liveness_ok is not False)
+    )
+    ready_for_view = bool(ready) or (
+        sot_plane_ok
+        and not components.cap_breach
+        and not components.offline_for_dev
+        and flat_or_supervised
+        and not any(b in view_hard for b in blockers)
+        and (
+            bool(components.trade_ready)
+            or components.health_ok is True
+            or bool(components.trade_support_running)
+            or flat_or_supervised
+        )
+    )
+
     try:
         from runtime.desk_upgrade_manifest import upgrades_live
 
@@ -1069,6 +1103,7 @@ def compute_boot_gate(
 
     return {
         "ready_for_desk": bool(ready),
+        "ready_for_view": bool(ready_for_view),
         "boot_started_at": started,
         "boot_grace_active": boot_grace_active(),
         "boot_latency_buffer_sec": boot_latency_buffer_sec(),
@@ -1091,6 +1126,7 @@ def compute_boot_gate(
         "stuck": stuck,
         "operator_hints": operator_hints,
         "promise": (
+            "ready_for_view unlocks the desk UI when supervisors/SoT are safe; "
             "ready_for_desk means path is armed to enter when signals fire — "
             "not a guarantee of an immediate fill"
         ),
@@ -1150,6 +1186,7 @@ def evaluate_stability(
         },
         "boot_gate": boot_gate,
         "ready_for_desk": bool(boot_gate.get("ready_for_desk")),
+        "ready_for_view": bool(boot_gate.get("ready_for_view")),
         # Convenience top-level aliases for Terminal / ops_strip
         "grade": grade,
         "reasons": reasons,

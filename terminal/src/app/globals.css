@@ -1377,10 +1377,53 @@
 }
 
 .sniper-asset strong {
-  display: block;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem;
   font-size: 0.82rem;
   letter-spacing: 0.04em;
   color: var(--gpu-ink);
+}
+
+.sniper-rank-lane {
+  font-family: var(--font-family-mono);
+  font-size: 0.52rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 0.08rem 0.32rem;
+  border-radius: 3px;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  color: #94a3b8;
+  background: rgba(148, 163, 184, 0.08);
+}
+
+.sniper-rank-lane[data-lane="promoted"] {
+  color: #34d399;
+  border-color: rgba(52, 211, 153, 0.45);
+  background: rgba(52, 211, 153, 0.1);
+}
+
+.sniper-rank-lane[data-lane="eligible"] {
+  color: #93c5fd;
+  border-color: rgba(147, 197, 253, 0.4);
+  background: rgba(59, 130, 246, 0.1);
+}
+
+.sniper-rank-lane[data-lane="waiting"] {
+  color: #fbbf24;
+  border-color: rgba(251, 191, 36, 0.4);
+  background: rgba(251, 191, 36, 0.08);
+}
+
+.sniper-rank-lane[data-lane="excluded"] {
+  color: #fb7185;
+  border-color: rgba(251, 113, 133, 0.4);
+  background: rgba(251, 113, 133, 0.08);
+}
+
+.sniper-row[data-rank-lane="promoted"] {
+  border-color: rgba(52, 211, 153, 0.28);
 }
 
 .sniper-epic {
@@ -2477,6 +2520,331 @@
   background: rgba(71, 85, 105, 0.35);
   border: 1px solid rgba(148, 163, 184, 0.35);
   border-radius: 4px;
+}
+
+/* ── Desk Intent — pilot strip (trade? · confidence · rotation) ─ */
+.desk-intent {
+  margin: 0 0.75rem 0.35rem;
+  padding: 0.55rem 0.85rem 0.6rem;
+  border: 1px solid var(--gpu-line);
+  border-radius: var(--gpu-radius);
+  background:
+    linear-gradient(105deg, rgba(52, 211, 153, 0.04), transparent 42%),
+    var(--gpu-panel);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22);
+}
+
+.desk-intent-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.4rem;
+}
+
+.desk-intent-head-right {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.desk-intent-mission {
+  font-size: 0.55rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--gpu-mute);
+}
+
+.desk-intent-ranked-chip {
+  font-family: var(--font-family-mono);
+  font-size: 0.55rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #34d399;
+  border: 1px solid rgba(52, 211, 153, 0.45);
+  background: rgba(52, 211, 153, 0.08);
+  padding: 0.12rem 0.4rem;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+
+.gui-supervisor-chip-wrap {
+  display: flex;
+  justify-content: center;
+  margin: -0.15rem 0 0.55rem;
+  min-height: 0;
+}
+
+.gui-supervisor-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  max-width: min(52rem, 94vw);
+  padding: 0.18rem 0.55rem;
+  border-radius: 3px;
+  font-family: var(--font-family-mono);
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border: 1px solid transparent;
+}
+
+.gui-supervisor-chip[data-tone="amber"] {
+  color: #fbbf24;
+  border-color: rgba(251, 191, 36, 0.5);
+  background: rgba(251, 191, 36, 0.1);
+}
+
+.gui-supervisor-chip[data-tone="red"] {
+  color: #f87171;
+  border-color: rgba(248, 113, 113, 0.55);
+  background: rgba(248, 113, 113, 0.12);
+}
+
+.gui-supervisor-chip-label {
+  flex: 0 0 auto;
+}
+
+.gui-supervisor-chip-alerts {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  align-items: center;
+}
+
+.gui-supervisor-chip-alert {
+  display: inline-block;
+  padding: 0.05rem 0.28rem;
+  border: 1px solid currentColor;
+  border-radius: 2px;
+  font-size: 0.54rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  line-height: 1.2;
+  opacity: 0.95;
+}
+
+.gui-supervisor-chip-alert[data-alert="BLEED"],
+.gui-supervisor-chip-alert[data-alert="HALTED"],
+.gui-supervisor-chip-alert[data-alert="SESSION_KILL"] {
+  background: rgba(248, 113, 113, 0.18);
+}
+
+.gui-supervisor-chip-alert[data-alert="GUI_LIE"],
+.gui-supervisor-chip-alert[data-alert="MICRO_HOLD"],
+.gui-supervisor-chip-alert[data-alert="FLICKER"],
+.gui-supervisor-chip-alert[data-alert="POST_CUTOVER"],
+.gui-supervisor-chip-alert[data-alert="EPIC_POLICY"] {
+  background: rgba(251, 191, 36, 0.14);
+}
+
+.gui-supervisor-chip-summary {
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  opacity: 0.92;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desk-intent-engines {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.4rem 0.75rem;
+  margin-bottom: 0.45rem;
+}
+
+.desk-intent-engine {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem 0.55rem;
+  min-width: 0;
+  padding: 0.28rem 0.45rem;
+  border-radius: 4px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: rgba(15, 23, 42, 0.35);
+}
+
+.desk-intent-engine-id {
+  font-size: 0.62rem;
+  letter-spacing: 0.06em;
+  color: #94a3b8;
+}
+
+.desk-intent-origin {
+  color: #64748b;
+  font-weight: 500;
+}
+
+.desk-intent-state {
+  font-family: var(--font-family-mono);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.desk-intent-state[data-tone="armed"] {
+  color: #34d399;
+}
+
+.desk-intent-state[data-tone="paused"] {
+  color: #94a3b8;
+}
+
+.desk-intent-state[data-tone="blocked"] {
+  color: #ff4d6d;
+}
+
+.desk-intent-why {
+  font-size: 0.58rem;
+  letter-spacing: 0.04em;
+  color: #64748b;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desk-intent-shared {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, 1.6fr);
+  gap: 0.45rem 0.75rem;
+}
+
+.desk-intent-shared[data-ranked="off"] {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.desk-intent-shared[data-ranked="off"] .desk-intent-cell:nth-child(2) {
+  display: none;
+}
+
+.desk-intent-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.desk-intent-value {
+  font-family: var(--font-family-mono);
+  font-size: 0.92rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--gpu-ink);
+}
+
+.desk-intent-value[data-band="High"] {
+  color: #34d399;
+}
+
+.desk-intent-value[data-band="Med"] {
+  color: #e2e8f0;
+}
+
+.desk-intent-value[data-band="Low"] {
+  color: #fbbf24;
+}
+
+.desk-intent-value[data-rot="held"] {
+  color: #fbbf24;
+}
+
+.desk-intent-value[data-rot="off"] {
+  color: #64748b;
+}
+
+.desk-intent-value[data-promoted="on"] {
+  color: #6ee7b7;
+}
+
+.desk-intent-rotation-line {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desk-intent-conf-src {
+  font-size: 0.58rem;
+  font-weight: 500;
+  color: #64748b;
+}
+
+.desk-intent-cell--confidence {
+  gap: 0.15rem;
+}
+
+.desk-intent-conf-primary {
+  line-height: 1.15;
+}
+
+.desk-intent-hierarchy {
+  line-height: 1.25;
+  font-size: 0.62rem;
+  letter-spacing: 0.02em;
+  color: #e2e8f0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.desk-intent-conf-accounts {
+  display: flex;
+  flex-direction: column;
+  gap: 0.08rem;
+  margin-top: 0.12rem;
+}
+
+.desk-intent-conf-account {
+  font-size: 0.58rem;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  color: #94a3b8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desk-intent-conf-account[data-suppressed="0"][data-band="High"] {
+  color: #34d399;
+}
+
+.desk-intent-conf-account[data-suppressed="0"][data-band="Med"] {
+  color: #e2e8f0;
+}
+
+.desk-intent-conf-account[data-suppressed="0"][data-band="Low"] {
+  color: #fbbf24;
+}
+
+.desk-intent-conf-account[data-suppressed="1"] {
+  color: #64748b;
+}
+
+.desk-intent-next {
+  margin: 0.4rem 0 0;
+  font-size: 0.58rem;
+  letter-spacing: 0.06em;
+  color: #94a3b8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 900px) {
+  .desk-intent-engines,
+  .desk-intent-shared {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* ── v32 dual-lane control deck ─────────────────────────────── */

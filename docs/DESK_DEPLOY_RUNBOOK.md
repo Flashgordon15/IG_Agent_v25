@@ -16,6 +16,21 @@
 Pause freezes new entries via `entry_halt` + `trading_paused` + `deploy_hold`.
 OPM + `trade_support` keep supervising opens. Never `kill -9`.
 
+## Dual-port supervision (v32)
+
+| Goal | Command |
+|------|---------|
+| **Arm dual watchdog** (no engine restart) | `./scripts/install_v32_dual_watchdog.sh` |
+| **Status** | `./scripts/install_v32_dual_watchdog.sh status` |
+| **Bootout dual only** | `./scripts/install_v32_dual_watchdog.sh bootout` |
+
+- Label: `com.igagent.v32.dual` — `RunAtLoad` + `KeepAlive` (observer loop).
+- Env `IG_V32_DUAL_PORT=1` → `watchdog.sh` watches `:8080`/`:8081` and **defers** single-engine restarts (heal via `v32_runtime_start.sh`).
+- Default `v32_runtime_start.sh start` still skips bootstrap (`IG_V32_SKIP_DUAL_LAUNCHD=1`) so a twin recycle does not fight an existing desk; arm with the install script after start, or set `IG_V32_SKIP_DUAL_LAUNCHD=0` when you want start to bootstrap.
+- Never re-enable legacy `com.igagent.v25.watchdog` while dual twins are live.
+
+**Trade support:** one `runtime.trade_support_wrapper` (prefer `com.igagent.trade_support` KeepAlive). Dedup stale detached copies with `TERM` only after flat-book confirm.
+
 ## Boot-gate splash (confidence gate)
 
 Every `Trading_Desk.app` / `trading_desk_silent.sh` launch opens

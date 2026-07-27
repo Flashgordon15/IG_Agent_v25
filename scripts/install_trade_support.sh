@@ -52,6 +52,7 @@ EOF
 launchctl bootout "gui/$(id -u)/${LABEL}" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "${LAUNCH_AGENTS}/${PLIST}"
 launchctl enable "gui/$(id -u)/${LABEL}" 2>/dev/null || true
-launchctl kickstart -k "gui/$(id -u)/${LABEL}" 2>/dev/null || true
+# Never kickstart -k (SIGKILL). Plain kickstart is enough with RunAtLoad/KeepAlive.
+launchctl kickstart "gui/$(id -u)/${LABEL}" 2>/dev/null || true
 
 echo "Installed ${PLIST} — logs: ${LOG_DIR}/trade_support_wrapper.log"

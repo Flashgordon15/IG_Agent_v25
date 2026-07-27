@@ -97,11 +97,19 @@ def classify_entry_path(path: str | None) -> str:
     p = str(path or PATH_OTHER).strip().lower()
     if p in ("instant", "instant_scalp", "micro_scalp_instant"):
         return PATH_INSTANT
-    if p in ("micro", "micro_scalp", "core_b_micro"):
+    if p in (
+        "micro",
+        "micro_scalp",
+        "core_b_micro",
+        "engine_b_micro_scalper",
+        "piercing_zone",
+        "parallel_strategy_sweep",
+        "predictive_micro_scalp",
+    ):
         return PATH_MICRO
     if p in ("long_trade_runner", "long_runner", "ltr", "macro_long"):
         return PATH_LONG_RUNNER
-    if p in ("core_b", "coreb", "signal_engine"):
+    if p in ("core_b", "coreb"):
         return PATH_CORE_B
     return PATH_OTHER
 
@@ -113,6 +121,17 @@ class OvernightEntryDecision:
     in_window: bool
     path: str
     account_id: str
+
+
+@dataclass(frozen=True)
+class EngineEntryPathDecision:
+    """Day+night entry-path gate (extends overnight lockdown for SB micro ban)."""
+
+    allow: bool
+    reason: str
+    path: str
+    account_id: str
+    engine_origin: str
 
 
 def evaluate_overnight_entry_policy(
@@ -229,6 +248,93 @@ def evaluate_overnight_entry_policy(
     )
 
 
+def evaluate_engine_entry_path_policy(
+    *,
+    epic: str,
+    path: str,
+    account_id: str | None = None,
+    engine_origin: str | None = None,
+    cfg: Any | None = None,
+    now: datetime | None = None,
+    long_runner_gates_ok: bool = False,
+) -> EngineEntryPathDecision:
+    """Unified NEW-entry path gate: overnight lockdown + SB Instant/Core-B hard veto.
+
+    CFD Instant / ENGINE_B_MICRO_SCALPER remain available outside overnight CFD ban.
+    SB Instant / Core-B micro are hard-disabled when dual_regime.sb_disable_* is set,
+    including daytime (fixes outside_overnight_window → Instant allowed bleed).
+    """
+    acct = resolve_account_id(cfg, account_id)
+    path_k = classify_entry_path(path)
+    origin = str(engine_origin or "").strip().upper()
+    allow_micro = None
+    try:
+        from system.dual_regime import (
+            MACRO_SENTINEL as _MS,
+            QUANT_SNIPER as _QS,
+            allow_engine_micro_scalp_path as _allow_micro,
+            normalize_engine_origin,
+        )
+
+        origin = normalize_engine_origin(
+            engine_origin, account_id=acct or account_id, cfg=cfg
+        )
+        allow_micro = _allow_micro
+        ms_origin = _MS
+        qs_origin = _QS
+    except Exception:
+        ms_origin = "MACRO_SENTINEL"
+        qs_origin = "QUANT_SNIPER"
+        if not origin:
+            origin = qs_origin if acct == ACCT_CFD else ms_origin
+
+        def _allow_micro_fallback(*_a, **_k):
+            return True, "dual_regime_unavailable"
+
+        allow_micro = _allow_micro_fallback
+
+    # SB Instant / Core-B micro hard veto (day + night).
+    # Prefer raw path so "signal_engine" / "trading_loop" are not collapsed into core_b.
+    if origin == ms_origin or acct == ACCT_SB:
+        ok, reason = allow_micro(
+            path,
+            engine_origin=ms_origin,
+            account_id=acct or ACCT_SB,
+            cfg=cfg,
+        )
+        if ok and path_k in (PATH_INSTANT, PATH_MICRO):
+            ok, reason = allow_micro(
+                path_k,
+                engine_origin=ms_origin,
+                account_id=acct or ACCT_SB,
+                cfg=cfg,
+            )
+        if not ok:
+            return EngineEntryPathDecision(
+                allow=False,
+                reason=reason,
+                path=path_k,
+                account_id=acct or ACCT_SB,
+                engine_origin=ms_origin,
+            )
+
+    od = evaluate_overnight_entry_policy(
+        epic=epic,
+        path=path,
+        account_id=acct or account_id,
+        cfg=cfg,
+        now=now,
+        long_runner_gates_ok=long_runner_gates_ok,
+    )
+    return EngineEntryPathDecision(
+        allow=od.allow,
+        reason=od.reason,
+        path=od.path,
+        account_id=od.account_id,
+        engine_origin=origin or qs_origin,
+    )
+
+
 def is_finite_ml_probability(value: Any) -> bool:
     try:
         if value is None:
@@ -324,6 +430,20 @@ def score_entry_candidate_ml(
             ml_score_at_entry=None,
             scorer=scorer,
         )
+
+    # Classic sniper gate default (0.68) must not stamp or clear submit.
+    # Elastic-band edges (0.72/0.78/0.82) are allowed — real P can sit there.
+    try:
+        if abs(float(p) - 0.68) < 1e-6:
+            return MlPreSubmitResult(
+                allow_submit=False,
+                p_success=None,
+                reason="ml_score_threshold_constant",
+                ml_score_at_entry=None,
+                scorer=scorer,
+            )
+    except Exception:
+        pass
 
     return MlPreSubmitResult(
         allow_submit=True,
@@ -558,14 +678,22 @@ def evaluate_elastic_gate(
             _cfg_block(cfg, "selectivity_gates").get("allow_non_dow", False)
         )
         if not allow_non_dow:
-            return ElasticGateDecision(
-                allow=False,
-                reason="elastic_non_dow_rejected",
-                min_p=min_p,
-                abs_obi=abs_obi,
-                p_success=p,
-                band=band,
-            )
+            failover_ok = False
+            try:
+                from runtime.rotation_failover import failover_allows_epic
+
+                failover_ok = bool(failover_allows_epic(epic_s, cfg))
+            except Exception:
+                failover_ok = False
+            if not failover_ok:
+                return ElasticGateDecision(
+                    allow=False,
+                    reason="elastic_non_dow_rejected",
+                    min_p=min_p,
+                    abs_obi=abs_obi,
+                    p_success=p,
+                    band=band,
+                )
     return ElasticGateDecision(
         allow=True,
         reason=f"elastic_ok band={band} min_p={min_p:.3f}",
@@ -588,12 +716,40 @@ def evaluate_selectivity_gates(
     obi_available: bool | None = None,
     spread_elasticity: float | None = None,
     depth_expanding: bool | None = None,
+    engine_origin: str | None = None,
+    account_id: str | None = None,
 ) -> SelectivityDecision:
     """P / |OBI| / 15m trend agree gates (DOW-centric selectivity).
 
     When ``elastic_gate.enabled``, delegates to Volatility-Adaptive ElasticGate
     (healthy plane → P∈[0.68,0.72]; stressed → P≥0.78–0.82; OBI missing → reject).
+
+    V37 dual-regime: ElasticGate knobs are CFD-owned — MACRO_SENTINEL skips the
+    HF OBI ElasticGate path (macro / Trend-Retention owns SB selectivity).
     """
+    try:
+        from system.dual_regime import dual_regime_enabled, elastic_gate_applies
+
+        if dual_regime_enabled(cfg) and not elastic_gate_applies(
+            engine_origin=engine_origin,
+            account_id=account_id,
+            cfg=cfg,
+        ):
+            p = normalize_ml_probability(p_success)
+            try:
+                abs_obi = abs(float(obi)) if obi is not None else 0.0
+            except (TypeError, ValueError):
+                abs_obi = 0.0
+            return SelectivityDecision(
+                allow=True,
+                reason="sb_macro_skips_cfd_elastic_gate",
+                p_success=p,
+                abs_obi=abs_obi,
+                trend_ok=True,
+            )
+    except Exception:
+        pass
+
     if elastic_gate_enabled(cfg):
         # Infer availability: explicit flag wins; None obi → unavailable.
         avail = True if obi_available is None else bool(obi_available)
@@ -680,13 +836,21 @@ def evaluate_selectivity_gates(
         # Hot-path SB / Instant selectivity is DOW-centric.
         allow_non_dow = bool(_cfg_block(cfg, "selectivity_gates").get("allow_non_dow", False))
         if not allow_non_dow:
-            return SelectivityDecision(
-                allow=False,
-                reason="selectivity_non_dow_rejected",
-                p_success=p,
-                abs_obi=abs_obi,
-                trend_ok=True,
-            )
+            failover_ok = False
+            try:
+                from runtime.rotation_failover import failover_allows_epic
+
+                failover_ok = bool(failover_allows_epic(epic_s, cfg))
+            except Exception:
+                failover_ok = False
+            if not failover_ok:
+                return SelectivityDecision(
+                    allow=False,
+                    reason="selectivity_non_dow_rejected",
+                    p_success=p,
+                    abs_obi=abs_obi,
+                    trend_ok=True,
+                )
     return SelectivityDecision(
         allow=True,
         reason="selectivity_ok",

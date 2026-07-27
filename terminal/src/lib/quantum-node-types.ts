@@ -58,6 +58,15 @@ export type PositionAuthorityRow = {
 /** AI multi-market sniper scanner row (DOW / FTSE / Gold / EURUSD). */
 export type SniperStatusKind = "long" | "short" | "proxy";
 
+/** Ranked rotator lane for scanner chrome (promoted ≠ legacy DOW-only stack). */
+export type SniperRankLane =
+  | "promoted"
+  | "eligible"
+  | "waiting"
+  | "excluded"
+  | "stack"
+  | null;
+
 export type SniperMarketRow = {
   id: "dow" | "ftse" | "gold" | "eurusd" | "dax" | "brent";
   label: string;
@@ -74,6 +83,10 @@ export type SniperMarketRow = {
   zScore: number;
   tpm: number;
   inActiveStack: boolean;
+  /** Ranked top-N allowlist member when ranked rotator is active */
+  inPromoted: boolean;
+  rankLane: SniperRankLane;
+  rank: number | null;
   allowEntries: boolean;
   regimeLabel: string;
   /** RuntimeContext metric overrides (memory plane) */
@@ -87,6 +100,14 @@ export type SniperMarketRow = {
   trailFloorGbp: number | null;
   softLossGbp: number | null;
   trailPriceLevel: number | null;
+};
+
+export type ScannerRankedChrome = {
+  active: boolean;
+  dominant: string | null;
+  promotedLabels: string[];
+  waitingLabels: string[];
+  excludedNote: string | null;
 };
 
 export type QuantumSafetyMatrix = {
@@ -103,6 +124,8 @@ export type QuantumSafetyMatrix = {
 export type QuantumNodeView = {
   nodes: AssetMarketNode[];
   scanner: SniperMarketRow[];
+  /** Ranked rotator summary for scanner chips (SB-prefer when CFD paused) */
+  rankedChrome: ScannerRankedChrome;
   alpha: {
     epic: string;
     label: string;

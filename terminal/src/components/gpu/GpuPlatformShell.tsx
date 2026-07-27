@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { AIMarketScanner } from "@/components/gpu/AIMarketScanner";
+import { DeskIntentStrip } from "@/components/gpu/DeskIntentStrip";
 import { DualLaneControlDeck } from "@/components/gpu/DualLaneControlDeck";
 import { ExecutionTruthStrip } from "@/components/gpu/ExecutionTruthStrip";
 import { GPUExecutionCanvas } from "@/components/gpu/GPUExecutionCanvas";
@@ -10,6 +11,8 @@ import { HardwareAffinityMeters } from "@/components/gpu/HardwareAffinityMeters"
 import { PerformanceMetricsBlotter } from "@/components/gpu/PerformanceMetricsBlotter";
 import { RefPositionBlotter } from "@/components/gpu/RefPositionBlotter";
 import { SovereignAccountingBoard } from "@/components/gpu/SovereignAccountingBoard";
+import { GuiSupervisorChip } from "@/components/gpu/GuiSupervisorChip";
+import { MlStrategyReviewChip } from "@/components/gpu/MlStrategyReviewChip";
 import { SovereignSystemBadge } from "@/components/gpu/SovereignSystemBadge";
 import { TacticalMacroObiStrip } from "@/components/gpu/TacticalMacroObiStrip";
 import { TokenBucketProgressBars } from "@/components/gpu/TokenBucketProgressBars";
@@ -181,6 +184,14 @@ export function GpuPlatformShell() {
         }
         coreDetached={Boolean(ops.core_detached)}
       />
+      <GuiSupervisorChip />
+      <MlStrategyReviewChip />
+
+      <DeskIntentStrip
+        bufferRef={bufferRef}
+        cfdOnline={chrome.cfdOnline}
+        sbOnline={chrome.sbOnline}
+      />
 
       <DualLaneControlDeck
         bufferRef={bufferRef}
@@ -201,15 +212,16 @@ export function GpuPlatformShell() {
           />
           <TacticalMacroObiStrip
             macroBias={macroBias}
-            lastObi={view.alpha.lastObi}
-            focusLabel={view.alpha.label}
+            lastObi={view.alpha?.lastObi ?? 0}
+            focusLabel={view.alpha?.label ?? "—"}
           />
           <AIMarketScanner
-            rows={view.scanner}
+            rows={view.scanner ?? []}
             wsState={chrome.wsState === "live" ? "live" : view.wsState}
             capital={capital}
             muxOpenCount={chrome.openCount}
             deskIdleReason={view.deskIdleReason}
+            rankedChrome={view.rankedChrome ?? null}
           />
         </main>
 

@@ -1338,6 +1338,20 @@ class SignalEngine:
             f"spread={float(last['spread']):.1f}, atr={float(last.get('atr', 0)):.1f}"
             f"{vol_note}, {learn_note}"
         )
+        close_history: list[float] = []
+        try:
+            src = c5i if c5i is not None and len(c5i) > 0 else c5
+            col = "close" if src is not None and "close" in getattr(src, "columns", []) else None
+            if col is None and src is not None and "price" in getattr(src, "columns", []):
+                col = "price"
+            if src is not None and col is not None:
+                close_history = [
+                    float(v)
+                    for v in src[col].tail(20).tolist()
+                    if v is not None and float(v) > 0
+                ]
+        except Exception:
+            close_history = []
         snapshot = {
             "last": last,
             "trend15": trend15,
@@ -1354,6 +1368,7 @@ class SignalEngine:
             "h1_bullish": h1_bullish,
             "h1_penalty": h1_penalty,
             "regime_penalty": regime_penalty if candidate in ("BUY", "SELL") else 0.0,
+            "close_history": close_history,
             **exhaustion_meta,
         }
         self.last_snapshot[market] = snapshot

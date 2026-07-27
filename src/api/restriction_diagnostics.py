@@ -6,8 +6,11 @@ from typing import Any
 
 
 def _live_config_restrictions() -> dict[str, Any]:
+    engine_caps: dict[str, Any] = {}
+    enforce_cap = True
     try:
         from system.config_loader import get_config
+        from system.engine_lane import engine_position_caps
 
         cfg = get_config()
         raw = cfg.max_open_positions
@@ -18,12 +21,22 @@ def _live_config_restrictions() -> dict[str, Any]:
         else:
             max_open = int(raw)
         rotation_on = bool(cfg.get("enforce_top3_rotation_filter", True))
+        engine_caps = dict(engine_position_caps(cfg) or {})
+        pm = cfg.get("position_management") or {}
+        if isinstance(pm, dict):
+            enforce_cap = bool(pm.get("enforce_cap_breach", True))
     except Exception:
         max_open = None
         rotation_on = True
     return {
         "max_open_positions": max_open,
+        "engine_position_caps": engine_caps,
+        "enforce_cap_breach": enforce_cap,
         "enforce_top3_rotation_filter": rotation_on,
+        "_max_open_note": (
+            "null global = dual-engine; entry/desk enforce engine_position_caps "
+            "+ position_management.enforce_cap_breach (not health alone)"
+        ),
     }
 
 

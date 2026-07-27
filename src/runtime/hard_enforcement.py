@@ -198,10 +198,32 @@ def decide_epic_hard_enforcement(
         reasons.append("STAND_DOWN — all execution paths hard-blocked")
 
     elif ownership is HardOwnership.SCALP:
-        hard_allow.add(ExecutionPath.MICRO.value)
-        hard_block.update([ExecutionPath.PATH_A.value, ExecutionPath.PATH_B_HANDOFF.value])
-        flags.append("SCALP_HARD_ENFORCEMENT")
-        reasons.append("SCALP ownership — micro only; Path A and Path B hard-blocked")
+        try:
+            from system.dual_regime import sb_macro_path_a_carve_active
+
+            _sb_path_a = sb_macro_path_a_carve_active()
+        except Exception:
+            _sb_path_a = False
+        if _sb_path_a:
+            # SB macro/LTR plane needs Path A; Instant/Core-B micro stay blocked.
+            hard_allow.add(ExecutionPath.PATH_A.value)
+            hard_block.update(
+                [ExecutionPath.MICRO.value, ExecutionPath.PATH_B_HANDOFF.value]
+            )
+            flags.append("SCALP_HARD_ENFORCEMENT")
+            flags.append("SB_MACRO_PATH_A_CARVE")
+            reasons.append(
+                "SCALP ownership — SB macro carve allows Path A; micro hard-blocked"
+            )
+        else:
+            hard_allow.add(ExecutionPath.MICRO.value)
+            hard_block.update(
+                [ExecutionPath.PATH_A.value, ExecutionPath.PATH_B_HANDOFF.value]
+            )
+            flags.append("SCALP_HARD_ENFORCEMENT")
+            reasons.append(
+                "SCALP ownership — micro only; Path A and Path B hard-blocked"
+            )
 
     elif ownership is HardOwnership.MOMENTUM:
         hard_allow.add(ExecutionPath.PATH_A.value)
@@ -243,6 +265,21 @@ def decide_epic_hard_enforcement(
                 hard_allow.add(path)
                 hard_block.discard(path)
             reasons.append(f"high-confidence hard transition {current} → {target}")
+
+    # Re-assert SB Path A carve after transition overlays (SCALP target would
+    # otherwise re-block PATH_A / re-allow MICRO).
+    try:
+        from system.dual_regime import sb_macro_path_a_carve_active
+
+        if sb_macro_path_a_carve_active() and ownership is HardOwnership.SCALP:
+            hard_block.discard(ExecutionPath.PATH_A.value)
+            hard_allow.add(ExecutionPath.PATH_A.value)
+            hard_block.add(ExecutionPath.MICRO.value)
+            hard_allow.discard(ExecutionPath.MICRO.value)
+            if "SB_MACRO_PATH_A_CARVE" not in flags:
+                flags.append("SB_MACRO_PATH_A_CARVE")
+    except Exception:
+        pass
 
     if not reasons:
         reasons.append("hard enforcement active")
@@ -388,9 +425,15 @@ def is_hard_enforcement_active(epic: str) -> bool:
 
 def is_path_hard_allowed(epic: str, path: ExecutionPath | str) -> tuple[bool, str]:
     try:
+        import os
+
         from system.demo_execution_plane import execution_guards_relaxed
 
-        if execution_guards_relaxed(epic=epic):
+        # Match unified_execution: keep pytest binding real so unit tests can
+        # assert hard blocks; demo-throughput bypass remains for live soak.
+        if os.environ.get("IG_AGENT_PYTEST") != "1" and execution_guards_relaxed(
+            epic=epic
+        ):
             return True, ""
     except Exception:
         pass

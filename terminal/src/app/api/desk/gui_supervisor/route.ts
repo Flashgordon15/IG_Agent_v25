@@ -28,9 +28,12 @@ type SupervisorPayload = {
     summary?: string;
     tone?: string;
     state_path?: string;
+    alerts?: string[];
     needs_code?: boolean;
     needs_ops?: boolean;
   } | null;
+  alerts?: string[];
+  halted?: boolean;
   cursor_handoff?: unknown;
   findings?: Array<{ severity?: string; title?: string }>;
 };
@@ -78,9 +81,23 @@ export async function GET() {
       });
     }
     const data = JSON.parse(raw) as SupervisorPayload;
-    const score = String(data.score || "UNKNOWN").toUpperCase();
-    const top = data.top_finding;
     const chipIn = data.dashboard_chip;
+    const halted = Boolean(data.halted) || String(chipIn?.score || "").toUpperCase() === "HALTED";
+    const score = halted
+      ? "HALTED"
+      : String(chipIn?.score || data.score || "UNKNOWN").toUpperCase();
+    const top = data.top_finding;
+    const alerts = Array.from(
+      new Set(
+        [
+          ...((chipIn && chipIn.alerts) || []),
+          ...(data.alerts || []),
+          ...(halted ? ["HALTED", "BLEED"] : []),
+        ]
+          .map((a) => String(a || "").trim().toUpperCase())
+          .filter(Boolean),
+      ),
+    );
     const summary =
       (chipIn && chipIn.summary) ||
       (top && top.title) ||
@@ -92,14 +109,25 @@ export async function GET() {
     const visible =
       chipIn?.visible != null
         ? Boolean(chipIn.visible)
-        : score === "WATCH" || score === "FAIL";
+        : score === "WATCH" || score === "FAIL" || score === "HALTED" || halted;
     const tone =
       chipIn?.tone ||
-      (score === "FAIL" ? "red" : score === "WATCH" ? "amber" : "green");
+      (score === "FAIL" || score === "HALTED" || halted
+        ? "red"
+        : score === "WATCH"
+          ? "amber"
+          : "green");
+    const label =
+      chipIn?.label ||
+      (halted || score === "HALTED"
+        ? "SUPERVISOR HALTED · BLEED LOCK"
+        : `SUPERVISOR ${score}${alerts.length ? ` · ${alerts.join(" · ")}` : ""}`);
     return NextResponse.json({
       ok: true,
       missing: false,
       score,
+      halted,
+      alerts,
       needs_code: Boolean(data.needs_code),
       needs_ops: Boolean(data.needs_ops),
       checked_at: data.checked_at ?? null,
@@ -108,9 +136,10 @@ export async function GET() {
       chip: {
         visible,
         score,
-        label: chipIn?.label || `SUPERVISOR ${score}`,
+        label,
         summary,
         tone,
+        alerts,
         state_path:
           chipIn?.state_path ||
           "src/data/v31-production/state/gui_supervisor_latest.json",

@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.igagent.daily_loss_loop</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>__IG_AGENT_ROOT__/scripts/run_daily_loss_autopsy.sh</string>
+		<string>--with-review</string>
+		<string>--with-shadow</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>__IG_AGENT_ROOT__</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>APP_MODE</key>
+		<string>DEMO</string>
+		<key>IG_AGENT_CONFIG</key>
+		<string>__IG_AGENT_ROOT__/config/config_v31_demo_throughput.json</string>
+		<key>PYTHONPATH</key>
+		<string>__IG_AGENT_ROOT__/src</string>
+		<key>PATH</key>
+		<string>/usr/local/bin:/usr/bin:/bin:__IG_AGENT_ROOT__/.venv/bin</string>
+	</dict>
+	<!-- Weekdays 21:40 local (Mini set to Europe/London) — after cash close, before rollover -->
+	<key>StartCalendarInterval</key>
+	<array>
+		<dict>
+			<key>Weekday</key>
+			<integer>1</integer>
+			<key>Hour</key>
+			<integer>21</integer>
+			<key>Minute</key>
+			<integer>40</integer>
+		</dict>
+		<dict>
+			<key>Weekday</key>
+			<integer>2</integer>
+			<key>Hour</key>
+			<integer>21</integer>
+			<key>Minute</key>
+			<integer>40</integer>
+		</dict>
+		<dict>
+			<key>Weekday</key>
+			<integer>3</integer>
+			<key>Hour</key>
+			<integer>21</integer>
+			<key>Minute</key>
+			<integer>40</integer>
+		</dict>
+		<dict>
+			<key>Weekday</key>
+			<integer>4</integer>
+			<key>Hour</key>
+			<integer>21</integer>
+			<key>Minute</key>
+			<integer>40</integer>
+		</dict>
+		<dict>
+			<key>Weekday</key>
+			<integer>5</integer>
+			<key>Hour</key>
+			<integer>21</integer>
+			<key>Minute</key>
+			<integer>40</integer>
+		</dict>
+	</array>
+	<key>StandardOutPath</key>
+	<string>__IG_AGENT_ROOT__/src/data/v31-production/logs/daily_loss_loop.log</string>
+	<key>StandardErrorPath</key>
+	<string>__IG_AGENT_ROOT__/src/data/v31-production/logs/daily_loss_loop.log</string>
+	<key>Nice</key>
+	<integer>10</integer>
+</dict>
+</plist>

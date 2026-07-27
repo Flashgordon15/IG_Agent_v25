@@ -423,6 +423,14 @@ def evaluate_sniper_ml_gate(
             p = float(stamp.ml_score_at_entry or 0.0)
         else:
             p = float(result.p_success) if p_norm is None else float(p_norm)
+        # Never treat the classic sniper gate default (0.68) as an inference
+        # pass — observed 2026-07-24 when snapshot/fallback landed on thr.
+        # Do not reject elastic floors (0.72/0.78/0.82); those can be real P.
+        try:
+            if abs(float(p) - 0.68) < 1e-6:
+                return False, "sniper_ml_threshold_constant", float(p)
+        except Exception:
+            pass
         if not result.approved:
             return False, result.reason, p
         return True, result.reason, p

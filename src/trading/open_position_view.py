@@ -342,6 +342,32 @@ def _quote_mark_trustworthy(entry: float | None, mark: float | None, epic: str) 
     return abs(mark_f - entry_f) < max(500.0, entry_f * 0.5)
 
 
+def mark_within_ig_basis(
+    entry: float | None,
+    mark: float | None,
+    epic: str,
+    *,
+    max_ig_pts: float = 25.0,
+) -> bool:
+    """Reject Yahoo/hub marks whose basis vs IG fill exceeds scalp risk ceilings.
+
+    Scale-only trustworthiness allows ~25% index divergence — enough for a
+    60pt Yahoo–IG basis to instantly trip a 6pt virtual stop / false TP.
+    """
+    if not _quote_mark_trustworthy(entry, mark, epic):
+        return False
+    try:
+        from system.pnl_math import ig_points_to_price_delta
+
+        delta = float(ig_points_to_price_delta(str(epic or ""), 1.0) or 0.0)
+        if delta <= 0:
+            delta = 1.0
+        pts = abs(float(mark) - float(entry)) / delta
+        return pts <= float(max_ig_pts)
+    except Exception:
+        return False
+
+
 def unrealized_from_quote(
     side: str,
     entry: float,

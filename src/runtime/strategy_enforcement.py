@@ -158,11 +158,28 @@ def decide_epic_enforcement(
         reasons.append("STAND_DOWN — all execution paths soft-blocked")
 
     elif ownership is EnforcementOwnership.SCALP:
-        soft_allow.update(_PROFILE_PATHS["SCALP"])
-        if enforcement_confidence >= OWNERSHIP_CONFIDENCE_THRESHOLD:
-            soft_block.add(ExecutionPath.PATH_A.value)
+        try:
+            from system.dual_regime import sb_macro_path_a_carve_active
+
+            _sb_path_a = sb_macro_path_a_carve_active()
+        except Exception:
+            _sb_path_a = False
+        if _sb_path_a:
+            soft_allow.add(ExecutionPath.PATH_A.value)
+            soft_block.update(
+                [ExecutionPath.MICRO.value, ExecutionPath.PATH_B_HANDOFF.value]
+            )
             flags.append("SCALP_SOFT_ENFORCEMENT")
-            reasons.append("SCALP ownership — Path A soft-blocked")
+            flags.append("SB_MACRO_PATH_A_CARVE")
+            reasons.append(
+                "SCALP ownership — SB macro carve allows Path A; micro soft-blocked"
+            )
+        else:
+            soft_allow.update(_PROFILE_PATHS["SCALP"])
+            if enforcement_confidence >= OWNERSHIP_CONFIDENCE_THRESHOLD:
+                soft_block.add(ExecutionPath.PATH_A.value)
+                flags.append("SCALP_SOFT_ENFORCEMENT")
+                reasons.append("SCALP ownership — Path A soft-blocked")
 
     elif ownership is EnforcementOwnership.MOMENTUM:
         soft_allow.add(ExecutionPath.PATH_A.value)
@@ -306,9 +323,13 @@ def _decision_for_epic(epic: str) -> dict[str, Any] | None:
 
 def is_path_soft_allowed(epic: str, path: ExecutionPath | str) -> tuple[bool, str]:
     try:
+        import os
+
         from system.demo_execution_plane import execution_guards_relaxed
 
-        if execution_guards_relaxed(epic=epic):
+        if os.environ.get("IG_AGENT_PYTEST") != "1" and execution_guards_relaxed(
+            epic=epic
+        ):
             return True, ""
     except Exception:
         pass

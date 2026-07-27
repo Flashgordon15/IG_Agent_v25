@@ -413,43 +413,61 @@ def _evaluate_track(track: GbpExitTrack, pnl_gbp: float) -> None:
         effective_soft = float(track.soft_loss_gbp)
 
     if pnl_gbp <= -effective_soft:
+        hold_age_soft = max(0.0, time.time() - float(track.armed_at or 0.0))
         try:
-            from execution.loss_patience import (
-                loss_patience_enabled,
-                should_hold_losing_position,
-            )
+            from execution.macro_path_a_exit_guard import soft_exit_deferred_for_path_a
 
-            if loss_patience_enabled(cfg):
-                decision = should_hold_losing_position(
-                    epic=track.epic,
-                    direction=track.direction,
-                    pnl_gbp=pnl_gbp,
-                    soft_loss_gbp=effective_soft,
-                    loss_cap_gbp=track.loss_cap_gbp,
-                    open_mins=(
-                        max(0.0, (time.time() - float(track.armed_at or 0)) / 60.0)
-                        if track.armed_at
-                        else None
-                    ),
-                    cfg=cfg,
+            defer, defer_reason = soft_exit_deferred_for_path_a(
+                hold_sec=hold_age_soft, cfg=cfg
+            )
+            if defer:
+                log_engine(
+                    f"MicroGbpExit: path_a soft_loss DEFER deal={track.deal_id[:10]} "
+                    f"pnl={pnl_gbp:.2f} — {defer_reason} (hard cap still live)"
                 )
-                if decision.hold:
-                    log_engine(
-                        f"MicroGbpExit: loss_patience HOLD deal={track.deal_id[:10]} "
-                        f"pnl={pnl_gbp:.2f} — {decision.reason}"
-                    )
-                    return
+                # Fall through to hard loss_cap below; do not soft-flatten yet.
+            else:
+                defer = False
         except Exception:
-            pass
-        _flatten(
-            track,
-            reason=(
-                f"soft_loss pnl={pnl_gbp:.2f} soft=-{effective_soft:.2f} "
-                f"(base=-{track.soft_loss_gbp:.2f}) hard=-{track.loss_cap_gbp:.2f}"
-            ),
-            pnl_gbp=pnl_gbp,
-        )
-        return
+            defer = False
+        if not defer:
+            try:
+                from execution.loss_patience import (
+                    loss_patience_enabled,
+                    should_hold_losing_position,
+                )
+
+                if loss_patience_enabled(cfg):
+                    decision = should_hold_losing_position(
+                        epic=track.epic,
+                        direction=track.direction,
+                        pnl_gbp=pnl_gbp,
+                        soft_loss_gbp=effective_soft,
+                        loss_cap_gbp=track.loss_cap_gbp,
+                        open_mins=(
+                            max(0.0, (time.time() - float(track.armed_at or 0)) / 60.0)
+                            if track.armed_at
+                            else None
+                        ),
+                        cfg=cfg,
+                    )
+                    if decision.hold:
+                        log_engine(
+                            f"MicroGbpExit: loss_patience HOLD deal={track.deal_id[:10]} "
+                            f"pnl={pnl_gbp:.2f} — {decision.reason}"
+                        )
+                        return
+            except Exception:
+                pass
+            _flatten(
+                track,
+                reason=(
+                    f"soft_loss pnl={pnl_gbp:.2f} soft=-{effective_soft:.2f} "
+                    f"(base=-{track.soft_loss_gbp:.2f}) hard=-{track.loss_cap_gbp:.2f}"
+                ),
+                pnl_gbp=pnl_gbp,
+            )
+            return
 
     # 2) Hard loss cap.
     if pnl_gbp <= -track.loss_cap_gbp:

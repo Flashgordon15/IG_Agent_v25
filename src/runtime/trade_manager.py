@@ -607,6 +607,22 @@ class DualCoreCoordinator:
                 f"DualCoreCoordinator: dispatch blocked epic={epic} reason={code}"
             )
 
+        # SB hard veto — ENGINE_B_MICRO_SCALPER must not fire on MACRO_SENTINEL.
+        try:
+            from runtime.overnight_entry_policy import evaluate_engine_entry_path_policy
+
+            ed = evaluate_engine_entry_path_policy(
+                epic=str(epic),
+                path="engine_b_micro_scalper",
+                cfg=self._cfg,
+                long_runner_gates_ok=False,
+            )
+            if not ed.allow:
+                _block(ed.reason)
+                return
+        except Exception:
+            pass
+
         # Pre-network regime veto — local tick math only, before any REST.
         entry_route = "MARKET"
         wo_touch_level: float | None = None
@@ -705,13 +721,15 @@ class DualCoreCoordinator:
         except Exception:
             pass
         try:
-            from api.agent_control import is_paused
+            from api.agent_control import new_entries_hard_blocked
 
-            if is_paused():
-                _block("api_trading_paused")
+            blocked_pause, pause_reason = new_entries_hard_blocked()
+            if blocked_pause:
+                _block(pause_reason or "api_trading_paused")
                 return
-        except Exception:
-            pass
+        except Exception as pause_exc:
+            _block(f"api_trading_paused_fail_closed:{type(pause_exc).__name__}")
+            return
         if self._rest is None:
             _block("rest_client_unavailable")
             return
@@ -1056,8 +1074,23 @@ class DualCoreCoordinator:
                 return
 
             ref = str(
-                result.get("dealReference") or result.get("dealId") or deal_ref
+                result.get("dealReference") or result.get("dealId") or ""
             ).strip()
+            # Never confirm with synthetic MICRO-{epic}-{ts} lifecycle tokens —
+            # IG returns 400 invalid.dealReference and priority polls thrash the
+            # shared REST budget (soft-blocks SB macro entries).
+            if (
+                not ref
+                or "." in ref
+                or (ref.upper().startswith("MICRO-") and "-" in ref[6:])
+            ):
+                log_engine(
+                    f"DualCoreCoordinator: skip confirm — no broker dealReference "
+                    f"epic={epic} place_keys={sorted(result.keys()) if isinstance(result, dict) else []} "
+                    f"synthetic_ref={deal_ref}"
+                )
+                set_last_gate_suppression_reason("micro_missing_deal_reference")
+                return
             if ref and hasattr(self._rest, "confirm_deal"):
                 try:
                     confirm = self._rest.confirm_deal(ref) or {}
@@ -1119,10 +1152,17 @@ class DualCoreCoordinator:
                             ref = str(
                                 result.get("dealReference")
                                 or result.get("dealId")
-                                or deal_ref
+                                or ""
                             ).strip()
                             confirm = {}
-                            if ref and hasattr(self._rest, "confirm_deal"):
+                            if (
+                                ref
+                                and "." not in ref
+                                and not (
+                                    ref.upper().startswith("MICRO-") and "-" in ref[6:]
+                                )
+                                and hasattr(self._rest, "confirm_deal")
+                            ):
                                 try:
                                     confirm = self._rest.confirm_deal(ref) or {}
                                 except Exception as exc:
@@ -1136,6 +1176,11 @@ class DualCoreCoordinator:
                                         "rejected": False,
                                         "reason": f"confirm_exception:{type(exc).__name__}",
                                     }
+                            elif not ref:
+                                log_engine(
+                                    f"DualCoreCoordinator: size-retry place missing "
+                                    f"dealReference epic={epic}"
+                                )
                             deal_id = str(
                                 confirm.get("deal_id") or result.get("dealId") or ""
                             ).strip() or None

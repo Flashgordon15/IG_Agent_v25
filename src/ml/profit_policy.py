@@ -50,6 +50,33 @@ def apply_profit_policy(
 
     # Marginal ML — skip low-conviction entries (toward 70% WR)
     min_ml = float(pol.get("min_ml_probability") or 0.52)
+    require_ml = bool(pol.get("require_ml_probability", True))
+    try:
+        from diagnostics.stamp_provenance import is_threshold_constant
+    except Exception:
+        is_threshold_constant = lambda _v: False  # type: ignore
+
+    if ml_prob is not None and is_threshold_constant(float(ml_prob)):
+        # Only hard-veto the classic sniper gate default (0.68). Elastic-band
+        # edges (0.72/0.78/0.82) can be real inferences that land on the floor.
+        if abs(float(ml_prob) - 0.68) < 1e-6:
+            log_engine(
+                f"[PROFIT POLICY] veto ml_prob={float(ml_prob):.3f} is gate threshold constant"
+            )
+            return ProfitPolicyVerdict(
+                confidence=0.0,
+                veto=True,
+                reason=f"ml_prob {float(ml_prob):.3f} is threshold_constant (not inference)",
+            )
+
+    if require_ml and ml_prob is None and pol.get("marginal_ml_veto", True):
+        log_engine("[PROFIT POLICY] veto ml_prob=None (require_ml_probability)")
+        return ProfitPolicyVerdict(
+            confidence=0.0,
+            veto=True,
+            reason="ml_prob absent — require_ml_probability",
+        )
+
     if ml_prob is not None and pol.get("marginal_ml_veto", True):
         if float(ml_prob) < min_ml:
             log_engine(

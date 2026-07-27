@@ -217,33 +217,47 @@ def _risk_action_for_row(
     if pnl <= -soft:
         hold_reason = ""
         try:
-            from execution.loss_patience import (
-                loss_patience_enabled,
-                should_hold_losing_position,
+            hold_sec = (
+                float(row.open_mins) * 60.0 if row.open_mins is not None else None
             )
+            from execution.macro_path_a_exit_guard import soft_exit_deferred_for_path_a
 
-            if loss_patience_enabled(cfg):
-                decision = should_hold_losing_position(
-                    epic=row.epic,
-                    direction=row.direction,
-                    pnl_gbp=pnl,
-                    soft_loss_gbp=soft,
-                    loss_cap_gbp=cap,
-                    open_mins=row.open_mins,
-                    cfg=cfg,
-                )
-                if decision.hold:
-                    hold_reason = decision.reason
+            defer, defer_reason = soft_exit_deferred_for_path_a(
+                hold_sec=hold_sec, cfg=cfg
+            )
+            if defer:
+                hold_reason = defer_reason
         except Exception:
             hold_reason = ""
+        if not hold_reason:
+            try:
+                from execution.loss_patience import (
+                    loss_patience_enabled,
+                    should_hold_losing_position,
+                )
+
+                if loss_patience_enabled(cfg):
+                    decision = should_hold_losing_position(
+                        epic=row.epic,
+                        direction=row.direction,
+                        pnl_gbp=pnl,
+                        soft_loss_gbp=soft,
+                        loss_cap_gbp=cap,
+                        open_mins=row.open_mins,
+                        cfg=cfg,
+                    )
+                    if decision.hold:
+                        hold_reason = decision.reason
+            except Exception:
+                hold_reason = ""
         if hold_reason:
-            # Defer the soft-loss cut for mean reversion; the HARD loss cap below
-            # is still enforced this same tick, so the loss can never run away.
+            # Defer soft-loss (Path A min-hold or loss_patience). HARD cap below
+            # still fires this tick so the loss cannot run away.
             try:
                 from system.engine_log import log_engine
 
                 log_engine(
-                    f"loss_patience HOLD {row.epic} deal={row.deal_id[:10]} "
+                    f"soft_exit HOLD {row.epic} deal={row.deal_id[:10]} "
                     f"pnl={pnl:.2f} soft=-{soft:.2f} cap=-{cap:.2f} — {hold_reason}"
                 )
             except Exception:

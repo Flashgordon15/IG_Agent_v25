@@ -11,6 +11,8 @@ import type {
   DualPortHealth,
   SniperArmState,
 } from "@/lib/desk-multiplex";
+import { GATE_STANDBY_WAITING_BREAKOUT } from "@/lib/gate-label";
+import { isValidMidSample } from "@/lib/chart-series";
 import { resolveRuntimeAssetProfile } from "@/lib/runtime-asset-profiles";
 
 export type GpuExecPosition = {
@@ -73,7 +75,7 @@ export function createGpuExecutionBuffer(): GpuExecutionBuffer {
     truth: {
       quoteAgeMs: null,
       sniperArm: "SUPPRESSED" as SniperArmState,
-      gateVerdict: "GATE_UNKNOWN",
+      gateVerdict: GATE_STANDBY_WAITING_BREAKOUT,
       updatedAt: 0,
     },
     lastMuxSource: "idle",
@@ -88,7 +90,7 @@ export function createGpuExecutionBuffer(): GpuExecutionBuffer {
 }
 
 export function pushMid(buf: GpuExecutionBuffer, mid: number): void {
-  if (!(mid > 0)) return;
+  if (!isValidMidSample(mid)) return;
   const last = buf.mids[buf.mids.length - 1];
   if (last === mid) {
     buf.lastMid = mid;
@@ -105,7 +107,7 @@ export function pushMid(buf: GpuExecutionBuffer, mid: number): void {
 }
 
 export function pushCrawl(ring: number[], level: number | null): void {
-  if (level == null || !(level > 0)) return;
+  if (level == null || !isValidMidSample(level)) return;
   const last = ring[ring.length - 1];
   if (last != null && Math.abs(last - level) < 1e-9) return;
   ring.push(level);

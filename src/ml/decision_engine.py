@@ -19,6 +19,44 @@ from system.config import Config
 from system.engine_log import log_engine
 
 
+def _record_veto(
+    *,
+    veto_source: str,
+    action: str,
+    reason: str,
+    epic: str,
+    market: str,
+    direction: str,
+    setup_key: str,
+    ml_score: float | None,
+    rules_conf: float,
+    confidence_before: float | None = None,
+    confidence_after: float | None = None,
+    quote: Any | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    try:
+        from diagnostics.ml_veto_decisions import record_ml_veto_decision
+
+        record_ml_veto_decision(
+            veto_source=veto_source,
+            action=action,
+            reason=reason,
+            epic=epic,
+            market=market,
+            direction=direction,
+            setup_key=setup_key,
+            ml_score=ml_score,
+            rules_conf=rules_conf,
+            confidence_before=confidence_before,
+            confidence_after=confidence_after,
+            quote=quote,
+            metadata=metadata,
+        )
+    except Exception as exc:
+        log_engine(f"ml veto log skipped: {type(exc).__name__}: {exc}")
+
+
 @dataclass
 class MLDecisionResult:
     confidence: float
@@ -73,6 +111,20 @@ def blend_ml_confidence(
 
         feed = evaluate_feed_quality(cfg, quote=quote, epic=epic)
         if feed.veto:
+            _record_veto(
+                veto_source="feed_quality",
+                action="veto",
+                reason=feed.reason,
+                epic=epic,
+                market=market,
+                direction=direction,
+                setup_key=setup_key,
+                ml_score=None,
+                rules_conf=rules_conf,
+                confidence_before=conf,
+                confidence_after=0.0,
+                quote=quote,
+            )
             return MLDecisionResult(
                 confidence=0.0,
                 rules_confidence=rules_conf,
@@ -82,8 +134,24 @@ def blend_ml_confidence(
                 log_entry={"feed_quality": feed.__dict__, "veto": True},
             )
         if feed.penalty_pts > 0:
+            before = conf
             conf = max(0.0, conf - feed.penalty_pts)
             notes_parts.append(f"feed_penalty=-{feed.penalty_pts:.0f}")
+            _record_veto(
+                veto_source="feed_quality",
+                action="penalty",
+                reason=feed.reason,
+                epic=epic,
+                market=market,
+                direction=direction,
+                setup_key=setup_key,
+                ml_score=None,
+                rules_conf=rules_conf,
+                confidence_before=before,
+                confidence_after=conf,
+                quote=quote,
+                metadata={"penalty_pts": feed.penalty_pts},
+            )
     except Exception as exc:
         log_engine(f"ml decision feed_quality skipped: {type(exc).__name__}: {exc}")
 
@@ -93,6 +161,21 @@ def blend_ml_confidence(
 
         mem = evaluate_setup_memory(cfg, setup_key)
         if mem.veto:
+            _record_veto(
+                veto_source="setup_memory",
+                action="veto",
+                reason=mem.reason,
+                epic=epic,
+                market=market,
+                direction=direction,
+                setup_key=setup_key,
+                ml_score=None,
+                rules_conf=rules_conf,
+                confidence_before=conf,
+                confidence_after=0.0,
+                quote=quote,
+                metadata={"setup_memory": mem.__dict__},
+            )
             return MLDecisionResult(
                 confidence=0.0,
                 rules_confidence=rules_conf,
@@ -106,8 +189,24 @@ def blend_ml_confidence(
                 },
             )
         if mem.penalty_pts > 0:
+            before = conf
             conf = max(0.0, conf - mem.penalty_pts)
             notes_parts.append(f"setup_penalty=-{mem.penalty_pts:.0f}")
+            _record_veto(
+                veto_source="setup_memory",
+                action="penalty",
+                reason=mem.reason,
+                epic=epic,
+                market=market,
+                direction=direction,
+                setup_key=setup_key,
+                ml_score=None,
+                rules_conf=rules_conf,
+                confidence_before=before,
+                confidence_after=conf,
+                quote=quote,
+                metadata={"penalty_pts": mem.penalty_pts},
+            )
     except Exception as exc:
         log_engine(f"ml decision setup_memory skipped: {type(exc).__name__}: {exc}")
 
@@ -129,6 +228,20 @@ def blend_ml_confidence(
             atr_ratio=_atr / _stop,
         )
         if blocked:
+            _record_veto(
+                veto_source="filter_override",
+                action="veto",
+                reason=reason,
+                epic=epic,
+                market=market,
+                direction=direction,
+                setup_key=setup_key,
+                ml_score=None,
+                rules_conf=rules_conf,
+                confidence_before=rules_after_gates,
+                confidence_after=0.0,
+                quote=quote,
+            )
             return MLDecisionResult(
                 confidence=0.0,
                 rules_confidence=rules_conf,
@@ -178,12 +291,37 @@ def blend_ml_confidence(
             _last = last if (last is not None and hasattr(last, "get")) else {}
             _atr = float(_last.get("atr", 0) or 0)
             _stop = max(1.0, float(cfg.stop_distance_points))
-            features = {
-                "adjusted_score": rules_after_gates,
-                "raw_score": float(snap.get("raw_confidence", rules_after_gates)),
-                "rsi": float(_last.get("rsi", 0) or 0),
-                "atr_ratio": _atr / _stop,
-            }
+            _spread = float(_last.get("spread", 0) or 0)
+            try:
+                from ml.replay_features import features_from_close_history
+                from signals.indicators import session_name
+
+                _closes = snap.get("close_history") or []
+                if not isinstance(_closes, (list, tuple)):
+                    _closes = []
+                features = features_from_close_history(
+                    [float(c) for c in _closes if c is not None],
+                    stop_pts=_stop,
+                    rsi=float(_last.get("rsi", 0) or 0),
+                    atr=_atr,
+                    spread=_spread,
+                    high=float(_last.get("high", 0) or 0),
+                    low=float(_last.get("low", 0) or 0),
+                    adjusted_score=rules_after_gates,
+                    raw_score=float(snap.get("raw_confidence", rules_after_gates)),
+                    session_window=str(
+                        snap.get("session") or session_name()
+                    ),
+                    vol_regime=str(snap.get("vol_regime") or ""),
+                )
+            except Exception:
+                features = {
+                    "adjusted_score": rules_after_gates,
+                    "raw_score": float(snap.get("raw_confidence", rules_after_gates)),
+                    "rsi": float(_last.get("rsi", 0) or 0),
+                    "atr_ratio": _atr / _stop,
+                    "spread_ratio": _spread / _stop,
+                }
             for opt_name, opt_val in (
                 ("profit_tier_pct", 0.0),
                 ("session_slot_idx", None),
@@ -201,6 +339,9 @@ def blend_ml_confidence(
                         except Exception:
                             opt_val = 0.0
                     features[opt_name] = float(opt_val or 0.0)
+            # Pad any model feature the live path could not derive (neutral 0).
+            for fname in scorer.feature_names:
+                features.setdefault(fname, 0.0)
             if all(f in features for f in scorer.feature_names):
                 ml_prob = scorer.score(
                     features, use_ml_signal=True, timeout_s=0.5
@@ -241,6 +382,21 @@ def blend_ml_confidence(
 
         pol = apply_profit_policy(cfg, conf, ml_prob=ml_prob, store=store)
         if pol.veto:
+            _record_veto(
+                veto_source="profit_policy",
+                action="veto",
+                reason=pol.reason,
+                epic=epic,
+                market=market,
+                direction=direction,
+                setup_key=setup_key,
+                ml_score=ml_prob,
+                rules_conf=rules_conf,
+                confidence_before=conf,
+                confidence_after=0.0,
+                quote=quote,
+                metadata={"profit_policy": pol.__dict__},
+            )
             return MLDecisionResult(
                 confidence=0.0,
                 rules_confidence=rules_conf,
@@ -249,9 +405,26 @@ def blend_ml_confidence(
                 notes=pol.reason,
                 log_entry={"profit_policy": pol.__dict__},
             )
+        before_pol = conf
         conf = float(pol.confidence)
         if pol.boost_pts or pol.penalty_pts:
             notes_parts.append(pol.reason)
+            if pol.penalty_pts:
+                _record_veto(
+                    veto_source="profit_policy",
+                    action="penalty",
+                    reason=pol.reason,
+                    epic=epic,
+                    market=market,
+                    direction=direction,
+                    setup_key=setup_key,
+                    ml_score=ml_prob,
+                    rules_conf=rules_conf,
+                    confidence_before=before_pol,
+                    confidence_after=conf,
+                    quote=quote,
+                    metadata={"penalty_pts": pol.penalty_pts, "boost_pts": pol.boost_pts},
+                )
     except Exception as exc:
         log_engine(f"ml decision profit_policy skipped: {type(exc).__name__}: {exc}")
 

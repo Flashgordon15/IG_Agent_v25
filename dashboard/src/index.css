@@ -1,18 +1,18 @@
 @import "tailwindcss";
 
 @theme {
-  --color-bg: #090d1f;
-  --color-card: #0d1330;
-  --color-surface: #0d1330;
+  --color-bg: #080b18;
+  --color-card: #0c1029;
+  --color-surface: #0c1029;
   --color-accent: #00b4d8;
   --color-foreground: #e8ecf4;
   --color-success: #2ec4b6;
   --color-warning: #ff9f1c;
   --color-danger: #e63946;
-  --color-border: #1c234a;
+  --color-border: #1a2148;
   --color-muted: #6b7c96;
-  --font-family-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --font-family-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-family-sans: "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-family-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 @layer base {
@@ -23,7 +23,7 @@
     font-size: 13px;
     font-family: var(--font-family-sans);
     color: var(--color-foreground);
-    background: linear-gradient(180deg, #090d1f 0%, #050714 100%);
+    background: linear-gradient(180deg, #080b18 0%, #04060f 100%);
     background-attachment: fixed;
   }
 }
@@ -385,7 +385,7 @@
   --apex-accent: #00b4d8;
   --apex-neon: #2ec4b6;
   min-height: min(85vh, 900px);
-  background: linear-gradient(180deg, #090d1f 0%, #050714 100%);
+  background: linear-gradient(180deg, #080b18 0%, #04060f 100%);
   border: 1px solid var(--apex-border);
   border-radius: 12px;
   overflow: hidden;
@@ -992,7 +992,7 @@
   height: 100%;
   min-height: 220px;
   display: block;
-  background: linear-gradient(180deg, #090d1f 0%, #050714 100%);
+  background: linear-gradient(180deg, #080b18 0%, #04060f 100%);
 }
 
 .apex-viewport-grid {
@@ -2917,5 +2917,60 @@
   margin-top: 1rem;
   font-size: 0.75rem;
   color: #94a3b8;
+}
+
+/* ── Amethyst Cybernetic — premium glow utilities ── */
+@keyframes glow-amber-pulse {
+  0%, 100% { box-shadow: 0 0 6px rgba(255, 159, 28, 0.25); }
+  50% { box-shadow: 0 0 16px rgba(255, 159, 28, 0.5); }
+}
+
+@keyframes glow-emerald-pulse {
+  0%, 100% { box-shadow: 0 0 6px rgba(46, 196, 182, 0.25); }
+  50% { box-shadow: 0 0 16px rgba(46, 196, 182, 0.5); }
+}
+
+@keyframes glow-crimson-pulse {
+  0%, 100% { box-shadow: 0 0 6px rgba(230, 57, 70, 0.2); }
+  50% { box-shadow: 0 0 14px rgba(230, 57, 70, 0.45); }
+}
+
+@keyframes neon-border-shimmer {
+  0%, 100% { border-color: rgba(0, 180, 216, 0.35); }
+  50% { border-color: rgba(0, 180, 216, 0.7); }
+}
+
+.glow-amber { animation: glow-amber-pulse 2s ease-in-out infinite; }
+.glow-emerald { animation: glow-emerald-pulse 2s ease-in-out infinite; }
+.glow-crimson { animation: glow-crimson-pulse 2s ease-in-out infinite; }
+
+.trail-bar-track {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(26, 33, 72, 0.85);
+  overflow: hidden;
+  min-width: 48px;
+}
+
+.trail-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.35s ease;
+}
+
+.trail-bar-fill--safe {
+  background: linear-gradient(90deg, #2ec4b6, #00b4d8);
+  box-shadow: 0 0 8px rgba(46, 196, 182, 0.4);
+}
+
+.trail-bar-fill--warn {
+  background: linear-gradient(90deg, #ff9f1c, #f59e0b);
+  box-shadow: 0 0 8px rgba(255, 159, 28, 0.4);
+}
+
+.trail-bar-fill--danger {
+  background: linear-gradient(90deg, #e63946, #ef4444);
+  box-shadow: 0 0 8px rgba(230, 57, 70, 0.4);
+  animation: glow-crimson-pulse 1.5s ease-in-out infinite;
 }
 

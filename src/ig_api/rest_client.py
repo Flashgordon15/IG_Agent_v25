@@ -63,6 +63,54 @@ def ig_demo_gateway_reachable(base: str | None = None) -> bool:
     """True when base resolves to the verified IG Demo REST host."""
     return IG_DEMO_HOST in str(base or IG_DEMO_GATEWAY).lower()
 
+
+def _reject_if_entries_hard_blocked() -> None:
+    """Last-line APP gate: process pause or CFD A2 marker → no new OTC entries."""
+    try:
+        from api.agent_control import new_entries_hard_blocked
+
+        blocked, pause_reason = new_entries_hard_blocked()
+        if blocked:
+            raise IGOrderError(
+                pause_reason or "api_trading_paused",
+                status_code=403,
+            )
+    except IGOrderError:
+        raise
+    except Exception as pause_exc:
+        raise IGOrderError(
+            f"api_trading_paused_fail_closed:{type(pause_exc).__name__}",
+            status_code=403,
+        ) from pause_exc
+
+
+def _reject_if_epic_policy_blocked(epic: str) -> None:
+    """Last-line APP gate: exclude_from_hot_path / SB allowlist → no new OTC entries.
+
+    Checks durable policy only (exclude list + SB allowlist) — not in-memory
+    stack races. Fail-closed: any exception while evaluating blocks the order.
+    """
+    key = str(epic or "").strip()
+    if not key:
+        raise IGOrderError("epic_policy_empty", status_code=403)
+    try:
+        from runtime.dual_core_execution import epic_hard_policy_blocked
+
+        blocked, reason = epic_hard_policy_blocked(key)
+        if blocked:
+            raise IGOrderError(
+                reason or f"epic_policy_excluded:{key}",
+                status_code=403,
+            )
+    except IGOrderError:
+        raise
+    except Exception as epic_exc:
+        raise IGOrderError(
+            f"epic_policy_fail_closed:{type(epic_exc).__name__}",
+            status_code=403,
+        ) from epic_exc
+
+
 # Phase-4 shadow tracer / validate_order_schema — IG gateway token bucket (1.5s).
 _IG_VALIDATE_THROTTLE_SEC = 1.5
 _validate_throttle_lock = threading.Lock()
@@ -1687,6 +1735,9 @@ class IGRestClient:
         from execution.maintenance_detachment import is_core_detached, suppress_order_dispatch
         from system.engine_log import log_engine
 
+        _reject_if_entries_hard_blocked()
+        _reject_if_epic_policy_blocked(str(epic))
+
         if is_core_detached():
             return suppress_order_dispatch(
                 source="IGRestClient.place_market_order",
@@ -2119,6 +2170,7 @@ class IGRestClient:
         from execution.maintenance_detachment import is_core_detached, suppress_order_dispatch
 
         body = dict(payload or {})
+        _reject_if_entries_hard_blocked()
         if is_core_detached():
             return suppress_order_dispatch(
                 source="IGRestClient.place_otc_market_payload",
@@ -2260,6 +2312,7 @@ class IGRestClient:
 
         GOOD_TILL_CANCELLED; used when spread elasticity forbids MARKET.
         """
+        _reject_if_entries_hard_blocked()
         self.ensure_session()
         size, stop_distance, limit_distance, currency_code = (
             self.normalize_order_params(
@@ -2348,6 +2401,7 @@ class IGRestClient:
         timeInForce FILL_OR_KILL / IMMEDIATE_OR_CANCEL prevents hanging queues.
         GOOD_TILL_CANCELLED is routed to ``place_working_order_otc``.
         """
+        _reject_if_entries_hard_blocked()
         tif_raw = str(time_in_force or "FILL_OR_KILL").upper().strip()
         if tif_raw in ("GTC", "GOOD_TILL_CANCELLED", "GOOD_TILL_CANCELED"):
             return self.place_working_order_otc(
@@ -3302,6 +3356,30 @@ class IGRestClient:
         poll_interval_seconds: float = 0.65,
     ) -> dict[str, Any]:
         self.ensure_session()
+        ref = str(deal_reference or "").strip()
+        # Synthetic DualCore MICRO-{epic_suffix}-{ts} ids are lifecycle tokens,
+        # never valid IG dealReferences. Polling them burns priority REST and
+        # soft-blocks macro entries (forensic: validation.pattern.invalid).
+        if (
+            not ref
+            or "." in ref
+            or (ref.upper().startswith("MICRO-") and "-" in ref[6:])
+        ):
+            log_demo_rest(
+                "GET /confirms — refuse invalid dealReference pattern",
+                deal_reference=ref or deal_reference,
+            )
+            return {
+                "terminal": True,
+                "accepted": False,
+                "rejected": True,
+                "opened": False,
+                "deal_id": None,
+                "deal_reference": ref,
+                "reason": "invalid_deal_reference_pattern",
+                "status": "REJECTED",
+                "dealStatus": "REJECTED",
+            }
         deadline = time.time() + max_wait_seconds
         # OPENED = entry/spawn terminal; FULLY_CLOSED/CLOSED = close terminal.
         _terminal = (
@@ -3317,14 +3395,14 @@ class IGRestClient:
             try:
                 r = self.request(
                     "GET",
-                    f"/confirms/{deal_reference}",
+                    f"/confirms/{ref}",
                     headers=self._auth_headers("1"),
                     budget_priority=True,
                 )
             except IGAPIError as exc:
                 log_demo_rest(
                     "GET /confirms — retry after IGAPIError",
-                    deal_reference=deal_reference,
+                    deal_reference=ref,
                     error=str(exc),
                 )
                 time.sleep(poll_interval_seconds)
@@ -3332,12 +3410,41 @@ class IGRestClient:
             except Exception as exc:
                 log_demo_rest(
                     "GET /confirms — retry after error",
-                    deal_reference=deal_reference,
+                    deal_reference=ref,
                     error=f"{type(exc).__name__}: {exc}",
                 )
                 time.sleep(poll_interval_seconds)
                 continue
             if r.status_code != 200:
+                # Permanent IG validation failures must not thrash for 15s.
+                err_code = ""
+                try:
+                    body_err = r.json() if r.content else {}
+                    if isinstance(body_err, dict):
+                        err_code = str(body_err.get("errorCode") or "")
+                except Exception:
+                    body_err = {}
+                if r.status_code == 400 and (
+                    "invalid.dealReference" in err_code
+                    or "validation.pattern" in err_code
+                ):
+                    log_demo_rest(
+                        "GET /confirms — permanent invalid dealReference",
+                        deal_reference=ref,
+                        error=err_code or f"http_{r.status_code}",
+                    )
+                    return {
+                        "terminal": True,
+                        "accepted": False,
+                        "rejected": True,
+                        "opened": False,
+                        "deal_id": None,
+                        "deal_reference": ref,
+                        "reason": err_code or "invalid_deal_reference",
+                        "status": "REJECTED",
+                        "dealStatus": "REJECTED",
+                        "raw": body_err if isinstance(body_err, dict) else {},
+                    }
                 time.sleep(poll_interval_seconds)
                 continue
             body = r.json()
@@ -3374,7 +3481,7 @@ class IGRestClient:
                     "rejected": status == "REJECTED",
                     "opened": status == "OPENED",
                     "deal_id": body.get("dealId"),
-                    "deal_reference": deal_reference,
+                    "deal_reference": ref,
                     "reason": str(reason),
                     "status": status,
                     "dealStatus": status,
@@ -3382,7 +3489,7 @@ class IGRestClient:
                 }
                 log_demo_rest(
                     "GET /confirms — deal status",
-                    deal_reference=deal_reference,
+                    deal_reference=ref,
                     status=status,
                     reason=reason,
                     deal_id=body.get("dealId"),

@@ -3,7 +3,11 @@
 import { useRef, type MutableRefObject } from "react";
 import { QuantumRouterAuditModal } from "@/components/QuantumRouterAuditModal";
 import type { DeskCapitalView } from "@/hooks/useDeskCapital";
-import type { SniperMarketRow } from "@/lib/quantum-node-types";
+import type {
+  ScannerRankedChrome,
+  SniperMarketRow,
+  SniperRankLane,
+} from "@/lib/quantum-node-types";
 
 type Props = {
   rows: SniperMarketRow[];
@@ -12,7 +16,17 @@ type Props = {
   muxOpenCount: number;
   /** One desk-level idle reason — avoids four identical yellow idle boxes */
   deskIdleReason?: string | null;
+  rankedChrome?: ScannerRankedChrome | null;
 };
+
+function rankLaneLabel(lane: SniperRankLane): string | null {
+  if (lane === "promoted") return "PROMOTED";
+  if (lane === "eligible") return "ELIGIBLE";
+  if (lane === "waiting") return "WAITING";
+  if (lane === "excluded") return "EXCLUDED";
+  if (lane === "stack") return "STACK";
+  return null;
+}
 
 /** Desk sniper arm threshold — below = chop isolation (slate); at/above = emerald flash */
 const SNIPER_GATE = 0.68;
@@ -144,6 +158,7 @@ export function AIMarketScanner({
   capital,
   muxOpenCount,
   deskIdleReason = null,
+  rankedChrome = null,
 }: Props) {
   const regimeHistRef = useRef<Map<string, number[]>>(new Map());
   const progress = Math.min(100, Math.max(0, capital.progressPct));
@@ -155,6 +170,22 @@ export function AIMarketScanner({
     deskIdleReason && allProxyIdle
       ? deskIdleReason
       : null;
+  const rankedOn = rankedChrome?.active === true;
+  const promotedLabels = rankedChrome?.promotedLabels ?? [];
+  const waitingLabels = rankedChrome?.waitingLabels ?? [];
+  const universeChip = rankedOn
+    ? [
+        promotedLabels.length
+          ? `PROMOTED ${promotedLabels.join(" · ")}`
+          : null,
+        waitingLabels.length
+          ? `WAIT ${waitingLabels.join(" · ")}`
+          : null,
+        rankedChrome?.excludedNote ?? null,
+      ]
+        .filter(Boolean)
+        .join(" · ")
+    : "DOW · FTSE · GOLD · EURUSD";
 
   return (
     <section className="gpu-fleet-panel sniper-hub" aria-label="AI multi-market scanner">
@@ -165,7 +196,15 @@ export function AIMarketScanner({
         </div>
         <div className="gpu-tensor-chips">
           <span className="gpu-chip gpu-chip--live">WS {wsState.toUpperCase()}</span>
-          <span className="gpu-chip">DOW · FTSE · GOLD · EURUSD</span>
+          {rankedOn ? (
+            <span className="gpu-chip gpu-chip--ok" title="Ranked multi-market rotator">
+              Ranked rotator ON
+              {rankedChrome?.dominant ? ` · ${rankedChrome.dominant}` : ""}
+            </span>
+          ) : null}
+          <span className="gpu-chip" title={universeChip}>
+            {universeChip}
+          </span>
           <span className="gpu-chip">MUX OPEN {muxOpenCount}</span>
           <span className="gpu-chip">GATE ADAPTIVE</span>
           <QuantumRouterAuditModal triggerClassName="blueprint-trigger blueprint-trigger--router" />
@@ -212,10 +251,27 @@ export function AIMarketScanner({
           const rollingRef = {
             current: regimeHistRef.current.get(row.id)!,
           } as MutableRefObject<number[]>;
+          const lane = rankLaneLabel(row.rankLane);
           return (
-          <div key={row.id} className="sniper-row" role="row">
+          <div
+            key={row.id}
+            className="sniper-row"
+            role="row"
+            data-rank-lane={row.rankLane || undefined}
+          >
             <div className="sniper-asset">
-              <strong>{row.label}</strong>
+              <strong>
+                {row.label}
+                {lane ? (
+                  <span
+                    className="sniper-rank-lane"
+                    data-lane={row.rankLane || undefined}
+                  >
+                    {row.rank != null ? `#${row.rank} ` : ""}
+                    {lane}
+                  </span>
+                ) : null}
+              </strong>
               <span className="sniper-epic">{row.epic}</span>
               <span className="sniper-meta">
                 {row.tpm.toFixed(0)} tpm · z {row.zScore.toFixed(2)} · {row.regimeLabel}

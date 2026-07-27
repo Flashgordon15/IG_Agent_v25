@@ -976,7 +976,10 @@ def api_trade_support_status() -> dict[str, Any]:
 
 
 def _position_manager_tick_sync() -> dict[str, Any]:
-    from runtime.open_position_manager import run_management_tick
+    from runtime.open_position_manager import (
+        ensure_open_position_manager,
+        run_management_tick,
+    )
     from system.config_loader import get_config
     from system.credentials_loader import try_load_credentials
     from system.ig_rest_session import get_shared_rest_client
@@ -986,6 +989,7 @@ def _position_manager_tick_sync() -> dict[str, Any]:
     cred = try_load_credentials()
     if cred.ok and cred.credentials:
         rest = get_shared_rest_client(cred.credentials)
+    ensure_open_position_manager(rest, cfg=cfg)
     return run_management_tick(rest, cfg, execute=True)
 
 

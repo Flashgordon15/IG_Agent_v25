@@ -129,4 +129,12 @@ export const api = {
   triageLedger: (limit = 50) => fetchJson(`/api/trades/triage-ledger?limit=${limit}`),
   triageStats: () => fetchJson("/api/stats/triage"),
   v30Cert: () => fetchJson("/api/v30/cert"),
+  injectSignal: (epic, direction) =>
+    fetchJson("/api/signal/inject", {
+      method: "POST",
+      body: JSON.stringify({ epic, direction }),
+    }),
+  pendingInjections: () => fetchJson("/api/signal/inject/pending"),
+  positionsLive: () => fetchJson("/api/positions/live"),
+  positionRiskMonitor: () => fetchJson("/api/position_risk_monitor"),
 };

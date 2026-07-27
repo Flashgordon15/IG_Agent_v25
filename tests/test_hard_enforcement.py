@@ -62,7 +62,14 @@ def _clean_env(monkeypatch):
     reset_session_lock_state_for_tests()
     reset_hard_enforcement_for_tests()
     reset_strategy_enforcement_for_tests()
-    for key in ("APP_MODE", "IG_ACCOUNT_SCOPE", "IG_DATA_ROOT", "IG_TRIAGE_DB"):
+    for key in (
+        "APP_MODE",
+        "IG_ACCOUNT_SCOPE",
+        "IG_DATA_ROOT",
+        "IG_TRIAGE_DB",
+        "IG_ENGINE_ORIGIN",
+        "IG_ACCOUNT_ID",
+    ):
         monkeypatch.delenv(key, raising=False)
 
 
@@ -81,6 +88,64 @@ def test_scalp_hard_blocks_path_a_and_path_b_allows_micro():
     assert ExecutionPath.MICRO.value in decision.hard_allow_paths
     assert ExecutionPath.MICRO.value not in decision.hard_block_paths
     assert "SCALP_HARD_ENFORCEMENT" in decision.enforcement_flags
+
+
+def test_sb_macro_scalp_carve_allows_path_a_blocks_micro(monkeypatch):
+    """MACRO_SENTINEL + sb_macro_ltr_entries_only: SCALP must not hard-block PATH_A."""
+    monkeypatch.setenv("IG_ENGINE_ORIGIN", "MACRO_SENTINEL")
+    monkeypatch.setenv("IG_ACCOUNT_ID", "Z6BAH3")
+    cfg = {
+        "dual_regime": {
+            "enabled": True,
+            "sb_disable_instant_micro": True,
+            "sb_disable_core_b_micro": True,
+            "sb_macro_ltr_entries_only": True,
+        }
+    }
+    with patch("system.config_loader.get_config", return_value=cfg):
+        decision = decide_epic_hard_enforcement(
+            "IX.D.DOW.IFM.IP",
+            controller_row=_controller_scalp(),
+            transition_row=None,
+            selector_advice={"recommended_strategy_profile": "SCALP", "confidence": 75},
+            gov_row={"pipeline_anomalies": [], "feed_anomalies": []},
+            api_feed_health=_feed_ok(),
+        )
+    assert decision.active is True
+    assert ExecutionPath.PATH_A.value in decision.hard_allow_paths
+    assert ExecutionPath.PATH_A.value not in decision.hard_block_paths
+    assert ExecutionPath.MICRO.value in decision.hard_block_paths
+    assert ExecutionPath.MICRO.value not in decision.hard_allow_paths
+    assert "SB_MACRO_PATH_A_CARVE" in decision.enforcement_flags
+    set_hard_enforcement_decisions_for_tests([decision.to_dict()])
+    assert hard_guard_path_a_execution("IX.D.DOW.IFM.IP") is True
+    assert hard_guard_micro_dispatch("IX.D.DOW.IFM.IP") is False
+
+
+def test_cfd_scalp_unaffected_by_sb_path_a_carve(monkeypatch):
+    """QUANT_SNIPER keeps SCALP → MICRO only (no Path A carve)."""
+    monkeypatch.setenv("IG_ENGINE_ORIGIN", "QUANT_SNIPER")
+    monkeypatch.setenv("IG_ACCOUNT_ID", "Z6BAH4")
+    cfg = {
+        "dual_regime": {
+            "enabled": True,
+            "sb_disable_instant_micro": True,
+            "sb_disable_core_b_micro": True,
+            "sb_macro_ltr_entries_only": True,
+        }
+    }
+    with patch("system.config_loader.get_config", return_value=cfg):
+        decision = decide_epic_hard_enforcement(
+            "IX.D.DOW.IFM.IP",
+            controller_row=_controller_scalp(),
+            transition_row=None,
+            selector_advice={"recommended_strategy_profile": "SCALP", "confidence": 75},
+            gov_row={"pipeline_anomalies": [], "feed_anomalies": []},
+            api_feed_health=_feed_ok(),
+        )
+    assert ExecutionPath.PATH_A.value in decision.hard_block_paths
+    assert ExecutionPath.MICRO.value in decision.hard_allow_paths
+    assert "SB_MACRO_PATH_A_CARVE" not in decision.enforcement_flags
 
 
 def test_momentum_hard_blocks_micro_allows_path_a():

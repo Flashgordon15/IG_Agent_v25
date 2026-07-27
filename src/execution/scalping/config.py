@@ -39,5 +39,18 @@ def is_scalping_enabled(cfg: Config | dict[str, Any] | None = None) -> bool:
 def is_scalping_exit_management_isolated(
     cfg: Config | dict[str, Any] | None = None,
 ) -> bool:
-    """Scalping BE/trail runs on isolated conditionals — never gated by sentiment/fitness."""
-    return is_scalping_enabled(cfg)
+    """Scalping BE/trail runs on isolated conditionals — never gated by sentiment/fitness.
+
+    Path A / MACRO_SENTINEL: hard-suppress Scalping BE+tx (APP hotfix — converts
+    macro claims into scalp-shaped BE+tx / 404 ghost closes).
+    """
+    if not is_scalping_enabled(cfg):
+        return False
+    try:
+        from execution.macro_path_a_exit_guard import scalping_be_suppressed_for_path_a
+
+        if scalping_be_suppressed_for_path_a(cfg=cfg):
+            return False
+    except Exception:
+        pass
+    return True

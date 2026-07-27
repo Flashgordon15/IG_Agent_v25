@@ -90,10 +90,19 @@ class ShadowExecutor:
                     entry = (bid + offer) / 2.0
 
         raw_size = float(execution_params.get("size") or execution_params.get("dealSize") or 0)
+        if raw_size <= 0:
+            try:
+                raw_size = float(execution_params.get("gate_approved_size") or 0)
+            except (TypeError, ValueError):
+                raw_size = 0.0
         size, lot_note = finalize_dispatch_lot_size(
             raw_size,
             epic=epic,
-            gate_approved_size=execution_params.get("gate_approved_size"),
+            micro_confidence=float(
+                execution_params.get("micro_confidence")
+                or execution_params.get("confidence")
+                or 1.0
+            ),
         )
         size = truncate_to_broker_lot(size)
         if size <= 0:

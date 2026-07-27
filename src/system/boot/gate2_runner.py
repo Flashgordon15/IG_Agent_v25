@@ -447,6 +447,28 @@ class Gate2Runner:
                     credentials, timeout_sec=90.0
                 )
                 self._context.rest_client = authed
+                try:
+                    from system.boot.post_ready_services import bind_boot_rest_client
+
+                    bind_boot_rest_client(authed)
+                except Exception as bind_exc:
+                    log_engine(
+                        "Gate2-deferred: bind_boot_rest_client failed "
+                        f"{type(bind_exc).__name__}: {bind_exc}"
+                    )
+                try:
+                    from runtime.open_position_manager import ensure_open_position_manager
+                    from system.config_loader import get_config
+
+                    ensure_open_position_manager(
+                        authed, cfg=self._context.config or get_config()
+                    )
+                    log_engine("Gate2-deferred: OpenPositionManager bound to authed REST")
+                except Exception as opm_exc:
+                    log_engine(
+                        "Gate2-deferred: OPM bind failed "
+                        f"{type(opm_exc).__name__}: {opm_exc}"
+                    )
                 start_gate2_background_hydration(authed, self._context, self._state)
             except Exception as retry_exc:
                 log_engine(

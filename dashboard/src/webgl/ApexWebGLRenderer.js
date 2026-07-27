@@ -75,21 +75,24 @@ export class ApexWebGLRenderer {
       powerPreference: "high-performance",
     });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-    this.renderer.setClearColor(0x090d1f, 1);
+    this.renderer.setClearColor(0x080b18, 1);
 
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(38, 1, 0.1, 100);
     this.camera.position.set(0, 0.15, 5.8);
     this.camera.lookAt(0, 0, 0);
 
-    const ambient = new THREE.AmbientLight(0x1c234a, 0.45);
+    const ambient = new THREE.AmbientLight(0x1a2148, 0.5);
     this.scene.add(ambient);
-    const goldLight = new THREE.PointLight(0xff9f1c, 2.4, 14);
+    const goldLight = new THREE.PointLight(0xff9f1c, 2.6, 16);
     goldLight.position.set(-3.2, 1.5, 2);
     this.scene.add(goldLight);
-    const wallLight = new THREE.PointLight(0x00b4d8, 2.4, 14);
+    const wallLight = new THREE.PointLight(0x00b4d8, 2.6, 16);
     wallLight.position.set(3.2, 1.5, 2);
     this.scene.add(wallLight);
+    const amethystFill = new THREE.PointLight(0x7209b7, 0.6, 20);
+    amethystFill.position.set(0, -1.5, 3);
+    this.scene.add(amethystFill);
 
     /** @type {Map<string, THREE.Mesh>} */
     this.rings = new Map();
@@ -166,7 +169,13 @@ export class ApexWebGLRenderer {
         transparent: true,
         opacity: 0.85,
       });
+      const wavePositions = new Float32Array(HISTORY_CAP * 3);
       const waveGeo = new THREE.BufferGeometry();
+      waveGeo.setAttribute(
+        "position",
+        new THREE.BufferAttribute(wavePositions, 3),
+      );
+      waveGeo.setDrawRange(0, 0);
       const wave = new THREE.Line(waveGeo, waveMat);
       wave.visible = false;
       wave.position.set(pos[0] - 1.0, pos[1] - 0.65, 0.08);
@@ -189,9 +198,13 @@ export class ApexWebGLRenderer {
     const now = performance.now();
     for (const key of PRIMARY_RING_KEYS) {
       const row = assets[key];
-      if (!row?.mid) continue;
-      this.interpolator.push(key, row.mid, now);
-      this.history.push(key, row.mid);
+      const mid = row?.mid;
+      if (mid == null || !Number.isFinite(Number(mid)) || !(Number(mid) > 0)) {
+        continue;
+      }
+      const midN = Number(mid);
+      this.interpolator.push(key, midN, now);
+      this.history.push(key, midN);
       if (row.confidence != null) this._confidence[key] = row.confidence;
       if (row.fitness != null) this._fitness[key] = row.fitness;
       if (row.volatility != null) this._volatility[key] = row.volatility;
@@ -284,13 +297,17 @@ export class ApexWebGLRenderer {
     const min = Math.min(...hist);
     const max = Math.max(...hist);
     const span = max - min || Math.max(min * 0.0001, 1);
-    const pts = hist.map((v, i) => {
-      const x = (i / (hist.length - 1)) * 2.0 - 1.0;
-      const y = ((v - min) / span) * 0.55 + 0.04;
-      return new THREE.Vector3(x, y, 0);
-    });
-    line.geometry.dispose();
-    line.geometry = new THREE.BufferGeometry().setFromPoints(pts);
+    const attr = line.geometry.getAttribute("position");
+    const arr = attr.array;
+    const len = hist.length;
+    const divisor = len > 1 ? len - 1 : 1;
+    for (let i = 0; i < len; i++) {
+      arr[i * 3] = (i / divisor) * 2.0 - 1.0;
+      arr[i * 3 + 1] = ((hist[i] - min) / span) * 0.55 + 0.04;
+      arr[i * 3 + 2] = 0;
+    }
+    attr.needsUpdate = true;
+    line.geometry.setDrawRange(0, len);
   }
 
   _tickFrame(now) {

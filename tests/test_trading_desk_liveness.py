@@ -114,6 +114,35 @@ def test_flat_book_softens_ig_sync_missing_and_tick_timeout(
     assert "position_manager_error" not in liv["issues"]
 
 
+@patch("api.positions_live.build_live_positions_payload")
+@patch("runtime.open_position_manager.snapshot")
+@patch("runtime.agent_bootstrap.get_ig_position_sync")
+def test_open_book_keeps_tick_timeout_as_manager_error(
+    mock_get_sync, mock_mgr_snap, mock_live
+):
+    """Open risk + OPM tick_timeout must stay sticky for REST recovery."""
+    mock_get_sync.return_value = None
+    mock_mgr_snap.return_value = {
+        "active": True,
+        "last_tick_at": time.time(),
+        "last_error": "tick_timeout",
+    }
+    mock_live.return_value = {
+        "count": 1,
+        "unmonitored": 0,
+        "verdict": "HEALTHY",
+        "stale": False,
+        "critical": False,
+        "trade_support": {"broker_open": 1, "actions_failed": 0},
+    }
+
+    liv = evaluate_liveness()
+
+    assert liv["has_open_risk"] is True
+    assert "position_manager_error" in liv["issues"]
+    assert liv["ok"] is False
+
+
 @patch("runtime.open_position_manager.run_management_tick")
 @patch("api.positions_live.build_live_positions_payload")
 @patch("runtime.open_position_manager.snapshot")

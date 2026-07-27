@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Trading_Desk.app — native pywebview shell (no browser, no Apex Electron).
+exec /Users/chrisgordon/Projects/IG_Agent_v25/scripts/trading_desk_silent.sh

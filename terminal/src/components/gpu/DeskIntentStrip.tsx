@@ -19,8 +19,11 @@ import {
   sbHttpBase,
 } from "@/lib/desk-api-bases";
 import {
+  applyDeskIntentHold,
   buildDeskIntentView,
+  initialDeskIntentHoldState,
   type DeskIntentHealthSlice,
+  type DeskIntentHoldState,
   type DeskIntentOpsSlice,
   type DeskIntentRotationSlice,
   type DeskIntentSniperByEpic,
@@ -91,45 +94,77 @@ const EMPTY: DeskIntentView = {
   sbPostureHint: null,
 };
 
-/** Hold band flips until two consecutive polls agree (reduces flicker). */
+/**
+ * Hold band/source flips until two consecutive polls agree, then apply
+ * time-based SETUP hold + hierarchy debounce (see applyDeskIntentHold).
+ */
 function debounceConfidenceView(
   prev: DeskIntentView,
   next: DeskIntentView,
   pendingRef: { current: DeskIntentView | null },
+  holdRef: { current: DeskIntentHoldState },
+  nowMs: number,
 ): DeskIntentView {
-  if (next.confidencePct == null || prev.confidencePct == null) {
+  let staged = next;
+  if (next.confidencePct != null && prev.confidencePct != null) {
+    const bandFlip =
+      prev.confidenceBand !== "—" &&
+      next.confidenceBand !== "—" &&
+      prev.confidenceBand !== next.confidenceBand;
+    const sourceFlip =
+      prev.confidenceSource != null &&
+      next.confidenceSource != null &&
+      prev.confidenceSource !== next.confidenceSource;
+    if (bandFlip || sourceFlip) {
+      const pend = pendingRef.current;
+      if (
+        !(
+          pend &&
+          pend.confidenceBand === next.confidenceBand &&
+          pend.confidenceSource === next.confidenceSource
+        )
+      ) {
+        pendingRef.current = next;
+        staged = {
+          ...next,
+          confidenceBand: prev.confidenceBand,
+          confidencePct: prev.confidencePct,
+          confidenceSource: prev.confidenceSource,
+          setupMode: prev.setupMode,
+        };
+      } else {
+        pendingRef.current = null;
+      }
+    } else {
+      pendingRef.current = null;
+    }
+  } else {
     pendingRef.current = null;
-    return next;
   }
-  const bandFlip =
-    prev.confidenceBand !== "—" &&
-    next.confidenceBand !== "—" &&
-    prev.confidenceBand !== next.confidenceBand;
-  const sourceFlip =
-    prev.confidenceSource != null &&
-    next.confidenceSource != null &&
-    prev.confidenceSource !== next.confidenceSource;
-  if (!bandFlip && !sourceFlip) {
-    pendingRef.current = null;
-    return next;
+
+  const held = applyDeskIntentHold({
+    nowMs,
+    rawSetupMode: staged.setupMode,
+    rawHierarchy: staged.marketHierarchy,
+    prev: holdRef.current,
+  });
+  holdRef.current = held.state;
+
+  let setupMode = held.setupMode;
+  let confidenceBand = staged.confidenceBand;
+  // If we are still holding before SETUP promotion, don't show High·SETUP.
+  if (staged.setupMode === "SETUP" && setupMode !== "SETUP") {
+    if (confidenceBand === "High") confidenceBand = "Med";
   }
-  const pend = pendingRef.current;
-  if (
-    pend &&
-    pend.confidenceBand === next.confidenceBand &&
-    pend.confidenceSource === next.confidenceSource
-  ) {
-    pendingRef.current = null;
-    return next;
+  if (setupMode === "SETUP" && staged.setupMode === "SETUP") {
+    confidenceBand = staged.confidenceBand;
   }
-  pendingRef.current = next;
-  // Hold primary confidence only — always refresh per-account lines (truth).
+
   return {
-    ...next,
-    confidenceBand: prev.confidenceBand,
-    confidencePct: prev.confidencePct,
-    confidenceSource: prev.confidenceSource,
-    setupMode: prev.setupMode,
+    ...staged,
+    setupMode,
+    confidenceBand,
+    marketHierarchy: held.marketHierarchy,
   };
 }
 
@@ -164,6 +199,7 @@ export function DeskIntentStrip({
 }: Props) {
   const [view, setView] = useState<DeskIntentView>(EMPTY);
   const pendingConfRef = useRef<DeskIntentView | null>(null);
+  const holdRef = useRef<DeskIntentHoldState>(initialDeskIntentHoldState());
 
   useEffect(() => {
     let alive = true;
@@ -207,7 +243,15 @@ export function DeskIntentStrip({
         sbSniperByEpic: sbSniper.data,
         cfdSniperByEpic: cfdSniper.data,
       });
-      setView((prev) => debounceConfidenceView(prev, next, pendingConfRef));
+      setView((prev) =>
+        debounceConfidenceView(
+          prev,
+          next,
+          pendingConfRef,
+          holdRef,
+          Date.now(),
+        ),
+      );
     };
 
     void pull();
@@ -218,14 +262,35 @@ export function DeskIntentStrip({
     };
   }, [bufferRef, cfdOnline, sbOnline, pollMs]);
 
+  const engines = Array.isArray(view?.engines) ? view.engines : EMPTY.engines;
+  const confidenceAccounts = Array.isArray(view?.confidenceAccounts)
+    ? view.confidenceAccounts
+    : EMPTY.confidenceAccounts;
+  const confidenceBand = view?.confidenceBand ?? "—";
+  const confidencePct =
+    view?.confidencePct != null && Number.isFinite(view.confidencePct)
+      ? view.confidencePct
+      : null;
+  const preferMarket = view?.preferMarket ?? null;
+  const focusMarket = view?.focusMarket ?? "—";
+  const promotedMarkets = view?.promotedMarkets ?? "—";
+  const rankedActive = view?.rankedActive === true;
+  const marketHierarchy = view?.marketHierarchy ?? null;
+  const confidenceSource = view?.confidenceSource ?? null;
+  const setupMode = view?.setupMode ?? null;
+  const rotationKind = view?.rotationKind ?? "off";
+  const rotationLabel = view?.rotationLabel ?? "off";
+  const nextBlock = view?.nextBlock ?? null;
+  const preferenceReason = view?.preferenceReason ?? null;
+
   const primaryLine =
-    view.confidenceBand === "—" && view.confidencePct == null
+    confidenceBand === "—" && confidencePct == null
       ? "—"
       : [
-          view.confidenceBand,
-          view.confidencePct != null ? fmtPct(view.confidencePct) : "",
-          view.setupMode ? `· ${view.setupMode}` : "",
-          view.confidenceSource ? `· ${view.confidenceSource}` : "",
+          confidenceBand,
+          confidencePct != null ? fmtPct(confidencePct) : "",
+          setupMode ? `· ${setupMode}` : "",
+          confidenceSource ? `· ${confidenceSource}` : "",
         ]
           .filter(Boolean)
           .join(" ")
@@ -237,7 +302,7 @@ export function DeskIntentStrip({
       <header className="desk-intent-head">
         <p className="gpu-kicker">Desk Intent</p>
         <div className="desk-intent-head-right">
-          {view.rankedActive ? (
+          {rankedActive ? (
             <span className="desk-intent-ranked-chip" title="Ranked multi-market rotator active">
               Ranked rotator ON
             </span>
@@ -249,7 +314,7 @@ export function DeskIntentStrip({
       </header>
 
       <div className="desk-intent-engines" role="list">
-        {view.engines.map((eng) => (
+        {engines.map((eng) => (
           <div
             key={eng.id}
             className="desk-intent-engine"
@@ -273,50 +338,50 @@ export function DeskIntentStrip({
         ))}
       </div>
 
-      <div className="desk-intent-shared" data-ranked={view.rankedActive ? "on" : "off"}>
+      <div className="desk-intent-shared" data-ranked={rankedActive ? "on" : "off"}>
         <div className="desk-intent-cell">
           <span className="gpu-metric-key">
-            {view.rankedActive || view.preferMarket
+            {rankedActive || preferMarket
               ? "Market focus · prefer"
               : "Market focus"}
           </span>
           <span className="desk-intent-value">
-            {view.preferMarket && view.preferMarket !== "—"
-              ? view.preferMarket
-              : view.focusMarket}
+            {preferMarket && preferMarket !== "—"
+              ? preferMarket
+              : focusMarket}
           </span>
         </div>
         <div className="desk-intent-cell">
           <span className="gpu-metric-key">Promoted</span>
           <span
             className="desk-intent-value"
-            data-promoted={view.rankedActive ? "on" : "off"}
+            data-promoted={rankedActive ? "on" : "off"}
             title={
-              view.rankedActive
+              rankedActive
                 ? "Ranked top-N allowlist (not DOW-only)"
                 : "Ranked rotator inactive"
             }
           >
-            {view.promotedMarkets}
+            {promotedMarkets}
           </span>
         </div>
         <div className="desk-intent-cell desk-intent-cell--confidence">
           <span className="gpu-metric-key">Confidence</span>
-          {view.marketHierarchy ? (
+          {marketHierarchy ? (
             <span
               className="desk-intent-value desk-intent-hierarchy gpu-ledger-mono"
-              title={view.preferenceReason || "Ranked market confidence"}
+              title={preferenceReason || "Ranked market confidence"}
             >
-              {view.marketHierarchy}
+              {marketHierarchy}
             </span>
           ) : (
             <span
               className="desk-intent-value desk-intent-conf-primary"
-              data-band={view.confidenceBand}
-              data-source={view.confidenceSource ?? undefined}
+              data-band={confidenceBand}
+              data-source={confidenceSource ?? undefined}
               title={
-                view.confidenceSource
-                  ? `Primary: ${view.confidenceSource} (armed / prefer account)`
+                confidenceSource
+                  ? `Primary: ${confidenceSource} (armed / prefer account)`
                   : "No primary sniper score"
               }
             >
@@ -324,21 +389,21 @@ export function DeskIntentStrip({
             </span>
           )}
           <div className="desk-intent-conf-accounts" role="list">
-            {view.confidenceAccounts.map((row) => (
+            {confidenceAccounts.map((row) => (
               <span
-                key={row.id}
+                key={row?.id ?? "acct"}
                 className="desk-intent-conf-account gpu-ledger-mono"
                 role="listitem"
-                data-id={row.id}
-                data-suppressed={row.suppressed ? "1" : "0"}
-                data-band={row.band}
+                data-id={row?.id}
+                data-suppressed={row?.suppressed ? "1" : "0"}
+                data-band={row?.band ?? "—"}
                 title={
-                  row.suppressed
-                    ? `${row.id.toUpperCase()} entries frozen — score suppressed`
-                    : `Source: ${row.source ?? "—"}`
+                  row?.suppressed
+                    ? `${String(row?.id ?? "?").toUpperCase()} entries frozen — score suppressed`
+                    : `Source: ${row?.source ?? "—"}`
                 }
               >
-                {row.line}
+                {row?.line ?? "—"}
               </span>
             ))}
           </div>
@@ -347,17 +412,17 @@ export function DeskIntentStrip({
           <span className="gpu-metric-key">Rotation</span>
           <span
             className="desk-intent-value desk-intent-rotation-line"
-            data-rot={view.rotationKind}
-            title={view.rotationLabel}
+            data-rot={rotationKind}
+            title={rotationLabel}
           >
-            {view.rotationLabel}
+            {rotationLabel}
           </span>
         </div>
       </div>
 
-      {view.nextBlock ? (
+      {nextBlock ? (
         <p className="desk-intent-next gpu-ledger-mono">
-          Next block · {view.nextBlock}
+          Next block · {nextBlock}
         </p>
       ) : null}
     </section>

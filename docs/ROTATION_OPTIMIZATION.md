@@ -34,6 +34,7 @@ Response includes:
 - Velocity ranking sweep (`rotation_sweep_count`)
 - Escape hatch when all stack TPM = 0 for >60s
 - Forex failover lock (EUR/USD + GBP/USD) bypasses index rotation
+- **DOW entry failover** (gated, default OFF) — see [`ROTATION_FAILOVER_POLICY.md`](./ROTATION_FAILOVER_POLICY.md) for temporary SB allowlist expansion to Gold when DOW stays WAIT/low-confidence
 
 ## Tuning Tips
 

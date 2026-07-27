@@ -14,6 +14,7 @@ from typing import Any
 
 from execution.open_position_actions import execute_actions_bulk
 from execution.open_position_rules import (
+    ManageAction,
     assess_open_positions,
     position_management_cfg,
     rows_from_ig_items,
@@ -37,6 +38,13 @@ _tick_running = False
 _tick_started_at = 0.0
 _DEFAULT_TICK_TIMEOUT_SEC = 45.0
 _DEFAULT_TICK_STALE_SEC = 90.0
+# deal_id → first time seen unmonitored (missing GBP track) this process life
+_unmonitored_since: dict[str, float] = {}
+_DEFAULT_UNMONITORED_GRACE_SEC = 45.0
+
+
+def _thread_alive() -> bool:
+    return _thread is not None and _thread.is_alive()
 
 
 def start_open_position_manager(
@@ -51,11 +59,14 @@ def start_open_position_manager(
         return
 
     with _lock:
-        _rest = rest_client
-        _cfg = cfg
-        if _thread is not None and _thread.is_alive():
+        if rest_client is not None:
+            _rest = rest_client
+        if cfg is not None:
+            _cfg = cfg
+        if _thread_alive():
             _active = True
             return
+        # Dead or never-started thread — clear stop latch and (re)arm.
         _stop.clear()
         _thread = threading.Thread(
             target=_run_loop,
@@ -70,6 +81,33 @@ def start_open_position_manager(
             daemon=True,
         ).start()
     log_engine("OpenPositionManager: supervisor armed")
+
+
+def ensure_open_position_manager(
+    rest_client: Any | None = None,
+    *,
+    cfg: Any | None = None,
+) -> dict[str, Any]:
+    """Idempotent arm — restart daemon if inactive or thread dead.
+
+    Safe to call after deferred G2 auth, heal ticks, and flat-book liveness
+    recovery. Prefer this over raw ``start_`` when rest may arrive late.
+    """
+    pm = position_management_cfg(cfg if cfg is not None else _cfg)
+    if not pm.get("manager_enabled", True):
+        return {"ok": False, "active": False, "reason": "disabled"}
+
+    was_alive = _thread_alive() and _active
+    start_open_position_manager(rest_client if rest_client is not None else _rest, cfg=cfg if cfg is not None else _cfg)
+    alive = _thread_alive() and _active
+    if alive and not was_alive:
+        log_engine("OpenPositionManager: ensure re-armed daemon")
+    return {
+        "ok": alive,
+        "active": alive,
+        "rearmed": alive and not was_alive,
+        "thread_alive": _thread_alive(),
+    }
 
 
 def _first_tick() -> None:
@@ -118,8 +156,12 @@ def stop_open_position_manager() -> None:
 
 def snapshot() -> dict[str, Any]:
     with _lock:
+        alive = _thread_alive()
+        # Reflect reality: flag alone can lag a dead thread after abrupt recycle.
+        active = bool(_active and alive)
         return {
-            "active": _active,
+            "active": active,
+            "thread_alive": alive,
             "last_tick_at": _last_tick_at,
             "tick_count": _tick_count,
             "last_error": _last_error,
@@ -129,7 +171,7 @@ def snapshot() -> dict[str, Any]:
 
 def reset_open_position_manager_for_tests() -> None:
     global _rest, _cfg, _active, _last_tick_at, _tick_count, _last_report, _last_error
-    global _tick_running, _tick_started_at
+    global _tick_running, _tick_started_at, _unmonitored_since
     stop_open_position_manager()
     with _lock:
         _rest = None
@@ -138,6 +180,7 @@ def reset_open_position_manager_for_tests() -> None:
         _tick_count = 0
         _last_report = {}
         _last_error = ""
+        _unmonitored_since = {}
     with _state_lock:
         _tick_running = False
         _tick_started_at = 0.0
@@ -264,20 +307,7 @@ def run_management_tick(
         result = result_holder.get("result") or {"ok": False, "error": "empty_tick"}
     else:
         # Flat book: a hung tick must not sticky-error the desk into REST recovery.
-        flat_book = False
-        try:
-            from pathlib import Path
-            import json
-
-            from system.paths import data_dir
-
-            snap_path = Path(data_dir()) / "state" / "broker_snapshot.json"
-            if snap_path.is_file():
-                raw = json.loads(snap_path.read_text(encoding="utf-8") or "{}")
-                flat_book = int(raw.get("count") or 0) == 0
-        except Exception:
-            flat_book = False
-        if flat_book:
+        if _broker_book_is_flat():
             result = {
                 "ok": True,
                 "error": "",
@@ -324,6 +354,23 @@ def run_management_tick(
 
     _record_tick_result(result if isinstance(result, dict) else {"ok": False})
     return result
+
+
+def _broker_book_is_flat() -> bool:
+    """True when broker snapshot reports zero opens (SoT for timeout soft-ok)."""
+    try:
+        from pathlib import Path
+        import json
+
+        from system.paths import data_dir
+
+        snap_path = Path(data_dir()) / "state" / "broker_snapshot.json"
+        if not snap_path.is_file():
+            return False
+        raw = json.loads(snap_path.read_text(encoding="utf-8") or "{}")
+        return int(raw.get("count") or 0) == 0
+    except Exception:
+        return False
 
 
 def _attach_broker_stops_on_timeout(
@@ -465,6 +512,87 @@ def _run_management_tick_impl(
         except Exception as exc:
             report.issues.append(f"unmonitored_escalation_failed:{type(exc).__name__}")
 
+    # Fail-closed: if still missing GBP track after grace, flatten — this is the
+    # APP class RISK_STACK_DID_NOT_CUT / SUPERVISION_GAP that bled 24 Jul.
+    pm = position_management_cfg(cfg)
+    grace = float(pm.get("unmonitored_grace_sec") or _DEFAULT_UNMONITORED_GRACE_SEC)
+    flatten_unmon = bool(pm.get("flatten_unmonitored_after_grace", True))
+    now = time.time()
+    gbp_after = _gbp_tracks()
+    still_unmon: list[Any] = []
+    for row in rows:
+        did = str(getattr(row, "deal_id", "") or "").strip()
+        if not did:
+            continue
+        if did in gbp_after:
+            _unmonitored_since.pop(did, None)
+            continue
+        _unmonitored_since.setdefault(did, now)
+        still_unmon.append(row)
+    # Drop trackers for deals no longer open
+    open_ids = {str(getattr(r, "deal_id", "") or "") for r in rows}
+    for stale in list(_unmonitored_since):
+        if stale not in open_ids:
+            _unmonitored_since.pop(stale, None)
+
+    grace_flattens = 0
+    if flatten_unmon and still_unmon:
+        existing = {(a.deal_id, a.action) for a in report.actions}
+        for row in still_unmon:
+            did = str(getattr(row, "deal_id", "") or "")
+            since = float(_unmonitored_since.get(did) or now)
+            age = now - since
+            if age < grace:
+                continue
+            if (did, "flatten") in existing:
+                continue
+            report.actions.append(
+                ManageAction(
+                    deal_id=did,
+                    epic=str(getattr(row, "epic", "") or ""),
+                    pnl_gbp=float(getattr(row, "pnl_gbp", 0.0) or 0.0),
+                    action="flatten",
+                    reason=(
+                        f"unmonitored_grace_exceeded age={age:.0f}s>={grace:.0f}s "
+                        "(no GBP exit track after force-arm)"
+                    ),
+                )
+            )
+            grace_flattens += 1
+            existing.add((did, "flatten"))
+        if grace_flattens:
+            report.issues.append(f"unmonitored_grace_flatten:{grace_flattens}")
+            log_engine(
+                f"OpenPositionManager: FAIL-CLOSED flatten {grace_flattens} "
+                f"unmonitored deal(s) after {grace:.0f}s grace"
+            )
+            if execute:
+                from execution.open_position_rules import ManageReport as _MR
+
+                grace_only = _MR(
+                    broker_open=report.broker_open,
+                    assessed=report.assessed,
+                    actions=[
+                        a
+                        for a in report.actions
+                        if "unmonitored_grace_exceeded" in (a.reason or "")
+                    ],
+                )
+                try:
+                    execute_actions_bulk(rest, grace_only, cfg)
+                    # Mirror ok/error onto the parent report actions
+                    by_id = {a.deal_id: a for a in grace_only.actions}
+                    for a in report.actions:
+                        g = by_id.get(a.deal_id)
+                        if g is not None and "unmonitored_grace_exceeded" in (a.reason or ""):
+                            a.ok = g.ok
+                            a.error = g.error
+                    executed = sum(1 for a in report.actions if a.ok)
+                except Exception as exc:
+                    report.issues.append(
+                        f"unmonitored_grace_flatten_failed:{type(exc).__name__}"
+                    )
+
     if report.actions:
         log_engine(
             f"OpenPositionManager: {len(report.actions)} action(s) "
@@ -494,6 +622,7 @@ def _run_management_tick_impl(
         "actions_executed": executed,
         "hard_floor": hard_floor_report,
         "unmonitored": unmonitored,
+        "unmonitored_grace_flattens": grace_flattens,
         "issues": report.issues[:10],
         "positions": report.positions[:20],
         "actions": [
@@ -517,16 +646,21 @@ def _poll_interval_sec(pm: dict[str, Any]) -> float:
 
 
 def _run_loop() -> None:
-    while not _stop.is_set():
-        pm = position_management_cfg(_cfg)
-        poll_sec = _poll_interval_sec(pm)
-        try:
-            run_management_tick(_rest, _cfg, execute=True)
-        except Exception as exc:
-            err = f"{type(exc).__name__}: {exc}"
-            log_engine(f"OpenPositionManager: tick failed: {err}")
-            _record_tick_result({"ok": False, "error": err})
-        _stop.wait(poll_sec)
+    global _active
+    try:
+        while not _stop.is_set():
+            pm = position_management_cfg(_cfg)
+            poll_sec = _poll_interval_sec(pm)
+            try:
+                run_management_tick(_rest, _cfg, execute=True)
+            except Exception as exc:
+                err = f"{type(exc).__name__}: {exc}"
+                log_engine(f"OpenPositionManager: tick failed: {err}")
+                _record_tick_result({"ok": False, "error": err})
+            _stop.wait(poll_sec)
+    finally:
+        _active = False
+        log_engine("OpenPositionManager: daemon loop exited (active=false)")
 
 
 def _ensure_sub_engines(rest: Any, cfg: Any) -> None:

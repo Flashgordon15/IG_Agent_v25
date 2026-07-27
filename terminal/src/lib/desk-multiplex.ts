@@ -6,6 +6,7 @@
 import { EPIC_LABELS } from "@/lib/constants";
 import type { LivePositionRow } from "@/lib/agent-client";
 import type { GpuExecPosition } from "@/lib/gpu-execution-buffer";
+import { mapGateVerdictLabel } from "@/lib/gate-label";
 
 /** Lightstreamer / WS sniper ceiling (ms). */
 export const LS_QUOTE_CEILING_MS = 500;
@@ -103,6 +104,8 @@ export type DeskEngineLane = {
   pathLive: boolean | null;
   operational: boolean;
   standby: boolean;
+  /** Per-port A2 / operator entry freeze (CFD :8080 often paused). */
+  tradingPaused: boolean | null;
   openCount: number;
   positions: GpuExecPosition[];
 };
@@ -262,6 +265,8 @@ export function buildDualPortLanes(
     const ageMs = env?.truth.quoteAgeMs ?? null;
     const positions = env?.positions ?? [];
     const pathLive = snap.online && snap.healthOk;
+    const tradingPaused =
+      env?.arms?.tradingPaused != null ? Boolean(env.arms.tradingPaused) : null;
     const lane: DeskEngineLane = {
       engineId,
       label: defs.label,
@@ -273,6 +278,7 @@ export function buildDualPortLanes(
       transport,
       pathLive,
       standby: false,
+      tradingPaused,
       openCount: positions.length,
       positions,
       operational: false,
@@ -360,6 +366,12 @@ function buildEngineLanes(
           : row.pathLive != null
             ? Boolean(row.pathLive)
             : pathLive;
+      const lanePaused =
+        row.trading_paused != null
+          ? Boolean(row.trading_paused)
+          : row.tradingPaused != null
+            ? Boolean(row.tradingPaused)
+            : null;
       const lane: DeskEngineLane = {
         engineId,
         label: String(row.label || defs.label),
@@ -371,6 +383,7 @@ function buildEngineLanes(
         transport: String(row.transport || transport),
         pathLive: lanePath,
         standby,
+        tradingPaused: lanePaused,
         openCount: Number(row.open_count ?? row.openCount ?? lanePositions.length) || 0,
         positions: lanePositions,
         operational: false,
@@ -389,6 +402,8 @@ function buildEngineLanes(
   const liveId: EngineLaneId = product === "CFD" ? "cfd_sniper" : "sb_sentinel";
   const standbyId: EngineLaneId = liveId === "cfd_sniper" ? "sb_sentinel" : "cfd_sniper";
 
+  const paused =
+    msg.trading_paused != null ? Boolean(msg.trading_paused) : null;
   const liveLane: DeskEngineLane = {
     ...LANE_DEFAULTS[liveId],
     engineId: liveId,
@@ -397,6 +412,7 @@ function buildEngineLanes(
     transport,
     pathLive,
     standby: false,
+    tradingPaused: paused,
     openCount: positions.length,
     positions,
     operational: false,
@@ -411,6 +427,7 @@ function buildEngineLanes(
     transport,
     pathLive: null,
     standby: true,
+    tradingPaused: null,
     openCount: 0,
     positions: [],
     operational: true,
@@ -488,7 +505,9 @@ function mapStatePositions(raw: unknown): GpuExecPosition[] {
 
 function extractGateVerdict(msg: Record<string, unknown>): string {
   const direct = msg.gate_verdict ?? msg.active_gate_verdict ?? msg.gating_reason;
-  if (typeof direct === "string" && direct.trim()) return direct.trim().toUpperCase();
+  if (typeof direct === "string" && direct.trim()) {
+    return mapGateVerdictLabel(direct);
+  }
 
   const gd = msg.gate_diagnostics as
     | {
@@ -506,8 +525,8 @@ function extractGateVerdict(msg: Record<string, unknown>): string {
     | undefined;
 
   const last = gd?.last;
-  if (last?.gating_reason) return String(last.gating_reason).toUpperCase();
-  if (last?.wait_reason) return String(last.wait_reason).toUpperCase();
+  if (last?.gating_reason) return mapGateVerdictLabel(last.gating_reason);
+  if (last?.wait_reason) return mapGateVerdictLabel(last.wait_reason);
 
   const by = gd?.by_epic;
   if (by && typeof by === "object") {
@@ -522,38 +541,45 @@ function extractGateVerdict(msg: Record<string, unknown>): string {
           .find((g) => g.passed && g.name);
         if (passed?.name) {
           const name = String(passed.name).toUpperCase();
-          return name.includes("PASSED") ? name : `${name}_PASSED`;
+          return mapGateVerdictLabel(
+            name.includes("PASSED") ? name : `${name}_PASSED`,
+          );
         }
-        return "GATES_ALL_PASSED";
+        return mapGateVerdictLabel("GATES_ALL_PASSED");
       }
       if (preferred.gating_reason) {
-        return String(preferred.gating_reason).toUpperCase();
+        return mapGateVerdictLabel(preferred.gating_reason);
       }
       if (preferred.wait_reason) {
-        return String(preferred.wait_reason).toUpperCase();
+        return mapGateVerdictLabel(preferred.wait_reason);
       }
       const failed = [...(preferred.gates || [])]
         .reverse()
         .find((g) => g.passed === false && g.name);
       if (failed?.name) {
         const why = String(failed.why_failed || "VETO").toUpperCase().replace(/\s+/g, "_");
-        return `${String(failed.name).toUpperCase()}_${why}`.slice(0, 64);
+        return mapGateVerdictLabel(
+          `${String(failed.name).toUpperCase()}_${why}`.slice(0, 64),
+        );
       }
     }
   }
 
   const signal = msg.signal as { block_reason?: string } | undefined;
-  if (signal?.block_reason) return String(signal.block_reason).toUpperCase();
+  if (signal?.block_reason) return mapGateVerdictLabel(signal.block_reason);
 
   const block = msg.block_reason;
-  if (typeof block === "string" && block.trim()) return block.trim().toUpperCase();
+  if (typeof block === "string" && block.trim()) {
+    return mapGateVerdictLabel(block);
+  }
 
   const suppress = msg.last_gate_suppression_reason;
   if (typeof suppress === "string" && suppress.trim()) {
-    return String(suppress).toUpperCase();
+    return mapGateVerdictLabel(suppress);
   }
 
-  return "GATE_UNKNOWN";
+  // Sparse multiplex / cold buffer — honest standby, not SETUP.
+  return mapGateVerdictLabel("GATE_UNKNOWN");
 }
 
 function deriveSniperArm(msg: Record<string, unknown>, gateVerdict: string): SniperArmState {

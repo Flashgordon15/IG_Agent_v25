@@ -543,6 +543,12 @@ while true; do
     fi
 
     if (( need_restart )); then
+        if [[ -f "${AGENT_DIR}/src/data/v31-production/state/desk_offline_hold.json" ]] \
+          || [[ -f "${AGENT_DIR}/src/data/state/desk_offline_hold.json" ]]; then
+            log "WATCHDOG: desk_offline_hold active — skipping auto-restart (${restart_reason})"
+            sleep "$CHECK_INTERVAL"
+            continue
+        fi
         if manual_stop_active; then
             log "WATCHDOG: manual stop active — skipping auto-restart (${restart_reason})"
             sleep "$CHECK_INTERVAL"

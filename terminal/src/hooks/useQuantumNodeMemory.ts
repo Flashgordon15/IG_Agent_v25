@@ -15,6 +15,11 @@ import {
   type LivePositionsPayload,
   type TelemetryPayload,
 } from "@/lib/agent-client";
+import {
+  cfdHttpBase,
+  fetchDeskJson,
+  sbHttpBase,
+} from "@/lib/desk-api-bases";
 import { liveQuoteForEpic } from "@/lib/fulfillment-parse";
 import { EPIC_LABELS } from "@/lib/constants";
 import { gbpToPriceLevel } from "@/lib/gpu-execution-buffer";
@@ -28,7 +33,9 @@ import type {
   PositionAuthorityRow,
   QuantumNodeView,
   QuantumSafetyMatrix,
+  ScannerRankedChrome,
   SniperMarketRow,
+  SniperRankLane,
   SniperStatusKind,
 } from "@/lib/quantum-node-types";
 import { useFulfillment } from "@/hooks/useFulfillment";
@@ -47,6 +54,10 @@ const CRUDE = "CS.D.CRUDE.CFD.IP";
 const GOLD = "CS.D.CFPGOLD.CFP.IP";
 const EURUSD = "CS.D.EURUSD.CFD.IP";
 const FTSE = "IX.D.FTSE.IFM.IP";
+const NIKKEI = "IX.D.NIKKEI.IFM.IP";
+
+/** Hot-path excluded until JPY PnL certified — never pretend Nikkei is promoted. */
+const RANKED_EXCLUDED_EPICS = new Set([NIKKEI, DAX, CRUDE, "CS.D.GBPUSD.CFD.IP"]);
 
 type RiskMonitorPayload = {
   ok?: boolean;
@@ -102,16 +113,101 @@ type RotationInstrument = {
   reason?: string;
 };
 
+type RankedRotatorRow = {
+  epic?: string;
+  eligible?: boolean;
+  rank?: number;
+  score?: number;
+};
+
+type RankedRotator = {
+  active?: boolean;
+  mode?: string;
+  dominant?: string | null;
+  promoted?: string[];
+  reason?: string;
+  rows?: RankedRotatorRow[];
+};
+
 type RotationPayload = {
   ok?: boolean;
   rotation?: {
     active_instruments?: RotationInstrument[];
     eligible_instruments?: RotationInstrument[];
+    inactive_instruments?: RotationInstrument[];
     stagnant_dead_zone_epics?: Record<string, number>;
     pinned_open_epics?: string[];
     last_rotation_reason?: string;
+    ranked_rotator?: RankedRotator | null;
   };
 };
+
+type HealthPauseSlice = {
+  trading_paused?: boolean;
+  agent_alive?: boolean;
+};
+
+function shortRankLabel(epic: string | null | undefined): string {
+  const e = String(epic || "").trim();
+  if (!e) return "";
+  if (e === DOW || e.includes("DOW")) return "DOW";
+  if (e === GOLD || e.includes("CFPGOLD") || e.includes("GOLD")) return "GOLD";
+  if (e.includes("EURUSD")) return "EUR";
+  if (e.includes("FTSE")) return "FTSE";
+  if (e.includes("NIKKEI")) return "NIKKEI";
+  if (e.includes("DAX")) return "DAX";
+  if (e.includes("CRUDE")) return "CRUDE";
+  return e.split(".")[2] || e.slice(0, 8);
+}
+
+function pickPreferredRotation(
+  cfd: RotationPayload | null,
+  sb: RotationPayload | null,
+  preferSb: boolean,
+): RotationPayload | null {
+  const order = preferSb ? [sb, cfd] : [cfd, sb];
+  for (const slice of order) {
+    if (slice?.rotation?.ranked_rotator?.active) return slice;
+  }
+  for (const slice of order) {
+    if (slice?.rotation) return slice;
+  }
+  return cfd || sb;
+}
+
+function buildRankedChrome(rotation: RotationPayload | null): ScannerRankedChrome {
+  const rr = rotation?.rotation?.ranked_rotator;
+  if (!rr?.active) {
+    return {
+      active: false,
+      dominant: null,
+      promotedLabels: [],
+      waitingLabels: [],
+      excludedNote: null,
+    };
+  }
+  const promoted = new Set(
+    (rr.promoted || []).map((e) => String(e).trim()).filter(Boolean),
+  );
+  const waiting: string[] = [];
+  for (const row of [...(rr.rows || [])].sort(
+    (a, b) => Number(a.rank ?? 99) - Number(b.rank ?? 99),
+  )) {
+    const epic = String(row.epic || "").trim();
+    if (!epic || promoted.has(epic)) continue;
+    const label = shortRankLabel(epic);
+    if (label && !waiting.includes(label)) waiting.push(label);
+  }
+  return {
+    active: true,
+    dominant: shortRankLabel(rr.dominant) || null,
+    promotedLabels: (rr.promoted || [])
+      .map((e) => shortRankLabel(e))
+      .filter(Boolean),
+    waitingLabels: waiting,
+    excludedNote: "NIKKEI excl",
+  };
+}
 
 type OpsStrip = {
   grok_macro_bias?: string;
@@ -401,10 +497,22 @@ function buildScanner(
     ),
   );
   const activeSet = new Set(activeList.map((r) => String(r.epic || "")));
-  // Hot-path proxy = primary active stack epic (DOW desk), never blanket FTSE
-  const hotProxyEpic = activeList[0]?.epic
-    ? String(activeList[0].epic)
-    : DOW;
+  const ranked = enrich.rotation?.rotation?.ranked_rotator;
+  const rankedOn = ranked?.active === true;
+  const promotedSet = new Set(
+    (ranked?.promoted || []).map((e) => String(e).trim()).filter(Boolean),
+  );
+  const rankedRowByEpic = new Map<string, RankedRotatorRow>();
+  for (const row of ranked?.rows || []) {
+    const epic = String(row.epic || "").trim();
+    if (epic) rankedRowByEpic.set(epic, row);
+  }
+  // Hot-path proxy = ranked dominant when active, else primary stack epic
+  const hotProxyEpic = rankedOn && ranked?.dominant
+    ? String(ranked.dominant)
+    : activeList[0]?.epic
+      ? String(activeList[0].epic)
+      : DOW;
   const hotProxyTag = shortEpicTag(hotProxyEpic);
 
   const targets: Array<{
@@ -427,6 +535,19 @@ function buildScanner(
     const regimeLabel = String(regime?.state_label || "unknown").toUpperCase();
     const inActiveStack = activeSet.has(t.epic);
     const inEligible = eligibleSet.has(t.epic);
+    const rankedRow = rankedRowByEpic.get(t.epic);
+    const inPromoted = rankedOn && promotedSet.has(t.epic);
+    const inRankedCandidate = rankedOn && rankedRow != null;
+    const rankedEligible = Boolean(rankedRow?.eligible);
+    const excludedHot = RANKED_EXCLUDED_EPICS.has(t.epic);
+    let rankLane: SniperRankLane = null;
+    if (excludedHot) rankLane = "excluded";
+    else if (inPromoted) rankLane = "promoted";
+    else if (inRankedCandidate && rankedEligible) rankLane = "eligible";
+    else if (inRankedCandidate) rankLane = "waiting";
+    else if (inActiveStack) rankLane = "stack";
+    // Ranked promote is the SB hot allowlist — do not require dual-core stack slot
+    const hotPathMember = rankedOn ? inPromoted : inActiveStack;
     const velocity = Number(rot?.velocity ?? 0);
     const zScore = Number(rot?.z_score ?? 0);
     const tpm = Number(rot?.ticks_per_minute ?? 0);
@@ -475,7 +596,7 @@ function buildScanner(
             0,
             Math.min(
               1,
-              (inActiveStack ? 0.35 : 0.1) +
+              (hotPathMember ? 0.35 : 0.1) +
                 Math.min(0.35, Math.abs(zScore) * 0.4) +
                 Math.min(0.3, velocity / 200),
             ),
@@ -517,7 +638,8 @@ function buildScanner(
       !volVeto &&
       !deadZone &&
       allowEntries &&
-      inActiveStack &&
+      hotPathMember &&
+      !excludedHot &&
       quotesFresh &&
       Boolean(fulfillment?.all_ready) &&
       !Boolean(fulfillment?.trading_paused);
@@ -537,13 +659,21 @@ function buildScanner(
                 ? "RANGE_BOUND"
                 : deadZone
                   ? "STAGNANT_DZ"
-                  : !allowEntries
-                    ? "ENTRIES_GATED"
-                    : !inActiveStack
-                      ? "ROTATION_IDLE"
-                      : !quotesFresh
-                        ? "QUOTE_STALE"
-                        : "WAITING_BIAS";
+                  : excludedHot
+                    ? "EXCLUDED_HOT_PATH"
+                    : !allowEntries
+                      ? "ENTRIES_GATED"
+                      : !hotPathMember
+                        ? rankedOn
+                          ? inRankedCandidate
+                            ? rankedEligible
+                              ? "RANKED_WAITING"
+                              : "RANKED_CANDIDATE"
+                            : "RANKED_IDLE"
+                          : "ROTATION_IDLE"
+                        : !quotesFresh
+                          ? "QUOTE_STALE"
+                          : "WAITING_BIAS";
 
     if (openBuy) {
       statusKind = "long";
@@ -572,11 +702,27 @@ function buildScanner(
       statusKind = "short";
       statusText = "SHORT BOUNDARY ARMED";
       profile = `BOUNDARY · z=${zScore.toFixed(2)} · ${tpm}tpm`;
+    } else if (excludedHot) {
+      statusKind = "proxy";
+      statusText = "STATUS: EXCLUDED · HOT PATH";
+      profile = `EXCLUDED · bias ${bias}`;
     } else if (mlApproved && !sniperArmed) {
       // ML edge ≠ strategy armed — keep statusKind proxy, wording consistent
       statusKind = "proxy";
       statusText = `STATUS: ML EDGE · GATES ${why}`;
       profile = `${why} · bias ${bias}`;
+    } else if (inPromoted) {
+      statusKind = "proxy";
+      statusText = `STATUS: RANKED PROMOTED · ${why}`;
+      profile = `PROMOTED · bias ${bias}`;
+    } else if (inRankedCandidate && rankedEligible) {
+      statusKind = "proxy";
+      statusText = `STATUS: RANKED ELIGIBLE · ${why}`;
+      profile = `ELIGIBLE · bias ${bias}`;
+    } else if (inRankedCandidate) {
+      statusKind = "proxy";
+      statusText = `STATUS: RANKED WAITING · ${why}`;
+      profile = `WAITING · bias ${bias}`;
     } else if (inActiveStack) {
       statusKind = "proxy";
       statusText = `STATUS: HOT PATH · ${why}`;
@@ -626,6 +772,12 @@ function buildScanner(
       zScore,
       tpm,
       inActiveStack,
+      inPromoted: Boolean(inPromoted),
+      rankLane,
+      rank:
+        rankedRow?.rank != null && Number.isFinite(Number(rankedRow.rank))
+          ? Number(rankedRow.rank)
+          : null,
       allowEntries,
       regimeLabel,
       maxSpreadPts: assetProf.maxSpreadPts,
@@ -846,23 +998,45 @@ export function useQuantumNodeMemory() {
     latencyRef.current = Math.max(0, performance.now() - t0);
   }, [fulfillment.data]);
 
-  // Enrichment APIs — shared agent endpoints, not file polls
+  // Enrichment APIs — shared agent endpoints, not file polls.
+  // Rotation: dual-fetch :8080+:8081; prefer SB when CFD A2-paused.
   useEffect(() => {
     let cancelled = false;
     const pull = async () => {
+      const cfdBase = cfdHttpBase();
+      const sbBase = sbHttpBase();
       const results = await Promise.allSettled([
-        // Coalesced enrichment — avoid 2.5s × 7 endpoint storms on the desk API.
+        // Coalesced enrichment — avoid 2.5s × N endpoint storms on the desk API.
         fetchAgentJson<RiskMonitorPayload>("/api/position_risk_monitor", undefined, 3000),
         fetchAgentJson<TradeStatePayload>("/api/trade_state", undefined, 3000),
         fetchAgentJson<TradeSupportPayload>("/api/trade_support/status", undefined, 3000),
         fetchAgentJson<RegimePayload>("/api/regime_state", undefined, 3000),
         fetchAgentJson<OpsStrip>("/api/desk/ops_strip", undefined, 2000),
-        fetchAgentJson<RotationPayload>("/api/rotation_state", undefined, 2500),
+        fetchDeskJson<RotationPayload>(cfdBase, "/api/rotation_state", undefined, 2500),
+        fetchDeskJson<RotationPayload>(sbBase, "/api/rotation_state", undefined, 2500),
+        fetchDeskJson<HealthPauseSlice>(cfdBase, "/api/health", undefined, 2000),
         fetchAgentJson<SniperMlPayload>("/api/desk/sniper_ml", undefined, 2500),
       ]);
       if (cancelled) return;
-      const [risk, tradeState, tradeSupport, regime, ops, rotation, sniperMl] =
-        results;
+      const [
+        risk,
+        tradeState,
+        tradeSupport,
+        regime,
+        ops,
+        cfdRotation,
+        sbRotation,
+        cfdHealth,
+        sniperMl,
+      ] = results;
+      const preferSb =
+        cfdHealth.status === "fulfilled" &&
+        cfdHealth.value?.trading_paused === true;
+      const mergedRotation = pickPreferredRotation(
+        cfdRotation.status === "fulfilled" ? cfdRotation.value : null,
+        sbRotation.status === "fulfilled" ? sbRotation.value : null,
+        preferSb,
+      );
       enrichRef.current = {
         risk: risk.status === "fulfilled" ? risk.value : enrichRef.current.risk,
         tradeState:
@@ -879,10 +1053,7 @@ export function useQuantumNodeMemory() {
           ops.status === "fulfilled"
             ? ops.value
             : enrichRef.current.ops ?? { grok_macro_bias: "NEUTRAL" },
-        rotation:
-          rotation.status === "fulfilled"
-            ? rotation.value
-            : enrichRef.current.rotation,
+        rotation: mergedRotation ?? enrichRef.current.rotation,
         sniperMl:
           sniperMl.status === "fulfilled"
             ? sniperMl.value
@@ -1012,6 +1183,7 @@ export function useQuantumNodeMemory() {
       convictionHoldRef.current,
       statusHoldRef.current,
     );
+    const rankedChrome = buildRankedChrome(enrich.rotation);
     const safety = buildSafety(fulfillment.data, live, enrich, wsState);
     const alphaSeries = alphaRef.current.slice();
     const last = alphaSeries[alphaSeries.length - 1];
@@ -1024,13 +1196,25 @@ export function useQuantumNodeMemory() {
       enrich.ops?.desk_idle_reason?.label ||
       enrich.ops?.desk_idle_reason?.code ||
       null;
+    const focusEpic = rankedChrome.active && enrich.rotation?.rotation?.ranked_rotator?.dominant
+      ? String(enrich.rotation.rotation.ranked_rotator.dominant)
+      : DOW;
+    const focusLabel =
+      focusEpic === GOLD
+        ? "GOLD"
+        : focusEpic === EURUSD
+          ? "EUR/USD"
+          : focusEpic === FTSE
+            ? "FTSE 100"
+            : "WALL ST / DOW";
 
     setView({
       nodes,
       scanner,
+      rankedChrome,
       alpha: {
-        epic: DOW,
-        label: "WALL ST / DOW",
+        epic: focusEpic,
+        label: focusLabel,
         series: alphaSeries,
         lastMid: last?.mid ?? dowMid,
         lastObi: last?.obi ?? 0,

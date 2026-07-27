@@ -43,3 +43,10 @@ touch "${TARGET}"
 echo "✅ Desktop Trading Desk installed: ${TARGET}"
 echo "   Version: $(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${TARGET}/Contents/Info.plist" 2>/dev/null || echo '?')"
 echo "   Launches: scripts/trading_desk_silent.sh → multiplex desk :3000/desk (pywebview)"
+
+# Optional: register UI-only always-on KeepAlive (never restarts trading agents).
+if [[ "${1:-}" == "--with-always-on" ]] || [[ "${IG_TRADING_DESK_ALWAYS_ON:-}" == "1" ]]; then
+  if [[ -x "${ROOT}/scripts/install_trading_desk_always_on.sh" ]]; then
+    bash "${ROOT}/scripts/install_trading_desk_always_on.sh" --enable
+  fi
+fi

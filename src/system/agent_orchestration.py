@@ -570,8 +570,10 @@ def soft_flush_network_buffers() -> dict[str, Any]:
             from system.credentials_loader import try_load_credentials
 
             cred = try_load_credentials()
-            if cred is not None:
-                client = get_session_registry().get_client_for_account(CFD_ACCOUNT, cred)
+            if cred.ok and cred.credentials is not None:
+                client = get_session_registry().get_client_for_account(
+                    CFD_ACCOUNT, cred.credentials
+                )
         except Exception:
             client = None
         if client is not None and hasattr(client, "soft_flush_connection_buffers"):
@@ -724,10 +726,12 @@ def soft_reauth_session() -> dict[str, Any]:
         from system.credentials_loader import try_load_credentials
 
         cred = try_load_credentials()
-        if cred is None:
+        if not cred.ok or cred.credentials is None:
             result["reason"] = "credentials_unavailable"
             return result
-        client = get_session_registry().get_client_for_account(CFD_ACCOUNT, cred)
+        client = get_session_registry().get_client_for_account(
+            CFD_ACCOUNT, cred.credentials
+        )
         if client is None:
             result["reason"] = "client_unavailable"
             return result
@@ -968,8 +972,10 @@ def _fetch_raw_broker_opens(account_id: str) -> int | None:
         from system.credentials_loader import try_load_credentials
 
         cred = try_load_credentials()
-        if cred is not None and acct:
-            client = get_session_registry().get_client_for_account(acct, cred)
+        if cred.ok and cred.credentials is not None and acct:
+            client = get_session_registry().get_client_for_account(
+                acct, cred.credentials
+            )
             if client is not None and hasattr(client, "count_open_positions_live"):
                 try:
                     return int(client.count_open_positions_live())
@@ -1272,8 +1278,10 @@ def _maybe_boot_stale_sot_cap_breach_override() -> dict[str, Any] | None:
         from system.credentials_loader import try_load_credentials
 
         cred = try_load_credentials()
-        if cred is not None:
-            client = get_session_registry().get_client_for_account(CFD_ACCOUNT, cred)
+        if cred.ok and cred.credentials is not None:
+            client = get_session_registry().get_client_for_account(
+                CFD_ACCOUNT, cred.credentials
+            )
             if hasattr(client, "refresh_session"):
                 client.refresh_session()
                 result["session_refresh"] = True

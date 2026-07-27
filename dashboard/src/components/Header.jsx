@@ -4,6 +4,7 @@ import {
   Brain,
   BrainCircuit,
   Loader2,
+  Power,
   Repeat,
   Shield,
   ShieldAlert,
@@ -283,6 +284,7 @@ export default function Header({
   initLiveSec,
   overnightSupervision,
   systemStandbyActive = false,
+  exchangeOnline,
   rotationFilterEnabled = false,
   onToggleRotationFilter,
   igAccountId,
@@ -361,8 +363,19 @@ export default function Header({
   const posMax = maxPositions ?? 10;
   const posCapacityColor = posOpen >= posMax ? "text-danger" : posOpen >= posMax * 0.8 ? "text-warning" : "text-foreground";
 
+  const exchangeHibernating = exchangeOnline === false;
+
   return (
-    <header className="sticky top-0 z-20 shrink-0 border-b border-border bg-bg/95 backdrop-blur-sm px-3 py-2">
+    <>
+    {exchangeHibernating && (
+      <div
+        className="sticky top-0 z-30 w-full border-b border-amber-600/40 bg-amber-950/90 px-4 py-2 text-center text-[11px] font-semibold tracking-wide text-amber-200 backdrop-blur-sm"
+        role="status"
+      >
+        EXCHANGE HIBERNATION ACTIVE: Global markets are closed for the weekend. Core execution gates are safely locked in standby mode. Live data streams will resume Sunday evening.
+      </div>
+    )}
+    <header className={`sticky ${exchangeHibernating ? "top-[36px]" : "top-0"} z-20 shrink-0 border-b border-border bg-bg/95 backdrop-blur-sm px-3 py-2`}>
       <div className="flex min-w-0 items-center gap-x-2 gap-y-1.5 flex-wrap">
 
         {/* Agent state badge */}
@@ -535,15 +548,15 @@ export default function Header({
             type="button"
             onClick={onStopAgent}
             disabled={Boolean(safeLeaveModal)}
-            className="inline-flex items-center justify-center gap-1.5 rounded-md border border-danger/50 bg-danger/10 px-2.5 py-1 text-[11px] font-semibold text-danger transition-colors hover:bg-danger/20 active:scale-95 disabled:cursor-not-allowed disabled:opacity-40"
+            className="group inline-flex items-center justify-center gap-1.5 rounded-md border border-danger/60 bg-danger/10 px-3 py-1.5 text-[10px] font-bold uppercase tracking-widest text-danger shadow-[0_0_12px_rgba(230,57,70,0.15)] transition-all hover:bg-danger/25 hover:shadow-[0_0_20px_rgba(230,57,70,0.3)] active:scale-95 disabled:cursor-not-allowed disabled:opacity-40"
             title={
               safeLeaveModal
                 ? "Disabled while Safe to Leave check is open"
-                : "Save session state and shut down the agent cleanly"
+                : "Save session state and shut down all trading loops"
             }
           >
-            <span className="h-1.5 w-1.5 rounded-full bg-danger" aria-hidden />
-            Stop Agent
+            <Power className="h-3.5 w-3.5 shrink-0 transition-transform group-hover:rotate-90" aria-hidden />
+            Shutdown Engine
           </button>
         </div>
       </div>
@@ -610,5 +623,6 @@ export default function Header({
         </div>
       )}
     </header>
+    </>
   );
 }

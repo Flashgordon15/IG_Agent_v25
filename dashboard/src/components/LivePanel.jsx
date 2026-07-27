@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client.js";
 import { fmtPrice } from "../utils/fmtPrice.js";
 import { fmtPts } from "../utils/fmtPts.js";
@@ -282,6 +282,77 @@ function resolvePositions(state) {
     if (all.length > 0) return all;
   }
   return [];
+}
+
+function mergeLiveProtection(basePositions, livePayload) {
+  const liveRows = Array.isArray(livePayload?.positions) ? livePayload.positions : [];
+  if (!liveRows.length) return basePositions;
+  const byDeal = Object.fromEntries(
+    liveRows.filter((r) => r?.deal_id).map((r) => [r.deal_id, r]),
+  );
+  const merged = basePositions.map((pos) => {
+    const live = byDeal[pos.deal_id ?? pos.id];
+    if (!live) return pos;
+    return {
+      ...pos,
+      ...live,
+      market: pos.market || live.epic,
+      pnl_gbp: live.pnl_gbp ?? pos.pnl_gbp ?? pos.unrealised_pnl_gbp ?? pos.upl,
+      entry: live.entry || pos.entry || pos.entry_price || pos.level,
+    };
+  });
+  for (const live of liveRows) {
+    if (!live?.deal_id) continue;
+    if (merged.some((p) => (p.deal_id ?? p.id) === live.deal_id)) continue;
+    merged.push({
+      ...live,
+      market: live.epic,
+    });
+  }
+  return merged;
+}
+
+function protectionLayerBadges(pos) {
+  const ps = pos?.protection_summary;
+  const g = ps?.gbp_armed ?? pos.gbp_armed;
+  const v = ps?.virtual_armed ?? pos.virtual_armed;
+  const d = ps?.dynamic_armed ?? pos.dynamic_armed;
+  const badge = (on, label) => (
+    <span
+      key={label}
+      className={[
+        "inline-block rounded px-1 py-px text-[9px] font-semibold tracking-wide",
+        on ? "bg-success/15 text-success" : "bg-danger/15 text-danger",
+      ].join(" ")}
+      title={on ? `${label} armed` : `${label} missing`}
+    >
+      {label}
+    </span>
+  );
+  return (
+    <span className="inline-flex gap-0.5">
+      {badge(g, "G")}
+      {badge(v, "V")}
+      {badge(d, "D")}
+    </span>
+  );
+}
+
+function formatProtectionRisk(pos) {
+  const ps = pos?.protection_summary ?? pos;
+  const cap = ps.loss_cap_gbp;
+  const soft = ps.soft_loss_gbp;
+  const floor = ps.trail_floor_gbp;
+  const peak = ps.peak_profit_gbp;
+  const target = ps.target_gbp;
+  if (cap == null && soft == null && floor == null && target == null) return "—";
+  const parts = [];
+  if (soft != null) parts.push(`soft ${fmtGbp(-Math.abs(soft))}`);
+  if (cap != null) parts.push(`cap ${fmtGbp(-Math.abs(cap))}`);
+  if (floor != null && Number(floor) > 0) parts.push(`floor ${fmtGbp(floor)}`);
+  else if (peak != null && Number(peak) > 0) parts.push(`peak ${fmtGbp(peak)}`);
+  if (target != null) parts.push(`tgt ${fmtGbp(target)}`);
+  return parts.join(" · ") || "—";
 }
 
 function resolveMlDecisionLog(state) {
@@ -1018,6 +1089,260 @@ function marketTabOptions(rawState) {
 }
 
 // ---------------------------------------------------------------------------
+// VolatilityBracketRibbon
+// ---------------------------------------------------------------------------
+
+function volRatioColor(vr) {
+  if (vr == null) return "text-muted";
+  if (vr <= 1.0) return "text-success";
+  if (vr <= 2.0) return "text-warning";
+  return "text-danger";
+}
+
+function modePill(mode) {
+  const m = String(mode ?? "").toLowerCase();
+  if (m.includes("flash")) return { label: m, cls: "border-danger/50 bg-danger/10 text-danger glow-crimson" };
+  if (m === "atr_trail") return { label: "atr_trail", cls: "border-accent/50 bg-accent/10 text-accent shadow-[0_0_8px_rgba(0,180,216,0.25)]" };
+  return { label: m || "hold", cls: "border-border bg-surface text-muted" };
+}
+
+function TrailProgressBar({ entry, stop, current, side }) {
+  if (entry == null || stop == null || current == null) return <span className="text-muted text-[10px]">--</span>;
+  const totalRange = Math.abs(entry - stop);
+  if (totalRange <= 0) return <span className="text-muted text-[10px]">--</span>;
+  const consumed = side === "BUY" ? (entry - current) : (current - entry);
+  const pct = Math.max(0, Math.min(100, (consumed / totalRange) * 100));
+  const cls = pct >= 80 ? "trail-bar-fill--danger" : pct >= 50 ? "trail-bar-fill--warn" : "trail-bar-fill--safe";
+  return (
+    <div className="flex items-center gap-1.5">
+      <div className="trail-bar-track flex-1">
+        <div className={`trail-bar-fill ${cls}`} style={{ width: `${pct}%` }} />
+      </div>
+      <span className={`font-mono text-[10px] font-semibold tabular-nums ${pct >= 80 ? "text-danger" : pct >= 50 ? "text-warning" : "text-success"}`}>
+        {pct.toFixed(0)}%
+      </span>
+    </div>
+  );
+}
+
+function VolatilityBracketRibbon({ positions }) {
+  if (!positions || positions.length === 0) return null;
+  return (
+    <section className="space-y-2">
+      {positions.map((row) => {
+        const pill = modePill(row.mode);
+        const isFlash = String(row.mode ?? "").toLowerCase().includes("flash");
+        return (
+          <div
+            key={row.epic}
+            className={`rounded-lg border overflow-hidden backdrop-blur-sm ${
+              isFlash
+                ? "border-danger/40 bg-danger/5 glow-crimson"
+                : "border-border/80 bg-card/80"
+            }`}
+          >
+            <div className={`flex items-center gap-2 border-l-[3px] px-3 py-2.5 ${isFlash ? "border-l-danger" : "border-l-accent/50"}`}>
+              <div className="flex items-center gap-2 flex-1 min-w-0">
+                <span className="text-[9px] font-bold uppercase tracking-[0.14em] text-muted/70">Vol Bracket</span>
+                <span className="font-mono text-[11px] font-semibold text-foreground truncate">
+                  {(MARKET_SHORT_LABELS[row.epic] || row.epic || "\u2014")}
+                </span>
+                <span className={`shrink-0 rounded-full px-2 py-0.5 text-[9px] font-bold uppercase tracking-wide border ${pill.cls}`}>
+                  {pill.label}
+                </span>
+                {isFlash ? (
+                  <span className="shrink-0 rounded-full border border-danger/60 bg-danger/15 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wide text-danger glow-crimson">
+                    Flash Active
+                  </span>
+                ) : (
+                  <span className="shrink-0 rounded-full border border-success/40 bg-success/8 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wide text-success shadow-[0_0_6px_rgba(46,196,182,0.15)]">
+                    Nominal
+                  </span>
+                )}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-5 gap-px border-t border-border/60 bg-border/20">
+              {[
+                { label: "Vol Ratio", value: row.vol_ratio != null ? `${row.vol_ratio.toFixed(2)}x` : "\u2014", cls: volRatioColor(row.vol_ratio) },
+                { label: "Trail Mult", value: row.trail_atr_mult != null ? row.trail_atr_mult.toFixed(2) : "\u2014", cls: "text-foreground" },
+                { label: "ATR", value: row.atr != null ? row.atr.toFixed(6) : "\u2014", cls: "text-foreground" },
+                { label: "Baseline", value: row.baseline_atr != null ? row.baseline_atr.toFixed(6) : "\u2014", cls: "text-foreground" },
+              ].map(({ label, value, cls }) => (
+                <div key={label} className="bg-card/60 px-2.5 py-2 text-center">
+                  <p className="text-[8px] font-semibold uppercase tracking-[0.12em] text-muted/60 mb-0.5">{label}</p>
+                  <p className={`font-mono text-[12px] font-semibold tabular-nums ${cls}`}>{value}</p>
+                </div>
+              ))}
+              <div className="bg-card/60 px-2.5 py-2">
+                <p className="text-[8px] font-semibold uppercase tracking-[0.12em] text-muted/60 mb-1 text-center">Trail</p>
+                <TrailProgressBar
+                  entry={row.entry_price}
+                  stop={row.proposed_stop ?? row.previous_stop}
+                  current={row.current_price}
+                  side={row.side}
+                />
+              </div>
+            </div>
+
+            <div className="border-t border-border/40 px-3 py-1.5 flex items-center gap-3 text-[10px] text-muted">
+              <span>
+                Stop <span className="font-mono tabular-nums text-foreground">{row.previous_stop != null ? row.previous_stop.toFixed(5) : "\u2014"}</span>
+                {row.changed && row.proposed_stop != null && (
+                  <span className="text-accent"> {"\u2192"} <span className="font-mono tabular-nums font-semibold text-accent">{row.proposed_stop.toFixed(5)}</span></span>
+                )}
+              </span>
+              <span className="text-border/60">|</span>
+              <span className="font-semibold">{row.side ?? "\u2014"}</span>
+              {row.stop_hit && (
+                <>
+                  <span className="text-border/60">|</span>
+                  <span className="font-bold uppercase text-danger glow-crimson">Stop Hit</span>
+                </>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </section>
+  );
+}
+
+function volBracketRibbonEqual(prev, next) {
+  if (prev.positions === next.positions) return true;
+  if (!prev.positions || !next.positions) return false;
+  if (prev.positions.length !== next.positions.length) return false;
+  for (let i = 0; i < prev.positions.length; i++) {
+    const p = prev.positions[i];
+    const n = next.positions[i];
+    if (
+      p.epic !== n.epic
+      || p.vol_ratio !== n.vol_ratio
+      || p.trail_atr_mult !== n.trail_atr_mult
+      || p.trail_distance !== n.trail_distance
+      || p.mode !== n.mode
+      || p.proposed_stop !== n.proposed_stop
+      || p.previous_stop !== n.previous_stop
+      || p.stop_hit !== n.stop_hit
+      || p.changed !== n.changed
+      || p.current_price !== n.current_price
+    ) return false;
+  }
+  return true;
+}
+
+const MemoVolBracketRibbon = memo(VolatilityBracketRibbon, volBracketRibbonEqual);
+
+// ---------------------------------------------------------------------------
+// SignalBoostCard — operator ad-hoc signal injection
+// ---------------------------------------------------------------------------
+
+function SignalBoostCard({ epics }) {
+  const [selected, setSelected] = useState("");
+  const [status, setStatus] = useState(null);
+  const timerRef = useRef(null);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, []);
+
+  const epicList = useMemo(() => {
+    if (!epics || !Array.isArray(epics)) return [];
+    return epics.filter(Boolean).sort();
+  }, [epics]);
+
+  const activeEpic = selected || epicList[0] || "";
+
+  const inject = async (direction) => {
+    if (!activeEpic) return;
+    setStatus({ type: "pending", msg: `SIGNAL QUEUED: Routing ${direction} to Gate 1-12 Pipeline...` });
+    if (timerRef.current) clearTimeout(timerRef.current);
+    try {
+      const res = await api.injectSignal(activeEpic, direction);
+      if (!mountedRef.current) return;
+      if (res?.ok) {
+        setStatus({ type: "ok", msg: `${direction} queued for ${activeEpic.split(".").pop()}` });
+      } else {
+        setStatus({ type: "error", msg: res?.error || "Injection rejected" });
+      }
+    } catch (err) {
+      if (!mountedRef.current) return;
+      setStatus({ type: "error", msg: err?.message || "Request failed" });
+    }
+    timerRef.current = setTimeout(() => {
+      if (mountedRef.current) setStatus(null);
+    }, 4000);
+  };
+
+  if (!epicList.length) return null;
+
+  return (
+    <div className="rounded-lg border border-border/80 bg-card/70 p-3 backdrop-blur-sm">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2.5">
+          <span className="text-[9px] font-bold uppercase tracking-[0.14em] text-amber-400/80">
+            Signal Inject
+          </span>
+          <select
+            value={activeEpic}
+            onChange={(e) => setSelected(e.target.value)}
+            className="rounded border border-border bg-bg px-2 py-0.5 font-mono text-[11px] text-foreground/90 focus:outline-none focus:ring-1 focus:ring-accent/50"
+          >
+            {epicList.map((e) => (
+              <option key={e} value={e}>
+                {e.split(".").pop() || e}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => inject("BUY")}
+            className="rounded-md border border-success/50 bg-success/15 px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-success shadow-[0_0_8px_rgba(46,196,182,0.2)] transition-all hover:bg-success/25 hover:shadow-[0_0_14px_rgba(46,196,182,0.35)] active:scale-95"
+          >
+            Inject Long
+          </button>
+          <button
+            onClick={() => inject("SELL")}
+            className="rounded-md border border-danger/50 bg-danger/15 px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-danger shadow-[0_0_8px_rgba(230,57,70,0.2)] transition-all hover:bg-danger/25 hover:shadow-[0_0_14px_rgba(230,57,70,0.35)] active:scale-95"
+          >
+            Inject Short
+          </button>
+        </div>
+      </div>
+      {status && (
+        <div
+          className={`mt-2 rounded-md border px-2.5 py-1 text-[10px] font-semibold ${
+            status.type === "ok"
+              ? "border-success/40 bg-success/10 text-success glow-emerald"
+              : status.type === "error"
+                ? "border-danger/40 bg-danger/10 text-danger"
+                : "border-amber-500/40 bg-amber-500/10 text-amber-300 glow-amber"
+          }`}
+        >
+          {status.msg}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function signalBoostEqual(prev, next) {
+  const a = prev.epics, b = next.epics;
+  if (a === b) return true;
+  if (!a || !b || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) { if (a[i] !== b[i]) return false; }
+  return true;
+}
+
+const MemoSignalBoostCard = memo(SignalBoostCard, signalBoostEqual);
+
+// ---------------------------------------------------------------------------
 // LivePanel
 // ---------------------------------------------------------------------------
 
@@ -1029,6 +1354,33 @@ export default function LivePanel({ state, rawState, selectedEpic, onSelectEpic,
   const agentState = resolveAgentState(state);
   const agent     = agentStateMeta(agentState, rawState ?? state);
   const positions = resolvePositions(state);
+  const [liveProtection, setLiveProtection] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const payload = await api.positionsLive();
+        if (!cancelled) setLiveProtection(payload);
+      } catch {
+        if (!cancelled) setLiveProtection(null);
+      }
+    };
+    poll();
+    const id = window.setInterval(poll, 4000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, []);
+  const displayPositions = useMemo(
+    () => mergeLiveProtection(positions, liveProtection),
+    [positions, liveProtection],
+  );
+  const protectionNote = liveProtection?.protection_note;
+  const protectionStale = Boolean(liveProtection?.stale);
+  const protectionCritical =
+    Boolean(liveProtection?.critical) || liveProtection?.verdict === "CRITICAL";
+  const flattenFailNote = liveProtection?.trade_support?.last_flatten_error;
   const gateReason    = resolveGateBlockedReason(state);
   const gateBlockedAt = resolveGateBlockedAt(state);
   const mlGauge   = resolveMlGauge(state);
@@ -1041,7 +1393,28 @@ export default function LivePanel({ state, rawState, selectedEpic, onSelectEpic,
   const maxPerEpic = Number(riskGate?.value?.max_per_epic ?? 2);
   const epicOpenCount = Number(riskGate?.value?.open_count ?? positions.length);
 
-  const closablePosition = positions.find((p) => !selectedEpic || p.epic === selectedEpic) ?? positions[0];
+  const volBracket = useMemo(() => {
+    const inst = rawState?.institutional?.volatility_bracket;
+    if (!inst?.ok) return null;
+    const rows = inst.positions;
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+    return rows;
+  }, [rawState?.institutional?.volatility_bracket]);
+
+  const volBracketByEpic = useMemo(() => {
+    if (!volBracket) return {};
+    const map = {};
+    for (const row of volBracket) {
+      if (row.epic) map[row.epic] = row;
+    }
+    return map;
+  }, [volBracket]);
+
+  const enabledEpics = useMemo(() => {
+    return rawState?.enabled_epics || Object.keys(rawState?.markets || {});
+  }, [rawState?.enabled_epics, rawState?.markets]);
+
+  const closablePosition = displayPositions.find((p) => !selectedEpic || p.epic === selectedEpic) ?? displayPositions[0];
   const [closeStep, setCloseStep] = useState(0);
   const [closing, setClosing] = useState(false);
   const [closeStatus, setCloseStatus] = useState(null);
@@ -1113,11 +1486,29 @@ export default function LivePanel({ state, rawState, selectedEpic, onSelectEpic,
       {/* 4. Active trades table */}
       <Card title="Active trades" titleRight={
         <div className="min-w-[180px]">
-          <CapacityBar positions={positions} maxPositions={maxPos} />
+          <CapacityBar positions={displayPositions} maxPositions={maxPos} />
         </div>
       }>
+        {(protectionNote || protectionStale || protectionCritical) &&
+          (displayPositions.length > 0 || protectionCritical) && (
+          <div className={`mb-2 rounded border px-2 py-1.5 text-[10px] leading-snug ${
+            protectionCritical
+              ? "border-danger/50 bg-danger/15 text-danger"
+              : protectionStale
+              ? "border-warning/40 bg-warning/10 text-warning"
+              : "border-border bg-card/60 text-muted"
+          }`}>
+            {protectionCritical && <span className="font-semibold">CRITICAL — </span>}
+            {!protectionCritical && protectionStale && (
+              <span className="font-semibold text-warning">Stale sync — </span>
+            )}
+            {flattenFailNote
+              ? `Flatten failed: ${flattenFailNote}`
+              : (protectionNote || "Software-managed stops; IG site may not show limits.")}
+          </div>
+        )}
         <div className="-mx-1 overflow-x-auto">
-          <table className="w-full min-w-[520px] text-left text-[11px] sm:text-[12px]">
+          <table className="w-full min-w-[620px] text-left text-[11px] sm:text-[12px]">
             <thead>
               <tr className="border-b border-border text-muted">
                 <th className="px-2 py-1.5 font-normal">Market</th>
@@ -1125,17 +1516,18 @@ export default function LivePanel({ state, rawState, selectedEpic, onSelectEpic,
                 <th className="px-2 py-1.5 font-normal">Entry</th>
                 <th className="px-2 py-1.5 font-normal">Current</th>
                 <th className="px-2 py-1.5 font-normal">P&amp;L</th>
-                <th className="px-2 py-1.5 font-normal">Stop</th>
+                <th className="px-2 py-1.5 font-normal" title="G=GBP exit · V=virtual stop · D=dynamic trail">Protect</th>
+                <th className="px-2 py-1.5 font-normal">Risk £</th>
                 <th className="px-2 py-1.5 font-normal">Open</th>
               </tr>
             </thead>
             <tbody>
-              {positions.length === 0 ? (
+              {displayPositions.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-2 py-4 text-center text-muted">No open positions</td>
+                  <td colSpan={8} className="px-2 py-4 text-center text-muted">No open positions</td>
                 </tr>
               ) : (
-                positions.map((pos, idx) => {
+                displayPositions.map((pos, idx) => {
                   const pnl = pos.pnl_gbp ?? pos.unrealised_pnl_gbp ?? pos.upl;
                   const pnlNum = pnl != null ? Number(pnl) : null;
                   const ptsNum = pos.pnl_pts != null ? Number(pos.pnl_pts) : null;
@@ -1144,10 +1536,13 @@ export default function LivePanel({ state, rawState, selectedEpic, onSelectEpic,
                                   : "text-foreground";
                   const side = String(pos.side ?? pos.direction ?? "").toUpperCase();
                   const sideColor = side === "BUY" ? "text-success" : side === "SELL" ? "text-danger" : "text-foreground";
-                  const stop = pos.stop ?? pos.stop_level;
-                  const trailLabel = stop != null ? `${fmtPrice(stop, pos.epic ?? epic)}${pos.trail_active ? " ↕" : ""}` : "—";
                   const key = pos.deal_id ?? pos.id ?? `${pos.epic ?? "row"}-${idx}`;
                   const ptsLabel = ptsNum != null ? `${fmtPts(ptsNum, pos.epic ?? epic)}pts` : "—";
+                  const ps = pos.protection_summary;
+                  const brokerStop = pos.broker_stop_level ?? ps?.broker_stop_level;
+                  const brokerTip = brokerStop
+                    ? `IG broker stop ~${fmtPrice(brokerStop, pos.epic ?? epic)}`
+                    : (ps?.operator_note || "Software-managed — IG may show no limit");
                   return (
                     <tr key={key} className="border-b border-border/60 last:border-0 hover:bg-card/60 transition-colors">
                       <td className="px-2 py-2 text-foreground text-[11px]">{pos.market || pos.epic || "—"}</td>
@@ -1160,7 +1555,12 @@ export default function LivePanel({ state, rawState, selectedEpic, onSelectEpic,
                           <span className="ml-1 text-[10px] font-normal opacity-70">{ptsLabel}</span>
                         )}
                       </td>
-                      <td className="px-2 py-2 font-mono tabular-nums text-muted">{trailLabel}</td>
+                      <td className="px-2 py-2" title={brokerTip}>
+                        {protectionLayerBadges(pos)}
+                      </td>
+                      <td className="px-2 py-2 font-mono tabular-nums text-[10px] text-muted">
+                        {formatProtectionRisk(pos)}
+                      </td>
                       <td className="px-2 py-2 tabular-nums text-muted">{pos.open_mins != null ? `${Math.round(Number(pos.open_mins))}m` : "—"}</td>
                     </tr>
                   );
@@ -1188,10 +1588,16 @@ export default function LivePanel({ state, rawState, selectedEpic, onSelectEpic,
             )}
           </div>
         )}
-        {positions.length > 1 && <FlattenAllButton />}
+        {displayPositions.length > 1 && <FlattenAllButton />}
       </Card>
 
-      {/* 5. Entry status + thresholds + ML gauge */}
+      {/* 5. Volatility bracket ribbon */}
+      <MemoVolBracketRibbon positions={volBracket} />
+
+      {/* 5b. Signal injection */}
+      <MemoSignalBoostCard epics={enabledEpics} />
+
+      {/* 6. Entry status + thresholds + ML gauge */}
       <div className="grid grid-cols-1 gap-2 lg:grid-cols-3 sm:gap-3">
         <MemoEntryStatusCard
           signal={signal}

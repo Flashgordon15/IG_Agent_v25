@@ -202,6 +202,21 @@ class V6InLoopCoroutineHandoff:
                 )
             sm = AutonomicBootstrapStateMachine(self._orch)
             sm.allocate_and_ready()
+            # Gate5 READY often lands on V6 skeletons, then this handoff replaces
+            # _loops with fresh TradingLoops still paused_at_boot=True. Without a
+            # second unpause, macro/LTR Path A never leaves dormant wait (zero
+            # "boot READY, arming tick loop") while ParallelStrategySweep still
+            # fires SB micro vetoes — looks like quiet markets, is a stuck plane.
+            try:
+                from system.system_state import get_system_state
+
+                if bool(get_system_state().snapshot_model().ready):
+                    self._orch.unpause_from_boot()
+            except Exception as exc:
+                log_engine(
+                    f"V6InLoopHandoff: post-READY unpause skipped: "
+                    f"{type(exc).__name__}: {exc}"
+                )
             self._orch._start_live_channels_impl()
             self._orch.instant_ram_bootstrap_all_epics()
             self._schedule_deferred_async_tail()

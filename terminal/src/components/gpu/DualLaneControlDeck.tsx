@@ -21,6 +21,7 @@ const OFFLINE_PLACEHOLDER_LANES: DeskEngineLane[] = [
     transport: "rest_poll",
     pathLive: false,
     standby: false,
+    tradingPaused: null,
     openCount: 0,
     positions: [],
     operational: false,
@@ -36,6 +37,7 @@ const OFFLINE_PLACEHOLDER_LANES: DeskEngineLane[] = [
     transport: "rest_poll",
     pathLive: false,
     standby: false,
+    tradingPaused: null,
     openCount: 0,
     positions: [],
     operational: false,
@@ -201,6 +203,16 @@ export function DualLaneControlDeck({
                     ? "PORT OFFLINE"
                     : `${lane.openCount} OPEN`}
                 </span>
+                {lane.tradingPaused ? (
+                  <span
+                    className="gpu-chip gpu-chip--warn"
+                    title="Operator / A2 entry freeze on this port"
+                  >
+                    {lane.productType === "CFD"
+                      ? "A2 · CFD ENTRIES PAUSED"
+                      : "ENTRIES PAUSED"}
+                  </span>
+                ) : null}
                 <span className="gpu-chip gpu-chip--mono">
                   {lane.quoteAgeMs != null
                     ? `${Math.round(lane.quoteAgeMs)}ms / ${lane.quoteBudgetMs}ms`

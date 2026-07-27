@@ -203,6 +203,158 @@ def count_rows(conn: sqlite3.Connection) -> int:
     return int(row["n"] or 0) if row else 0
 
 
+# ---------------------------------------------------------------------------
+# Offline dual-engine replay outcomes — fully isolated shadow learning plane.
+#
+# Written by scripts/ml_replay_learn.py from REAL market replay data. These rows
+# never touch setup_stats, expectancy, or ml_training_store.jsonl (live plane).
+# Keyed per (style, source_ref) so re-running the harness is idempotent.
+# ---------------------------------------------------------------------------
+_REPLAY_TABLE = "shadow_replay_outcomes"
+
+
+def ensure_replay_schema(c: sqlite3.Cursor) -> None:
+    c.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {_REPLAY_TABLE} (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            replay_ref TEXT NOT NULL,
+            source_ref TEXT,
+            style TEXT NOT NULL,
+            engine TEXT,
+            epic TEXT,
+            market TEXT,
+            side TEXT,
+            result TEXT,
+            ml_score_at_entry REAL,
+            hold_sec REAL,
+            horizon_bars INTEGER,
+            setup_key TEXT,
+            session_window TEXT,
+            is_shadow INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    c.execute(
+        f"""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_shadow_replay_ref
+        ON {_REPLAY_TABLE}(replay_ref)
+        """
+    )
+
+
+def upsert_shadow_replay(
+    conn: sqlite3.Connection, row: dict[str, Any], *, commit: bool = True
+) -> bool:
+    """Insert/replace one isolated replay outcome (is_shadow always 1).
+
+    Pass ``commit=False`` inside a bulk loop and commit once at the end.
+    """
+    ref = str(row.get("replay_ref") or "").strip()
+    if not ref:
+        return False
+    cur = conn.cursor()
+    ensure_replay_schema(cur)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cur.execute(
+        f"""
+        INSERT INTO {_REPLAY_TABLE}(
+            replay_ref, source_ref, style, engine, epic, market, side, result,
+            ml_score_at_entry, hold_sec, horizon_bars, setup_key, session_window,
+            is_shadow, created_at
+        )
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)
+        ON CONFLICT(replay_ref) DO UPDATE SET
+            source_ref=excluded.source_ref,
+            style=excluded.style,
+            engine=excluded.engine,
+            epic=excluded.epic,
+            market=excluded.market,
+            side=excluded.side,
+            result=excluded.result,
+            ml_score_at_entry=excluded.ml_score_at_entry,
+            hold_sec=excluded.hold_sec,
+            horizon_bars=excluded.horizon_bars,
+            setup_key=excluded.setup_key,
+            session_window=excluded.session_window,
+            is_shadow=1,
+            created_at=excluded.created_at
+        """,
+        (
+            ref,
+            str(row.get("source_ref") or ""),
+            str(row.get("style") or "unknown"),
+            str(row.get("engine") or ""),
+            str(row.get("epic") or ""),
+            str(row.get("market") or ""),
+            str(row.get("side") or ""),
+            str(row.get("result") or ""),
+            row.get("ml_score_at_entry"),
+            row.get("hold_sec"),
+            int(row["horizon_bars"]) if row.get("horizon_bars") is not None else None,
+            str(row.get("setup_key") or ""),
+            str(row.get("session_window") or ""),
+            now,
+        ),
+    )
+    if commit:
+        conn.commit()
+    return True
+
+
+def count_replay_rows(conn: sqlite3.Connection, *, style: str | None = None) -> int:
+    cur = conn.cursor()
+    ensure_replay_schema(cur)
+    if style:
+        row = cur.execute(
+            f"SELECT COUNT(*) AS n FROM {_REPLAY_TABLE} WHERE is_shadow=1 AND style=?",
+            (style,),
+        ).fetchone()
+    else:
+        row = cur.execute(
+            f"SELECT COUNT(*) AS n FROM {_REPLAY_TABLE} WHERE is_shadow=1"
+        ).fetchone()
+    return int(row["n"] or 0) if row else 0
+
+
+def replay_style_epic_counts(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+    """Per-style summary: total, WIN/LOSS, epics, ml_score coverage."""
+    cur = conn.cursor()
+    ensure_replay_schema(cur)
+    out: dict[str, dict[str, Any]] = {}
+    rows = cur.execute(
+        f"""
+        SELECT style,
+               COUNT(*) AS n,
+               SUM(CASE WHEN UPPER(result)='WIN' THEN 1 ELSE 0 END) AS wins,
+               SUM(CASE WHEN UPPER(result)='LOSS' THEN 1 ELSE 0 END) AS losses,
+               SUM(CASE WHEN ml_score_at_entry IS NOT NULL THEN 1 ELSE 0 END) AS ml_stamped,
+               SUM(CASE WHEN hold_sec IS NOT NULL THEN 1 ELSE 0 END) AS hold_stamped
+        FROM {_REPLAY_TABLE}
+        WHERE is_shadow=1
+        GROUP BY style
+        """
+    ).fetchall()
+    for r in rows:
+        d = dict(r)
+        style = str(d.get("style") or "unknown")
+        epics = cur.execute(
+            f"SELECT epic, COUNT(*) AS n FROM {_REPLAY_TABLE} "
+            f"WHERE is_shadow=1 AND style=? GROUP BY epic ORDER BY n DESC",
+            (style,),
+        ).fetchall()
+        out[style] = {
+            "n": int(d.get("n") or 0),
+            "wins": int(d.get("wins") or 0),
+            "losses": int(d.get("losses") or 0),
+            "ml_stamped": int(d.get("ml_stamped") or 0),
+            "hold_stamped": int(d.get("hold_stamped") or 0),
+            "epics": {str(e["epic"]): int(e["n"]) for e in epics},
+        }
+    return out
+
+
 def list_for_ml_training(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """Rows mapped for build_training_dataset / background ML workers."""
     rows = conn.execute(
